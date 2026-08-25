@@ -145,3 +145,11 @@ catch_discover_tests(rc_test)
 add_executable(rc_channel_test rc_channel_test.cpp)
 target_link_libraries(rc_channel_test PRIVATE ap-rc-channel Catch2::Catch2WithMain)
 catch_discover_tests(rc_channel_test)
+
+add_executable(uart_driver_test uart_driver_test.cpp)
+target_link_libraries(uart_driver_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(uart_driver_test)
+
+add_executable(analog_in_test analog_in_test.cpp)
+target_link_libraries(analog_in_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(analog_in_test)
