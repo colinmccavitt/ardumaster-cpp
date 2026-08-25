@@ -1,22 +1,19 @@
 #pragma once
 
-// Port of AP_Math/vector3.h + vector3.cpp's core algebra. CPP-007, slice 1,
-// plus rotate(Rotation) added by CPP-019.
+// Port of AP_Math/vector3.h + vector3.cpp. CPP-007 - now complete against
+// upstream vector3.h/vector3.cpp, after CPP-019 added the Rotation enum
+// (which unblocked rotate/rotate_inverse) and CPP-008 landed Matrix3
+// (which unblocked row_times_mat/mul_rowcol/rotate_inverse).
 //
-// SLICE BOUNDARY (matches the vector2.hpp precedent): this lands the
-// struct, equality, arithmetic operators, dot/cross, length/length_squared/
-// limit_length_xy, normalize/normalized, is_zero/is_nan/is_inf, angle,
-// rotate_xy, offset_bearing, reflect/project/projected, distance_squared,
-// zero(), scale(), perpendicular, rfu_to_frd, tofloat/todouble, and now
-// rotate(Rotation) (CPP-019 - the Rotation enum plus this ~50-case switch,
-// declared here, DEFINED in vector3.cpp since HALF_SQRT_2 and several
-// rotation-specific constants are bare non-exact literals needing the
-// compiled-.cpp treatment scalar.cpp's wrap_* family established).
+// rotate(Rotation), rotate_inverse(Rotation), row_times_mat, and
+// mul_rowcol are all declared here but DEFINED in vector3.cpp - rotate for
+// the usual literal-safety reason (HALF_SQRT_2 etc, matching scalar.cpp's
+// wrap_* family), the other three because they need Matrix3, and
+// matrix3.hpp already includes vector3.hpp (Matrix3's rows are Vector3) -
+// vector3.hpp including matrix3.hpp back would be circular. The .cpp has
+// no such constraint.
 //
-// Deliberately NOT in this slice:
-//   - rotate_inverse: builds on rotate(Rotation) but wasn't itself needed
-//     yet by anything this port has read; own follow-on ticket.
-//   - row_times_mat/mul_rowcol: need Matrix3, not yet ported.
+// Deliberately still not ported:
 //   - xy(): upstream implements this by reinterpret_cast-ing a Vector3's
 //     first two members as a Vector2&, relying on standard-layout aliasing
 //     that happens to work. ADR-0012's "no unsafe reinterpretation" stance
@@ -48,6 +45,11 @@
 #include <fwcpp/math/vector2.hpp>
 
 namespace fwcpp::math {
+
+template <typename T>
+struct Matrix3; // forward decl, matches upstream's own vector3.h/matrix3.h
+                // mutual forward declarations - full definition lives in
+                // matrix3.hpp, included by whoever needs both.
 
 template <typename T>
 struct Vector3 {
@@ -158,6 +160,23 @@ struct Vector3 {
     // no silent wrong answer, just a no-op) though without the singleton
     // reporting call itself - see vector3.cpp for the fuller note.
     void rotate(Rotation rotation);
+
+    // Apply the INVERSE of a standard rotation. Defined in vector3.cpp -
+    // needs Matrix3, which would make vector3.hpp include matrix3.hpp
+    // while matrix3.hpp already includes vector3.hpp (Matrix3's rows are
+    // Vector3) - a genuine circular-include constraint, not just the
+    // literal-safety reason most of this port's other compiled-.cpp
+    // functions have (this one has no ambiguous literal itself).
+    void rotate_inverse(Rotation rotation);
+
+    // Multiply a row vector by a matrix, giving a row vector. Defined in
+    // vector3.cpp - needs Matrix3, same circular-include reason as
+    // rotate_inverse above.
+    [[nodiscard]] Vector3<T> row_times_mat(const Matrix3<T>& m) const;
+
+    // Multiply a column vector (*this) by a row vector (v2), returning a
+    // 3x3 matrix (outer product). Defined in vector3.cpp - same reason.
+    [[nodiscard]] Matrix3<T> mul_rowcol(const Vector3<T>& v2) const;
 
     // Rotate in the xy plane only, z untouched.
     void rotate_xy(T angle_rad) {

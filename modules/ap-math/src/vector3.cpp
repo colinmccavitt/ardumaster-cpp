@@ -14,6 +14,8 @@
 
 #include <fwcpp/math/vector3.hpp>
 
+#include <fwcpp/math/matrix3.hpp>
+
 namespace fwcpp::math {
 
 namespace {
@@ -238,5 +240,51 @@ void Vector3<T>::rotate(Rotation rotation) {
 
 template void Vector3<float>::rotate(Rotation);
 template void Vector3<double>::rotate(Rotation);
+
+// Apply the inverse of `rotation` by rotating the three standard basis
+// vectors forward, assembling them as the COLUMNS of a matrix M (so M is
+// the forward-rotation matrix), then applying M's transpose - which for an
+// orthonormal (rotation) matrix is exactly its inverse. Matches upstream
+// bit-for-bit: it builds the same M and calls the same mul_transpose.
+template <typename T>
+void Vector3<T>::rotate_inverse(Rotation rotation) {
+    Vector3<T> x_vec(T(1), T(0), T(0));
+    Vector3<T> y_vec(T(0), T(1), T(0));
+    Vector3<T> z_vec(T(0), T(0), T(1));
+
+    x_vec.rotate(rotation);
+    y_vec.rotate(rotation);
+    z_vec.rotate(rotation);
+
+    Matrix3<T> m(
+        x_vec.x, y_vec.x, z_vec.x,
+        x_vec.y, y_vec.y, z_vec.y,
+        x_vec.z, y_vec.z, z_vec.z
+    );
+
+    *this = m.mul_transpose(*this);
+}
+
+template void Vector3<float>::rotate_inverse(Rotation);
+template void Vector3<double>::rotate_inverse(Rotation);
+
+template <typename T>
+Vector3<T> Vector3<T>::row_times_mat(const Matrix3<T>& m) const {
+    return Vector3<T>(*this * m.colx(), *this * m.coly(), *this * m.colz());
+}
+
+template Vector3<float> Vector3<float>::row_times_mat(const Matrix3<float>&) const;
+template Vector3<double> Vector3<double>::row_times_mat(const Matrix3<double>&) const;
+
+template <typename T>
+Matrix3<T> Vector3<T>::mul_rowcol(const Vector3<T>& v2) const {
+    const Vector3<T>& v1 = *this;
+    return Matrix3<T>(v1.x * v2.x, v1.x * v2.y, v1.x * v2.z,
+                       v1.y * v2.x, v1.y * v2.y, v1.y * v2.z,
+                       v1.z * v2.x, v1.z * v2.y, v1.z * v2.z);
+}
+
+template Matrix3<float> Vector3<float>::mul_rowcol(const Vector3<float>&) const;
+template Matrix3<double> Vector3<double>::mul_rowcol(const Vector3<double>&) const;
 
 } // namespace fwcpp::math

@@ -93,3 +93,7 @@ catch_discover_tests(rotations_test)
 add_executable(quaternion_rotation_test quaternion_rotation_test.cpp)
 target_link_libraries(quaternion_rotation_test PRIVATE ap-math Catch2::Catch2WithMain)
 catch_discover_tests(quaternion_rotation_test)
+
+add_executable(vector3_matops_test vector3_matops_test.cpp)
+target_link_libraries(vector3_matops_test PRIVATE ap-math Catch2::Catch2WithMain)
+catch_discover_tests(vector3_matops_test)
