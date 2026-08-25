@@ -4,6 +4,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/location.hpp>
 
+#include <cstdint>
+
 using fwcpp::Location;
 
 TEST_CASE("Location default constructor is all-zero", "[location]") {
@@ -261,4 +263,121 @@ TEST_CASE("past_interval_finish_line is true only once line_path_proportion reac
 
     Location at = point2;
     REQUIRE(at.past_interval_finish_line(point1, point2));
+}
+
+TEST_CASE("initialised is false only for lat=lng=alt=0, regardless of alt frame flags", "[location][initialised]") {
+    Location zero;
+    REQUIRE_FALSE(zero.initialised());
+
+    Location nonzero_lat(1, 0, 0, Location::AltFrame::ABSOLUTE);
+    REQUIRE(nonzero_lat.initialised());
+
+    // lat=lng=0 but a nonzero alt in a non-ABSOLUTE frame - looks exotic
+    // but upstream's own definition only checks lat/lng/alt, not the
+    // frame flags, so this counts as initialised.
+    Location nonzero_alt(0, 0, 500, Location::AltFrame::ABOVE_HOME);
+    REQUIRE(nonzero_alt.initialised());
+}
+
+TEST_CASE("copy_alt_from copies alt and every frame flag, leaving lat/lng untouched", "[location][copy_alt_from]") {
+    Location a(100, 200, 1000, Location::AltFrame::ABSOLUTE);
+    Location b(999, 888, 5000, Location::AltFrame::ABOVE_TERRAIN);
+    a.copy_alt_from(b);
+    REQUIRE(a.lat == 100);
+    REQUIRE(a.lng == 200);
+    REQUIRE(a.alt == 5000);
+    REQUIRE(a.get_alt_frame() == Location::AltFrame::ABOVE_TERRAIN);
+}
+
+TEST_CASE("get_alt_cm same-frame shortcut succeeds with no context at all", "[location][get_alt_cm]") {
+    Location loc(0, 0, 1234, Location::AltFrame::ABSOLUTE);
+    fwcpp::AltitudeContext ctx; // home/origin both unset
+    std::int32_t out = 0;
+    REQUIRE(loc.get_alt_cm(Location::AltFrame::ABSOLUTE, ctx, out));
+    REQUIRE(out == 1234);
+}
+
+TEST_CASE("get_alt_cm converts ABOVE_HOME to ABSOLUTE using the context's home altitude", "[location][get_alt_cm]") {
+    Location loc(0, 0, 500, Location::AltFrame::ABOVE_HOME); // 500cm above home
+    fwcpp::AltitudeContext ctx;
+    ctx.home_is_set = true;
+    ctx.home = Location(0, 0, 10000, Location::AltFrame::ABSOLUTE); // home at 100m AMSL
+
+    std::int32_t out = 0;
+    REQUIRE(loc.get_alt_cm(Location::AltFrame::ABSOLUTE, ctx, out));
+    REQUIRE(out == 10500); // 100m home + 5m relative
+}
+
+TEST_CASE("get_alt_cm fails when the required context (home/origin) is not set", "[location][get_alt_cm]") {
+    Location loc(0, 0, 500, Location::AltFrame::ABOVE_HOME);
+    fwcpp::AltitudeContext ctx; // home_is_set left false
+    std::int32_t out = 999;
+    REQUIRE_FALSE(loc.get_alt_cm(Location::AltFrame::ABSOLUTE, ctx, out));
+    REQUIRE(out == 999); // untouched on failure, matching upstream's contract
+}
+
+TEST_CASE("get_alt_cm round-trips ABOVE_HOME -> ABSOLUTE -> ABOVE_ORIGIN correctly", "[location][get_alt_cm]") {
+    Location loc(0, 0, 500, Location::AltFrame::ABOVE_HOME);
+    fwcpp::AltitudeContext ctx;
+    ctx.home_is_set = true;
+    ctx.home = Location(0, 0, 10000, Location::AltFrame::ABSOLUTE); // home at 100m AMSL
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = Location(0, 0, 8000, Location::AltFrame::ABSOLUTE); // origin at 80m AMSL
+
+    std::int32_t out = 0;
+    REQUIRE(loc.get_alt_cm(Location::AltFrame::ABOVE_ORIGIN, ctx, out));
+    // absolute = 100m + 5m = 105m; above origin (80m) = 25m = 2500cm
+    REQUIRE(out == 2500);
+}
+
+TEST_CASE("get_alt_cm fails whenever a terrain frame is involved - no terrain database in this port", "[location][get_alt_cm]") {
+    Location loc(0, 0, 500, Location::AltFrame::ABOVE_TERRAIN);
+    fwcpp::AltitudeContext ctx;
+    ctx.home_is_set = true;
+    ctx.home = Location(0, 0, 10000, Location::AltFrame::ABSOLUTE);
+    std::int32_t out = 0;
+    REQUIRE_FALSE(loc.get_alt_cm(Location::AltFrame::ABSOLUTE, ctx, out));
+
+    Location loc2(0, 0, 500, Location::AltFrame::ABSOLUTE);
+    REQUIRE_FALSE(loc2.get_alt_cm(Location::AltFrame::ABOVE_TERRAIN, ctx, out));
+}
+
+TEST_CASE("get_alt_cm with matching source/desired terrain frames succeeds via the same-frame shortcut", "[location][get_alt_cm]") {
+    // The one terrain-involving case this port CAN honor: no actual
+    // conversion is happening, so no terrain database is needed.
+    Location loc(0, 0, 500, Location::AltFrame::ABOVE_TERRAIN);
+    fwcpp::AltitudeContext ctx;
+    std::int32_t out = 0;
+    REQUIRE(loc.get_alt_cm(Location::AltFrame::ABOVE_TERRAIN, ctx, out));
+    REQUIRE(out == 500);
+}
+
+TEST_CASE("get_alt_m matches get_alt_cm scaled to meters", "[location][get_alt_m]") {
+    Location loc(0, 0, 500, Location::AltFrame::ABOVE_HOME);
+    fwcpp::AltitudeContext ctx;
+    ctx.home_is_set = true;
+    ctx.home = Location(0, 0, 10000, Location::AltFrame::ABSOLUTE);
+
+    float out = 0.0f;
+    REQUIRE(loc.get_alt_m(Location::AltFrame::ABSOLUTE, ctx, out));
+    REQUIRE(out == Catch::Approx(105.0f));
+}
+
+TEST_CASE("change_alt_frame converts this Location's own altitude and frame in place", "[location][change_alt_frame]") {
+    Location loc(0, 0, 500, Location::AltFrame::ABOVE_HOME);
+    fwcpp::AltitudeContext ctx;
+    ctx.home_is_set = true;
+    ctx.home = Location(0, 0, 10000, Location::AltFrame::ABSOLUTE);
+
+    REQUIRE(loc.change_alt_frame(Location::AltFrame::ABSOLUTE, ctx));
+    REQUIRE(loc.alt == 10500);
+    REQUIRE(loc.get_alt_frame() == Location::AltFrame::ABSOLUTE);
+}
+
+TEST_CASE("change_alt_frame leaves the Location unchanged when the conversion fails", "[location][change_alt_frame]") {
+    Location loc(0, 0, 500, Location::AltFrame::ABOVE_HOME);
+    fwcpp::AltitudeContext ctx; // home not set
+    REQUIRE_FALSE(loc.change_alt_frame(Location::AltFrame::ABSOLUTE, ctx));
+    REQUIRE(loc.alt == 500);
+    REQUIRE(loc.get_alt_frame() == Location::AltFrame::ABOVE_HOME);
 }

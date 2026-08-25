@@ -13,27 +13,41 @@
 //
 // is_zero/check_latlng/line_path_proportion/past_interval_finish_line
 // (slice 2) were picked out specifically because they're the remaining
-// functions with NO home-position/EKF-origin/terrain dependency - every
-// other still-missing piece genuinely needs that context (see below).
+// functions with NO home-position/EKF-origin/terrain dependency.
 // check_lat/check_lng are upstream free functions (AP_Math/location.cpp);
 // nothing else in this port calls them yet, so they're inlined into
 // check_latlng() here rather than given their own public names.
 //
-// Deliberately NOT in this slice: get_alt_cm/get_alt_m/change_alt_frame
-// (need home-position/EKF-origin/terrain-database context this port hasn't
-// built yet - ADR-0012 decision 6's explicit-context-struct is the right
-// answer once there IS a context to pass, not before), get_vector_from_
-// origin_* (same reason - needs EKF origin), the Vector3p/Vector2p/double
-// variants of get_distance_* (Vector3p/Vector2p don't exist in this port
-// yet - a reduced-precision "postype" used for logging, out of scope until
-// something needs it), sanitize (its alt==0/relative_alt branch calls the
-// still-unported get_alt_cm - porting the rest and silently skipping that
-// branch would be exactly the kind of partial-behavior stub this port's
-// conventions forbid, so the whole function stays deferred together), the
-// Vector3f/Vector3d ekf_offset constructors (same origin-context
-// dependency), and everything past line ~530 of Location.cpp (great-circle/
-// line-intersection helpers, closest-point-on-line-between-two-locations,
-// and more). Tracked in CPP-011's notes.
+// SLICE 3 adds get_alt_cm/get_alt_m/change_alt_frame/copy_alt_from/
+// initialised, via a new explicit AltitudeContext struct (see its own
+// comment below) carrying home position and EKF origin - matches this
+// port's standing pattern (L1Inputs, constrain_value's InternalError*) of
+// taking external state as a parameter instead of reaching for a
+// singleton (AP::ahrs()). Terrain-frame conversions (AltFrame::
+// ABOVE_TERRAIN as EITHER the location's own frame or the desired frame)
+// still fail unconditionally here, same as upstream's own #if
+// AP_TERRAIN_AVAILABLE / #else return false / #endif path compiles to
+// when terrain support is off - AP_Terrain is a real subsystem (a
+// database, not a value) this port hasn't built, and AltitudeContext
+// carrying a single caller-supplied terrain altitude wouldn't actually
+// be equivalent to it (the real function can be asked about ANY
+// location, not just the one Location instance a single cm value would
+// cover) - so this isn't a smaller version of terrain support, it's
+// honestly no terrain support, matching a real board built without it.
+//
+// Deliberately NOT in this slice: get_vector_from_origin_* (would reuse
+// AltitudeContext's ekf_origin, but returns Vector3f/Vector3p in upstream
+// and Vector3p doesn't exist in this port), the Vector3p/Vector2p/double
+// variants of get_distance_* (same Vector3p/Vector2p gap), sanitize (its
+// alt==0/relative_alt branch now COULD call get_alt_cm, but sanitize also
+// needs a default Location to fall back to and isn't otherwise blocked -
+// left for a following slice to keep this one's diff focused on
+// AltitudeContext itself), the Vector3f/Vector3d ekf_offset constructors
+// (same ekf_origin dependency as get_vector_from_origin_*, plus the
+// Location-returning-Location constructor shape needs more thought than
+// this slice's scope), and everything past line ~530 of Location.cpp
+// (great-circle/line-intersection helpers, closest-point-on-line-between-
+// two-locations, and more). Tracked in CPP-011's notes.
 //
 // LITERAL SAFETY: LOCATION_SCALING_FACTOR/_INV are upstream `#define
 // LATLON_TO_M 0.011131884502145034` etc, narrowed to an explicitly-typed
@@ -66,6 +80,8 @@
 #include <fwcpp/math/vector3.hpp>
 
 namespace fwcpp {
+
+struct AltitudeContext; // full definition below Location - see get_alt_cm's own comment
 
 class Location {
 public:
@@ -140,6 +156,36 @@ public:
     void set_alt_m(float alt_m, AltFrame frame) {
         set_alt_cm(static_cast<std::int32_t>(alt_m * 100), frame);
     }
+
+    void copy_alt_from(const Location& other) {
+        alt = other.alt;
+        relative_alt = other.relative_alt;
+        terrain_alt = other.terrain_alt;
+        origin_alt = other.origin_alt;
+    }
+
+    // Upstream's own definition: only lat/lng/alt, NOT the bitfield flags
+    // is_zero() checks - a Location with alt frame flags set but lat=lng=
+    // alt=0 is "not initialised" the same as an all-zero one, but a
+    // Location with a nonzero alt in ABOVE_HOME frame (lat=lng=0, alt!=0)
+    // IS initialised despite looking exotic. Reproduced exactly as
+    // upstream defines it, not derived from is_zero().
+    [[nodiscard]] bool initialised() const { return lat != 0 || lng != 0 || alt != 0; }
+
+    // Get this location's altitude in a different frame. Returns false
+    // (leaving ret_alt_cm untouched) if the conversion isn't possible with
+    // the given context - matching upstream's own failure contract exactly
+    // (home not set, EKF origin not available, or a terrain-frame
+    // conversion, which this port cannot honor - see file banner and
+    // AltitudeContext's own comment). Declared here, defined below
+    // AltitudeContext (needs the complete type).
+    [[nodiscard]] bool get_alt_cm(AltFrame desired_frame, const AltitudeContext& ctx, std::int32_t& ret_alt_cm) const;
+
+    [[nodiscard]] bool get_alt_m(AltFrame desired_frame, const AltitudeContext& ctx, float& ret_alt) const;
+
+    // Converts this Location's own altitude (in place) to desired_frame.
+    // Returns false (leaving this Location unchanged) if get_alt_cm fails.
+    bool change_alt_frame(AltFrame desired_frame, const AltitudeContext& ctx);
 
     // See file banner: the SITL-only panic on an inconsistent
     // terrain_alt/relative_alt combination is not reproduced.
@@ -337,5 +383,104 @@ public:
         return line_path_proportion(point1, point2) >= 1.0f;
     }
 };
+
+// Everything get_alt_cm needs from the AHRS for one altitude-frame
+// conversion - see file banner. home/ekf_origin are themselves Locations
+// (their own alt fields carry the ABSOLUTE altitude each is anchored at,
+// matching upstream's AP::ahrs().get_home()/get_origin()); the *_is_set
+// flags mirror upstream's own home_is_set()/get_origin() bool-return
+// contract, since neither is guaranteed available at any given moment.
+//
+// Deliberately NOT modeled: terrain altitude as a general lookup. Upstream
+// can ask AP_Terrain for the AMSL height under ANY location; this struct
+// can only carry a value already looked up for one specific Location by
+// the caller - not equivalent, so it isn't offered as a substitute at
+// all. Every terrain-frame conversion fails here, honestly, matching a
+// real board built without AP_TERRAIN_AVAILABLE.
+struct AltitudeContext {
+    bool home_is_set = false;
+    Location home;
+    bool origin_is_set = false;
+    Location ekf_origin;
+};
+
+inline bool Location::get_alt_cm(AltFrame desired_frame, const AltitudeContext& ctx, std::int32_t& ret_alt_cm) const {
+    const AltFrame frame = get_alt_frame();
+
+    // Shortcut if desired and underlying frame are the same - matches
+    // upstream, and is the only path that works when frame ==
+    // desired_frame == ABOVE_TERRAIN (this port has no terrain database,
+    // but doesn't need one if no actual conversion is being asked for).
+    if (desired_frame == frame) {
+        ret_alt_cm = alt;
+        return true;
+    }
+
+    // Terrain frame involved on either side and no terrain database in
+    // this port - matches upstream's own #else return false #endif path.
+    if (frame == AltFrame::ABOVE_TERRAIN || desired_frame == AltFrame::ABOVE_TERRAIN) {
+        return false;
+    }
+
+    std::int32_t alt_abs = 0;
+    switch (frame) {
+        case AltFrame::ABSOLUTE:
+            alt_abs = alt;
+            break;
+        case AltFrame::ABOVE_HOME:
+            if (!ctx.home_is_set) {
+                return false;
+            }
+            alt_abs = alt + ctx.home.alt;
+            break;
+        case AltFrame::ABOVE_ORIGIN:
+            if (!ctx.origin_is_set) {
+                return false;
+            }
+            alt_abs = alt + ctx.ekf_origin.alt;
+            break;
+        case AltFrame::ABOVE_TERRAIN:
+            return false; // unreachable (handled above) - no fallthrough
+    }
+
+    switch (desired_frame) {
+        case AltFrame::ABSOLUTE:
+            ret_alt_cm = alt_abs;
+            return true;
+        case AltFrame::ABOVE_HOME:
+            if (!ctx.home_is_set) {
+                return false;
+            }
+            ret_alt_cm = alt_abs - ctx.home.alt;
+            return true;
+        case AltFrame::ABOVE_ORIGIN:
+            if (!ctx.origin_is_set) {
+                return false;
+            }
+            ret_alt_cm = alt_abs - ctx.ekf_origin.alt;
+            return true;
+        case AltFrame::ABOVE_TERRAIN:
+            return false; // unreachable (handled above) - no fallthrough
+    }
+    return false;
+}
+
+inline bool Location::get_alt_m(AltFrame desired_frame, const AltitudeContext& ctx, float& ret_alt) const {
+    std::int32_t ret_alt_cm;
+    if (!get_alt_cm(desired_frame, ctx, ret_alt_cm)) {
+        return false;
+    }
+    ret_alt = static_cast<float>(ret_alt_cm) * 0.01f;
+    return true;
+}
+
+inline bool Location::change_alt_frame(AltFrame desired_frame, const AltitudeContext& ctx) {
+    std::int32_t new_alt_cm;
+    if (!get_alt_cm(desired_frame, ctx, new_alt_cm)) {
+        return false;
+    }
+    set_alt_cm(new_alt_cm, desired_frame);
+    return true;
+}
 
 } // namespace fwcpp
