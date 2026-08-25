@@ -33,3 +33,7 @@ catch_discover_tests(vector2_test)
 add_executable(vector3_test vector3_test.cpp)
 target_link_libraries(vector3_test PRIVATE ap-math Catch2::Catch2WithMain)
 catch_discover_tests(vector3_test)
+
+add_executable(matrix3_test matrix3_test.cpp)
+target_link_libraries(matrix3_test PRIVATE ap-math Catch2::Catch2WithMain)
+catch_discover_tests(matrix3_test)
