@@ -141,3 +141,7 @@ catch_discover_tests(scheduler_test)
 add_executable(rc_test rc_test.cpp)
 target_link_libraries(rc_test PRIVATE ap-hal Catch2::Catch2WithMain)
 catch_discover_tests(rc_test)
+
+add_executable(rc_channel_test rc_channel_test.cpp)
+target_link_libraries(rc_channel_test PRIVATE ap-rc-channel Catch2::Catch2WithMain)
+catch_discover_tests(rc_channel_test)
