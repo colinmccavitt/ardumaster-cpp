@@ -13,14 +13,18 @@
 // vector3.hpp including matrix3.hpp back would be circular. The .cpp has
 // no such constraint.
 //
+// xy() ADDED (CPP-028 slice 2): upstream implements this by
+// reinterpret_cast-ing a Vector3's first two members as a Vector2&,
+// relying on standard-layout aliasing that happens to work. ADR-0012's "no
+// unsafe reinterpretation" stance (the same one ap-param's is_sentinel
+// port took on the Rust side) argues against reproducing that with
+// reinterpret_cast here too, so this port's xy() just copies x/y into a
+// fresh Vector2<T> instead - same observable result (AP_AHRS_DCM::
+// _yaw_gain()'s _accel_ef.xy().length(), the concrete caller this was
+// deferred waiting for), no aliasing trick. Not a mutable-reference view
+// like upstream's - no caller in this port needs to write back through it.
+//
 // Deliberately still not ported:
-//   - xy(): upstream implements this by reinterpret_cast-ing a Vector3's
-//     first two members as a Vector2&, relying on standard-layout aliasing
-//     that happens to work. ADR-0012's "no unsafe reinterpretation" stance
-//     (the same one ap-param's is_sentinel port took on the Rust side)
-//     argues against reproducing that with reinterpret_cast here too.
-//     Deferred until there's a concrete caller to design the safe
-//     equivalent against, rather than guessing at one speculatively.
 //   - distance_to_segment, closest_distance_between_line_and_point,
 //     point_on_line_closest_to_other_point, segment_to_segment_closest_point,
 //     segment_plane_intersect: geometry helpers built on the core algebra,
@@ -111,6 +115,12 @@ struct Vector3 {
 
     [[nodiscard]] bool is_nan() const { return std::isnan(x) || std::isnan(y) || std::isnan(z); }
     [[nodiscard]] bool is_inf() const { return std::isinf(x) || std::isinf(y) || std::isinf(z); }
+
+    // Horizontal (x, y) components as a standalone Vector2 - see file
+    // banner. A copy, not a reinterpret_cast view: upstream's xy() aliases
+    // the underlying storage (readable and writable through the
+    // reference); this returns an independent value instead.
+    [[nodiscard]] Vector2<T> xy() const { return Vector2<T>(x, y); }
 
     // Generic (integral T): exact comparison. Overridden below for
     // float/double, matching upstream's template<> split.
