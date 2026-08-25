@@ -1,11 +1,8 @@
 #pragma once
 
-// Port of AP_Math/matrix3.h + matrix3.cpp. CPP-008, slice 1.
-//
-// SLICE BOUNDARY: everything except from_rotation(enum Rotation), which
-// needs the Rotation enum and Vector3::rotate(enum Rotation) - both
-// deferred in vector3.hpp/vector2.hpp for the same reason (own ticket,
-// substantial 52-entry table). Tracked in CPP-008's notes, not silent.
+// Port of AP_Math/matrix3.h + matrix3.cpp. CPP-008 - now complete,
+// including from_rotation(Rotation), added once CPP-019 landed
+// Vector3::rotate(Rotation).
 //
 // Nothing in matrix3.cpp has a bare ambiguous double literal - from_euler,
 // to_euler, from_euler312, to_euler312, from_axis_angle, rotate, normalize,
@@ -228,6 +225,18 @@ struct Matrix3 {
         a = t0 * (T(1) / t0.length());
         b = t1 * (T(1) / t1.length());
         c = t2 * (T(1) / t2.length());
+    }
+
+    // Rotation matrix for a standard (45-degree-increment) rotation.
+    // Matches upstream exactly: rotate each basis row, then transpose.
+    void from_rotation(Rotation rotation) {
+        a = Vector3<T>(T(1), T(0), T(0));
+        b = Vector3<T>(T(0), T(1), T(0));
+        c = Vector3<T>(T(0), T(0), T(1));
+        a.rotate(rotation);
+        b.rotate(rotation);
+        c.rotate(rotation);
+        transpose();
     }
 
     // Rotation matrix for rotation about axis v by angle theta (Rodrigues'

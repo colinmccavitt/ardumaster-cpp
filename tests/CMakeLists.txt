@@ -85,3 +85,7 @@ catch_discover_tests(notch_filter_test)
 add_executable(vector2_geometry_test vector2_geometry_test.cpp)
 target_link_libraries(vector2_geometry_test PRIVATE ap-math Catch2::Catch2WithMain)
 catch_discover_tests(vector2_geometry_test)
+
+add_executable(rotations_test rotations_test.cpp)
+target_link_libraries(rotations_test PRIVATE ap-math Catch2::Catch2WithMain)
+catch_discover_tests(rotations_test)

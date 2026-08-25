@@ -1,17 +1,21 @@
 #pragma once
 
-// Port of AP_Math/vector3.h + vector3.cpp's core algebra. CPP-007, slice 1.
+// Port of AP_Math/vector3.h + vector3.cpp's core algebra. CPP-007, slice 1,
+// plus rotate(Rotation) added by CPP-019.
 //
 // SLICE BOUNDARY (matches the vector2.hpp precedent): this lands the
 // struct, equality, arithmetic operators, dot/cross, length/length_squared/
 // limit_length_xy, normalize/normalized, is_zero/is_nan/is_inf, angle,
 // rotate_xy, offset_bearing, reflect/project/projected, distance_squared,
-// zero(), scale(), perpendicular, rfu_to_frd, tofloat/todouble.
+// zero(), scale(), perpendicular, rfu_to_frd, tofloat/todouble, and now
+// rotate(Rotation) (CPP-019 - the Rotation enum plus this ~50-case switch,
+// declared here, DEFINED in vector3.cpp since HALF_SQRT_2 and several
+// rotation-specific constants are bare non-exact literals needing the
+// compiled-.cpp treatment scalar.cpp's wrap_* family established).
 //
 // Deliberately NOT in this slice:
-//   - rotate(enum Rotation)/rotate_inverse: need the Rotation enum and its
-//     52-entry table (rotations.h) - a substantial separate port, tracked
-//     as its own ticket rather than folded in here.
+//   - rotate_inverse: builds on rotate(Rotation) but wasn't itself needed
+//     yet by anything this port has read; own follow-on ticket.
 //   - row_times_mat/mul_rowcol: need Matrix3, not yet ported.
 //   - xy(): upstream implements this by reinterpret_cast-ing a Vector3's
 //     first two members as a Vector2&, relying on standard-layout aliasing
@@ -39,6 +43,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include <fwcpp/math/rotations.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector2.hpp>
 
@@ -144,6 +149,15 @@ struct Vector3 {
         const T dz = z - v.z;
         return dx * dx + dy * dy + dz * dz;
     }
+
+    // Rotate by a standard (45-degree-increment) rotation. Defined in
+    // vector3.cpp - see file banner. Unsupported enum values (MAX,
+    // CUSTOM_OLD, CUSTOM_1, CUSTOM_2, CUSTOM_END - the last three need
+    // AP_CustomRotations, not ported) leave the vector unchanged, matching
+    // upstream's fallthrough-to-INTERNAL_ERROR path in effect (no crash,
+    // no silent wrong answer, just a no-op) though without the singleton
+    // reporting call itself - see vector3.cpp for the fuller note.
+    void rotate(Rotation rotation);
 
     // Rotate in the xy plane only, z untouched.
     void rotate_xy(T angle_rad) {
