@@ -20,6 +20,21 @@
 //
 // LITERAL SAFETY: no bare ambiguous double literals - every constant is
 // an explicit float-suffixed literal, matching upstream's own.
+//
+// CPP-027 slice: added ch_in/control_in (RC_Channel.h:521,529) and
+// update() (RC_Channel.cpp:~303) so fwcpp::rc::RcChannels (rc_channels.hpp,
+// same module) can drive a channel from an fwcpp::hal::RcInput. update()
+// here deliberately takes the already-read PWM value as a parameter
+// rather than pulling from hal.rcin itself: this keeps RcChannel free of
+// any HAL dependency (it stays pure per-channel math, as it was before
+// this slice) and matches this port's explicit-context convention - the
+// registry (which does depend on ap-hal) owns "where does the PWM value
+// come from" (RcInput::read(ch_in), or in upstream's case also GCS
+// overrides - see rc_channels.hpp's banner for why overrides aren't
+// reproduced here). Functionally this is upstream's update() with the
+// has_override()/has_had_rc_receiver() gate hoisted to the caller: by
+// the time a caller has a PWM value in hand to pass in, upstream would
+// already have decided to update, so update() always returns true here.
 
 #include <cstdint>
 
@@ -42,6 +57,36 @@ public:
     bool reversed = false;
     std::int16_t high_in = 4500; // e.g. ANGLE_MAX for a control surface channel
     ControlType type_in = ControlType::kAngle;
+
+    // Index into the RC input source (fwcpp::hal::RcInput::read(ch_in)),
+    // matching RC_Channel.h:521's ch_in. RcChannels::RcChannels() below
+    // defaults every channel's ch_in to its own array index (matching
+    // RC_Channels::init()'s `channel(i)->ch_in = i` loop) - overridable
+    // afterwards for a non-1:1 mapping, same as upstream allows.
+    std::uint8_t ch_in = 0;
+
+    // Cached scaled value from the last update(), matching RC_Channel.h:
+    // 529's control_in. int16_t (not float) is upstream's own choice,
+    // even though pwm_to_range()/pwm_to_angle() are float-returning -
+    // reproduced here with an explicit narrowing cast rather than
+    // upstream's implicit one (get_control_in_zero_dz() above stays
+    // float-returning since it's a fresh per-call computation, not this
+    // cache).
+    std::int16_t control_in = 0;
+
+    // Pulls a freshly-read PWM value in as radio_in and recomputes
+    // control_in via pwm_to_range() or pwm_to_angle() depending on
+    // type_in - matches RC_Channel::update()'s dispatch (RC_Channel.cpp:
+    // ~303) minus the override/has_had_rc_receiver gating (see file
+    // banner - that decision is the caller's, i.e. RcChannels::
+    // read_input() in rc_channels.hpp). Always returns true: reaching
+    // this call already means the caller decided a real update happens.
+    bool update(std::uint16_t new_radio_in) {
+        radio_in = static_cast<std::int16_t>(new_radio_in);
+        control_in = static_cast<std::int16_t>(
+            type_in == ControlType::kRange ? pwm_to_range() : pwm_to_angle());
+        return true;
+    }
 
     // Angle (centidegrees) from radio_in, using an explicit dead_zone and
     // trim rather than this channel's own configured ones - the shared
