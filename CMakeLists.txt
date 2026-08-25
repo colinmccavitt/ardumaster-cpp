@@ -17,6 +17,15 @@ endif()
 # ADR-0012 decision 7: precision is a build option, not a template parameter.
 option(FWCPP_EKF_DOUBLE "Use double precision for ftype (matches upstream HAL_WITH_EKF_DOUBLE)" OFF)
 
+# Same ADR-0012 decision 7 pattern, for a different upstream precision
+# switch: postype_t/Vector2p/Vector3p (AP_Math/control.h). Upstream:
+# `#if HAL_WITH_POSTYPE_DOUBLE` where HAL_WITH_POSTYPE_DOUBLE is itself
+# `HAL_PROGRAM_SIZE_LIMIT_KB > 1024` - true for every board with more than
+# 1MB of flash. This port's target is SITL (see ADR/memory: "SITL target,
+# full fidelity"), which has no such limit, so ON is the value that
+# actually matches what this port runs as - not an arbitrary default.
+option(FWCPP_POSTYPE_DOUBLE "Use double precision for postype_t (matches upstream HAL_WITH_POSTYPE_DOUBLE, true for SITL)" ON)
+
 # Warnings apply everywhere, tests included - these don't affect literal
 # typing or numeric behavior.
 add_compile_options(-Wall -Wextra)
