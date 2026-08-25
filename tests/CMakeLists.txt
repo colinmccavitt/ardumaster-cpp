@@ -177,3 +177,7 @@ catch_discover_tests(ahrs_dcm_test)
 add_executable(sim_plane_test sim_plane_test.cpp)
 target_link_libraries(sim_plane_test PRIVATE ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sim_plane_test)
+
+add_executable(tecs_test tecs_test.cpp)
+target_link_libraries(tecs_test PRIVATE ap-tecs Catch2::Catch2WithMain)
+catch_discover_tests(tecs_test)

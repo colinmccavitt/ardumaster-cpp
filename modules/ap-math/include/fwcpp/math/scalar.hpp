@@ -47,6 +47,7 @@
 #include <cmath>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 
 #include <fwcpp/internal_error.hpp>
 
@@ -200,6 +201,31 @@ template <typename T>
         return std::sqrt(val);
     }
     return 0.0f;
+}
+
+// linear_interpolate (CPP-029, added alongside AP_TECS's port): upstream
+// AP_Math.cpp's float-only overload (no double/template variant exists
+// upstream either). Kept header-only like safe_asin/safe_sqrt above - its
+// only literal is the swap-detection branch, which touches no bare
+// floating constant the -fsingle-precision-constant flag could give a
+// different meaning depending on the including TU (see this file's own
+// banner for why that matters for the wrap_* family but not this
+// function).
+[[nodiscard]] inline float linear_interpolate(float output_low, float output_high, float input_value,
+                                               float input_low, float input_high) {
+    if (input_low > input_high) {
+        // support either polarity
+        std::swap(input_low, input_high);
+        std::swap(output_low, output_high);
+    }
+    if (input_value <= input_low) {
+        return output_low;
+    }
+    if (input_value >= input_high) {
+        return output_high;
+    }
+    const float p = (input_value - input_low) / (input_high - input_low);
+    return output_low + p * (output_high - output_low);
 }
 
 // constrain_value: NaN clamps to the midpoint (upstream's own choice, not
