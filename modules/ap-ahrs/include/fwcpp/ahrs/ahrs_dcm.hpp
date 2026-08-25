@@ -1,31 +1,31 @@
 #pragma once
 
-// Port of AP_AHRS_DCM's gyro-integration attitude core (slice 1) plus YAW
-// drift correction (slice 2, this addition): drift_correction_yaw() and
-// everything it calls. CPP-028. Upstream: AP_AHRS/AP_AHRS_DCM.h,
+// Port of AP_AHRS_DCM's gyro-integration attitude core (slice 1), YAW
+// drift correction (slice 2, commit 49960ca), and now the ROLL/PITCH half
+// of drift correction (slice 3, this addition): everything in
+// drift_correction(float deltat) EXCEPT the drift_correction_yaw() call at
+// its top (that's slice 2). CPP-028. Upstream: AP_AHRS/AP_AHRS_DCM.h,
 // AP_AHRS_DCM.cpp (Plane-4.7.0) - read directly from the pinned upstream
 // worktree, not from training-data memory.
 //
 // SLICE 1 (matrix_update/normalize/check_matrix/renorm/reset/update, no
 // drift correction at all - commit b0e2e6d) left omega_i_/omega_p_/
 // omega_yaw_p_ as always-zero placeholder fields that matrix_update()
-// already read every tick. SLICE 2 (this addition) starts writing
-// omega_yaw_p_ and omega_i_.z from real compass/GPS yaw fusion.
-// matrix_update() ITSELF HAS NOT CHANGED - not one line - it already
-// consumed these exact fields in slice 1.
+// already read every tick. SLICE 2 (commit 49960ca) started writing
+// omega_yaw_p_ and omega_i_.z from real compass/GPS yaw fusion. SLICE 3
+// (this addition) makes omega_p_ real and completes omega_i_.x/omega_i_.y.
+// matrix_update() ITSELF HAS NOT CHANGED across any of the three slices -
+// not one line - it already consumed these exact fields in slice 1.
 //
-// STILL NOT PORTED, and now the single biggest remaining chunk of
-// AP_AHRS_DCM.cpp: AP_AHRS_DCM::drift_correction(float deltat) itself
-// (minus the drift_correction_yaw() call already inside it) - the
-// roll/pitch half of drift correction. It fuses a GPS-lag-delayed,
-// multi-accelerometer-instance-voted accel-vs-gravity error into
-// omega_P and omega_I.x/omega_I.y, gated by should_correct_centrifugal()
-// and wind estimation - needing a GPS-lag delay ring buffer
-// (_ra_delay_buffer/ra_delayed), multi-IMU-instance voting, and wind
-// estimation this port hasn't built. A future slice 3. Everything else
-// slice 1's banner already excluded for the same reasons (wind estimation,
-// airspeed, groundspeed/position, status/arming plumbing/GCS,
-// backup_attitude()/watchdog persistence) is still excluded.
+// With slice 3 landed, this class has NO axis left that drifts
+// unboundedly: roll/pitch are now pulled back toward the accel-vs-gravity
+// (and, with GPS, accel-vs-GPS-velocity-implied-gravity) reference exactly
+// as upstream does, on top of slice 2's yaw correction. Everything else
+// slice 1's banner already excluded for the same reasons (airspeed sensor
+// hardware, groundspeed/position tracking, status/arming plumbing/GCS,
+// backup_attitude()/watchdog persistence) is still excluded - see the
+// SLICE 3 section below for what specifically is and isn't reproduced from
+// drift_correction()'s roll/pitch half.
 //
 // COMPASS_CAL_ENABLED's compass.is_calibrating() early return is cut too -
 // no compass calibration subsystem in this port.
@@ -39,11 +39,9 @@
 // porting the one call site's real math beat stubbing it behind a
 // pre-computed-heading parameter).
 //
-// This class produces a real, gyro-only attitude estimate that still
-// slowly drifts on the roll/pitch axes without slice 3's accel correction
-// - exactly the upstream algorithm with those correction terms omitted,
-// not a simplified approximation of it. Yaw no longer drifts unbounded:
-// it is now corrected exactly as upstream does, from compass or GPS.
+// This class now reproduces the FULL upstream drift-correction algorithm
+// on all three axes (modulo the named, documented exclusions below) -
+// nothing left drifts unbounded under pure gyro integration.
 //
 // NO SINGLETONS, EXPLICIT INPUTS INSTEAD (ADR-0012), matching this port's
 // standing L1Inputs/AcPid/FilterRegistry pattern:
@@ -128,21 +126,48 @@
 // sample" behavior can hold back its own first CompassSample before
 // calling in.
 //
-// _omega_I_sum BATCHING IS NOT REPRODUCED - a genuine divergence, not an
-// oversight: upstream accumulates this slice's yaw contribution into a
-// SHARED `_omega_I_sum.z` (also written by the out-of-scope accel-based
-// drift_correction(), same vector), only actually folded into `_omega_I`
-// every 5 seconds (`_omega_I_sum_time >= 5`), constrained by
-// `AP::ins().get_gyro_drift_rate()` - an IMU property this port hasn't
-// wired in, and inseparable from drift_correction()'s multi-instance accel
-// voting that owns the sum's other two axes. Since that batching/clamping
-// machinery cannot be ported without the accel half, this slice instead
-// accumulates the yaw contribution directly and continuously into
-// omega_i_.z on every gated tick - the identical `error_z * kKiYaw *
-// yaw_deltat` term upstream computes, just applied immediately rather than
-// batched-then-clamped. A future slice 3 porting drift_correction()'s
-// accel half should revisit this once omega_i_.z has a real batching
-// partner for x/y again.
+// _omega_I_sum BATCHING - SLICE 2's ORIGINAL NOTE (kept for history): a
+// genuine divergence, not an oversight: upstream accumulates yaw's
+// contribution into a SHARED `_omega_I_sum.z` (also written by the then-
+// out-of-scope accel-based drift_correction(), same vector), only actually
+// folded into `_omega_I` every 5 seconds (`_omega_I_sum_time >= 5`),
+// constrained by `AP::ins().get_gyro_drift_rate()`. Since that
+// batching/clamping machinery couldn't be ported without the accel half,
+// slice 2 instead accumulated the yaw contribution directly and
+// continuously into omega_i_.z on every gated tick - the identical
+// `error_z * kKiYaw * yaw_deltat` term upstream computes, just applied
+// immediately rather than batched-then-clamped.
+//
+// SLICE 3 UPDATE - PARTIAL UNIFICATION, not full: now that this slice adds
+// the accel half's real x/y/z error contributions, the task of porting
+// this class asked whether to now properly unify _omega_I_sum across both
+// paths (upstream's actual behavior) or keep them separate. Full
+// unification is NOT practical without breaking slice 2's already-tested,
+// byte-for-byte-preserved contract: several slice-2 tests
+// (ahrs_dcm_test.cpp, e.g. "drift_correction_yaw: first-ever compass
+// reading...") assert that omega_i_.z updates IMMEDIATELY within the same
+// drift_correction_yaw() call that produced a new yaw_error, not after a
+// 5-second batch delay - switching yaw's z-contribution to route through a
+// shared, batched-and-clamped sum would silently change that observable
+// behavior and fail those tests, which this task explicitly requires stay
+// unmodified and passing. So the two paths remain PARTIALLY separate:
+//   - x/y: this slice's OWN omega_i_sum_/omega_i_sum_time_ (a real,
+//     upstream-faithful 5-second batch-and-clamp, using
+//     max_gyro_drift_rad_s in place of get_gyro_drift_rate() - see
+//     drift_correction_accel()'s own doc comment). Slice 2 never wrote
+//     x/y, so there is no existing contract to break here.
+//   - z: BOTH contributors keep writing omega_i_.z directly and
+//     immediately, each under its own pre-existing gate (yaw: `yaw_deltat
+//     < 2.0f && spin_rate < kSpinRateLimitDeg`, unchanged from slice 2;
+//     accel: `spin_rate < kSpinRateLimitDeg` alone, matching upstream's
+//     own accel-half gate for _omega_I_sum, which never checked a
+//     yaw_deltat). This preserves BOTH real upstream signal sources
+//     feeding the z gyro-bias estimate (dropping the accel-half's z
+//     contribution entirely would be a quiet loss of real upstream
+//     behavior, worse than the immediate-vs-batched divergence already on
+//     record) while keeping slice 2's tested contract intact. A
+//     hypothetical future rework that revisits slice 2's own tests could
+//     complete the unification; this slice does not, by design.
 //
 // kp_yaw_ SANITY CLAMP: upstream's `if (_kp_yaw < AP_AHRS_YAW_P_MIN)
 // _kp_yaw.set(AP_AHRS_YAW_P_MIN)` mutates the live AP_Param in place.
@@ -162,17 +187,20 @@
 // upstream's do - a genuine, minor, and conservative divergence: it means
 // LESS fast-gain treatment after an internal recovery, never more.
 //
-// PLACEHOLDER DRIFT-CORRECTION FIELD: omega_p_ (upstream: _omega_P) is
-// still an always-zero private member - it belongs entirely to the
-// out-of-scope accel half of drift_correction() (slice 3). omega_i_/
-// omega_yaw_p_ are placeholders no longer: this slice writes both.
-// matrix_update()'s math still reads all three exactly as it did in slice
-// 1; nothing about matrix_update() needed to change for any of this.
-// reset_gyro_drift() is kept too (it's a trivial one-liner upstream even
-// including drift correction - `_omega_I.zero()`; this slice still drops
-// upstream's accompanying `_omega_I_sum.zero(); _omega_I_sum_time = 0;`
-// since this port has no _omega_I_sum to zero - see the batching note
-// above).
+// PLACEHOLDER DRIFT-CORRECTION FIELD - SLICE 2's ORIGINAL NOTE (kept for
+// history): omega_p_ (upstream: _omega_P) was still an always-zero private
+// member in slice 2 - it belonged entirely to the then-out-of-scope accel
+// half of drift_correction(). SLICE 3 UPDATE: omega_p_ is a placeholder no
+// longer either - drift_correction_accel() (below) now writes it every
+// GPS-triggered fusion cycle. All three of omega_p_/omega_i_/omega_yaw_p_
+// are real now. matrix_update()'s math still reads all three exactly as it
+// did in slice 1; nothing about matrix_update() needed to change across
+// any of the three slices. reset_gyro_drift() now also zeroes
+// omega_i_sum_/omega_i_sum_time_ (upstream: `_omega_I_sum.zero();
+// _omega_I_sum_time = 0;`) - slice 2 dropped these because this port had
+// no _omega_I_sum yet; slice 3 gives it a real (partial - x/y only, see
+// the OMEGA_I_SUM UNIFICATION note above) one, so reset_gyro_drift() now
+// matches upstream's full reset_gyro_drift() body again.
 //
 // LAST-ACCEL FALLBACK FOR INTERNAL RESETS - a genuine divergence, not just
 // a naming difference: upstream's check_matrix()/normalize() call the
@@ -210,6 +238,200 @@
 // port hasn't built) are dropped rather than ported - pure bookkeeping
 // with no consumer in this slice, and cheap to re-add if a future slice's
 // status-reporting work wants it.
+//
+// =====================================================================
+// SLICE 3: drift_correction()'s ROLL/PITCH half (this addition)
+// =====================================================================
+//
+// Upstream's drift_correction(float deltat) is dual-rate: it integrates
+// accel into _ra_sum on EVERY call (once per IMU tick), but only does the
+// GPS-triggered fusion work once a NEW GPS fix time is observed
+// (`_gps.last_fix_time_ms() == _ra_sum_start` early-returns otherwise).
+// This slice splits that into two methods matching that same split:
+//   - accumulate_accel(const AccelSample&, float deltat) - the fast,
+//     every-tick half (upstream: the top of drift_correction(), before its
+//     `have_gps()` branch).
+//   - drift_correction_accel(...) - the slow, GPS-triggered fusion half
+//     (upstream: everything from the `have_gps()` branch to the end of
+//     drift_correction()), named to parallel slice 2's
+//     drift_correction_yaw() and distinguish it clearly.
+//
+// AccelSample (new struct, matching GyroSample's shape/naming exactly):
+//   - delta_velocity/delta_velocity_dt: upstream's per-instance
+//     get_delta_velocity() out-params (m/s, body frame / s) - sampled over
+//     the sensor's own time delta specifically to avoid aliasing, per
+//     upstream's own comment. Feeds ra_sum_ (upstream: _ra_sum[i]).
+//   - accel: upstream's _ins.get_accel() - a SEPARATE, already-filtered
+//     instantaneous body-frame reading (m/s^2), NOT derived from
+//     delta_velocity/delta_velocity_dt. Feeds accel_ef (see below) and the
+//     catapult-launch gain-reduction check.
+//
+// ACCEL-INSTANCE VOTING NOT REPRODUCED: upstream loops
+// `for i in 0..get_accel_count()`, summing per-instance _ra_sum[i] and,
+// at fusion time, VOTING across instances (besti/best_error/error[]/GA_b[]
+// arrays) to pick whichever accelerometer's integrated reading has the
+// smallest error term - deliberately exploiting different sample rates
+// across accelerometers to reduce aliasing from vibration harmonics. This
+// port's GyroSample already models exactly ONE gyro/accel reading per
+// tick with no multi-instance array anywhere; there is nothing to vote
+// BETWEEN yet, not a case of dropping real behavior for convenience. Both
+// accumulate_accel() and drift_correction_accel() take exactly one
+// AccelSample/one implicit instance throughout - every per-instance
+// upstream construct (the `for` loop, _ra_sum[INS_MAX_INSTANCES],
+// _ra_delay_buffer[INS_MAX_INSTANCES], besti, best_error, error[],
+// error_dirn[], GA_b[], _active_accel_instance) collapses to its
+// single-instance equivalent. A future slice modeling multiple IMUs should
+// restore the voting; this slice's single-instance math is otherwise the
+// complete upstream algorithm, not an approximation of it.
+//
+// accel_ef (upstream: `_accel_ef = _dcm_matrix * _ins.get_accel();`) IS
+// NOW COMPUTED, by accumulate_accel(), every tick a real AccelSample is
+// available - slice 2 left it an externally-set field because nothing in
+// this class computed it yet. It STAYS a public, externally-settable field
+// rather than becoming purely internal: a caller that hasn't wired up
+// accumulate_accel() every tick (e.g. exercising only drift_correction_yaw()
+// in isolation, as several slice-2 tests still do) can still set it
+// directly, preserving slice 2's existing contract and tests unmodified.
+// A caller that DOES call accumulate_accel() every tick simply doesn't
+// need to touch accel_ef itself any more - it's kept in sync automatically.
+//
+// ra_delayed() (upstream: AP_AHRS_DCM::ra_delayed(uint8_t, const Vector3f&))
+// is a trivial one-sample delay line (return the previous stored value,
+// then overwrite it with the new one; "first call returns the input
+// unchanged" via an is_zero() guard against a false trigger on
+// initialisation) - ported near-verbatim, single-instance (see above), and
+// left PUBLIC (like renorm()) rather than private, since it's a small,
+// independently meaningful, independently-testable primitive in the same
+// spirit as renorm().
+//
+// should_correct_centrifugal() (upstream:
+// AP_AHRS_DCM::should_correct_centrifugal() const) is guarded
+// `#if APM_BUILD_COPTER_OR_HELI || ArduSub || Blimp` with
+// `return hal.util->get_soft_armed();` under those build types; Plane
+// (this port's only target) falls through to upstream's own unconditional
+// `return true;` at the bottom of the function - verified against the live
+// upstream source, not assumed. Kept as a named static method (not inlined
+// away at its one call site) so the correspondence to upstream stays
+// visible and cheap to extend if this port ever grows a Copter/Sub/Blimp
+// target.
+//
+// GpsSample EXTENDED (three new fields, all defaulted so slice 1/2's
+// existing GpsSample-constructing call sites and tests keep compiling
+// unchanged):
+//   - velocity_ned (Vector3f): upstream `AP::gps().velocity()`, NED m/s.
+//   - num_sats (uint8_t): upstream `AP::gps().num_sats()`.
+//   - has_3d_fix (bool): upstream `AP::gps().status() >= AP_GPS::
+//     GPS_OK_FIX_3D`. NOTE this is a DIFFERENT, stronger threshold than
+//     the existing has_fix field (`status() > NO_FIX`) - checked against
+//     upstream's AP_GPS::GPS_Status enum (NO_GPS=0, NO_FIX=1,
+//     GPS_OK_FIX_2D=2, GPS_OK_FIX_3D=3, ...): has_fix is EXACTLY
+//     `status() >= GPS_OK_FIX_2D` (there is no enum value between NO_FIX
+//     and GPS_OK_FIX_2D), which is also exactly the threshold upstream's
+//     catapult-launch check uses (`_gps.status() >= AP_GPS::
+//     GPS_OK_FIX_2D`) - so has_fix is reused there directly, precisely,
+//     not approximated.
+//
+// gps_gain/gps_minsats/kp (upstream: `AP_Float& gps_gain`, `AP_Int8&
+// _gps_minsats`, `AP_Float& _kp`) become plain constructor fields
+// (gps_gain_, gps_minsats_, kp_), defaulted to upstream's own GSCALAR
+// defaults (AHRS_GPS_GAIN=1.0f, AHRS_GPS_MINSATS=6, AHRS_RP_P=0.2f) - same
+// "AP_Param not wired in yet" precedent as slice 2's kp_yaw, appended to
+// the existing defaulted constructor so `AhrsDcm ahrs;` and slice 2's
+// `AhrsDcm ahrs(0.01f)` test call sites keep compiling unchanged. `_ki`
+// (upstream: `static constexpr float _ki = 0.0087f;`, never an AP_Float
+// either) stays a compile-time constant (kKi), matching kKiYaw's
+// precedent.
+//
+// drift_correction_accel()'s remaining explicit-input parameters,
+// replacing upstream singleton/subsystem reads (ADR-0012):
+//   - compass/gps (CompassSample/GpsSample): the SAME structs slice 2
+//     already takes. use_compass() is genuinely called a SECOND time here
+//     - upstream itself calls its own (argument-free, singleton-reading)
+//     use_compass() twice per full drift_correction() tick, once from
+//     drift_correction_yaw() and once from here; this is faithfully
+//     reproduced, not a mistake. wind_speed_ms (the scalar use_compass()
+//     itself needs) is DERIVED here as `wind_estimate.xy().length()`
+//     rather than taken as a second, independently-suppliable parameter -
+//     upstream's use_compass() and drift_correction() both read the exact
+//     same `_wind` member, so deriving one from the other here preserves
+//     that single-source-of-truth relationship instead of letting a
+//     caller pass two mismatched wind values.
+//   - wind_estimate (Vector3f, replacing `_wind`) and airspeed_tas (float,
+//     replacing `_last_airspeed_TAS`'s role as the dead-reckoning fallback
+//     value, and the `#if AP_AIRSPEED_ENABLED` live-sensor override that
+//     would normally take priority over it) - no wind-estimation or
+//     airspeed-sensor subsystem in this port (both already out of scope
+//     per slice 1/2's banner), so the caller supplies whatever estimate it
+//     has, 0/zero-vector if none. This class still maintains its OWN
+//     `_last_airspeed_TAS`-equivalent cache (last_airspeed_tas_, exposed
+//     via last_airspeed_tas()), computed from GPS velocity exactly as
+//     upstream does whenever GPS is available - that computation is pure
+//     math needing no sensor - but, UNLIKE upstream, does not
+//     automatically fall back to it when airspeed_tas is 0; a caller
+//     wanting upstream's exact fallback chain can feed last_airspeed_tas()
+//     back in as the next no-GPS tick's airspeed_tas argument itself,
+//     making the fallback an explicit caller choice rather than an
+//     implicit one.
+//   - accel_healthy (bool, replacing `_ins.get_accel_health(i)`): with one
+//     instance, "this instance failed its health check and was skipped"
+//     collapses to "no healthy accelerometers at all" (upstream's
+//     besti==-1 path) - so this parameter gates that same early return.
+//   - ins_healthy (bool, replacing `_ins.healthy()`): a DIFFERENT, coarser
+//     signal upstream checks separately - it zeroes the error term rather
+//     than early-returning, so the P-gain/integrator code below still
+//     runs (on a deliberately-zeroed error) rather than skipping entirely.
+//   - now_ms: reused for use_fast_gains() (as in slice 2) AND for
+//     upstream's `last_correction_time = AP_HAL::millis();` in the
+//     dead-reckoning branch - both want "the current wall-clock time", so
+//     one parameter serves both rather than introducing a redundant
+//     second one.
+//   - max_gyro_drift_rad_s (float, defaulted, replacing `AP::ins().
+//     get_gyro_drift_rate()`): upstream's OWN implementation of that
+//     accessor (AP_InertialSensor.h) is `return radians(0.5f/60);` - a
+//     hardcoded constant with no actual per-hardware calibration behind
+//     it, not a real IMU property. Defaulting this parameter to that exact
+//     expression (kDefaultMaxGyroDriftRadS) reproduces upstream's real
+//     behavior verbatim, not an invented approximation; a future slice
+//     modeling per-hardware gyro drift rates can override it per call.
+//
+// EXCLUDED from drift_correction_accel(), each a genuine, named scope
+// boundary rather than an oversight:
+//   - Multi-accelerometer-instance voting - see the ACCEL-INSTANCE VOTING
+//     note above.
+//   - The position-estimate block (`_last_lat`/`_last_lng`/
+//     `_position_offset_north`/`_position_offset_east`, `_have_position`) -
+//     no position/GPS-location/GCS subsystem in this port; this was
+//     already implicitly out of scope under slice 1's "groundspeed/
+//     position...plumbing/GCS" exclusion before this slice existed, now
+//     made explicit against this specific block.
+//   - `_last_failure_ms` - write-only status bookkeeping upstream sets on
+//     every failure path; its only reader upstream (`healthy()`, AP_AHRS_
+//     DCM.cpp) is itself outside this class's current scope (no overall
+//     health-status accessor exists yet). Same precedent as slice 1's
+//     dropped _renorm_val_sum/_renorm_val_count. Every early-return site
+//     that would have set it here just returns instead.
+//   - `_active_accel_instance` - purely a multi-instance bookkeeping index,
+//     meaningless with exactly one instance.
+//   - The dead `#if YAW_INDEPENDENT_DRIFT_CORRECTION` block - upstream's
+//     own macro guarding it is hardcoded `#define
+//     YAW_INDEPENDENT_DRIFT_CORRECTION 0` immediately above the block, so
+//     it is unreachable code even in upstream itself, not something this
+//     port chose to cut.
+//
+// CATAPULT-LAUNCH GAIN REDUCTION IS INCLUDED (upstream: `if (fly_forward
+// && _gps.status() >= AP_GPS::GPS_OK_FIX_2D && _gps.ground_speed() <
+// GPS_SPEED_MIN && _ins.get_accel().x >= 7 && pitch > radians(-30) &&
+// pitch < radians(30)) { _omega_P *= 0.5f; }`) - judged cheap and
+// self-contained enough to keep rather than cut: every value it reads is
+// already available (gps.has_fix stands in exactly, not approximately, for
+// `status() >= GPS_OK_FIX_2D` - see the GpsSample note above; the accel.x
+// reading is cached from the last accumulate_accel() call as
+// last_accel_x_, matching upstream's own _ins.get_accel().x).
+//
+// error_rp_/get_error_rp() (upstream: `_error_rp{1.0f}`/
+// `get_error_rp() const`) are ported alongside omega_p_/omega_i_ - this
+// slice is what actually computes best_error/error now, so the same
+// treatment slice 2 gave error_yaw_/get_error_yaw() applies here too.
 
 #include <cfloat>
 #include <cmath>
@@ -237,6 +459,27 @@ inline constexpr float kYawPMin = 0.05f;
 // 0.01f` - not an AP_Float upstream either, so no parameter here.
 inline constexpr float kKiYaw = 0.01f;
 
+// upstream: AP_AHRS_RP_P_MIN (AP_AHRS_Backend.h) - floor for kp_ (slice 3).
+inline constexpr float kRpPMin = 0.05f;
+
+// upstream: AP_AHRS_DCM::_ki, `static constexpr float _ki = 0.0087f;` -
+// not an AP_Float upstream either, so no parameter here (slice 3).
+inline constexpr float kKi = 0.0087f;
+
+// upstream: #define GRAVITY_MSS 9.80665f (AP_Math/definitions.h) - slice
+// 3's own local copy, matching l1_control.hpp/sim_plane.hpp's precedent of
+// each file defining this constant locally rather than sharing one header.
+inline constexpr float kGravityMss = 9.80665f;
+
+// upstream: AP_InertialSensor::get_gyro_drift_rate() - see
+// drift_correction_accel()'s doc comment (file banner) for why this
+// hardcoded upstream return value, not a real per-hardware property, is a
+// faithful default for max_gyro_drift_rad_s rather than an invented
+// approximation. Not `constexpr`: math::radians() is a regular (non-
+// constexpr) function - see scalar.hpp's own banner - so this is a
+// runtime-initialized inline constant instead.
+inline const float kDefaultMaxGyroDriftRadS = math::radians(0.5f / 60.0f);
+
 // Everything yaw_error_compass()/use_compass()/drift_correction_yaw() need
 // from the compass for one tick - see file banner.
 struct CompassSample {
@@ -253,6 +496,13 @@ struct GpsSample {
     float ground_course_deg = 0.0f;      // upstream: AP::gps().ground_course()
     std::uint32_t last_fix_time_ms = 0;  // upstream: AP::gps().last_fix_time_ms()
     bool has_fix = false;                // upstream: AP::gps().status() > AP_GPS::NO_FIX
+
+    // --- slice 3 additions (drift_correction_accel()) - see file banner's
+    // "GpsSample EXTENDED" note. ---
+    math::Vector3f velocity_ned;  // upstream: AP::gps().velocity(), NED m/s
+    std::uint8_t num_sats = 0;    // upstream: AP::gps().num_sats()
+    bool has_3d_fix = false;      // upstream: AP::gps().status() >= AP_GPS::GPS_OK_FIX_3D -
+                                   // a DIFFERENT, stronger threshold than has_fix above; see file banner.
 };
 
 // Everything matrix_update() needs from the primary IMU for one tick - see
@@ -270,20 +520,48 @@ struct GyroSample {
     math::Vector3f gyro;        // upstream: get_gyro(), rad/s
 };
 
+// Everything accumulate_accel() needs from the primary IMU for one tick -
+// see file banner's SLICE 3 section. Matches GyroSample's shape/naming
+// convention exactly.
+struct AccelSample {
+    math::Vector3f delta_velocity; // upstream: get_delta_velocity() out-param, m/s, body frame
+    float delta_velocity_dt = 0.0f; // upstream: get_delta_velocity() out-param, s; <=0 means no valid sample this tick
+    math::Vector3f accel;          // upstream: _ins.get_accel(), filtered instantaneous body-frame accel, m/s^2 -
+                                    // a SEPARATE reading from delta_velocity/delta_velocity_dt, see file banner.
+};
+
 class AhrsDcm {
 public:
     // kp_yaw: upstream `AP_Float& _kp_yaw`, defaulted to AHRS_YAW_P's
     // GSCALAR default (0.2f) - see file banner. Defaulted (not a mandatory
     // Gains struct) so slice 1's `AhrsDcm ahrs;` call sites keep compiling
-    // unchanged.
-    explicit AhrsDcm(float kp_yaw = 0.2f) : kp_yaw_(kp_yaw) { dcm_matrix.identity(); }
+    // unchanged. kp/gps_gain/gps_minsats: slice 3 additions, same
+    // treatment, defaulted to upstream's own GSCALAR defaults - see file
+    // banner's "gps_gain/gps_minsats/kp" note. Appended after kp_yaw so
+    // slice 1/2's existing constructor call sites (including slice 2's
+    // `AhrsDcm ahrs(0.01f)`) keep compiling unchanged.
+    explicit AhrsDcm(float kp_yaw = 0.2f, float kp = 0.2f, float gps_gain = 1.0f, std::uint8_t gps_minsats = 6)
+        // NOTE: listed in class declaration order (kp_/gps_gain_/gps_minsats_
+        // precede kp_yaw_ - see the private section below) to avoid a
+        // -Wreorder warning; member initialization always runs in
+        // declaration order regardless of this list's textual order.
+        : kp_(kp), gps_gain_(gps_gain), gps_minsats_(gps_minsats), kp_yaw_(kp_yaw) {
+        dcm_matrix.identity();
+    }
 
     AhrsDcm(const AhrsDcm&) = delete;
     AhrsDcm& operator=(const AhrsDcm&) = delete;
 
-    // upstream: AP_AHRS_DCM::reset_gyro_drift() - see file banner for why
-    // _omega_I_sum/_omega_I_sum_time aren't reproduced.
-    void reset_gyro_drift() { omega_i_.zero(); }
+    // upstream: AP_AHRS_DCM::reset_gyro_drift(). Slice 2 dropped the
+    // `_omega_I_sum.zero(); _omega_I_sum_time = 0;` lines because this
+    // class had no _omega_I_sum equivalent yet; slice 3 gives it a real
+    // (partial - x/y only, see file banner's OMEGA_I_SUM UNIFICATION note)
+    // one, so this now matches upstream's full body again.
+    void reset_gyro_drift() {
+        omega_i_.zero();
+        omega_i_sum_.zero();
+        omega_i_sum_time_ = 0.0f;
+    }
 
     // upstream: AP_AHRS_DCM::reset(bool recover_eulers), entered here with
     // an explicit initial_accel instead of a live sensor read - see file
@@ -327,10 +605,10 @@ public:
         last_startup_ms_ = now_ms;
     }
 
-    // upstream: AP_AHRS_DCM::matrix_update(). omega_p_ is still an
-    // always-zero placeholder (slice 3); omega_i_/omega_yaw_p_ are real,
-    // slice-2-written values now - see file banner. This method's own code
-    // is byte-for-byte unchanged from slice 1.
+    // upstream: AP_AHRS_DCM::matrix_update(). omega_p_/omega_i_/omega_yaw_p_
+    // are all real values now (slice 3 completed omega_p_/omega_i_ on top
+    // of slice 2's omega_yaw_p_/omega_i_.z) - see file banner. This
+    // method's own code is byte-for-byte unchanged from slice 1.
     void matrix_update(const GyroSample& sample) {
         if (sample.dangle_dt > 0.0f) {
             omega = sample.delta_angle / sample.dangle_dt;
@@ -420,6 +698,20 @@ public:
     // state like this for both testing and downstream status/logging use.
     [[nodiscard]] const math::Vector3f& omega_yaw_p() const { return omega_yaw_p_; }
     [[nodiscard]] const math::Vector3f& omega_i() const { return omega_i_; }
+
+    // upstream: AP_AHRS_DCM::_omega_P member access (upstream has no
+    // dedicated accessor - it's read directly as a sibling member). Real
+    // as of slice 3 - see file banner.
+    [[nodiscard]] const math::Vector3f& omega_p() const { return omega_p_; }
+
+    // upstream: AP_AHRS_DCM::get_error_rp() const. Real as of slice 3 -
+    // see file banner.
+    [[nodiscard]] float get_error_rp() const { return error_rp_; }
+
+    // upstream: AP_AHRS_DCM's own `_last_airspeed_TAS` cache, exposed for
+    // callers wanting to replicate upstream's dead-reckoning fallback
+    // chain explicitly - see file banner's "airspeed_tas" note.
+    [[nodiscard]] float last_airspeed_tas() const { return last_airspeed_tas_; }
 
     // upstream: AP_AHRS_DCM::_P_gain(float). Made static here - it's a
     // pure function of spin_rate alone (upstream declares it a regular,
@@ -606,6 +898,279 @@ public:
         error_yaw_ = 0.8f * error_yaw_ + 0.2f * std::fabs(yaw_error);
     }
 
+    // upstream: AP_AHRS_DCM::ra_delayed(uint8_t instance, const Vector3f&
+    // ra) - a one-sample delay line matching the GPS's inherent lag when
+    // comparing against the accel-integrated gravity estimate.
+    // Single-instance (see file banner's ACCEL-INSTANCE VOTING note):
+    // upstream indexes _ra_delay_buffer[instance], this port has exactly
+    // one buffer. Left public, like renorm(), as an independently
+    // meaningful and independently-testable primitive.
+    [[nodiscard]] math::Vector3f ra_delayed(const math::Vector3f& ra) {
+        // get the old element, and then fill it with the new element
+        const math::Vector3f ret = ra_delay_buffer_;
+        ra_delay_buffer_ = ra;
+        if (ret.is_zero()) {
+            // use the current vector if the previous vector is exactly
+            // zero - prevents an error on initialisation, matching
+            // upstream exactly.
+            return ra;
+        }
+        return ret;
+    }
+
+    // upstream: AP_AHRS_DCM::should_correct_centrifugal() const - see file
+    // banner for why Plane (this port's only target) reduces to an
+    // unconditional true.
+    [[nodiscard]] static bool should_correct_centrifugal() { return true; }
+
+    // upstream: the per-tick accel-accumulation code at the TOP of
+    // AP_AHRS_DCM::drift_correction(float deltat), executed every call
+    // regardless of GPS rate - see file banner's dual-rate note. Builds up
+    // ra_sum_ (the earth-frame accel-vs-time integral consumed by
+    // drift_correction_accel() once a new GPS fix arrives) and refreshes
+    // accel_ef for yaw_gain(). Multi-accelerometer-instance voting is not
+    // reproduced - see file banner.
+    void accumulate_accel(const AccelSample& sample, float deltat) {
+        if (sample.delta_velocity_dt > 0.0f) {
+            // by using delta_velocity/delta_velocity_dt instead of
+            // sample.accel, the accel value is sampled over the right
+            // time delta for this sensor, which prevents an aliasing
+            // effect - matches upstream's own comment.
+            const math::Vector3f accel_ef_body = sample.delta_velocity / sample.delta_velocity_dt;
+            const math::Vector3f accel_ef_earth = dcm_matrix * accel_ef_body;
+            // integrate the accel vector in the earth frame between GPS readings
+            ra_sum_ += accel_ef_earth * deltat;
+        }
+
+        // set accel_ef based on the filtered accel - upstream:
+        // `_accel_ef = _dcm_matrix * _ins.get_accel();`. See file banner.
+        accel_ef = dcm_matrix * sample.accel;
+        last_accel_x_ = sample.accel.x; // feeds the catapult-launch check below
+
+        // keep a sum of the deltat values, so we know how much time we
+        // have integrated over
+        ra_deltat_ += deltat;
+    }
+
+    // upstream: AP_AHRS_DCM::drift_correction(float deltat)'s GPS-triggered
+    // fusion half - everything from its `have_gps()` branch to its end.
+    // Named to parallel slice 2's drift_correction_yaw() - see file
+    // banner's SLICE 3 section for every parameter's provenance and every
+    // exclusion.
+    void drift_correction_accel(const CompassSample& compass, const GpsSample& gps, bool fly_forward, bool armed,
+                                 bool gps_use_enabled, const math::Vector3f& wind_estimate, float airspeed_tas,
+                                 bool accel_healthy, bool ins_healthy, std::uint32_t now_ms,
+                                 float max_gyro_drift_rad_s = kDefaultMaxGyroDriftRadS) {
+        math::Vector3f velocity;
+        // Zero-initialized defensively (unlike upstream's bare local) so
+        // no compiler's flow analysis can flag a false-positive
+        // maybe-uninitialized warning across the if/else below - every
+        // real path through it assigns this before it's ever read.
+        std::uint32_t last_correction_time = 0;
+
+        if (!have_gps(gps, gps_use_enabled) || !gps.has_3d_fix || gps.num_sats < gps_minsats_) {
+            // no GPS, or not a good lock. From experience upstream needs
+            // at least 6 satellites to get a really reliable velocity
+            // number from the GPS.
+            //
+            // As a fallback we use the fixed wing acceleration correction
+            // if the caller has an airspeed estimate (which upstream only
+            // has if fly_forward is set), otherwise no correction.
+            if (ra_deltat_ < 0.2f) {
+                // not enough time has accumulated
+                return;
+            }
+
+            // use airspeed to estimate our ground velocity in earth frame
+            // by subtracting the wind
+            velocity = dcm_matrix.colx() * airspeed_tas;
+            velocity += wind_estimate;
+
+            last_correction_time = now_ms;
+            have_gps_lock_ = false;
+        } else {
+            if (gps.last_fix_time_ms == ra_sum_start_) {
+                // we don't have a new GPS fix - nothing more to do
+                return;
+            }
+            velocity = gps.velocity_ned;
+            last_correction_time = gps.last_fix_time_ms;
+            if (!have_gps_lock_) {
+                // if we didn't have GPS lock in the last drift correction
+                // interval then set the velocities equal
+                last_velocity_ = velocity;
+            }
+            have_gps_lock_ = true;
+
+            // keep last airspeed estimate for dead-reckoning purposes
+            math::Vector3f airspeed = velocity - wind_estimate;
+            // rotate vector to body frame - upstream: _body_dcm_matrix
+            // (this port's update() extracts eulers straight from
+            // dcm_matrix with no separate body-trim matrix - see file
+            // banner's update() note).
+            airspeed = dcm_matrix.mul_transpose(airspeed);
+            // take positive component in X direction - mimics a pitot tube
+            last_airspeed_tas_ = std::fmax(airspeed.x, 0.0f);
+        }
+
+        // upstream's position-estimate block (_last_lat/_last_lng/
+        // _position_offset_north/_position_offset_east) is excluded - see
+        // file banner.
+
+        // see if this is our first time through - in which case we just
+        // set up the start times and return
+        if (ra_sum_start_ == 0) {
+            ra_sum_start_ = last_correction_time;
+            last_velocity_ = velocity;
+            return;
+        }
+
+        // equation 9: get the corrected acceleration vector in earth
+        // frame. Units are m/s/s
+        math::Vector3f ga_e(0.0f, 0.0f, -1.0f);
+
+        if (ra_deltat_ <= 0.0f) {
+            // waiting for more data
+            return;
+        }
+
+        bool using_gps_corrections = false;
+        const float ra_scale = 1.0f / (ra_deltat_ * kGravityMss);
+
+        if (should_correct_centrifugal() && (have_gps_lock_ || fly_forward)) {
+            const float v_scale = gps_gain_ * ra_scale;
+            const math::Vector3f vdelta = (velocity - last_velocity_) * v_scale;
+            ga_e += vdelta;
+            ga_e.normalize();
+            if (ga_e.is_inf()) {
+                // wait for some non-zero acceleration information
+                return;
+            }
+            using_gps_corrections = true;
+        }
+
+        // Multi-accelerometer-instance voting collapses to a single
+        // instance gated by accel_healthy - see file banner.
+        if (!accel_healthy) {
+            // no healthy accelerometers
+            return;
+        }
+
+        ra_sum_ *= ra_scale;
+
+        // get the delayed ra_sum to match the GPS lag
+        math::Vector3f ga_b = using_gps_corrections ? ra_delayed(ra_sum_) : ra_sum_;
+        if (ga_b.is_zero()) {
+            // wait for some non-zero acceleration information
+            return;
+        }
+        ga_b.normalize();
+        if (ga_b.is_inf()) {
+            // wait for some non-zero acceleration information
+            return;
+        }
+
+        math::Vector3f error = ga_b % ga_e;
+        // take dot product to catch case vectors are opposite sign and parallel
+        const float error_dirn = ga_b * ga_e;
+        float best_error = error.length();
+        // catch case where orientation is 180 degrees out
+        if (error_dirn < 0.0f) {
+            best_error = 1.0f;
+        }
+
+        // to reduce the impact of two competing yaw controllers, we reduce
+        // the impact of the gps/accelerometers on yaw when we are flat,
+        // but still allow for yaw correction using the accelerometers at
+        // high roll angles as long as we have a GPS. upstream calls
+        // use_compass() a SECOND time here - see file banner.
+        if (use_compass(compass, gps, fly_forward, gps_use_enabled, wind_estimate.xy().length(), now_ms)) {
+            if (have_gps(gps, gps_use_enabled) && math::is_equal(gps_gain_, 1.0f)) {
+                error.z *= std::sin(std::fabs(roll));
+            } else {
+                error.z = 0.0f;
+            }
+        }
+
+        // if ins is unhealthy then stop attitude drift correction and hope
+        // the gyros are OK for a while. Just slowly reduce omega_p_ to
+        // prevent previous bad accels from throwing us off.
+        if (!ins_healthy) {
+            error.zero();
+        } else {
+            // convert the error term to body frame
+            error = dcm_matrix.mul_transpose(error);
+        }
+
+        if (error.is_nan() || error.is_inf()) {
+            // don't allow bad values
+            check_matrix();
+            return;
+        }
+
+        error_rp_ = 0.8f * error_rp_ + 0.2f * best_error;
+
+        // base the P gain on the spin rate
+        const float spin_rate = omega.length();
+
+        // sanity check kp_ - see file banner's "kp_yaw_ SANITY CLAMP" note
+        // (drift_correction_yaw()) for the equivalent treatment here.
+        if (kp_ < kRpPMin) {
+            kp_ = kRpPMin;
+        }
+
+        // we now want to calculate omega_p_ - the value that drags us
+        // quickly to the accelerometer reading.
+        omega_p_ = error * p_gain(spin_rate) * kp_;
+        if (use_fast_gains(armed, now_ms)) {
+            omega_p_ *= 8.0f;
+        }
+
+        // catapult-launch gain reduction - see file banner. gps.has_fix
+        // stands in exactly for `status() >= GPS_OK_FIX_2D`.
+        if (fly_forward && gps.has_fix && gps.ground_speed_ms < kGpsSpeedMinMs && last_accel_x_ >= 7.0f &&
+            pitch > math::radians(-30.0f) && pitch < math::radians(30.0f)) {
+            // assume we are in a launch acceleration, and reduce the rp
+            // gain by 50% to reduce the impact of GPS lag on takeoff
+            // attitude when using a catapult
+            omega_p_ *= 0.5f;
+        }
+
+        // accumulate some integrator error. See file banner's OMEGA_I_SUM
+        // UNIFICATION note: x/y go through the batched-and-clamped
+        // omega_i_sum_/omega_i_sum_time_ machinery; z is folded into
+        // omega_i_.z immediately instead, preserving slice 2's
+        // already-tested, unbatched z contract.
+        if (spin_rate < math::radians(kSpinRateLimitDeg)) {
+            omega_i_sum_.x += error.x * kKi * ra_deltat_;
+            omega_i_sum_.y += error.y * kKi * ra_deltat_;
+            omega_i_.z += error.z * kKi * ra_deltat_;
+            omega_i_sum_time_ += ra_deltat_;
+        }
+
+        if (omega_i_sum_time_ >= 5.0f) {
+            // limit the rate of change of omega_i_ to the (explicit)
+            // max_gyro_drift_rad_s parameter - see file banner. This
+            // ensures short term errors don't cause a buildup of omega_i_
+            // beyond the physical limits of the device.
+            const float change_limit = max_gyro_drift_rad_s * omega_i_sum_time_;
+            omega_i_sum_.x = math::constrain_value(omega_i_sum_.x, -change_limit, change_limit);
+            omega_i_sum_.y = math::constrain_value(omega_i_sum_.y, -change_limit, change_limit);
+            omega_i_.x += omega_i_sum_.x;
+            omega_i_.y += omega_i_sum_.y;
+            omega_i_sum_.zero();
+            omega_i_sum_time_ = 0.0f;
+        }
+
+        // zero our accumulator ready for the next GPS step
+        ra_sum_.zero();
+        ra_deltat_ = 0.0f;
+        ra_sum_start_ = last_correction_time;
+
+        // remember the velocity for next time
+        last_velocity_ = velocity;
+    }
+
     // Primary attitude representation - upstream: _dcm_matrix.
     math::Matrix3f dcm_matrix;
 
@@ -619,18 +1184,49 @@ public:
     math::Vector3f omega;
 
     // Earth-frame accelerometer reading feeding yaw_gain()'s observability
-    // gain - upstream: _accel_ef. See file banner for why this is a plain
-    // settable field rather than something this class computes.
+    // gain - upstream: _accel_ef. Written every tick by accumulate_accel()
+    // (slice 3) but remains a public, externally-settable field for
+    // callers that don't call accumulate_accel() every tick - see file
+    // banner's "accel_ef IS NOW COMPUTED" note.
     math::Vector3f accel_ef;
 
 private:
-    // Always-zero placeholder in this slice (accel half of drift
-    // correction, slice 3) - see file banner.
+    // Real as of slice 3 (drift_correction_accel()) - see file banner.
     math::Vector3f omega_p_; // upstream: _omega_P
 
-    // Real, slice-2-written values now - see file banner.
+    // Real, slice-2/slice-3-written values now - see file banner.
     math::Vector3f omega_i_;     // upstream: _omega_I
     math::Vector3f omega_yaw_p_; // upstream: _omega_yaw_P
+
+    // drift_correction_accel()'s x/y integrator batch (slice 3) - upstream:
+    // _omega_I_sum/_omega_I_sum_time. z is NOT accumulated here - see file
+    // banner's OMEGA_I_SUM UNIFICATION note for why it stays a separate,
+    // immediate contribution into omega_i_.z instead.
+    math::Vector3f omega_i_sum_;
+    float omega_i_sum_time_ = 0.0f;
+
+    // drift_correction_accel()'s bookkeeping (slice 3) - upstream:
+    // _ra_sum[instance], _ra_deltat, _ra_sum_start, _ra_delay_buffer[instance],
+    // _have_gps_lock, _last_velocity, _last_airspeed_TAS, _error_rp{1.0f},
+    // and _ins.get_accel().x (cached here as last_accel_x_ for the
+    // catapult-launch check) - all collapsed to single-instance where
+    // upstream indexed by accelerometer instance (see file banner).
+    math::Vector3f ra_sum_;
+    float ra_deltat_ = 0.0f;
+    std::uint32_t ra_sum_start_ = 0;
+    math::Vector3f ra_delay_buffer_;
+    bool have_gps_lock_ = false;
+    math::Vector3f last_velocity_;
+    float last_airspeed_tas_ = 0.0f;
+    float last_accel_x_ = 0.0f;
+    float error_rp_ = 1.0f;
+
+    // kp_/gps_gain_/gps_minsats_: see file banner's "gps_gain/gps_minsats/
+    // kp" note. kp_ is mutated in place by drift_correction_accel()'s
+    // sanity clamp, matching upstream's `_kp.set(...)`.
+    float kp_ = 0.2f;
+    float gps_gain_ = 1.0f;
+    std::uint8_t gps_minsats_ = 6;
 
     // See file banner's "LAST-ACCEL FALLBACK FOR INTERNAL RESETS" note.
     math::Vector3f last_initial_accel_;

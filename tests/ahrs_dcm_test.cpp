@@ -538,3 +538,271 @@ TEST_CASE("drift_correction_yaw: GPS reset condition 3 - large error at high spe
     // Condition-3 resets force yaw_error to 0 for this tick.
     REQUIRE(ahrs.omega_yaw_p().z == Catch::Approx(0.0f).margin(1e-6f));
 }
+
+// ===========================================================================
+// CPP-028 slice 3: ROLL/PITCH drift correction (drift_correction_accel(),
+// accumulate_accel(), ra_delayed(), should_correct_centrifugal()).
+// Everything above this marker is slice 1/2 and is unmodified.
+// ===========================================================================
+
+TEST_CASE("should_correct_centrifugal: always true for Plane", "[ahrs_dcm]") {
+    REQUIRE(AhrsDcm::should_correct_centrifugal());
+}
+
+TEST_CASE("ra_delayed: first call passes through, then delays by one sample", "[ahrs_dcm]") {
+    AhrsDcm ahrs;
+    const Vector3f v1(1.0f, 2.0f, 3.0f);
+    // previous buffer starts exactly zero -> passthrough on the first call
+    REQUIRE(ahrs.ra_delayed(v1) == v1);
+
+    const Vector3f v2(4.0f, 5.0f, 6.0f);
+    REQUIRE(ahrs.ra_delayed(v2) == v1); // now returns the PREVIOUS value
+
+    const Vector3f v3(7.0f, 8.0f, 9.0f);
+    REQUIRE(ahrs.ra_delayed(v3) == v2);
+}
+
+TEST_CASE("accumulate_accel integrates accel*deltat across ticks (invariant to tick count)", "[ahrs_dcm]") {
+    // Two AHRS instances fed the SAME total accel-time history via a
+    // DIFFERENT number of accumulate_accel() calls (2 coarse ticks vs 10
+    // fine ticks, same total elapsed time and same accel) must reach an
+    // identical fused correction - proof that accumulate_accel() really
+    // integrates accel*deltat (upstream: `_ra_sum[i] += accel_ef * deltat`)
+    // rather than, say, overwriting a snapshot each call.
+    AhrsDcm coarse;
+    AhrsDcm fine;
+
+    GpsSample gps;
+    gps.has_fix = true;
+    gps.has_3d_fix = true;
+    gps.num_sats = 10;
+    gps.velocity_ned = Vector3f(0.0f, 0.0f, 0.0f); // stationary for the bootstrap fix
+    CompassSample compass; // unhealthy by default - keeps use_compass() false
+
+    Vector3f accel_reading(0.0f, 0.0f, -9.80665f); // exactly vertical throughout - no accel-tilt error source
+
+    auto feed_coarse = [&](float total_dt) {
+        AccelSample a;
+        a.accel = accel_reading;
+        a.delta_velocity_dt = total_dt / 2.0f;
+        a.delta_velocity = a.accel * a.delta_velocity_dt;
+        for (int i = 0; i < 2; ++i) {
+            coarse.accumulate_accel(a, a.delta_velocity_dt);
+        }
+    };
+    auto feed_fine = [&](float total_dt) {
+        AccelSample a;
+        a.accel = accel_reading;
+        a.delta_velocity_dt = total_dt / 10.0f;
+        a.delta_velocity = a.accel * a.delta_velocity_dt;
+        for (int i = 0; i < 10; ++i) {
+            fine.accumulate_accel(a, a.delta_velocity_dt);
+        }
+    };
+
+    feed_coarse(0.1f);
+    feed_fine(0.1f);
+    gps.last_fix_time_ms = 1000;
+    coarse.drift_correction_accel(compass, gps, false, true, true, Vector3f(), 0.0f, true, true, 1000);
+    fine.drift_correction_accel(compass, gps, false, true, true, Vector3f(), 0.0f, true, true, 1000);
+    // Both calls above just bootstrap (first-ever GPS fix) - nothing to
+    // compare yet.
+
+    // The real error source: GPS velocity changes between the bootstrap
+    // and this cycle (the accel history stays exactly vertical the whole
+    // time) - this is what shifts GA_e and produces a real, nonzero error
+    // for both instances to (identically) react to.
+    gps.velocity_ned = Vector3f(0.0f, 3.0f, 0.0f);
+    feed_coarse(0.1f);
+    feed_fine(0.1f);
+    gps.last_fix_time_ms = 2000;
+    coarse.drift_correction_accel(compass, gps, false, true, true, Vector3f(), 0.0f, true, true, 2000);
+    fine.drift_correction_accel(compass, gps, false, true, true, Vector3f(), 0.0f, true, true, 2000);
+
+    REQUIRE(coarse.omega_p().x == Catch::Approx(fine.omega_p().x).margin(1e-5f));
+    REQUIRE(coarse.omega_p().y == Catch::Approx(fine.omega_p().y).margin(1e-5f));
+    REQUIRE(coarse.omega_p().z == Catch::Approx(fine.omega_p().z).margin(1e-5f));
+    // Sanity: a real, nonzero correction happened (not a degenerate 0==0
+    // pass) - the Y-axis GPS velocity change lands the error on X (see
+    // the next test's doc comment for the cross-product rule why).
+    REQUIRE(std::fabs(coarse.omega_p().x) > 1e-4f);
+}
+
+TEST_CASE("drift_correction_accel: a GPS velocity change produces a correctly-signed nonzero omega_p_",
+          "[ahrs_dcm]") {
+    AhrsDcm ahrs; // identity dcm_matrix, roll=pitch=yaw=0
+    GpsSample gps;
+    gps.has_fix = true;
+    gps.has_3d_fix = true;
+    gps.num_sats = 10;
+    CompassSample compass; // unhealthy - keeps use_compass() false, error.z left untouched
+
+    AccelSample accel;
+    accel.accel = Vector3f(0.0f, 0.0f, -9.80665f); // perfectly level & stationary accel history
+    accel.delta_velocity_dt = 0.01f;
+    accel.delta_velocity = accel.accel * accel.delta_velocity_dt;
+
+    // Bootstrap: stationary GPS velocity, sets last_velocity_ = (0,0,0).
+    gps.velocity_ned = Vector3f(0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < 10; ++i) {
+        ahrs.accumulate_accel(accel, 0.01f);
+    }
+    gps.last_fix_time_ms = 1000;
+    ahrs.drift_correction_accel(compass, gps, false, true, true, Vector3f(), 0.0f, true, true, 1000);
+    REQUIRE(ahrs.omega_p().is_zero()); // no correction produced on the bootstrap pass
+
+    // Real fusion cycle: GPS velocity jumps to (0, 3, 0) while the accel
+    // history stayed exactly vertical - this vdelta is what shifts GA_e
+    // off (0,0,-1) and produces a real error, independent of any accel tilt.
+    gps.velocity_ned = Vector3f(0.0f, 3.0f, 0.0f);
+    for (int i = 0; i < 10; ++i) {
+        ahrs.accumulate_accel(accel, 0.01f);
+    }
+    gps.last_fix_time_ms = 2000;
+    ahrs.drift_correction_accel(compass, gps, false, true, true, Vector3f(), 0.0f, true, true, 2000);
+
+    // Independent hand-derived cross-check. ra_deltat_ entering THIS call
+    // is 0.2s, not 0.1s - the bootstrap call above does NOT reset
+    // ra_deltat_/ra_sum_ (only a full, non-bootstrap successful pass does),
+    // so the first 0.1s (accumulated before the bootstrap call) is still
+    // there, plus the 0.1s accumulated since:
+    //   ra_scale = 1/(ra_deltat*g) = 1/(0.2*9.80665)
+    //   GA_b (accel exactly vertical throughout - ra_sum_ = accel*ra_deltat_
+    //     always scales back to exactly accel/g regardless of ra_deltat_'s
+    //     actual value; first-ever ra_delayed call passes through
+    //     unchanged) = (0,0,-1) after scale+normalize.
+    //   vdelta = (velocity - last_velocity) * (gps_gain * ra_scale)
+    //          = (0,3,0) * ra_scale (gps_gain defaults to 1.0)
+    //   GA_e = normalize((0,0,-1) + vdelta)
+    //   error = GA_b x GA_e - note this lands on the X axis (not Y): for
+    //     ga_b=(0,0,-1), cross((0,0,-1), (kx,ky,-1)) = (ky, -kx, 0) - a
+    //     vdelta purely in Y (ky!=0, kx=0, as here) produces error on X.
+    const float ra_scale = 1.0f / (0.2f * 9.80665f);
+    const Vector3f ga_b(0.0f, 0.0f, -1.0f);
+    Vector3f ga_e = Vector3f(0.0f, 0.0f, -1.0f) + Vector3f(0.0f, 3.0f, 0.0f) * ra_scale;
+    ga_e.normalize();
+    const Vector3f expected_error = ga_b % ga_e;
+    const float expected_omega_p_x = expected_error.x * AhrsDcm::p_gain(0.0f) * 0.2f; // default kp_, armed=true (no *8)
+
+    REQUIRE(ahrs.omega_p().x == Catch::Approx(expected_omega_p_x).margin(1e-4f));
+    REQUIRE(ahrs.omega_p().y == Catch::Approx(0.0f).margin(1e-5f));
+    REQUIRE(ahrs.omega_p().z == Catch::Approx(0.0f).margin(1e-5f));
+    REQUIRE(ahrs.omega_p().x > 0.0f); // a real, correctly-signed nonzero correction
+}
+
+TEST_CASE("drift_correction_accel: dead-reckoning fallback with no GPS but a real airspeed change",
+          "[ahrs_dcm]") {
+    AhrsDcm ahrs;
+    GpsSample gps; // has_fix stays false throughout - forces the no-GPS branch
+    CompassSample compass; // unhealthy - keeps use_compass() false
+
+    AccelSample accel;
+    accel.accel = Vector3f(0.0f, 0.0f, -9.80665f); // perfectly level accel history throughout
+    accel.delta_velocity_dt = 0.01f;
+    accel.delta_velocity = accel.accel * accel.delta_velocity_dt;
+
+    // Accumulate enough time (>0.2s) BEFORE the very first call - the
+    // no-GPS branch's own `ra_deltat_ < 0.2f` guard applies even to the
+    // bootstrap call.
+    for (int i = 0; i < 25; ++i) {
+        ahrs.accumulate_accel(accel, 0.01f);
+    }
+
+    // Bootstrap: airspeed_tas=15, wind=0 -> velocity = colx()*15 = (15,0,0).
+    ahrs.drift_correction_accel(compass, gps, /*fly_forward=*/true, /*armed=*/true, /*gps_use_enabled=*/true,
+                                 Vector3f(), /*airspeed_tas=*/15.0f, true, true, 1000);
+    REQUIRE(ahrs.omega_p().is_zero()); // bootstrap pass produces no correction
+    REQUIRE(ahrs.last_airspeed_tas() == 0.0f); // never touched by the no-GPS branch
+
+    // Real fusion cycle: airspeed_tas changes to 20 -> velocity = (20,0,0),
+    // a real vdelta relative to the bootstrap's (15,0,0) last_velocity_,
+    // with no GPS involved at all.
+    ahrs.drift_correction_accel(compass, gps, true, true, true, Vector3f(), /*airspeed_tas=*/20.0f, true, true, 2000);
+
+    REQUIRE(ahrs.last_airspeed_tas() == 0.0f); // still untouched - no-GPS branch never writes it
+    REQUIRE(ahrs.omega_p().x == Catch::Approx(0.0f).margin(1e-5f));
+    REQUIRE(ahrs.omega_p().y < 0.0f); // real, nonzero, correctly-signed correction
+    REQUIRE(ahrs.omega_p().z == Catch::Approx(0.0f).margin(1e-5f));
+}
+
+TEST_CASE("drift_correction_accel: omega_i_ batches for 5 seconds then folds in, clamped", "[ahrs_dcm]") {
+    AhrsDcm ahrs;
+    GpsSample gps;
+    gps.has_fix = true;
+    gps.has_3d_fix = true;
+    gps.num_sats = 10;
+    gps.velocity_ned = Vector3f(0.0f, 0.0f, 0.0f); // constant -> vdelta always 0
+    CompassSample compass; // unhealthy - keeps use_compass() false
+
+    AccelSample accel;
+    // Deliberately large, constant tilt: a big roll/pitch error every
+    // cycle, chosen so the raw accumulated integrator sum vastly exceeds
+    // the tiny default max_gyro_drift_rad_s bound, proving the clamp
+    // actually engages rather than just passing the raw sum through.
+    accel.accel = Vector3f(2.0f, 0.0f, -9.8f);
+    accel.delta_velocity_dt = 0.05f;
+    accel.delta_velocity = accel.accel * accel.delta_velocity_dt;
+
+    auto run_cycle = [&](std::uint32_t fix_time_ms) {
+        for (int i = 0; i < 10; ++i) {
+            ahrs.accumulate_accel(accel, 0.05f); // 10 * 0.05 = 0.5s
+        }
+        gps.last_fix_time_ms = fix_time_ms;
+        ahrs.drift_correction_accel(compass, gps, false, true, true, Vector3f(), 0.0f, true, true, fix_time_ms);
+    };
+
+    run_cycle(1000); // call #1 - bootstrap, ra_deltat_ left un-reset (0.5s)
+
+    // Calls #2..#9: call #2 sees 0.5s (pre-bootstrap, unreset) + 0.5s
+    // (this cycle) = 1.0s; calls #3-#9 each see a fresh 0.5s. Cumulative
+    // omega_i_sum_time_ after call #9: 1.0 + 7*0.5 = 4.5s - still under
+    // the 5s threshold, so omega_i_ must not have moved yet.
+    for (int cycle = 0; cycle < 8; ++cycle) {
+        run_cycle(2000 + static_cast<std::uint32_t>(cycle) * 1000);
+        REQUIRE(ahrs.omega_i().x == 0.0f);
+        REQUIRE(ahrs.omega_i().y == 0.0f);
+    }
+
+    // Call #10: cumulative omega_i_sum_time_ = 4.5 + 0.5 = 5.0s, crossing
+    // the >=5s fold-and-clamp threshold.
+    run_cycle(10000);
+
+    REQUIRE(ahrs.omega_i().x == 0.0f); // no x-axis error was ever fed in
+    REQUIRE(ahrs.omega_i().y > 0.0f);
+
+    // The raw accumulated error*kKi*time vastly exceeds the tiny default
+    // gyro-drift-rate bound (by design, see above) - so the folded value
+    // must equal the clamp bound exactly, not the larger raw sum.
+    const float expected_change_limit = fwcpp::math::radians(0.5f / 60.0f) * 5.0f;
+    REQUIRE(ahrs.omega_i().y == Catch::Approx(expected_change_limit).margin(1e-6f));
+}
+
+TEST_CASE("drift_correction_accel: stationary level GPS-locked scenario settles near zero, no divergence",
+          "[ahrs_dcm]") {
+    AhrsDcm ahrs;
+    GpsSample gps;
+    gps.has_fix = true;
+    gps.has_3d_fix = true;
+    gps.num_sats = 10;
+    gps.velocity_ned = Vector3f(0.0f, 0.0f, 0.0f); // stationary, never changes
+    CompassSample compass;                          // unhealthy - keeps use_compass() false
+
+    AccelSample accel;
+    accel.accel = Vector3f(0.0f, 0.0f, -9.80665f); // exactly level & stationary
+    accel.delta_velocity_dt = 0.01f;
+    accel.delta_velocity = accel.accel * accel.delta_velocity_dt;
+
+    for (int cycle = 0; cycle < 30; ++cycle) {
+        for (int i = 0; i < 10; ++i) {
+            ahrs.accumulate_accel(accel, 0.01f);
+        }
+        gps.last_fix_time_ms = 1000 + static_cast<std::uint32_t>(cycle) * 1000;
+        ahrs.drift_correction_accel(compass, gps, false, true, true, Vector3f(), 0.0f, true, true,
+                                     gps.last_fix_time_ms);
+    }
+
+    REQUIRE(ahrs.omega_p().length() < 1e-5f);
+    REQUIRE(ahrs.omega_i().x == 0.0f);
+    REQUIRE(ahrs.omega_i().y == 0.0f);
+    REQUIRE(ahrs.omega_i().z == 0.0f);
+}
