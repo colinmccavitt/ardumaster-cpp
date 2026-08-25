@@ -136,3 +136,84 @@ TEST_CASE("PD sum limit (kPDMAX) scales P and D down together when exceeded", "[
     REQUIRE(std::fabs(out) <= 5.0f + 0.01f);
     REQUIRE(pid.get_pid_info().pd_limit);
 }
+
+TEST_CASE("update_error reuses update_all with target forced to zero", "[ac_pid][update_error]") {
+    // error=6 should produce the same P-term as update_all(target=6,
+    // measurement=0) - update_error's whole contract is "error input only,
+    // target assumed zero".
+    AcPid pid_a = make_pid(2.0f, 0.0f, 0.0f);
+    AcPid pid_b = make_pid(2.0f, 0.0f, 0.0f);
+    float out_a = pid_a.update_all(6.0f, 0.0f, 0.01f, 1000);
+    float out_b = pid_b.update_error(6.0f, 0.01f, 1000);
+    REQUIRE(out_b == Catch::Approx(out_a));
+    REQUIRE(pid_b.get_pid_info().target == Catch::Approx(0.0f));
+    REQUIRE(pid_b.get_pid_info().actual == Catch::Approx(0.0f));
+}
+
+TEST_CASE("update_error returns 0 for NaN or infinite input", "[ac_pid][update_error]") {
+    AcPid pid = make_pid(1.0f, 0.0f, 0.0f);
+    REQUIRE(pid.update_error(std::nanf(""), 0.01f, 1000) == 0.0f);
+    REQUIRE(pid.update_error(std::numeric_limits<float>::infinity(), 0.01f, 1000) == 0.0f);
+}
+
+TEST_CASE("get_filt_t/e/d_alpha match calc_lowpass_alpha_dt at the configured frequencies", "[ac_pid][alpha]") {
+    AcPid::Gains g;
+    g.p = 1.0f;
+    g.filt_t_hz = 10.0f;
+    g.filt_e_hz = 20.0f;
+    g.filt_d_hz = 30.0f;
+    AcPid pid(g);
+    REQUIRE(pid.get_filt_t_alpha(0.01f) == Catch::Approx(fwcpp::math::calc_lowpass_alpha_dt(0.01f, 10.0f)));
+    REQUIRE(pid.get_filt_e_alpha(0.01f) == Catch::Approx(fwcpp::math::calc_lowpass_alpha_dt(0.01f, 20.0f)));
+    REQUIRE(pid.get_filt_d_alpha(0.01f) == Catch::Approx(fwcpp::math::calc_lowpass_alpha_dt(0.01f, 30.0f)));
+}
+
+TEST_CASE("set_ accessors update the same storage the getters read from", "[ac_pid][setters]") {
+    AcPid pid = make_pid(1.0f, 1.0f, 1.0f);
+    pid.set_kP(3.0f);
+    pid.set_kI(4.0f);
+    pid.set_kD(5.0f);
+    pid.set_ff(6.0f);
+    pid.set_kDff(7.0f);
+    REQUIRE(pid.kP() == Catch::Approx(3.0f));
+    REQUIRE(pid.kI() == Catch::Approx(4.0f));
+    REQUIRE(pid.kD() == Catch::Approx(5.0f));
+    REQUIRE(pid.ff() == Catch::Approx(6.0f));
+    REQUIRE(pid.kDff() == Catch::Approx(7.0f));
+}
+
+TEST_CASE("set_imax/set_pdmax/set_filt_*_hz/set_slew_limit take the absolute value, matching upstream's fabsf", "[ac_pid][setters]") {
+    AcPid pid = make_pid(1.0f, 1.0f, 1.0f);
+    pid.set_imax(-10.0f);
+    pid.set_pdmax(-5.0f);
+    pid.set_filt_T_hz(-1.0f);
+    pid.set_filt_E_hz(-2.0f);
+    pid.set_filt_D_hz(-3.0f);
+    pid.set_slew_limit(-4.0f);
+    REQUIRE(pid.imax() == Catch::Approx(10.0f));
+    REQUIRE(pid.pdmax() == Catch::Approx(5.0f));
+    REQUIRE(pid.filt_T_hz() == Catch::Approx(1.0f));
+    REQUIRE(pid.filt_E_hz() == Catch::Approx(2.0f));
+    REQUIRE(pid.filt_D_hz() == Catch::Approx(3.0f));
+    REQUIRE(pid.slew_limit() == Catch::Approx(4.0f));
+}
+
+TEST_CASE("set_slew_limit actually affects the embedded slew limiter (reference-aliased, not copied)", "[ac_pid][setters]") {
+    // slew_limit() and set_slew_limit() mutate the very float the embedded
+    // SlewLimiter holds a const-reference to (see slew_limiter.hpp) -
+    // changing it after construction must change limiter behavior, not
+    // just the accessor's own return value.
+    AcPid::Gains g;
+    g.p = 10.0f;
+    g.filt_t_hz = 0.0f;
+    g.filt_e_hz = 0.0f;
+    g.filt_d_hz = 0.0f;
+    g.srmax = 1.0f; // start with slew limiting enabled
+    AcPid pid(g);
+    REQUIRE(pid.slew_limit() == Catch::Approx(1.0f));
+
+    pid.set_slew_limit(0.0f); // disabled: modifier always returns 1 (no scaling)
+    REQUIRE(pid.slew_limit() == Catch::Approx(0.0f));
+    float out_unlimited = pid.update_all(10.0f, 0.0f, 0.01f, 1000); // raw P = 100
+    REQUIRE(out_unlimited == Catch::Approx(100.0f));
+}

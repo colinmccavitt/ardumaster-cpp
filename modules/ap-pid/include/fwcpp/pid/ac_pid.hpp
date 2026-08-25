@@ -17,13 +17,19 @@
 // update_all(), threading through to the embedded SlewLimiter's own
 // modifier() call - same reasoning as SlewLimiter's own file banner.
 //
-// NOTCH FILTERS NOT INCLUDED: upstream's target/error notch filter
-// pointers default to nullptr and are entirely opt-in (guarded by
-// `if (_target_notch != nullptr)` at every use), so omitting them
-// reproduces the "notch filters not configured" state exactly - not a
-// simplification of behavior, just a state this port doesn't yet have a
-// way to leave. NotchFilter/AP_Filter aren't ported. set_notch_sample_rate
-// and the AP_FILTER_ENABLED members are therefore also absent.
+// NOTCH FILTERS STILL NOT INCLUDED, and this is now the one deliberately
+// remaining gap (as of CPP-016 slice 2): unlike Filter/NotchFilter.h itself
+// (ported as fwcpp::filter::NotchFilter, CPP-018, done), AC_PID's notch
+// integration doesn't just construct a NotchFilter - it looks one up at
+// runtime by index through AP_Filter's global registry (`AP::filters()`,
+// a singleton returning a filter definition the user configured via GCS
+// parameters). Wiring that in means either porting AP_Filter's registry
+// (a real subsystem, its own ticket) or inventing a different lookup
+// mechanism upstream doesn't have - neither is a small addition to bolt
+// onto this file. set_notch_sample_rate and the AP_FILTER_ENABLED members
+// remain absent; every other function in this slice reproduces the
+// "notch filters not configured" behavior exactly, since upstream's own
+// notch application is a no-op whenever the pointer is null.
 //
 // load_gains/save_gains/var_info NOT PORTED: EEPROM/AP_Param-specific,
 // meaningless without AP_Param.
@@ -32,6 +38,7 @@
 // functions - constrain_float's contribution to AC_PID_RESET_TC (0.16f)
 // and similar constants are all explicitly float-suffixed upstream.
 
+#include <cmath>
 #include <cstdint>
 
 #include <fwcpp/filter/slew_limiter.hpp>
@@ -155,6 +162,23 @@ public:
         return p_out + d_out + i_out;
     }
 
+    // Computes the PID output from an error input only (target assumed
+    // zero). Reuses update_all's code path exactly as upstream does:
+    // target is force-set to 0 (bypassing the target filter, matching
+    // upstream's direct `_target = 0.0` before the call), then update_all
+    // runs with measurement = -error so that its own `target - measurement`
+    // reproduces `error`. now_ms: see update_all's own note.
+    float update_error(float error, float dt, std::uint32_t now_ms, bool limit = false) {
+        if (!std::isfinite(error)) {
+            return 0.0f;
+        }
+        target_ = 0.0f;
+        const float output = update_all(0.0f, -error, dt, now_ms, limit);
+        pid_info_.target = 0.0f;
+        pid_info_.actual = 0.0f;
+        return output;
+    }
+
     void reset_filter() { flags_reset_filter_ = true; }
 
     void reset_i() {
@@ -190,6 +214,13 @@ public:
     [[nodiscard]] float imax() const { return kimax_; }
     [[nodiscard]] float pdmax() const { return kpdmax_; }
 
+    // Returns the low-pass filter alpha for the given dt at each filter's
+    // configured frequency - exposed separately from update_all so callers
+    // can inspect/log the effective filtering without running a full step.
+    [[nodiscard]] float get_filt_t_alpha(float dt) const { return math::calc_lowpass_alpha_dt(dt, filt_t_hz_); }
+    [[nodiscard]] float get_filt_e_alpha(float dt) const { return math::calc_lowpass_alpha_dt(dt, filt_e_hz_); }
+    [[nodiscard]] float get_filt_d_alpha(float dt) const { return math::calc_lowpass_alpha_dt(dt, filt_d_hz_); }
+
     void set_target_rate(float target) { pid_info_.target = target; }
     void set_actual_rate(float actual) { pid_info_.actual = actual; }
 
@@ -202,6 +233,25 @@ public:
     float& kPDMAX() { return kpdmax_; }
     float& ff() { return kff_; }
     float& kDff() { return kdff_; }
+    float& filt_T_hz() { return filt_t_hz_; }
+    float& filt_E_hz() { return filt_e_hz_; }
+    float& filt_D_hz() { return filt_d_hz_; }
+    float& slew_limit() { return slew_rate_max_; }
+
+    // set accessors - upstream's own set_* family. abs()-clamped where
+    // upstream's set_kX(v) calls fabsf(v) before storing (imax/pdmax and
+    // every filter/slew frequency are magnitude-only quantities).
+    void set_kP(float v) { kp_ = v; }
+    void set_kI(float v) { ki_ = v; }
+    void set_kD(float v) { kd_ = v; }
+    void set_ff(float v) { kff_ = v; }
+    void set_imax(float v) { kimax_ = std::fabs(v); }
+    void set_pdmax(float v) { kpdmax_ = std::fabs(v); }
+    void set_filt_T_hz(float v) { filt_t_hz_ = std::fabs(v); }
+    void set_filt_E_hz(float v) { filt_e_hz_ = std::fabs(v); }
+    void set_filt_D_hz(float v) { filt_d_hz_ = std::fabs(v); }
+    void set_slew_limit(float v) { slew_rate_max_ = std::fabs(v); }
+    void set_kDff(float v) { kdff_ = v; }
 
 private:
     void update_i(float dt, bool limit, float i_scale) {
