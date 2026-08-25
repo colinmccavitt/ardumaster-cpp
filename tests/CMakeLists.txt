@@ -173,3 +173,7 @@ catch_discover_tests(srv_channels_test)
 add_executable(ahrs_dcm_test ahrs_dcm_test.cpp)
 target_link_libraries(ahrs_dcm_test PRIVATE ap-ahrs Catch2::Catch2WithMain)
 catch_discover_tests(ahrs_dcm_test)
+
+add_executable(sim_plane_test sim_plane_test.cpp)
+target_link_libraries(sim_plane_test PRIVATE ap-sim Catch2::Catch2WithMain)
+catch_discover_tests(sim_plane_test)
