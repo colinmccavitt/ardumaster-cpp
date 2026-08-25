@@ -20,8 +20,20 @@
 // Deliberately NOT in this slice: from_axis_angle (+_fast variants),
 // to_axis_angle, from_vector312/to_vector312, from_angular_velocity,
 // rotate_fast, angular_difference, roll_pitch_difference, earth_to_body,
-// operator/, from_rotation(enum)/rotate(enum) [needs the Rotation enum,
-// same deferral as Vector2/Vector3/Matrix3]. Tracked in CPP-009's notes.
+// operator/. Tracked in CPP-009's notes.
+//
+// from_rotation(Rotation)/rotate(Rotation) added by CPP-019 once the
+// Rotation enum existed. from_rotation is a precomputed constant table
+// (comment upstream: "the constants below can be calculated ... from
+// Matrix3f m; m.from_rotation(rotation); Quaternion q; q.from_rotation_matrix(m);"
+// - i.e. these are cached results of a computation this port could also
+// just run, but upstream hardcodes them and this port reproduces the
+// hardcoded values exactly rather than deriving them, so any transcription
+// slip in either the constants or the derivation shows up as a genuine
+// difference, not a self-consistent alternative). Declared here, DEFINED
+// in quaternion.cpp - the constants are bare non-exact literals, same
+// compiled-.cpp treatment as scalar.cpp's wrap_* family and vector3.cpp's
+// rotate(Rotation).
 //
 // LITERAL SAFETY: from_euler's `roll*0.5` etc use a bare 0.5 - exactly
 // representable in both float and double, so -fsingle-precision-constant's
@@ -239,6 +251,18 @@ struct QuaternionT {
 
     [[nodiscard]] QuaternionT<double> todouble() const { return QuaternionT<double>(q1, q2, q3, q4); }
     [[nodiscard]] QuaternionT<float> tofloat() const { return QuaternionT<float>(q1, q2, q3, q4); }
+
+    // Defined in quaternion.cpp - see file banner.
+    void from_rotation(Rotation rotation);
+
+    // Compose this quaternion with the quaternion for `rotation`. No
+    // literal ambiguity in this body itself (from_rotation is where the
+    // constants live), so this stays header-inline.
+    void rotate(Rotation rotation) {
+        QuaternionT<T> q_from_rot;
+        q_from_rot.from_rotation(rotation);
+        *this *= q_from_rot;
+    }
 };
 
 using Quaternion = QuaternionT<float>;

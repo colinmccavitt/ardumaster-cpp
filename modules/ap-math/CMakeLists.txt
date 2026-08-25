@@ -3,6 +3,7 @@ add_library(ap-math STATIC
     src/matrix_alg.cpp
     src/vector2.cpp
     src/vector3.cpp
+    src/quaternion.cpp
 )
 target_include_directories(ap-math PUBLIC include)
 target_compile_features(ap-math PUBLIC cxx_std_20)
