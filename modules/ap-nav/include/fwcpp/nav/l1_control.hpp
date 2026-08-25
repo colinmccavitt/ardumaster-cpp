@@ -23,20 +23,32 @@
 // L1_damping, L1_xtrack_i_gain, loiter_bank_limit) - same precedent as
 // AC_PID's Gains struct, no AP_Param in this port yet.
 //
-// SLICE BOUNDARY: nav_roll_cd, lateral_acceleration, nav_bearing_cd,
-// bearing_error_cd, target_bearing_cd, turn_distance (both overloads),
-// loiter_radius, reached_loiter_target, update_waypoint (the core L1
-// tracking algorithm) - the accessor surface plus the algorithm this
-// effort's own scope is built around. Deliberately NOT in this slice:
-// update_loiter, update_heading_hold, update_level_flight (three more
-// update_* variants sharing update_waypoint's shape but with their own
-// geometry) - tracked as follow-on work in CPP-017's notes, not silent.
+// SLICE 2 adds update_loiter, update_heading_hold, update_level_flight -
+// the three update_* variants deferred from slice 1. update_loiter needed
+// Location::same_loc_as (added to CPP-011's Location alongside this) for
+// its "keep _WPcircle latched" check, and math::cd_to_rad (added to
+// CPP-004's scalar module alongside this) for update_heading_hold's
+// centidegrees-to-radians conversion - upstream had both already; this
+// port didn't need them until now.
+//
+// L1Inputs gained now_ms (upstream: AP_HAL::millis(), used only by
+// update_loiter's 200ms latch window) alongside the pre-existing now_us
+// (AP_HAL::micros(), used by update_waypoint's dt calc) - same explicit-
+// parameter treatment, not derived from one another since upstream itself
+// reads two independent clocks.
+//
+// SLICE BOUNDARY (now closed): nav_roll_cd, lateral_acceleration,
+// nav_bearing_cd, bearing_error_cd, target_bearing_cd, turn_distance (both
+// overloads), loiter_radius, reached_loiter_target, update_waypoint,
+// update_loiter, update_heading_hold, update_level_flight - every public
+// member of upstream AP_L1_Control is now ported.
 //
 // LITERAL SAFETY: GRAVITY_MSS (9.80665f) and every other literal touched
 // in this slice are already explicitly float-suffixed upstream - nothing
 // here needed the compiled-.cpp treatment scalar.cpp's wrap_* family or
 // Location::get_bearing needed.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -58,7 +70,8 @@ struct L1Inputs {
     float pitch_rad = 0.0f;       // upstream: _ahrs.get_pitch_rad()
     float eas2tas = 1.0f;         // upstream: _ahrs.get_EAS2TAS()
     float target_airspeed = 0.0f; // upstream: _tecs->get_target_airspeed(), 0 if _tecs is null
-    std::uint32_t now_us = 0;     // upstream: AP_HAL::micros()
+    std::uint32_t now_us = 0;     // upstream: AP_HAL::micros(), used by update_waypoint's dt
+    std::uint32_t now_ms = 0;     // upstream: AP_HAL::millis(), used by update_loiter's latch window
 };
 
 class L1Control {
@@ -231,9 +244,160 @@ public:
         lat_acc_dem_ = k_l1 * ground_speed * ground_speed / l1_dist_ * std::sin(nu);
 
         wp_circle_ = false;
-        last_loiter_reached_ms_ = 0;
+        last_loiter_.reached_loiter_target_ms = 0;
 
         bearing_error_ = nu;
+        data_is_stale_ = false;
+    }
+
+    // L1-guided circular loiter around center_wp. Blends a "capture" law
+    // (same L1 guidance as update_waypoint, pulling the aircraft toward
+    // the circle) with a "circle" law (PD + centripetal, holding it on the
+    // circle), switching between them at the point the two demands cross
+    // so the transition is seamless rather than a mode-switch discontinuity.
+    void update_loiter(const Location& center_wp, float radius, std::int8_t loiter_direction, const L1Inputs& in) {
+        const float radius_unscaled = radius;
+        radius = loiter_radius(std::fabs(radius), in);
+
+        const float omega = 6.2832f / l1_period_;
+        const float kx = omega * omega;
+        const float kv = 2.0f * l1_damping_ * omega;
+        const float k_l1 = 4.0f * l1_damping_ * l1_damping_;
+
+        if (!in.location_valid) {
+            data_is_stale_ = true;
+            return;
+        }
+        const Location& current_loc = in.current_loc;
+        const math::Vector2f& groundspeed_vector = in.groundspeed_vector;
+
+        const float ground_speed = std::max(groundspeed_vector.length(), 1.0f);
+
+        target_bearing_cd_ = current_loc.get_bearing_to(center_wp);
+
+        l1_dist_ = 0.3183099f * l1_damping_ * l1_period_ * ground_speed;
+
+        const math::Vector2f a_air = center_wp.get_distance_NE(current_loc);
+
+        math::Vector2f a_air_unit;
+        if (a_air.length() > 0.1f) {
+            a_air_unit = a_air.normalized();
+        } else if (groundspeed_vector.length() < 0.1f) {
+            a_air_unit = math::Vector2f(std::cos(get_yaw(in)), std::sin(get_yaw(in)));
+        } else {
+            a_air_unit = groundspeed_vector.normalized();
+        }
+
+        const float xtrack_vel_cap = a_air_unit % groundspeed_vector;
+        const float ltrack_vel_cap = -(groundspeed_vector * a_air_unit);
+        float nu = std::atan2(xtrack_vel_cap, ltrack_vel_cap);
+
+        prevent_indecision(nu, in);
+        last_nu_ = nu;
+
+        nu = math::constrain_value(nu, -1.5708f, 1.5708f);
+
+        const float lat_acc_dem_cap = k_l1 * ground_speed * ground_speed / l1_dist_ * std::sin(nu);
+
+        const float xtrack_vel_circ = -ltrack_vel_cap;
+        const float xtrack_err_circ = a_air.length() - radius;
+
+        crosstrack_error_ = xtrack_err_circ;
+
+        float lat_acc_dem_circ_pd = xtrack_err_circ * kx + xtrack_vel_circ * kv;
+
+        const float vel_tangent = xtrack_vel_cap * static_cast<float>(loiter_direction);
+
+        if (ltrack_vel_cap < 0.0f && vel_tangent < 0.0f) {
+            lat_acc_dem_circ_pd = std::max(lat_acc_dem_circ_pd, 0.0f);
+        }
+
+        const float lat_acc_dem_circ_ctr = vel_tangent * vel_tangent / std::max(0.5f * radius, radius + xtrack_err_circ);
+        const float lat_acc_dem_circ = static_cast<float>(loiter_direction) * (lat_acc_dem_circ_pd + lat_acc_dem_circ_ctr);
+
+        const std::uint32_t now_ms = in.now_ms;
+        if (xtrack_err_circ > 0.0f
+            && static_cast<float>(loiter_direction) * lat_acc_dem_cap < static_cast<float>(loiter_direction) * lat_acc_dem_circ) {
+            lat_acc_dem_ = lat_acc_dem_cap;
+
+            // See file banner / Location::same_loc_as: keeps _WPcircle
+            // (wp_circle_) latched true across brief capture-mode blips
+            // (a wind gust, an unachievable radius) rather than letting
+            // reached_loiter_target() flicker false and back.
+            if (wp_circle_ && last_loiter_.reached_loiter_target_ms != 0
+                && now_ms - last_loiter_.reached_loiter_target_ms < 200U
+                && loiter_direction == last_loiter_.direction
+                && math::is_equal(radius_unscaled, last_loiter_.radius)
+                && center_wp.same_loc_as(last_loiter_.center_wp)) {
+                last_loiter_.reached_loiter_target_ms = now_ms;
+            } else {
+                wp_circle_ = false;
+                last_loiter_.reached_loiter_target_ms = 0;
+            }
+
+            bearing_error_ = nu;
+            nav_bearing_ = std::atan2(-a_air_unit.y, -a_air_unit.x);
+        } else {
+            lat_acc_dem_ = lat_acc_dem_circ;
+            wp_circle_ = true;
+            last_loiter_.reached_loiter_target_ms = now_ms;
+            bearing_error_ = 0.0f;
+            nav_bearing_ = std::atan2(-a_air_unit.y, -a_air_unit.x);
+        }
+
+        last_loiter_.radius = radius_unscaled;
+        last_loiter_.direction = loiter_direction;
+        last_loiter_.center_wp = center_wp;
+
+        data_is_stale_ = false;
+    }
+
+    // Heading-hold navigation: track a commanded heading directly rather
+    // than a waypoint line. Unlike update_waypoint/update_loiter, this
+    // reads yaw_sensor_cd directly (NOT through get_yaw_sensor(in)'s
+    // reverse-aware wrapper) - matching upstream's own choice to bypass
+    // the reverse flag here.
+    void update_heading_hold(std::int32_t navigation_heading_cd, const L1Inputs& in) {
+        const float omega_a = 4.4428f / l1_period_; // sqrt(2)*pi/period
+
+        target_bearing_cd_ = math::wrap_180_cd(navigation_heading_cd);
+        nav_bearing_ = math::cd_to_rad(static_cast<float>(navigation_heading_cd));
+
+        std::int32_t nu_cd = target_bearing_cd_ - math::wrap_180_cd(in.yaw_sensor_cd);
+        nu_cd = math::wrap_180_cd(nu_cd);
+        float nu = math::cd_to_rad(static_cast<float>(nu_cd));
+
+        const float ground_speed = in.groundspeed_vector.length();
+
+        l1_dist_ = ground_speed / omega_a;
+        const float v_omega_a = ground_speed * omega_a;
+
+        wp_circle_ = false;
+        last_loiter_.reached_loiter_target_ms = 0;
+
+        crosstrack_error_ = 0.0f;
+        bearing_error_ = nu;
+
+        nu = math::constrain_value(nu, -1.5708f, 1.5708f);
+        lat_acc_dem_ = 2.0f * std::sin(nu) * v_omega_a;
+
+        data_is_stale_ = false;
+    }
+
+    // Level flight on the current heading - no navigation demand at all.
+    // Also bypasses the reverse-aware get_yaw()/get_yaw_sensor() helpers,
+    // matching upstream's direct AHRS reads here.
+    void update_level_flight(const L1Inputs& in) {
+        target_bearing_cd_ = in.yaw_sensor_cd;
+        nav_bearing_ = in.yaw_rad;
+        bearing_error_ = 0.0f;
+        crosstrack_error_ = 0.0f;
+
+        wp_circle_ = false;
+        last_loiter_.reached_loiter_target_ms = 0;
+
+        lat_acc_dem_ = 0.0f;
+
         data_is_stale_ = false;
     }
 
@@ -278,7 +442,18 @@ private:
     float l1_xtrack_i_gain_prev_ = 0.0f;
     std::uint32_t last_update_waypoint_us_ = 0;
     bool data_is_stale_ = true;
-    std::uint32_t last_loiter_reached_ms_ = 0;
+
+    // Remembers the last update_loiter() decision, for the "keep _WPcircle
+    // latched" check in update_loiter (see its body) - matches upstream's
+    // anonymous _last_loiter struct.
+    struct LastLoiter {
+        std::uint32_t reached_loiter_target_ms = 0;
+        float radius = 0.0f;
+        std::int8_t direction = 1;
+        Location center_wp;
+    };
+    LastLoiter last_loiter_;
+
     bool reverse_ = false;
 };
 
