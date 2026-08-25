@@ -165,3 +165,7 @@ catch_discover_tests(hal_context_test)
 add_executable(rc_channels_test rc_channels_test.cpp)
 target_link_libraries(rc_channels_test PRIVATE ap-rc-channel Catch2::Catch2WithMain)
 catch_discover_tests(rc_channels_test)
+
+add_executable(srv_channels_test srv_channels_test.cpp)
+target_link_libraries(srv_channels_test PRIVATE ap-srv-channel Catch2::Catch2WithMain)
+catch_discover_tests(srv_channels_test)
