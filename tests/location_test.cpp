@@ -433,3 +433,140 @@ TEST_CASE("sanitize corrects an out-of-range lat/lng to default_loc's", "[locati
     REQUIRE(loc.lat == 100);
     REQUIRE(loc.lng == 200);
 }
+
+TEST_CASE("get_distance_NE_postype matches get_distance_NE within float precision", "[location][postype]") {
+    Location a(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    Location b = a;
+    b.offset(1000.0f, 500.0f);
+    fwcpp::math::Vector2f d_float = a.get_distance_NE(b);
+    fwcpp::math::Vector2p d_post = a.get_distance_NE_postype(b);
+    REQUIRE(static_cast<float>(d_post.x) == Catch::Approx(d_float.x).margin(0.01f));
+    REQUIRE(static_cast<float>(d_post.y) == Catch::Approx(d_float.y).margin(0.01f));
+}
+
+TEST_CASE("get_distance_NED_postype matches get_distance_NED bit-for-bit (no genuine precision gain - see comment)", "[location][postype]") {
+    // Unlike get_distance_NE_postype, get_distance_NED_postype does NOT
+    // cast LOCATION_SCALING_FACTOR to double before multiplying - matches
+    // upstream's own inconsistency, so this should be exactly as precise
+    // as (not better than) get_distance_NED, not just approximately equal.
+    Location a(0, 0, 1000, Location::AltFrame::ABSOLUTE);
+    Location b = a;
+    b.offset(500.0f, 0.0f);
+    b.alt = 2000;
+    fwcpp::math::Vector3f d_float = a.get_distance_NED(b);
+    fwcpp::math::Vector3p d_post = a.get_distance_NED_postype(b);
+    REQUIRE(static_cast<float>(d_post.x) == d_float.x);
+    REQUIRE(static_cast<float>(d_post.y) == d_float.y);
+    REQUIRE(static_cast<float>(d_post.z) == d_float.z);
+}
+
+TEST_CASE("get_vector_xy_from_origin_NE_cm returns the NE offset from the EKF origin, in cm", "[location][origin]") {
+    Location origin(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    Location loc = origin;
+    loc.offset(100.0f, 0.0f); // 100m north of origin
+
+    fwcpp::AltitudeContext ctx;
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = origin;
+
+    fwcpp::math::Vector2f vec;
+    REQUIRE(loc.get_vector_xy_from_origin_NE_cm(vec, ctx));
+    REQUIRE(vec.x == Catch::Approx(10000.0f).margin(50.0f)); // 100m = 10000cm
+    REQUIRE(vec.y == Catch::Approx(0.0f).margin(50.0f));
+}
+
+TEST_CASE("get_vector_xy_from_origin_NE_cm fails when the context has no EKF origin", "[location][origin]") {
+    Location loc(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    fwcpp::AltitudeContext ctx; // origin_is_set left false
+    fwcpp::math::Vector2f vec(9.0f, 9.0f);
+    REQUIRE_FALSE(loc.get_vector_xy_from_origin_NE_cm(vec, ctx));
+    REQUIRE(vec.x == 9.0f); // untouched on failure
+}
+
+TEST_CASE("get_vector_xy_from_origin_NE_cm works with Vector2p (postype), touching only x/y", "[location][origin]") {
+    Location origin(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    Location loc = origin;
+    loc.offset(0.0f, 50.0f); // 50m east
+
+    fwcpp::AltitudeContext ctx;
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = origin;
+
+    fwcpp::math::Vector2p vec;
+    REQUIRE(loc.get_vector_xy_from_origin_NE_cm(vec, ctx));
+    REQUIRE(vec.y == Catch::Approx(5000.0).margin(50.0));
+}
+
+TEST_CASE("get_vector_from_origin_NEU_cm combines the NE vector with altitude above origin", "[location][origin]") {
+    Location origin(0, 0, 10000, Location::AltFrame::ABSOLUTE); // origin at 100m AMSL
+    Location loc = origin;
+    loc.offset(10.0f, 0.0f); // 10m north
+    loc.alt = 15000; // 150m AMSL absolute
+
+    fwcpp::AltitudeContext ctx;
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = origin;
+
+    fwcpp::math::Vector3f vec;
+    REQUIRE(loc.get_vector_from_origin_NEU_cm(vec, ctx));
+    REQUIRE(vec.x == Catch::Approx(1000.0f).margin(50.0f)); // 10m north = 1000cm
+    REQUIRE(vec.z == Catch::Approx(5000.0f)); // 150m - 100m = 50m above origin = 5000cm
+}
+
+TEST_CASE("get_vector_from_origin_NEU_cm fails when altitude cannot be resolved above origin", "[location][origin]") {
+    Location origin(0, 0, 10000, Location::AltFrame::ABSOLUTE);
+    Location loc(0, 0, 500, Location::AltFrame::ABOVE_TERRAIN); // no terrain database in this port
+    fwcpp::AltitudeContext ctx;
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = origin;
+
+    fwcpp::math::Vector3f vec;
+    REQUIRE_FALSE(loc.get_vector_from_origin_NEU_cm(vec, ctx));
+}
+
+TEST_CASE("get_vector_from_origin_NEU is an alias for get_vector_from_origin_NEU_cm", "[location][origin]") {
+    Location origin(0, 0, 10000, Location::AltFrame::ABSOLUTE);
+    Location loc = origin;
+    loc.offset(10.0f, 0.0f);
+    loc.alt = 15000;
+    fwcpp::AltitudeContext ctx;
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = origin;
+
+    fwcpp::math::Vector3f a, b;
+    REQUIRE(loc.get_vector_from_origin_NEU_cm(a, ctx));
+    REQUIRE(loc.get_vector_from_origin_NEU(b, ctx));
+    REQUIRE(a.x == b.x);
+    REQUIRE(a.y == b.y);
+    REQUIRE(a.z == b.z);
+}
+
+TEST_CASE("get_vector_xy_from_origin_NE_m scales the cm result down by 100", "[location][origin]") {
+    Location origin(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    Location loc = origin;
+    loc.offset(100.0f, 0.0f);
+    fwcpp::AltitudeContext ctx;
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = origin;
+
+    fwcpp::math::Vector2f vec;
+    REQUIRE(loc.get_vector_xy_from_origin_NE_m(vec, ctx));
+    REQUIRE(vec.x == Catch::Approx(100.0f).margin(0.5f));
+}
+
+TEST_CASE("get_vector_from_origin_NED_m negates z relative to get_vector_from_origin_NEU_m", "[location][origin]") {
+    Location origin(0, 0, 10000, Location::AltFrame::ABSOLUTE);
+    Location loc = origin;
+    loc.alt = 15000;
+    fwcpp::AltitudeContext ctx;
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = origin;
+
+    fwcpp::math::Vector3f neu;
+    fwcpp::math::Vector3f ned;
+    REQUIRE(loc.get_vector_from_origin_NEU_m(neu, ctx));
+    REQUIRE(loc.get_vector_from_origin_NED_m(ned, ctx));
+    REQUIRE(ned.z == Catch::Approx(-neu.z));
+    REQUIRE(ned.x == Catch::Approx(neu.x));
+    REQUIRE(ned.y == Catch::Approx(neu.y));
+}

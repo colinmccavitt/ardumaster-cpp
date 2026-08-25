@@ -77,6 +77,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <fwcpp/math/postype.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector2.hpp>
 #include <fwcpp/math/vector3.hpp>
@@ -195,6 +196,39 @@ public:
     // branch calls get_alt_cm).
     bool sanitize(const Location& default_loc, const AltitudeContext& ctx);
 
+    // North/East vector (in cm) from ctx.ekf_origin to this Location.
+    // Returns false (leaving vec_ne unmodified) if ctx has no EKF origin.
+    // T is any type with .x/.y members - Vector2f, Vector2p, and (since
+    // Vector3<T> also has plain .x/.y members, no aliasing needed) Vector3f/
+    // Vector3p all work, which is exactly how get_vector_from_origin_NEU_cm
+    // below reuses this same function on a Vector3 argument instead of
+    // upstream's reinterpret_cast-based vec_neu.xy() trick (see this
+    // header's own SLICE BOUNDARY note on why xy() itself isn't ported).
+    // All defined below AltitudeContext (needs the complete type).
+    template <typename T>
+    [[nodiscard]] bool get_vector_xy_from_origin_NE_cm(T& vec_ne, const AltitudeContext& ctx) const;
+
+    // North/East/Up vector (in cm) from ctx.ekf_origin to this Location's
+    // full 3D position. Returns false if either the horizontal vector or
+    // the altitude-above-origin conversion fails.
+    template <typename T>
+    [[nodiscard]] bool get_vector_from_origin_NEU_cm(T& vec_neu, const AltitudeContext& ctx) const;
+
+    // Alias for get_vector_from_origin_NEU_cm - matches upstream's own
+    // same-named alias (the "_cm" suffix used to be the only variant;
+    // this name predates the _m-suffixed ones below).
+    template <typename T>
+    [[nodiscard]] bool get_vector_from_origin_NEU(T& vec_neu, const AltitudeContext& ctx) const;
+
+    template <typename T>
+    [[nodiscard]] bool get_vector_xy_from_origin_NE_m(T& vec_ne, const AltitudeContext& ctx) const;
+
+    template <typename T>
+    [[nodiscard]] bool get_vector_from_origin_NED_m(T& vec_ned, const AltitudeContext& ctx) const;
+
+    template <typename T>
+    [[nodiscard]] bool get_vector_from_origin_NEU_m(T& vec_neu, const AltitudeContext& ctx) const;
+
     // See file banner: the SITL-only panic on an inconsistent
     // terrain_alt/relative_alt combination is not reproduced.
     [[nodiscard]] AltFrame get_alt_frame() const {
@@ -212,6 +246,15 @@ public:
 
     static constexpr float LOCATION_SCALING_FACTOR = 0.011131884502145034f;
     static constexpr float LOCATION_SCALING_FACTOR_INV = 89.83204953368922f;
+
+    // Upstream's LATLON_TO_CM macro (definitions.h) is LOCATION_SCALING_
+    // FACTOR * 100 written as its own separate literal
+    // (1.1131884502145034), not derived from LOCATION_SCALING_FACTOR at
+    // compile time - reproduced as its own explicit-float constant here
+    // too, rather than computing LOCATION_SCALING_FACTOR * 100.0f, since
+    // upstream's own two independently-rounded-to-float literals aren't
+    // guaranteed to be bit-identical to one float value scaled by another.
+    static constexpr float LOCATION_SCALING_FACTOR_CM = 1.1131884502145034f;
 
     // Scale factor to convert a longitude delta (in the same 1e7-degree
     // units as `lng`) into a true east-west distance, compensating for
@@ -323,6 +366,35 @@ public:
             static_cast<float>(loc2.lat - lat) * LOCATION_SCALING_FACTOR,
             static_cast<float>(diff_longitude(loc2.lng, lng)) * LOCATION_SCALING_FACTOR * longitude_scale((lat + loc2.lat) / 2),
             static_cast<float>(alt - loc2.alt) * 0.01f); // cm -> m; verified against upstream: (alt - loc2.alt) * 0.01
+    }
+
+    // North/East distance to loc2, in meters, at postype_t precision.
+    // UPSTREAM'S OWN GENUINE PRECISION GAIN, reproduced deliberately: this
+    // one casts LOCATION_SCALING_FACTOR to double BEFORE multiplying,
+    // so when postype_t is double the multiplication itself happens at
+    // double precision - unlike get_distance_NE (and unlike
+    // get_distance_NED_postype right below), which multiplies as float
+    // regardless of the result type. Not a port inconsistency - upstream's
+    // own Location.cpp has get_distance_NE_postype do this and
+    // get_distance_NED_postype NOT do it, side by side. Preserved exactly.
+    [[nodiscard]] math::Vector2p get_distance_NE_postype(const Location& loc2) const {
+        return math::Vector2p(
+            static_cast<double>(loc2.lat - lat) * static_cast<double>(LOCATION_SCALING_FACTOR),
+            static_cast<double>(diff_longitude(loc2.lng, lng)) * static_cast<double>(LOCATION_SCALING_FACTOR)
+                * longitude_scale((lat + loc2.lat) / 2));
+    }
+
+    // North/East/Down distance to loc2, in meters, at postype_t precision.
+    // See get_distance_NE_postype's comment: THIS overload does NOT cast
+    // LOCATION_SCALING_FACTOR to double - float-precision arithmetic
+    // widened into a double-typed Vector3p result, no more accurate than
+    // get_distance_NED despite the name. Matches upstream exactly,
+    // including the inconsistency with get_distance_NE_postype above.
+    [[nodiscard]] math::Vector3p get_distance_NED_postype(const Location& loc2) const {
+        return math::Vector3p(
+            static_cast<float>(loc2.lat - lat) * LOCATION_SCALING_FACTOR,
+            static_cast<float>(diff_longitude(loc2.lng, lng)) * LOCATION_SCALING_FACTOR * longitude_scale((lat + loc2.lat) / 2),
+            static_cast<float>(alt - loc2.alt) * 0.01f);
     }
 
     // Bearing to loc2, radians, 0 to 2*pi. Defined in location.cpp - bare
@@ -521,6 +593,74 @@ inline bool Location::sanitize(const Location& default_loc, const AltitudeContex
     }
 
     return has_changed;
+}
+
+template <typename T>
+inline bool Location::get_vector_xy_from_origin_NE_cm(T& vec_ne, const AltitudeContext& ctx) const {
+    if (!ctx.origin_is_set) {
+        return false;
+    }
+    // Bare LOCATION_SCALING_FACTOR_CM, no double() upcast - matches
+    // upstream's own get_vector_xy_from_origin_NE_cm exactly (unlike
+    // get_distance_NE_postype above, this family never gains real double
+    // precision even when T's members are double - see that function's
+    // own comment for the upstream inconsistency this preserves).
+    vec_ne.x = static_cast<float>(lat - ctx.ekf_origin.lat) * LOCATION_SCALING_FACTOR_CM;
+    vec_ne.y = static_cast<float>(diff_longitude(lng, ctx.ekf_origin.lng)) * LOCATION_SCALING_FACTOR_CM
+        * longitude_scale((lat + ctx.ekf_origin.lat) / 2);
+    return true;
+}
+
+template <typename T>
+inline bool Location::get_vector_from_origin_NEU_cm(T& vec_neu, const AltitudeContext& ctx) const {
+    std::int32_t alt_above_origin_cm = 0;
+    if (!get_alt_cm(AltFrame::ABOVE_ORIGIN, ctx, alt_above_origin_cm)) {
+        return false;
+    }
+    if (!get_vector_xy_from_origin_NE_cm(vec_neu, ctx)) {
+        return false;
+    }
+    // Direct int32_t -> T assignment, matching upstream's own
+    // `vec_neu.z = alt_above_origin_cm;` exactly - NOT routed through
+    // float first, which would needlessly truncate precision for
+    // T=Vector3p (double) on large altitude values (float's 24-bit
+    // mantissa can't exactly represent every int32_t; double's 53-bit one
+    // can, for any centimeter altitude this port will ever see).
+    vec_neu.z = alt_above_origin_cm;
+    return true;
+}
+
+template <typename T>
+inline bool Location::get_vector_from_origin_NEU(T& vec_neu, const AltitudeContext& ctx) const {
+    return get_vector_from_origin_NEU_cm(vec_neu, ctx);
+}
+
+template <typename T>
+inline bool Location::get_vector_xy_from_origin_NE_m(T& vec_ne, const AltitudeContext& ctx) const {
+    if (!get_vector_xy_from_origin_NE_cm(vec_ne, ctx)) {
+        return false;
+    }
+    vec_ne *= 0.01f;
+    return true;
+}
+
+template <typename T>
+inline bool Location::get_vector_from_origin_NED_m(T& vec_ned, const AltitudeContext& ctx) const {
+    if (!get_vector_from_origin_NEU_cm(vec_ned, ctx)) {
+        return false;
+    }
+    vec_ned *= 0.01f;
+    vec_ned.z *= -1.0f;
+    return true;
+}
+
+template <typename T>
+inline bool Location::get_vector_from_origin_NEU_m(T& vec_neu, const AltitudeContext& ctx) const {
+    if (!get_vector_from_origin_NEU_cm(vec_neu, ctx)) {
+        return false;
+    }
+    vec_neu *= 0.01f;
+    return true;
 }
 
 } // namespace fwcpp
