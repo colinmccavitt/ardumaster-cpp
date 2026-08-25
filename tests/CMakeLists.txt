@@ -14,4 +14,6 @@ find_package(Catch2 3 REQUIRED)
 include(CTest)
 include(Catch)
 
-# Empty until CPP-002 lands the first module's tests.
+add_executable(result_test result_test.cpp)
+target_link_libraries(result_test PRIVATE fwcpp-result Catch2::Catch2WithMain)
+catch_discover_tests(result_test)

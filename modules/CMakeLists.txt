@@ -5,8 +5,5 @@
 # add_subdirectory(ap-common)
 # add_subdirectory(ap-math)
 # ...
-#
-# Empty until CPP-002 lands the first module. An empty add_subdirectory tree
-# is intentional, not a placeholder to fill blindly - see ADR-0007 and the
-# project's no-stubbing rule: nothing here compiles a stub, it simply isn't
-# started yet.
+
+add_subdirectory(fwcpp-result)
