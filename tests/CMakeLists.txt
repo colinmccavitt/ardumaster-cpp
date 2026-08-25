@@ -109,3 +109,7 @@ catch_discover_tests(storage_test)
 add_executable(param_test param_test.cpp)
 target_link_libraries(param_test PRIVATE ap-param Catch2::Catch2WithMain)
 catch_discover_tests(param_test)
+
+add_executable(group_info_test group_info_test.cpp)
+target_link_libraries(group_info_test PRIVATE ap-param Catch2::Catch2WithMain)
+catch_discover_tests(group_info_test)
