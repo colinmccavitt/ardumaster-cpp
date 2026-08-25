@@ -37,3 +37,7 @@ catch_discover_tests(vector3_test)
 add_executable(matrix3_test matrix3_test.cpp)
 target_link_libraries(matrix3_test PRIVATE ap-math Catch2::Catch2WithMain)
 catch_discover_tests(matrix3_test)
+
+add_executable(quaternion_test quaternion_test.cpp)
+target_link_libraries(quaternion_test PRIVATE ap-math Catch2::Catch2WithMain)
+catch_discover_tests(quaternion_test)
