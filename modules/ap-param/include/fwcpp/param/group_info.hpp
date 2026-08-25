@@ -1,20 +1,35 @@
 #pragma once
 
-// Port of AP_Param/AP_Param.h's GroupInfo/Info descriptor structs and
-// AP_Param.cpp's group_id() token encoding. CPP-022, slice 1. See
+// Port of AP_Param/AP_Param.h's GroupInfo/Info descriptor structs,
+// AP_Param.cpp's group_id() token encoding, and get_base/
+// adjust_group_offset (address resolution). CPP-022, slices 1-2. See
 // ADR-0013 for the AP_Param sub-effort's overall scoping.
 //
-// SLICE BOUNDARY: this is the descriptor SHAPE (the structs a var_info
-// table is built from) plus group_id (the one small, fully self-
-// contained function needed to encode a nested parameter's position
-// within its object). Deliberately NOT in this slice: the tree-
-// traversal functions built on top of these structs (find_var_info's two
-// modes - by name, and by a live object's own pointer identity - see
-// upstream's find_var_info_group; they're a materially bigger and more
-// intricate piece than this slice, tracked as CPP-022's own remaining
-// work, not silently folded in here), get_base/adjust_group_offset,
-// load_object_from_eeprom/save (need CPP-020's ParamStorage wired to a
-// resolved address, which needs the traversal above), and
+// SLICE 2 (get_base/adjust_group_offset) signature note: upstream's
+// adjust_group_offset takes a `vindex` (an index into the vehicle-wide
+// var_info table) and looks up `var_info(vindex)` internally to resolve
+// the AP_PARAM_FLAG_POINTER case's base address. This port has no
+// vehicle-wide root table yet (see ADR-0013's scope boundary - no
+// AP_Vehicle/Parameters.cpp exists to root one in). Every actual caller
+// of adjust_group_offset already HAS that base address in hand (it's
+// computed by their own prior get_base call) before calling it, so this
+// port's version takes that resolved `base` directly as a std::ptrdiff_t
+// parameter instead of a vindex to re-derive it from - same information,
+// explicit parameter instead of a hidden second lookup, matching this
+// port's standing pattern (L1Inputs, AltitudeContext, now_ms
+// throughout). Not a behavior change; the pointer arithmetic is
+// otherwise identical.
+//
+// SLICE BOUNDARY: get_base/adjust_group_offset resolve WHERE a value
+// lives, given a Info/GroupInfo entry already in hand - they do not
+// themselves search by name or walk a tree. Deliberately NOT in this
+// slice: the search algorithms built on top (find_group/find - by name;
+// find_var_info - by a live object's own pointer identity, including
+// Vector3f sub-element detection via pointer-offset comparison; a
+// materially bigger and more intricate piece, tracked as CPP-022's own
+// remaining work), load_object_from_eeprom/save (need CPP-020's
+// ParamStorage wired to a resolved address, which needs the search
+// algorithms above to find that address by name first), and
 // setup_object_defaults.
 //
 // GroupInfo/Info's union of {group_info pointer, group_info_ptr,
@@ -102,6 +117,50 @@ struct Info {
         return base + (63U << shift);
     }
     return base + (static_cast<std::uint32_t>(grpinfo[i].idx) << shift);
+}
+
+// Resolves a top-level Info entry's base address, accounting for
+// kFlagPointer (info.ptr itself points at a POINTER to the real object,
+// for dynamically-allocated top-level objects, rather than the object
+// directly). Returns false (base left as whatever the caller passed in)
+// if the pointer target isn't allocated yet - matches upstream exactly.
+//
+// reinterpret_cast between pointer and ptrdiff_t here is ordinary,
+// well-defined address arithmetic (implementation-defined but explicitly
+// permitted by the standard), not the union/type-punning kind of
+// reinterpretation ADR-0012 forbids (Float16's bit_cast, this port's
+// declined-until-needed Vector3::xy()) - every AP_Param-shaped container
+// or allocator does this same address computation.
+[[nodiscard]] inline bool get_base(const Info& info, std::ptrdiff_t& base) {
+    if (info.flags & kFlagPointer) {
+        base = *reinterpret_cast<const std::ptrdiff_t*>(info.ptr);
+        return base != 0;
+    }
+    base = reinterpret_cast<std::ptrdiff_t>(info.ptr);
+    return true;
+}
+
+// Adjusts `new_offset` (in place) to account for one level of group
+// nesting described by `group_info`, given the containing object's own
+// resolved `base` address (from a prior get_base call - see this file's
+// banner for why this is a direct parameter here instead of upstream's
+// vindex-based internal re-lookup). Returns false if a kFlagPointer
+// sub-object isn't allocated yet.
+[[nodiscard]] inline bool adjust_group_offset(std::ptrdiff_t base, const GroupInfo& group_info, std::ptrdiff_t& new_offset) {
+    if (group_info.flags & kFlagNestedOffset) {
+        new_offset += group_info.offset;
+        return true;
+    }
+    if (group_info.flags & kFlagPointer) {
+        // group_info.offset refers to a pointer, itself found at
+        // base+new_offset+group_info.offset.
+        void** p = reinterpret_cast<void**>(base + new_offset + group_info.offset);
+        if (*p == nullptr) {
+            return false;
+        }
+        new_offset = reinterpret_cast<std::ptrdiff_t>(*p) - base;
+    }
+    return true;
 }
 
 } // namespace fwcpp::param

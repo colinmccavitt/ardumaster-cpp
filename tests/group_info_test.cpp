@@ -1,7 +1,10 @@
-// Tests for fwcpp::param::GroupInfo/Info and group_id (CPP-022 slice 1).
+// Tests for fwcpp::param::GroupInfo/Info, group_id, get_base, and
+// adjust_group_offset (CPP-022 slices 1-2).
 
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/param/group_info.hpp>
+
+#include <cstddef>
 
 using namespace fwcpp::param;
 
@@ -63,4 +66,89 @@ TEST_CASE("GroupInfo/Info are POD-shaped: default construction zero-initializes 
     Info info{};
     REQUIRE(info.ptr == nullptr);
     REQUIRE(info.key == 0);
+}
+
+TEST_CASE("get_base without kFlagPointer returns info.ptr's own address directly", "[param][get_base]") {
+    int dummy_object = 0;
+    Info info{};
+    info.ptr = &dummy_object;
+    info.flags = 0;
+
+    std::ptrdiff_t base = 0;
+    REQUIRE(get_base(info, base));
+    REQUIRE(base == reinterpret_cast<std::ptrdiff_t>(&dummy_object));
+}
+
+TEST_CASE("get_base with kFlagPointer dereferences info.ptr as a pointer-to-the-real-object", "[param][get_base]") {
+    int real_object = 42;
+    void* stored_ptr = &real_object; // this is what info.ptr "points at": a slot holding the real address
+
+    Info info{};
+    info.ptr = &stored_ptr;
+    info.flags = kFlagPointer;
+
+    std::ptrdiff_t base = 0;
+    REQUIRE(get_base(info, base));
+    REQUIRE(base == reinterpret_cast<std::ptrdiff_t>(&real_object));
+}
+
+TEST_CASE("get_base with kFlagPointer fails when the target isn't allocated (nullptr) yet", "[param][get_base]") {
+    void* stored_ptr = nullptr;
+    Info info{};
+    info.ptr = &stored_ptr;
+    info.flags = kFlagPointer;
+
+    std::ptrdiff_t base = 0;
+    REQUIRE_FALSE(get_base(info, base));
+}
+
+TEST_CASE("adjust_group_offset with kFlagNestedOffset adds group_info.offset to new_offset", "[param][adjust_group_offset]") {
+    GroupInfo group_info{};
+    group_info.flags = kFlagNestedOffset;
+    group_info.offset = 16;
+
+    std::ptrdiff_t new_offset = 4;
+    REQUIRE(adjust_group_offset(0 /* base unused for this flag */, group_info, new_offset));
+    REQUIRE(new_offset == 20);
+}
+
+TEST_CASE("adjust_group_offset with neither flag leaves new_offset untouched", "[param][adjust_group_offset]") {
+    GroupInfo group_info{}; // flags = 0
+    std::ptrdiff_t new_offset = 7;
+    REQUIRE(adjust_group_offset(100, group_info, new_offset));
+    REQUIRE(new_offset == 7);
+}
+
+TEST_CASE("adjust_group_offset with kFlagPointer resolves through an allocated sub-object pointer", "[param][adjust_group_offset]") {
+    struct Container {
+        void* sub_object_ptr;
+    };
+    int real_sub_object = 0;
+    Container container{&real_sub_object};
+
+    const std::ptrdiff_t base = reinterpret_cast<std::ptrdiff_t>(&container);
+
+    GroupInfo group_info{};
+    group_info.flags = kFlagPointer;
+    group_info.offset = offsetof(Container, sub_object_ptr);
+
+    std::ptrdiff_t new_offset = 0;
+    REQUIRE(adjust_group_offset(base, group_info, new_offset));
+    // new_offset should now be the delta from base to the real sub-object
+    REQUIRE(base + new_offset == reinterpret_cast<std::ptrdiff_t>(&real_sub_object));
+}
+
+TEST_CASE("adjust_group_offset with kFlagPointer fails when the sub-object isn't allocated yet", "[param][adjust_group_offset]") {
+    struct Container {
+        void* sub_object_ptr;
+    };
+    Container container{nullptr};
+    const std::ptrdiff_t base = reinterpret_cast<std::ptrdiff_t>(&container);
+
+    GroupInfo group_info{};
+    group_info.flags = kFlagPointer;
+    group_info.offset = offsetof(Container, sub_object_ptr);
+
+    std::ptrdiff_t new_offset = 0;
+    REQUIRE_FALSE(adjust_group_offset(base, group_info, new_offset));
 }
