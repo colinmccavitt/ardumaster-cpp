@@ -133,3 +133,7 @@ catch_discover_tests(notch_filter_params_test)
 add_executable(filter_registry_test filter_registry_test.cpp)
 target_link_libraries(filter_registry_test PRIVATE ap-filter Catch2::Catch2WithMain)
 catch_discover_tests(filter_registry_test)
+
+add_executable(scheduler_test scheduler_test.cpp)
+target_link_libraries(scheduler_test PRIVATE ap-scheduler Catch2::Catch2WithMain)
+catch_discover_tests(scheduler_test)
