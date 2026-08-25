@@ -256,23 +256,66 @@ public:
 // MANUAL/FBWA too - wrong per upstream's own real behavior - without
 // resurrecting the mode-identification machinery this port deliberately
 // left unported.
+//
+// CPP-031 SLICE 3 NOTE: this function is what actually closes the real gap
+// CPP-033 was built for - see plane.hpp's own file banner addendum for the
+// full design rationale (StabilizeInputs's four new fields, the
+// fly_forward()/accel_healthy()/ins_healthy() Plane methods, and the
+// CALL-ORDER NOTE explaining why drift correction runs AFTER, not
+// interleaved with, ahrs.update() this tick). Previously this function
+// called ONLY `plane.ahrs.update(gyro_sample)` - pure gyro integration,
+// with NO drift correction at all, despite CPP-028 slices 2/3 having fully
+// ported and unit-tested drift_correction_yaw()/drift_correction_accel().
+// Steps 2 and 3b below are what were missing.
 inline void tick(Plane& plane, Mode& mode, const ahrs::GyroSample& gyro_sample, const StabilizeInputs& in) {
     // 1. pull RC input (upstream: AP_Vehicle's read_radio() scheduled task)
     plane.rc_channels.read_input(plane.hal.rc_input);
 
-    // 2. AHRS update (upstream: Plane::ahrs_update()'s ahrs.update() call)
+    // 2. GPS update (upstream: AP_GPS::update(), a separate, earlier
+    //    scheduled task feeding the AHRS update that follows it - see
+    //    ap-gps/gps.hpp's own file banner for what this reproduces from
+    //    AP_GPS_SITL). Always called every tick; internally rate-limited to
+    //    200ms, exactly like the real backend, so most calls are a no-op.
+    plane.gps.update(in.true_velocity_ned, in.now_ms);
+
+    // 3. AHRS update (upstream: Plane::ahrs_update()'s ahrs.update() call)
     plane.ahrs.update(gyro_sample);
 
-    // 3. scaled roll/pitch limits from current attitude (upstream: the
+    // 3b. Drift correction (upstream: the REST of AP_AHRS_DCM::update() -
+    //    drift_correction(delta_t) - which this port's AhrsDcm (CPP-028
+    //    slices 2/3) split into accumulate_accel() (every tick, unrated)
+    //    plus drift_correction_yaw()/drift_correction_accel() (each
+    //    internally gated on a new GPS-fix-time observation - see their own
+    //    doc comments in ahrs_dcm.hpp). CompassSample is constructed fresh
+    //    here with healthy=false (its own default) EVERY TICK - no compass
+    //    hardware in this port yet, a REAL CURRENT LIMITATION, not a
+    //    permanent design choice (see plane.hpp's file banner addendum).
+    //    This means drift_correction_yaw()'s GPS-course fallback path -
+    //    reachable exactly because use_compass() returns false immediately
+    //    for an unhealthy compass - is what actually corrects yaw for this
+    //    port's vehicle today, once it is moving fast enough for a
+    //    meaningful GPS course (kGpsSpeedMinMs, 3 m/s).
+    const ahrs::CompassSample compass; // healthy=false (default) - see above
+    const ahrs::GpsSample& gps_sample = plane.gps.sample();
+    const float wind_speed_ms = in.wind_estimate.xy().length(); // see plane.hpp's file banner addendum
+    const float airspeed_tas = in.airspeed_valid ? in.airspeed_eas * in.eas2tas : 0.0f; // matches ap-tecs's own EAS*eas2tas->TAS precedent
+
+    plane.ahrs.accumulate_accel(in.accel_sample, in.dt);
+    plane.ahrs.drift_correction_yaw(compass, gps_sample, plane.fly_forward(), in.armed_and_safety_off, in.gps_use_enabled,
+                                     wind_speed_ms, in.now_ms);
+    plane.ahrs.drift_correction_accel(compass, gps_sample, plane.fly_forward(), in.armed_and_safety_off, in.gps_use_enabled,
+                                       in.wind_estimate, airspeed_tas, plane.accel_healthy(), plane.ins_healthy(), in.now_ms);
+
+    // 4. scaled roll/pitch limits from current attitude (upstream: the
     //    rest of Plane::ahrs_update())
     plane.update_flight_limits();
 
-    // 4. speed-scaler low-pass filter (upstream: calc_airspeed_errors(),
+    // 5. speed-scaler low-pass filter (upstream: calc_airspeed_errors(),
     //    normally a separate 10Hz scheduled task - see Plane::
     //    update_speed_scaler()'s own doc comment)
     plane.update_speed_scaler(in.airspeed_valid, in.airspeed_eas, in.armed_and_safety_off, in.dt);
 
-    // 5. mode update + stabilize (upstream: Plane::stabilize())
+    // 6. mode update + stabilize (upstream: Plane::stabilize())
     if (in.now_ms - plane.last_stabilize_ms > 2000U) {
         mode.reset_controllers();
     }
@@ -280,7 +323,7 @@ inline void tick(Plane& plane, Mode& mode, const ahrs::GyroSample& gyro_sample, 
     mode.update(in);
     mode.run(in);
 
-    // 6. write computed PWM to hardware (upstream: Plane::set_servos() ->
+    // 7. write computed PWM to hardware (upstream: Plane::set_servos() ->
     //    SRV_Channels::output_ch_all())
     plane.srv_channels.output_ch_all(plane.hal.rc_output);
 }

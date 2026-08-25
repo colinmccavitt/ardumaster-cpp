@@ -297,6 +297,143 @@
 // by contrast, are NOT rate-limited - they run every call, exactly
 // matching upstream's own code shape (only the target-altitude
 // integration sits inside the `if` block).
+//
+// =====================================================================
+// CPP-031 SLICE 3 ADDENDUM: closing a real gap - tick() (mode.hpp) called
+// ahrs.update(gyro_sample) and NOTHING else on the AHRS, meaning this
+// vehicle's attitude estimate was PURE gyro integration with NO drift
+// correction at all, despite CPP-028 slices 2/3 having fully ported
+// AhrsDcm::drift_correction_yaw()/drift_correction_accel() and unit-tested
+// them in isolation. The gap was that nothing in this port could ever call
+// them with real data - there was no GPS module. CPP-033 built that module
+// (ap-gps/gps.hpp); this slice wires it in.
+//
+// NEW Plane MEMBER: `gps::Gps gps` - see its own file banner (ap-gps) for
+// what it reproduces from AP_GPS_SITL. Declared after `ahrs` (its natural
+// place among owned subsystems); no declaration-order constraint applies
+// to it (unlike aparm/the four controllers - see the DECLARATION-ORDER
+// CONSTRAINT note above) since nothing in Plane's constructor reads it.
+//
+// StabilizeInputs GAINS FOUR NEW FIELDS, all defaulted so slice 1/2's
+// existing MANUAL/FBWA/FBWB tests keep compiling AND PASSING unchanged
+// (verified - see vehicle_test.cpp's own new closed-loop test comment for
+// why a default-valued StabilizeInputs produces byte-for-byte the same
+// tick() behavior as before this slice for any caller that doesn't
+// populate them):
+//   - true_velocity_ned (Vector3f, upstream: AP::sitl()->state.speedN/E/D,
+//     the same true velocity ap-gps's own file banner already documents as
+//     its `update()` parameter) - fed straight through to
+//     `gps.update(in.true_velocity_ned, in.now_ms)` every tick. Default
+//     zero vector: with true_velocity_ned always (0,0,0), Gps::update()
+//     still fires every 200ms (the rate limit doesn't care about the
+//     velocity value) but ground_speed_ms stays 0 forever, which sits
+//     below kGpsSpeedMinMs (3.0f) - drift_correction_yaw()'s GPS-course
+//     branch requires `ground_speed_ms >= kGpsSpeedMinMs` to ever produce
+//     a nonzero yaw correction, so a caller leaving this at its default
+//     gets a GPS that "has a fix" but never actually corrects anything,
+//     exactly matching a stationary vehicle's real behavior (no ground
+//     velocity yet, so no valid GPS heading to fuse) rather than an
+//     invented no-op.
+//   - accel_sample (ahrs::AccelSample, upstream: get_delta_velocity()/
+//     _ins.get_accel() - the same struct AhrsDcm::accumulate_accel()
+//     already takes, see ahrs_dcm.hpp's own SLICE 3 section) - fed to
+//     `ahrs.accumulate_accel(in.accel_sample, in.dt)` every tick, matching
+//     upstream's own dual-rate structure (the fast, every-tick half of
+//     drift_correction() runs regardless of GPS timing). Default
+//     AccelSample{} (delta_velocity_dt=0.0f, accel=zero): accumulate_accel()
+//     treats delta_velocity_dt<=0 as "no valid sample this tick" (same
+//     convention GyroSample's own dangle_dt already established) and skips
+//     the ra_sum_ integration entirely; accel_ef is still written every
+//     call (`dcm_matrix * sample.accel`), but with sample.accel at its
+//     default zero this evaluates to the zero vector regardless of
+//     dcm_matrix's value - IDENTICAL to accel_ef's pre-this-slice value
+//     (it was never written by anything before CPP-028 slice 3 landed, and
+//     slice 3's own callers that don't call accumulate_accel() leave it at
+//     its own zero default - see ahrs_dcm.hpp's "accel_ef IS NOW COMPUTED"
+//     note) - so a caller leaving this field at its default sees no change
+//     to accel_ef, and therefore none to yaw_gain() or build_tecs_inputs()'s
+//     accel_ef_z/accel_body_x reads either.
+//   - wind_estimate (Vector3f, upstream: `_wind` - no wind-estimation
+//     subsystem in this port, same "no wind estimation subsystem" precedent
+//     ahrs_dcm.hpp's own file banner already established for
+//     drift_correction_accel()'s wind_estimate parameter) - default zero
+//     vector, fed to drift_correction_accel() directly and, via
+//     `.xy().length()`, to drift_correction_yaw()'s wind_speed_ms
+//     parameter - the SAME single-source-of-truth derivation ahrs_dcm.hpp's
+//     banner documents upstream's own use_compass()/drift_correction() both
+//     performing from the one `_wind` member.
+//   - gps_use_enabled (bool, default true, upstream: AHRS_GPS_USE's real
+//     GSCALAR default, `AP_AHRS::GPSUse::Enable` - verified directly
+//     against AP_AHRS.cpp's own AP_GROUPINFO table, not assumed) - fed to
+//     both drift_correction_yaw()/drift_correction_accel()'s
+//     gps_use_enabled parameter and, transitively, have_gps(). Defaulting
+//     to true (matching upstream's own real default) rather than false is
+//     safe for slice 1/2's existing tests specifically BECAUSE
+//     true_velocity_ned defaults to zero (see above) - have_gps() being
+//     true doesn't by itself produce any correction without real velocity
+//     data, so this is the faithful default, not a hidden behavior change.
+//
+// `armed` (drift_correction_yaw/accel's own parameter, upstream:
+// hal.util->get_soft_armed()) is NOT a new field - StabilizeInputs::
+// armed_and_safety_off already exists (slice 1) and is reused directly,
+// matching the SAME reuse precedent calc_speed_scaler() already
+// established for that exact field - no separate arming subsystem to model
+// a finer distinction with.
+//
+// fly_forward()/accel_healthy()/ins_healthy() ADDED AS Plane METHODS, NOT
+// StabilizeInputs FIELDS - matching fly_inverted()'s own precedent
+// immediately below (a hardcoded, documented, always-the-same-answer
+// method rather than a field nobody varies):
+//   - fly_forward() (upstream: AP_AHRS::get_fly_forward(), set every loop
+//     by Plane::update_fly_forward() (Plane.cpp), read directly): read in
+//     full - with no quadplane (HAL_QUADPLANE_ENABLED), no idle_mode
+//     (balloon-lift ballast release, no such subsystem), and no LAND
+//     flight-stage (no landing subsystem/flight_stage machinery in this
+//     port), update_fly_forward()'s real body falls straight through every
+//     conditional to its final, unconditional `ahrs.set_fly_forward(true);`
+//     - traced, not assumed. Always true for this port's scope.
+//   - accel_healthy()/ins_healthy() (upstream: _ins.get_accel_health(i)/
+//     _ins.healthy() - no INS health-monitoring subsystem in this port,
+//     same "no subsystem, so this reads the nominal/unconfigured value"
+//     precedent as ground_mode/reversed_throttle above) - both always true:
+//     this port's IMU input IS the real gyro/accel data a caller already
+//     supplies every tick (GyroSample/AccelSample), so "assume healthy" is
+//     the honest behavior of a vehicle with no separate health-checking
+//     machinery, not an invented shortcut. A future slice adding real
+//     health monitoring can override these.
+//
+// CompassSample: mode.hpp's tick() constructs one with healthy=false EVERY
+// TICK, unconditionally - no compass hardware in this port yet. This is
+// documented there (not here) as a REAL, CURRENT LIMITATION, not a
+// permanent design choice: drift_correction_yaw()'s use_compass() returns
+// false immediately whenever compass.healthy is false (its very first
+// check), which sends every call down the GPS-course branch instead
+// (`else if (fly_forward && have_gps(...))`) - traced this path directly
+// in ahrs_dcm.hpp rather than assuming it, confirming a compass-less
+// vehicle genuinely CAN get real yaw correction from GPS course alone once
+// moving fast enough (>= kGpsSpeedMinMs, 3 m/s).
+//
+// CALL-ORDER NOTE - a genuine, minor, and unavoidable consequence of this
+// port's own class boundaries, not a bug: upstream's real
+// AP_AHRS_DCM::update() calls matrix_update() -> normalize() ->
+// drift_correction(delta_t) -> check_matrix() -> to_euler() as ONE atomic
+// sequence, so drift_correction()'s newly-computed omega_p_/omega_yaw_p_
+// feed into check_matrix()/to_euler() THE SAME TICK they're computed. This
+// port's AhrsDcm::update() (CPP-028 slice 1) already bundles matrix_update/
+// normalize/check_matrix/to_euler into one method with NO seam for a caller
+// to insert drift correction in the middle - that seam was never built,
+// and un-building it now would mean touching AhrsDcm's own already-tested,
+// already-merged update() from a different ticket's slice, which this
+// slice deliberately avoids. So tick() (mode.hpp) calls
+// `ahrs.update(gyro_sample)` (using the PREVIOUS tick's omega_p_/
+// omega_yaw_p_/omega_i_), THEN gps.update()+accumulate_accel()+
+// drift_correction_yaw()/drift_correction_accel() (computing THIS tick's
+// omega_p_/omega_yaw_p_/omega_i_ for the NEXT tick's matrix_update()) -a
+// one-tick lag versus upstream's atomic ordering. Since these correction
+// terms are deliberately slow, low-bandwidth trim signals (P-gains around
+// 0.2, integrator time constants of seconds), a single 20ms tick's lag is
+// immaterial to their effect and does not change any of this slice's own
+// convergence tests' outcomes.
 
 #include <algorithm>
 #include <cmath>
@@ -307,6 +444,7 @@
 #include <fwcpp/fw_control/pitch_controller.hpp>
 #include <fwcpp/fw_control/roll_controller.hpp>
 #include <fwcpp/fw_control/yaw_controller.hpp>
+#include <fwcpp/gps/gps.hpp>
 #include <fwcpp/hal/hal_context.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/rc/rc_channels.hpp>
@@ -397,6 +535,13 @@ struct StabilizeInputs {
     // LIMIT" notes ---
     float current_altitude_m = 0.0f; // current TRUE altitude above the vehicle's fixed start point (NOT AMSL/home - see file banner)
     std::uint64_t now_us = 0;        // upstream: AP_HAL::micros64() - independent microsecond clock, see file banner
+
+    // --- CPP-031 slice 3 additions - see file banner addendum for each
+    // field's full provenance/default-safety rationale ---
+    math::Vector3f true_velocity_ned; // upstream: AP::sitl()->state.speedN/E/D - fed to gps.update() every tick
+    ahrs::AccelSample accel_sample;   // upstream: get_delta_velocity()/_ins.get_accel() - fed to ahrs.accumulate_accel() every tick
+    math::Vector3f wind_estimate;     // upstream: _wind - no wind-estimation subsystem, see file banner
+    bool gps_use_enabled = true;      // upstream: AHRS_GPS_USE's real default (GPSUse::Enable) - see file banner
 };
 
 namespace detail {
@@ -439,6 +584,7 @@ public:
     rc::RcChannels rc_channels;
     srv::SrvChannels srv_channels;
     ahrs::AhrsDcm ahrs;
+    gps::Gps gps; // CPP-031 slice 3 (see file banner addendum) - CPP-033's minimal SITL GPS backend.
 
     // MUST precede roll_controller/pitch_controller/yaw_controller/tecs -
     // see file banner's "DECLARATION-ORDER CONSTRAINT" note.
@@ -744,6 +890,27 @@ public:
     // slice) - neither is reachable here, so FBWA falls through to the
     // exact same `return false;` MANUAL takes explicitly.
     [[nodiscard]] bool fly_inverted() const { return false; }
+
+    // upstream: Plane::update_fly_forward() (Plane.cpp), read via
+    // AP_AHRS::get_fly_forward() - see file banner addendum's "fly_forward()
+    // /accel_healthy()/ins_healthy() ADDED AS Plane METHODS" note. Always
+    // true for this port's scope: no quadplane, no idle_mode (balloon
+    // lift), no LAND flight-stage subsystem, so update_fly_forward()'s real
+    // body falls through every conditional to its final unconditional
+    // `ahrs.set_fly_forward(true)`.
+    [[nodiscard]] bool fly_forward() const { return true; }
+
+    // upstream: AP_InertialSensor::get_accel_health(i) - see file banner
+    // addendum. No INS health-monitoring subsystem in this port; this
+    // vehicle's accel input IS the real data a caller supplies every tick,
+    // so "assume healthy" is this port's honest current behavior, not an
+    // invented shortcut.
+    [[nodiscard]] bool accel_healthy() const { return true; }
+
+    // upstream: AP_InertialSensor::healthy() - see file banner addendum;
+    // same "no health-monitoring subsystem, assume healthy" treatment as
+    // accel_healthy() above.
+    [[nodiscard]] bool ins_healthy() const { return true; }
 
     // upstream: Plane::stick_mixing_enabled() (Attitude.cpp), reduced to
     // this slice's scope. fence_stickmixing() (AP_FENCE_ENABLED) is not
