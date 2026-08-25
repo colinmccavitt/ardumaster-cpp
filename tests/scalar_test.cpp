@@ -137,3 +137,17 @@ TEST_CASE("constrain_value never records off the NaN path", "[scalar]") {
     REQUIRE(result == 5.0f);
     REQUIRE(err.count() == 0);
 }
+
+TEST_CASE("cd_to_rad is the inverse of rad_to_cd", "[scalar][cd_to_rad]") {
+    for (float rad : {0.0f, 1.0f, -1.0f, 3.14f, -2.5f}) {
+        REQUIRE(cd_to_rad(rad_to_cd(rad)) == Catch::Approx(rad).margin(1e-4f));
+    }
+}
+
+TEST_CASE("cd_to_rad(18000) is pi", "[scalar][cd_to_rad]") {
+    REQUIRE(cd_to_rad(18000.0f) == Catch::Approx(3.14159265f).margin(1e-4f));
+}
+
+TEST_CASE("cd_to_rad(0) is 0", "[scalar][cd_to_rad]") {
+    REQUIRE(cd_to_rad(0.0f) == 0.0f);
+}

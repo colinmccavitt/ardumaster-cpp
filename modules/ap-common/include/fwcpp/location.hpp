@@ -254,6 +254,32 @@ public:
     [[nodiscard]] std::int32_t get_bearing_to(const Location& loc2) const {
         return static_cast<std::int32_t>(math::rad_to_cd(get_bearing(loc2)) + 0.5f);
     }
+
+    [[nodiscard]] bool same_latlon_as(const Location& loc2) const {
+        return lat == loc2.lat && lng == loc2.lng;
+    }
+
+    // Upstream's slow path (different alt frames: converts both to a
+    // common frame via get_height_above(), which needs home/EKF-origin
+    // context this port hasn't built - see file banner) is NOT
+    // reproduced. Only the fast path (same frame: direct alt comparison)
+    // is - matching upstream exactly for same-frame callers, and
+    // returning false for cross-frame callers rather than fabricating an
+    // answer this port doesn't have the context to compute honestly. Every
+    // known caller in the L1 controller (CPP-017) compares locations built
+    // in the same frame within one control cycle, so this fast path is the
+    // one that matters there; noted as a real gap for any future caller
+    // that isn't.
+    [[nodiscard]] bool same_alt_as(const Location& loc2) const {
+        if (get_alt_frame() == loc2.get_alt_frame()) {
+            return alt == loc2.alt;
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool same_loc_as(const Location& loc2) const {
+        return same_latlon_as(loc2) && same_alt_as(loc2);
+    }
 };
 
 } // namespace fwcpp

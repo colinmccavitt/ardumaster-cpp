@@ -51,6 +51,14 @@ float rad_to_cd(float rad) {
     return rad * kRadToCDeg;
 }
 
+// CDEG_TO_RAD upstream is `M_PI / 18000.0f` - float precision, same
+// reasoning as kRadToCDeg/kDegToRad.
+static constexpr float kCdegToRad = static_cast<float>(kPi) / 18000.0f;
+
+float cd_to_rad(float cdeg) {
+    return cdeg * kCdegToRad;
+}
+
 double pi_constant() {
     return kPi;
 }

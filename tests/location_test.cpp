@@ -158,3 +158,37 @@ TEST_CASE("Location::get_bearing_to is always in [0, 35999]", "[location][bearin
     REQUIRE(bearing >= 0);
     REQUIRE(bearing <= 35999);
 }
+
+TEST_CASE("same_latlon_as is exact lat/lng equality, alt-independent", "[location][same_loc]") {
+    Location a(100, 200, 1000, Location::AltFrame::ABSOLUTE);
+    Location b(100, 200, 5000, Location::AltFrame::ABOVE_HOME); // different alt+frame
+    REQUIRE(a.same_latlon_as(b));
+    Location c(100, 201, 1000, Location::AltFrame::ABSOLUTE);
+    REQUIRE_FALSE(a.same_latlon_as(c));
+}
+
+TEST_CASE("same_alt_as compares alt directly when frames match", "[location][same_loc]") {
+    Location a(0, 0, 1000, Location::AltFrame::ABOVE_HOME);
+    Location b(0, 0, 1000, Location::AltFrame::ABOVE_HOME);
+    Location c(0, 0, 2000, Location::AltFrame::ABOVE_HOME);
+    REQUIRE(a.same_alt_as(b));
+    REQUIRE_FALSE(a.same_alt_as(c));
+}
+
+TEST_CASE("same_alt_as returns false across differing alt frames (fast path only - see file banner)", "[location][same_loc]") {
+    Location a(0, 0, 1000, Location::AltFrame::ABOVE_HOME);
+    Location b(0, 0, 1000, Location::AltFrame::ABSOLUTE); // same numeric alt, different frame
+    REQUIRE_FALSE(a.same_alt_as(b));
+}
+
+TEST_CASE("same_loc_as requires both same_latlon_as and same_alt_as", "[location][same_loc]") {
+    Location a(100, 200, 1000, Location::AltFrame::ABSOLUTE);
+    Location b(100, 200, 1000, Location::AltFrame::ABSOLUTE);
+    REQUIRE(a.same_loc_as(b));
+
+    Location c(100, 200, 2000, Location::AltFrame::ABSOLUTE); // same latlon, different alt
+    REQUIRE_FALSE(a.same_loc_as(c));
+
+    Location d(101, 200, 1000, Location::AltFrame::ABSOLUTE); // different latlon, same alt
+    REQUIRE_FALSE(a.same_loc_as(d));
+}
