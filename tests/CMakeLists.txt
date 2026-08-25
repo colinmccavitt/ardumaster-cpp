@@ -69,3 +69,7 @@ catch_discover_tests(low_pass_filter_test)
 add_executable(slew_limiter_test slew_limiter_test.cpp)
 target_link_libraries(slew_limiter_test PRIVATE ap-filter Catch2::Catch2WithMain)
 catch_discover_tests(slew_limiter_test)
+
+add_executable(ac_pid_test ac_pid_test.cpp)
+target_link_libraries(ac_pid_test PRIVATE ap-pid Catch2::Catch2WithMain)
+catch_discover_tests(ac_pid_test)
