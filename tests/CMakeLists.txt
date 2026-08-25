@@ -153,3 +153,7 @@ catch_discover_tests(uart_driver_test)
 add_executable(analog_in_test analog_in_test.cpp)
 target_link_libraries(analog_in_test PRIVATE ap-hal Catch2::Catch2WithMain)
 catch_discover_tests(analog_in_test)
+
+add_executable(srv_channel_test srv_channel_test.cpp)
+target_link_libraries(srv_channel_test PRIVATE ap-srv-channel Catch2::Catch2WithMain)
+catch_discover_tests(srv_channel_test)
