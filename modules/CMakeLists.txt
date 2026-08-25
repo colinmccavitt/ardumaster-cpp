@@ -3,7 +3,7 @@
 # is the same upstream scope as ap-math in ports/plane-fw-rust/crates/).
 #
 # add_subdirectory(ap-common)
-# add_subdirectory(ap-math)
 # ...
 
 add_subdirectory(fwcpp-result)
+add_subdirectory(ap-math)

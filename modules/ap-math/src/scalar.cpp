@@ -1,0 +1,171 @@
+// Definitions for the wrap_* family declared in scalar.hpp. Compiled under
+// fwcpp_upstream_flags (see CMakeLists.txt) - this is the ONE translation
+// unit where -fsingle-precision-constant applies to these bodies, matching
+// upstream's own AP_Math.cpp. See scalar.hpp's file banner for why these
+// aren't header-inline.
+
+#include <fwcpp/math/scalar.hpp>
+
+namespace fwcpp::math {
+
+// Upstream AP_Math/definitions.h defines its own M_PI (not <cmath>'s),
+// digit-for-digit reproduced here. Under -fsingle-precision-constant this
+// bare literal is parsed as a float constant same as it is upstream - that
+// is the point, not an oversight; it's why these bodies live in this
+// specific translation unit.
+static constexpr double kPi = 3.141592653589793238462643383279502884;
+static constexpr double kTwoPi = kPi * 2;
+
+float wrap_360(float angle) {
+    float res = std::fmod(angle, 360.0f);
+    if (res < 0) {
+        res += 360.0f;
+    }
+    return res;
+}
+
+double wrap_360(double angle) {
+    double res = std::fmod(angle, 360.0);
+    if (res < 0) {
+        res += 360.0;
+    }
+    return res;
+}
+
+int wrap_360(int angle) {
+    int res = angle % 360;
+    if (res < 0) {
+        res += 360;
+    }
+    return res;
+}
+
+float wrap_360_cd(float angle) {
+    float res = std::fmod(angle, 36000.0f);
+    if (res < 0) {
+        res += 36000.0f;
+    }
+    return res;
+}
+
+double wrap_360_cd(double angle) {
+    double res = std::fmod(angle, 36000.0);
+    if (res < 0) {
+        res += 36000.0;
+    }
+    return res;
+}
+
+long wrap_360_cd(long angle) {
+    long res = angle % 36000;
+    if (res < 0) {
+        res += 36000;
+    }
+    return res;
+}
+
+int wrap_360_cd(int angle) {
+    int res = angle % 36000;
+    if (res < 0) {
+        res += 36000;
+    }
+    return res;
+}
+
+float wrap_180(float angle) {
+    float res = wrap_360(angle);
+    if (res > 180.0f) {
+        res -= 360.0f;
+    }
+    return res;
+}
+
+double wrap_180(double angle) {
+    double res = wrap_360(angle);
+    if (res > 180.0) {
+        res -= 360.0;
+    }
+    return res;
+}
+
+int wrap_180(int angle) {
+    int res = wrap_360(angle);
+    if (res > 180) {
+        res -= 360;
+    }
+    return res;
+}
+
+short wrap_180(short angle) {
+    return static_cast<short>(wrap_180(static_cast<int>(angle)));
+}
+
+float wrap_180_cd(float angle) {
+    float res = wrap_360_cd(angle);
+    if (res > 18000.0f) {
+        res -= 36000.0f;
+    }
+    return res;
+}
+
+double wrap_180_cd(double angle) {
+    double res = wrap_360_cd(angle);
+    if (res > 18000.0) {
+        res -= 36000.0;
+    }
+    return res;
+}
+
+int wrap_180_cd(int angle) {
+    int res = wrap_360_cd(angle);
+    if (res > 18000) {
+        res -= 36000;
+    }
+    return res;
+}
+
+long wrap_180_cd(long angle) {
+    long res = wrap_360_cd(angle);
+    if (res > 18000) {
+        res -= 36000;
+    }
+    return res;
+}
+
+short wrap_180_cd(short angle) {
+    return static_cast<short>(wrap_180_cd(static_cast<int>(angle)));
+}
+
+float wrap_2PI(float radian) {
+    float res = std::fmod(radian, static_cast<float>(kTwoPi));
+    if (res < 0) {
+        res += static_cast<float>(kTwoPi);
+    }
+    return res;
+}
+
+double wrap_2PI(double radian) {
+    double res = std::fmod(radian, kTwoPi);
+    if (res < 0) {
+        res += kTwoPi;
+    }
+    return res;
+}
+
+float wrap_PI(float radian) {
+    float res = wrap_2PI(radian);
+    if (res > static_cast<float>(kPi)) {
+        res -= static_cast<float>(kTwoPi);
+    }
+    return res;
+}
+
+double wrap_PI(double radian) {
+    double res = wrap_2PI(radian);
+    if (res > kPi) {
+        res -= kTwoPi;
+    }
+    return res;
+}
+
+} // namespace fwcpp::math
