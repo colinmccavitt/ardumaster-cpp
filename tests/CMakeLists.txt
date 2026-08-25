@@ -45,3 +45,7 @@ catch_discover_tests(matrix3_test)
 add_executable(quaternion_test quaternion_test.cpp)
 target_link_libraries(quaternion_test PRIVATE ap-math Catch2::Catch2WithMain)
 catch_discover_tests(quaternion_test)
+
+add_executable(bitmask_test bitmask_test.cpp)
+target_link_libraries(bitmask_test PRIVATE ap-common Catch2::Catch2WithMain)
+catch_discover_tests(bitmask_test)
