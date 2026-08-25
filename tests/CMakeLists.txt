@@ -181,3 +181,7 @@ catch_discover_tests(sim_plane_test)
 add_executable(tecs_test tecs_test.cpp)
 target_link_libraries(tecs_test PRIVATE ap-tecs Catch2::Catch2WithMain)
 catch_discover_tests(tecs_test)
+
+add_executable(fw_control_test fw_control_test.cpp)
+target_link_libraries(fw_control_test PRIVATE ap-fw-control Catch2::Catch2WithMain)
+catch_discover_tests(fw_control_test)
