@@ -77,3 +77,7 @@ catch_discover_tests(ac_pid_test)
 add_executable(l1_control_test l1_control_test.cpp)
 target_link_libraries(l1_control_test PRIVATE ap-nav Catch2::Catch2WithMain)
 catch_discover_tests(l1_control_test)
+
+add_executable(notch_filter_test notch_filter_test.cpp)
+target_link_libraries(notch_filter_test PRIVATE ap-filter Catch2::Catch2WithMain)
+catch_discover_tests(notch_filter_test)
