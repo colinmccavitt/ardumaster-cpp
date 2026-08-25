@@ -105,3 +105,7 @@ catch_discover_tests(postype_test)
 add_executable(storage_test storage_test.cpp)
 target_link_libraries(storage_test PRIVATE ap-param Catch2::Catch2WithMain)
 catch_discover_tests(storage_test)
+
+add_executable(param_test param_test.cpp)
+target_link_libraries(param_test PRIVATE ap-param Catch2::Catch2WithMain)
+catch_discover_tests(param_test)
