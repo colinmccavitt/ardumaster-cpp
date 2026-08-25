@@ -61,11 +61,21 @@ TEST_CASE("Quaternion normalize produces a unit quaternion", "[quaternion]") {
     REQUIRE(q.q1 == Catch::Approx(1.0f));
 }
 
-TEST_CASE("Quaternion normalize on a zero quaternion leaves it unchanged (no crash)", "[quaternion]") {
+TEST_CASE("Quaternion normalize on a zero quaternion leaves it unchanged and reports via InternalError", "[quaternion]") {
     Quaternion q;
     q.zero();
-    q.normalize();
-    REQUIRE(q.is_zero()); // still zero - no report wired yet (CPP-005), but no crash either
+    fwcpp::InternalError err;
+    q.normalize(&err, 99);
+    REQUIRE(q.is_zero()); // still zero - normalize can't invent a direction
+    REQUIRE(err.has_error(fwcpp::InternalErrorCode::flow_of_control));
+    REQUIRE(err.last_error_line() == 99);
+}
+
+TEST_CASE("Quaternion normalize with a null InternalError does not crash", "[quaternion]") {
+    Quaternion q;
+    q.zero();
+    q.normalize(); // default nullptr
+    REQUIRE(q.is_zero());
 }
 
 TEST_CASE("Quaternion is_unit_length", "[quaternion]") {

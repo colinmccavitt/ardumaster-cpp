@@ -18,6 +18,10 @@ add_executable(result_test result_test.cpp)
 target_link_libraries(result_test PRIVATE fwcpp-result Catch2::Catch2WithMain)
 catch_discover_tests(result_test)
 
+add_executable(internal_error_test internal_error_test.cpp)
+target_link_libraries(internal_error_test PRIVATE ap-internal-error Catch2::Catch2WithMain)
+catch_discover_tests(internal_error_test)
+
 add_executable(scalar_test scalar_test.cpp)
 target_link_libraries(scalar_test PRIVATE ap-math Catch2::Catch2WithMain)
 catch_discover_tests(scalar_test)

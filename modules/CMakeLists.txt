@@ -6,4 +6,5 @@
 # ...
 
 add_subdirectory(fwcpp-result)
+add_subdirectory(ap-internal-error)
 add_subdirectory(ap-math)

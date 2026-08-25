@@ -34,17 +34,15 @@
 // the float- and double-rounded constant is immaterial and this stays
 // header-only rather than getting the compiled-.cpp treatment.
 //
-// normalize()'s zero-quaternion path: upstream calls INTERNAL_ERROR (the
-// AP::internalerror() singleton) there. ADR-0012 decision 6 forbids
-// reproducing that; CPP-005 (internal-error channel) is the ticket for a
-// real replacement. Left unwired here rather than guessed at - the
-// zero-quaternion path leaves the quaternion at [0,0,0,0] unchanged and
-// unreported, which is a real, honest "nothing happens" rather than a
-// fabricated reporting call.
+// normalize()'s zero-quaternion path reports through fwcpp::InternalError
+// (CPP-005), matching upstream's
+// `INTERNAL_ERROR(AP_InternalError::error_t::flow_of_control)` there but via
+// the explicit non-singleton channel rather than AP::internalerror().
 
 #include <cmath>
 #include <cstdint>
 
+#include <fwcpp/internal_error.hpp>
 #include <fwcpp/math/matrix3.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector3.hpp>
@@ -81,9 +79,9 @@ struct QuaternionT {
     [[nodiscard]] T length_squared() const { return q1 * q1 + q2 * q2 + q3 * q3 + q4 * q4; }
     [[nodiscard]] T length() const { return std::sqrt(length_squared()); }
 
-    // No-op (leaves [0,0,0,0] unchanged, unreported) on the zero-magnitude
-    // path - see file banner re: CPP-005.
-    void normalize() {
+    // Leaves [0,0,0,0] unchanged on the zero-magnitude path, reporting
+    // through `err` if non-null - see file banner.
+    void normalize(InternalError* err = nullptr, std::uint16_t line = 0) {
         const T mag = length();
         if (!math::is_zero(mag)) {
             const T inv = T(1) / mag;
@@ -91,6 +89,8 @@ struct QuaternionT {
             q2 *= inv;
             q3 *= inv;
             q4 *= inv;
+        } else if (err != nullptr) {
+            err->record(InternalErrorCode::flow_of_control, line);
         }
     }
 

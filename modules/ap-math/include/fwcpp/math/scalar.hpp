@@ -48,6 +48,8 @@
 #include <cstdint>
 #include <type_traits>
 
+#include <fwcpp/internal_error.hpp>
+
 namespace fwcpp::math {
 
 // D-003 (registered independently here; same conclusion the Rust port
@@ -179,29 +181,21 @@ template <typename T>
     return 0.0f;
 }
 
-// Sink for the NaN-clamp anomaly constrain_value reports. Upstream reaches a
-// global singleton (AP::internalerror()); ADR-0012 decision 6 forbids
-// reproducing that, so it is an explicit, optional, non-owning pointer
-// instead - a null sink is a silent report, exactly like a build where
-// AP_INTERNALERROR_ENABLED is off upstream. Real wiring is CPP-005; this
-// interface is the contract that ticket implements against, not a stub of
-// it - constrain_value's own NaN-clamp behavior is fully implemented today
-// regardless of whether anything is listening.
-class ConstrainNanSink {
-public:
-    virtual ~ConstrainNanSink() = default;
-    virtual void on_constrain_nan(uint32_t line) = 0;
-};
-
 // constrain_value: NaN clamps to the midpoint (upstream's own choice, not
-// this port's) and reports through `sink` if non-null. Non-floating-point T
-// never NaNs, so the check compiles away via `if constexpr`.
+// this port's) and reports through `err` if non-null, matching upstream's
+// `INTERNAL_ERROR(AP_InternalError::error_t::constraining_nan)` - but via
+// the explicit, non-singleton fwcpp::InternalError (CPP-005) rather than
+// AP::internalerror(). A null `err` is the same as a build with
+// AP_INTERNALERROR_ENABLED off upstream: reporting is a no-op, but
+// constrain_value's own NaN-clamp behavior is unaffected either way.
+// Non-floating-point T never NaNs, so the check compiles away entirely via
+// `if constexpr`.
 template <typename T>
-[[nodiscard]] inline T constrain_value(T amt, T low, T high, ConstrainNanSink* sink = nullptr, uint32_t line = 0) {
+[[nodiscard]] inline T constrain_value(T amt, T low, T high, InternalError* err = nullptr, std::uint16_t line = 0) {
     if constexpr (std::is_floating_point_v<T>) {
         if (std::isnan(amt)) {
-            if (sink != nullptr) {
-                sink->on_constrain_nan(line);
+            if (err != nullptr) {
+                err->record(InternalErrorCode::constraining_nan, line);
             }
             return (low + high) / 2;
         }

@@ -118,33 +118,22 @@ TEST_CASE("constrain_value on NaN returns the midpoint, matching upstream's own 
     REQUIRE(result == 5.0f);
 }
 
-namespace {
-class RecordingSink : public fwcpp::math::ConstrainNanSink {
-public:
-    int calls = 0;
-    uint32_t last_line = 0;
-    void on_constrain_nan(uint32_t line) override {
-        ++calls;
-        last_line = line;
-    }
-};
-} // namespace
-
-TEST_CASE("constrain_value reports NaN through an explicit sink, never a singleton", "[scalar]") {
-    RecordingSink sink;
-    float result = constrain_value(std::nanf(""), 0.0f, 10.0f, &sink, 42);
+TEST_CASE("constrain_value reports NaN through fwcpp::InternalError, never a singleton", "[scalar]") {
+    fwcpp::InternalError err;
+    float result = constrain_value(std::nanf(""), 0.0f, 10.0f, &err, 42);
     REQUIRE(result == 5.0f);
-    REQUIRE(sink.calls == 1);
-    REQUIRE(sink.last_line == 42);
+    REQUIRE(err.has_error(fwcpp::InternalErrorCode::constraining_nan));
+    REQUIRE(err.count() == 1);
+    REQUIRE(err.last_error_line() == 42);
 }
 
-TEST_CASE("constrain_value with a null sink does not crash - matches a build with reporting disabled", "[scalar]") {
+TEST_CASE("constrain_value with a null InternalError does not crash - matches AP_INTERNALERROR_ENABLED off", "[scalar]") {
     REQUIRE(constrain_value(std::nanf(""), 0.0f, 10.0f, nullptr) == 5.0f);
 }
 
-TEST_CASE("constrain_value never invokes the sink off the NaN path", "[scalar]") {
-    RecordingSink sink;
-    float result = constrain_value(5.0f, 0.0f, 10.0f, &sink);
+TEST_CASE("constrain_value never records off the NaN path", "[scalar]") {
+    fwcpp::InternalError err;
+    float result = constrain_value(5.0f, 0.0f, 10.0f, &err);
     REQUIRE(result == 5.0f);
-    REQUIRE(sink.calls == 0);
+    REQUIRE(err.count() == 0);
 }
