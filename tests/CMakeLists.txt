@@ -137,3 +137,7 @@ catch_discover_tests(filter_registry_test)
 add_executable(scheduler_test scheduler_test.cpp)
 target_link_libraries(scheduler_test PRIVATE ap-scheduler Catch2::Catch2WithMain)
 catch_discover_tests(scheduler_test)
+
+add_executable(rc_test rc_test.cpp)
+target_link_libraries(rc_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(rc_test)
