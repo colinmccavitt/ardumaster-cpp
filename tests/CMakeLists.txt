@@ -117,3 +117,7 @@ catch_discover_tests(group_info_test)
 add_executable(name_lookup_test name_lookup_test.cpp)
 target_link_libraries(name_lookup_test PRIVATE ap-param Catch2::Catch2WithMain)
 catch_discover_tests(name_lookup_test)
+
+add_executable(persistence_test persistence_test.cpp)
+target_link_libraries(persistence_test PRIVATE ap-param Catch2::Catch2WithMain)
+catch_discover_tests(persistence_test)
