@@ -61,3 +61,7 @@ catch_discover_tests(float16_test)
 add_executable(low_pass_filter_2p_test low_pass_filter_2p_test.cpp)
 target_link_libraries(low_pass_filter_2p_test PRIVATE ap-filter Catch2::Catch2WithMain)
 catch_discover_tests(low_pass_filter_2p_test)
+
+add_executable(low_pass_filter_test low_pass_filter_test.cpp)
+target_link_libraries(low_pass_filter_test PRIVATE ap-filter Catch2::Catch2WithMain)
+catch_discover_tests(low_pass_filter_test)

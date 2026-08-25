@@ -199,4 +199,21 @@ double wrap_PI(double radian) {
     return res;
 }
 
+float calc_lowpass_alpha_dt(float dt, float cutoff_freq, InternalError* err, std::uint16_t line) {
+    if (is_negative(dt) || is_negative(cutoff_freq)) {
+        if (err != nullptr) {
+            err->record(InternalErrorCode::invalid_arg_or_result, line);
+        }
+        return 1.0f;
+    }
+    if (is_zero(cutoff_freq)) {
+        return 1.0f;
+    }
+    if (is_zero(dt)) {
+        return 0.0f;
+    }
+    const float rc = 1.0f / (static_cast<float>(kTwoPi) * cutoff_freq);
+    return dt / (dt + rc);
+}
+
 } // namespace fwcpp::math

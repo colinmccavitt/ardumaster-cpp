@@ -158,6 +158,12 @@ is_equal(A a, B b) {
 [[nodiscard]] float wrap_PI(float radian);
 [[nodiscard]] double wrap_PI(double radian);
 
+// Alpha for a one-pole IIR low-pass given dt and cutoff frequency. Reports
+// through `err` (nullable) on a negative dt or cutoff, matching upstream's
+// `INTERNAL_ERROR(AP_InternalError::error_t::invalid_arg_or_result)` -
+// same pattern as constrain_value's InternalError* parameter.
+[[nodiscard]] float calc_lowpass_alpha_dt(float dt, float cutoff_freq, InternalError* err = nullptr, std::uint16_t line = 0);
+
 // safe_asin / safe_sqrt: both narrow to float BEFORE any comparison or call
 // (upstream's own comment on safe_sqrt: "cast before checking so we sqrtf
 // the same value we check"), so unlike the wrap_* family there is no
