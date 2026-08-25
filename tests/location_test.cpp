@@ -192,3 +192,73 @@ TEST_CASE("same_loc_as requires both same_latlon_as and same_alt_as", "[location
     Location d(101, 200, 1000, Location::AltFrame::ABSOLUTE); // different latlon, same alt
     REQUIRE_FALSE(a.same_loc_as(d));
 }
+
+TEST_CASE("is_zero is true only for a default-constructed (all-zero) Location", "[location][is_zero]") {
+    Location a;
+    REQUIRE(a.is_zero());
+
+    Location b(1, 0, 0, Location::AltFrame::ABSOLUTE);
+    REQUIRE_FALSE(b.is_zero());
+
+    Location c(0, 0, 0, Location::AltFrame::ABOVE_HOME); // sets relative_alt=1 even with alt=0
+    REQUIRE_FALSE(c.is_zero());
+}
+
+TEST_CASE("check_latlng accepts in-range and rejects out-of-range lat/lng", "[location][check_latlng]") {
+    Location a(900000000, 1800000000, 0, Location::AltFrame::ABSOLUTE); // exactly at the poles/antimeridian
+    REQUIRE(a.check_latlng());
+
+    Location b(900000001, 0, 0, Location::AltFrame::ABSOLUTE); // just past the pole
+    REQUIRE_FALSE(b.check_latlng());
+
+    Location c(0, 1800000001, 0, Location::AltFrame::ABSOLUTE); // just past the antimeridian
+    REQUIRE_FALSE(c.check_latlng());
+
+    Location d(-900000000, -1800000000, 0, Location::AltFrame::ABSOLUTE);
+    REQUIRE(d.check_latlng());
+}
+
+TEST_CASE("line_path_proportion is 0 at point1, 1 at point2, and interpolates between", "[location][line_path_proportion]") {
+    Location point1(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    Location point2 = point1;
+    point2.offset(1000.0f, 0.0f); // 1000m north
+
+    Location at_start = point1;
+    REQUIRE(at_start.line_path_proportion(point1, point2) == Catch::Approx(0.0f).margin(0.01f));
+
+    Location at_end = point2;
+    REQUIRE(at_end.line_path_proportion(point1, point2) == Catch::Approx(1.0f).margin(0.01f));
+
+    Location halfway = point1;
+    halfway.offset(500.0f, 0.0f);
+    REQUIRE(halfway.line_path_proportion(point1, point2) == Catch::Approx(0.5f).margin(0.01f));
+
+    Location past_end = point1;
+    past_end.offset(1500.0f, 0.0f);
+    REQUIRE(past_end.line_path_proportion(point1, point2) == Catch::Approx(1.5f).margin(0.01f));
+}
+
+TEST_CASE("line_path_proportion returns 1.0 when point1 and point2 are coincident", "[location][line_path_proportion]") {
+    Location point1(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    Location point2 = point1; // same location - zero-length segment
+    Location anywhere = point1;
+    anywhere.offset(100.0f, 0.0f);
+    REQUIRE(anywhere.line_path_proportion(point1, point2) == 1.0f);
+}
+
+TEST_CASE("past_interval_finish_line is true only once line_path_proportion reaches 1", "[location][past_interval_finish_line]") {
+    Location point1(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    Location point2 = point1;
+    point2.offset(1000.0f, 0.0f);
+
+    Location before = point1;
+    before.offset(500.0f, 0.0f);
+    REQUIRE_FALSE(before.past_interval_finish_line(point1, point2));
+
+    Location after = point1;
+    after.offset(1500.0f, 0.0f);
+    REQUIRE(after.past_interval_finish_line(point1, point2));
+
+    Location at = point2;
+    REQUIRE(at.past_interval_finish_line(point1, point2));
+}

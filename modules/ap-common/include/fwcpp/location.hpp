@@ -1,13 +1,23 @@
 #pragma once
 
-// Port of AP_Common/Location.h + Location.cpp. CPP-011, slice 1.
+// Port of AP_Common/Location.h + Location.cpp. CPP-011.
 //
 // SLICE BOUNDARY: struct (bitfield flags, lat/lng/alt, AltFrame), zero(),
 // the (lat, lng, alt, frame) constructor, set_alt_cm/set_alt_m,
 // get_alt_frame, longitude_scale/diff_longitude/wrap_longitude/
 // limit_lattitude, offset_latlng/offset/offset_bearing/
 // offset_bearing_and_pitch, get_distance, get_distance_NE (Vector2f only),
-// get_distance_NED (Vector3f only).
+// get_distance_NED (Vector3f only), same_latlon_as/same_alt_as/
+// same_loc_as, is_zero, check_latlng, line_path_proportion,
+// past_interval_finish_line.
+//
+// is_zero/check_latlng/line_path_proportion/past_interval_finish_line
+// (slice 2) were picked out specifically because they're the remaining
+// functions with NO home-position/EKF-origin/terrain dependency - every
+// other still-missing piece genuinely needs that context (see below).
+// check_lat/check_lng are upstream free functions (AP_Math/location.cpp);
+// nothing else in this port calls them yet, so they're inlined into
+// check_latlng() here rather than given their own public names.
 //
 // Deliberately NOT in this slice: get_alt_cm/get_alt_m/change_alt_frame
 // (need home-position/EKF-origin/terrain-database context this port hasn't
@@ -16,11 +26,14 @@
 // origin_* (same reason - needs EKF origin), the Vector3p/Vector2p/double
 // variants of get_distance_* (Vector3p/Vector2p don't exist in this port
 // yet - a reduced-precision "postype" used for logging, out of scope until
-// something needs it), sanitize, the Vector3f/Vector3d ekf_offset
-// constructors (same origin-context dependency), and everything past
-// line ~530 of Location.cpp (great-circle/line-intersection helpers,
-// closest-point-on-line-between-two-locations, and more). Tracked in
-// CPP-011's notes.
+// something needs it), sanitize (its alt==0/relative_alt branch calls the
+// still-unported get_alt_cm - porting the rest and silently skipping that
+// branch would be exactly the kind of partial-behavior stub this port's
+// conventions forbid, so the whole function stays deferred together), the
+// Vector3f/Vector3d ekf_offset constructors (same origin-context
+// dependency), and everything past line ~530 of Location.cpp (great-circle/
+// line-intersection helpers, closest-point-on-line-between-two-locations,
+// and more). Tracked in CPP-011's notes.
 //
 // LITERAL SAFETY: LOCATION_SCALING_FACTOR/_INV are upstream `#define
 // LATLON_TO_M 0.011131884502145034` etc, narrowed to an explicitly-typed
@@ -45,6 +58,7 @@
 // noted rather than silently dropped.
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 #include <fwcpp/math/scalar.hpp>
@@ -87,6 +101,18 @@ public:
     void zero() {
         relative_alt = loiter_ccw = terrain_alt = origin_alt = loiter_xtrack = 0;
         alt = lat = lng = 0;
+    }
+
+    // Upstream compares the whole object's memory against a zero-inited
+    // Location via memcmp - not reproduced (ADR-0012 no-unsafe-
+    // reinterpretation stance, same reasoning as zero() above). Explicit
+    // field-by-field comparison is exactly equivalent for this struct: it
+    // has no padding-sensitive layout dependency anywhere else in this
+    // port, so there's no observable difference from the memcmp version.
+    [[nodiscard]] bool is_zero() const {
+        return lat == 0 && lng == 0 && alt == 0
+            && relative_alt == 0 && loiter_ccw == 0 && terrain_alt == 0
+            && origin_alt == 0 && loiter_xtrack == 0;
     }
 
     void set_alt_cm(std::int32_t alt_cm, AltFrame frame) {
@@ -279,6 +305,36 @@ public:
 
     [[nodiscard]] bool same_loc_as(const Location& loc2) const {
         return same_latlon_as(loc2) && same_alt_as(loc2);
+    }
+
+    // Upstream's check_lat(int32_t)/check_lng(int32_t) (AP_Math/location.cpp)
+    // inlined here - see file banner for why they aren't given their own
+    // names.
+    [[nodiscard]] bool check_latlng() const {
+        return std::abs(lat) <= 900000000L && std::abs(lng) <= 1800000000L;
+    }
+
+    // Proportion of the way along the path from point1 to point2 that
+    // *this* location's perpendicular projection falls at. 0 at point1, 1
+    // at point2; can exceed 1 (past point2) or be negative (before
+    // point1). If point1 and point2 are within ~3cm of each other,
+    // returns 1.0 rather than dividing by a near-zero denominator -
+    // matches upstream's own 0.001 (m^2) threshold exactly.
+    [[nodiscard]] float line_path_proportion(const Location& point1, const Location& point2) const {
+        const math::Vector2f vec1 = point1.get_distance_NE(point2);
+        const math::Vector2f vec2 = point1.get_distance_NE(*this);
+        const float dsquared = vec1.x * vec1.x + vec1.y * vec1.y;
+        if (dsquared < 0.001f) {
+            return 1.0f;
+        }
+        return (vec1 * vec2) / dsquared;
+    }
+
+    // True once this location has flown past the line through point2,
+    // perpendicular to the point1->point2 track - the standard "have we
+    // reached/passed the waypoint" test.
+    [[nodiscard]] bool past_interval_finish_line(const Location& point1, const Location& point2) const {
+        return line_path_proportion(point1, point2) >= 1.0f;
     }
 };
 
