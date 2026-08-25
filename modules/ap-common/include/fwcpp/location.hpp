@@ -9,7 +9,8 @@
 // offset_bearing_and_pitch, get_distance, get_distance_NE (Vector2f only),
 // get_distance_NED (Vector3f only), same_latlon_as/same_alt_as/
 // same_loc_as, is_zero, check_latlng, line_path_proportion,
-// past_interval_finish_line.
+// past_interval_finish_line, get_alt_cm/get_alt_m/change_alt_frame/
+// copy_alt_from/initialised/sanitize (via AltitudeContext).
 //
 // is_zero/check_latlng/line_path_proportion/past_interval_finish_line
 // (slice 2) were picked out specifically because they're the remaining
@@ -19,8 +20,8 @@
 // check_latlng() here rather than given their own public names.
 //
 // SLICE 3 adds get_alt_cm/get_alt_m/change_alt_frame/copy_alt_from/
-// initialised, via a new explicit AltitudeContext struct (see its own
-// comment below) carrying home position and EKF origin - matches this
+// initialised/sanitize, via a new explicit AltitudeContext struct (see its
+// own comment below) carrying home position and EKF origin - matches this
 // port's standing pattern (L1Inputs, constrain_value's InternalError*) of
 // taking external state as a parameter instead of reaching for a
 // singleton (AP::ahrs()). Terrain-frame conversions (AltFrame::
@@ -34,20 +35,21 @@
 // location, not just the one Location instance a single cm value would
 // cover) - so this isn't a smaller version of terrain support, it's
 // honestly no terrain support, matching a real board built without it.
+// sanitize()'s alt==0/relative_alt branch inherits this same limit: if
+// get_alt_cm can't resolve default_loc's altitude (terrain frame, or
+// context missing), that branch is simply skipped - matching upstream's
+// own `if (...) { alt = ...; }` with no else, not a port-specific gap.
 //
 // Deliberately NOT in this slice: get_vector_from_origin_* (would reuse
 // AltitudeContext's ekf_origin, but returns Vector3f/Vector3p in upstream
 // and Vector3p doesn't exist in this port), the Vector3p/Vector2p/double
-// variants of get_distance_* (same Vector3p/Vector2p gap), sanitize (its
-// alt==0/relative_alt branch now COULD call get_alt_cm, but sanitize also
-// needs a default Location to fall back to and isn't otherwise blocked -
-// left for a following slice to keep this one's diff focused on
-// AltitudeContext itself), the Vector3f/Vector3d ekf_offset constructors
-// (same ekf_origin dependency as get_vector_from_origin_*, plus the
-// Location-returning-Location constructor shape needs more thought than
-// this slice's scope), and everything past line ~530 of Location.cpp
-// (great-circle/line-intersection helpers, closest-point-on-line-between-
-// two-locations, and more). Tracked in CPP-011's notes.
+// variants of get_distance_* (same Vector3p/Vector2p gap), the Vector3f/
+// Vector3d ekf_offset constructors (same ekf_origin dependency as
+// get_vector_from_origin_*, plus the Location-returning-Location
+// constructor shape needs more thought than this slice's scope), and
+// everything past line ~530 of Location.cpp (great-circle/line-
+// intersection helpers, closest-point-on-line-between-two-locations, and
+// more). Tracked in CPP-011's notes.
 //
 // LITERAL SAFETY: LOCATION_SCALING_FACTOR/_INV are upstream `#define
 // LATLON_TO_M 0.011131884502145034` etc, narrowed to an explicitly-typed
@@ -186,6 +188,12 @@ public:
     // Converts this Location's own altitude (in place) to desired_frame.
     // Returns false (leaving this Location unchanged) if get_alt_cm fails.
     bool change_alt_frame(AltFrame desired_frame, const AltitudeContext& ctx);
+
+    // Fills in lat/lng/alt from default_loc wherever this Location's own
+    // values are missing or out of range, returning true if anything
+    // changed. Declared here, defined below AltitudeContext (its alt
+    // branch calls get_alt_cm).
+    bool sanitize(const Location& default_loc, const AltitudeContext& ctx);
 
     // See file banner: the SITL-only panic on an inconsistent
     // terrain_alt/relative_alt combination is not reproduced.
@@ -481,6 +489,38 @@ inline bool Location::change_alt_frame(AltFrame desired_frame, const AltitudeCon
     }
     set_alt_cm(new_alt_cm, desired_frame);
     return true;
+}
+
+inline bool Location::sanitize(const Location& default_loc, const AltitudeContext& ctx) {
+    bool has_changed = false;
+
+    // lat/lng == 0 conventionally means "use the current point".
+    if (lat == 0 && lng == 0) {
+        lat = default_loc.lat;
+        lng = default_loc.lng;
+        has_changed = true;
+    }
+
+    // A relative altitude of exactly 0 conventionally means "use the
+    // current altitude" - only reachable if default_loc.get_alt_cm
+    // actually succeeds (e.g. AltitudeContext has the needed home/origin
+    // set); otherwise this Location's alt is left as-is, matching
+    // upstream's own `if (...) { alt = ...; }` (no else branch).
+    if (alt == 0 && relative_alt) {
+        std::int32_t default_loc_alt = 0;
+        if (default_loc.get_alt_cm(get_alt_frame(), ctx, default_loc_alt)) {
+            alt = default_loc_alt;
+            has_changed = true;
+        }
+    }
+
+    if (!check_latlng()) {
+        lat = default_loc.lat;
+        lng = default_loc.lng;
+        has_changed = true;
+    }
+
+    return has_changed;
 }
 
 } // namespace fwcpp

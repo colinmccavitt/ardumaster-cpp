@@ -381,3 +381,55 @@ TEST_CASE("change_alt_frame leaves the Location unchanged when the conversion fa
     REQUIRE(loc.alt == 500);
     REQUIRE(loc.get_alt_frame() == Location::AltFrame::ABOVE_HOME);
 }
+
+TEST_CASE("sanitize fills in lat/lng from default_loc when both are zero", "[location][sanitize]") {
+    Location loc(0, 0, 1000, Location::AltFrame::ABSOLUTE);
+    Location default_loc(100, 200, 5000, Location::AltFrame::ABSOLUTE);
+    fwcpp::AltitudeContext ctx;
+
+    REQUIRE(loc.sanitize(default_loc, ctx));
+    REQUIRE(loc.lat == 100);
+    REQUIRE(loc.lng == 200);
+    REQUIRE(loc.alt == 1000); // alt untouched: not relative, so the alt branch doesn't apply
+}
+
+TEST_CASE("sanitize leaves a nonzero lat/lng untouched", "[location][sanitize]") {
+    Location loc(50, 60, 1000, Location::AltFrame::ABSOLUTE);
+    Location default_loc(100, 200, 5000, Location::AltFrame::ABSOLUTE);
+    fwcpp::AltitudeContext ctx;
+
+    REQUIRE_FALSE(loc.sanitize(default_loc, ctx));
+    REQUIRE(loc.lat == 50);
+    REQUIRE(loc.lng == 60);
+}
+
+TEST_CASE("sanitize fills in a zero relative altitude from default_loc when the context resolves it", "[location][sanitize]") {
+    Location loc(50, 60, 0, Location::AltFrame::ABOVE_HOME); // alt=0, relative -> "use current alt"
+    Location default_loc(50, 60, 1500, Location::AltFrame::ABOVE_HOME); // default_loc is 15m above home
+    fwcpp::AltitudeContext ctx; // home not needed: get_alt_frame() == default_loc's frame -> same-frame shortcut
+
+    REQUIRE(loc.sanitize(default_loc, ctx));
+    REQUIRE(loc.alt == 1500);
+}
+
+TEST_CASE("sanitize's alt branch is skipped (not a crash) when get_alt_cm can't resolve it", "[location][sanitize]") {
+    // loc's frame is ABOVE_HOME but default_loc is ABSOLUTE with no home
+    // set in ctx - get_alt_cm has no way to convert, matching upstream's
+    // own `if (...) { alt = ...; }` with no else: alt is simply left at 0.
+    Location loc(50, 60, 0, Location::AltFrame::ABOVE_HOME);
+    Location default_loc(50, 60, 5000, Location::AltFrame::ABSOLUTE);
+    fwcpp::AltitudeContext ctx; // home_is_set left false
+
+    REQUIRE_FALSE(loc.sanitize(default_loc, ctx)); // lat/lng already matched, alt branch failed silently
+    REQUIRE(loc.alt == 0);
+}
+
+TEST_CASE("sanitize corrects an out-of-range lat/lng to default_loc's", "[location][sanitize]") {
+    Location loc(950000000, 60, 1000, Location::AltFrame::ABSOLUTE); // lat out of range
+    Location default_loc(100, 200, 5000, Location::AltFrame::ABSOLUTE);
+    fwcpp::AltitudeContext ctx;
+
+    REQUIRE(loc.sanitize(default_loc, ctx));
+    REQUIRE(loc.lat == 100);
+    REQUIRE(loc.lng == 200);
+}
