@@ -1,5 +1,6 @@
 // Tests for fwcpp::param::type_size/scan (CPP-022 slice 4).
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/param/persistence.hpp>
 
@@ -269,4 +270,81 @@ TEST_CASE("save_raw fails once storage genuinely has no room left for a new entr
         ++key;
     }
     REQUIRE(ran_out);
+}
+
+TEST_CASE("cast_to_float converts every scalar type correctly", "[param][cast_to_float]") {
+    ParamInt8 i8(-5);
+    ParamInt16 i16(1000);
+    ParamInt32 i32(-70000);
+    ParamFloat f(3.5f);
+
+    REQUIRE(cast_to_float(VarType::Int8, &i8) == -5.0f);
+    REQUIRE(cast_to_float(VarType::Int16, &i16) == 1000.0f);
+    REQUIRE(cast_to_float(VarType::Int32, &i32) == -70000.0f);
+    REQUIRE(cast_to_float(VarType::Float, &f) == 3.5f);
+}
+
+TEST_CASE("should_skip_save never skips when force_save is set, even if the value equals its default", "[param][should_skip_save]") {
+    REQUIRE_FALSE(should_skip_save(VarType::Float, 5.0f, 5.0f, /*force_save=*/true));
+}
+
+TEST_CASE("should_skip_save skips when the value exactly equals its default", "[param][should_skip_save]") {
+    REQUIRE(should_skip_save(VarType::Float, 5.0f, 5.0f, false));
+}
+
+TEST_CASE("should_skip_save skips a Float within 0.01 percent of its default, but not further away", "[param][should_skip_save]") {
+    REQUIRE(should_skip_save(VarType::Float, 100.0f, 100.00005f, false)); // well within 0.01%
+    REQUIRE_FALSE(should_skip_save(VarType::Float, 100.0f, 101.0f, false)); // 1% away - not close enough
+}
+
+TEST_CASE("should_skip_save does NOT apply the 0.01 percent tolerance to Int32", "[param][should_skip_save]") {
+    // 1000000 vs 1000001 is well within 0.01% relatively, but Int32 is
+    // excluded from the tolerance check entirely - only exact equality
+    // (via is_equal, which for these float-represented integer values
+    // means exact) skips.
+    REQUIRE_FALSE(should_skip_save(VarType::Int32, 1000000.0f, 1000001.0f, false));
+    REQUIRE(should_skip_save(VarType::Int32, 1000000.0f, 1000000.0f, false));
+}
+
+TEST_CASE("save_scalar skips writing (and reports so) when the value matches its default", "[param][save_scalar]") {
+    RawStorage raw;
+    StorageAccess params(raw, StorageType::Param);
+
+    ParamFloat value(2.0f); // AC_PID_TFILT_HZ_DEFAULT-style: matches default
+    ParamHeader phdr = make_header(1, VarType::Float);
+
+    REQUIRE(save_scalar(params, phdr, &value, /*default_value=*/2.0f) == SaveOutcome::kSkippedMatchesDefault);
+
+    // Confirm nothing was actually written - scan should not find it.
+    std::uint16_t found_offset = 0;
+    std::uint16_t sentinel_offset = 0;
+    REQUIRE_FALSE(scan(params, phdr, found_offset, sentinel_offset));
+}
+
+TEST_CASE("save_scalar writes and round-trips when the value differs meaningfully from its default", "[param][save_scalar]") {
+    RawStorage raw;
+    StorageAccess params(raw, StorageType::Param);
+
+    ParamFloat value(9.5f);
+    ParamHeader phdr = make_header(2, VarType::Float);
+
+    REQUIRE(save_scalar(params, phdr, &value, /*default_value=*/2.0f) == SaveOutcome::kWritten);
+
+    float out = 0.0f;
+    REQUIRE(load_raw(params, phdr, &out, sizeof(out)));
+    REQUIRE(out == 9.5f);
+}
+
+TEST_CASE("save_scalar with force_save writes even when the value matches its default", "[param][save_scalar]") {
+    RawStorage raw;
+    StorageAccess params(raw, StorageType::Param);
+
+    ParamFloat value(2.0f);
+    ParamHeader phdr = make_header(3, VarType::Float);
+
+    REQUIRE(save_scalar(params, phdr, &value, /*default_value=*/2.0f, /*force_save=*/true) == SaveOutcome::kWritten);
+
+    float out = 0.0f;
+    REQUIRE(load_raw(params, phdr, &out, sizeof(out)));
+    REQUIRE(out == 2.0f);
 }

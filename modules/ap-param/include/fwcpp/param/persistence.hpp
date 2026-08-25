@@ -8,18 +8,21 @@
 // SLICE 5 (load_raw/save_raw) scope: this is the raw byte-level
 // persistence primitive - given an already-resolved ParamHeader (key/
 // group_element/type set by the caller) and a value buffer, read or
-// write it. Deliberately NOT included: the default-value-skip comparison
-// upstream's save_sync performs before writing (skip the write entirely
-// if the new value equals the GroupInfo/Info's own def_value, within a
-// 0.01% tolerance for non-int32 types) - that's a policy layered ON TOP
-// of raw persistence, needs a resolved GroupInfo/Info entry's def_value
-// (not just a ParamHeader), and belongs with the higher-level save()
-// this port doesn't have yet (which itself needs find_var_info's by-
-// pointer-identity resolution - still unported, see name_lookup.hpp's
-// banner). Also not reproduced: AP_PARAM_STORAGE_BAK_ENABLED's mirrored
+// write it. Also not reproduced: AP_PARAM_STORAGE_BAK_ENABLED's mirrored
 // backup-storage write (eeprom_write_check writes to both _storage and
 // an optional _storage_bak) - a redundancy feature, not part of the core
 // format, and this port has one storage area, not two.
+//
+// SLICE 7 (cast_to_float/should_skip_save/save_scalar): the default-
+// value-skip policy layered ON TOP of save_raw, deferred out of slice 5
+// because it needs a resolved default value (from defaults.hpp's
+// get_default_value against a GroupInfo/Info entry), not just a
+// ParamHeader. This is genuinely usable now (unlike a full save() that
+// discovers its OWN key/group_element via the still-unported by-pointer-
+// identity find_var_info - see name_lookup.hpp's banner): any caller
+// that already has a resolved ParamHeader (e.g. from find_group plus its
+// own knowledge of the object's key) and the matching GroupInfo entry's
+// default can use save_scalar directly.
 //
 // POWER-LOSS-SAFE WRITE ORDER, preserved exactly: when appending a new
 // entry, upstream writes the NEW sentinel (past the new entry) FIRST,
@@ -62,8 +65,10 @@
 // LITERAL SAFETY: no bare ambiguous double literals - everything here is
 // integer/byte arithmetic.
 
+#include <cmath>
 #include <cstdint>
 
+#include <fwcpp/math/scalar.hpp> // math::is_equal
 #include <fwcpp/param/param.hpp> // EepromHeader, ParamHeader, VarType, get_key, is_sentinel
 #include <fwcpp/param/storage.hpp> // storage::StorageAccess
 
@@ -166,6 +171,73 @@ namespace fwcpp::param {
         return false;
     }
     return storage.write_block(ofs, &phdr, sizeof(phdr)); // header written LAST - see file banner
+}
+
+// Reads the scalar value at `ptr` (known, by the caller, to hold a value
+// of `type`) as a float - matches upstream's own AP_Param::cast_to_float
+// dispatch. NaN for None/Group/Vector3f (this port has no scalar
+// representation for those to cast).
+[[nodiscard]] inline float cast_to_float(VarType type, const void* ptr) {
+    switch (type) {
+        case VarType::Int8:
+            return static_cast<float>(static_cast<const ParamInt8*>(ptr)->get());
+        case VarType::Int16:
+            return static_cast<float>(static_cast<const ParamInt16*>(ptr)->get());
+        case VarType::Int32:
+            return static_cast<float>(static_cast<const ParamInt32*>(ptr)->get());
+        case VarType::Float:
+            return static_cast<const ParamFloat*>(ptr)->get();
+        default:
+            return std::nanf("");
+    }
+}
+
+// True if a save of `current_value` (given `default_value`) should be
+// skipped - matches upstream's save_sync exactly: never skip when
+// force_save is set; skip when the value already equals its default;
+// otherwise, for every type EXCEPT Int32, also skip when the two are
+// within 0.01% of each other (upstream's own comment: "for other than
+// 32 bit integers, we accept values within 0.01 percent of the current
+// value as being the same" - Int32 is excluded because a relative
+// tolerance on integer counts doesn't make the same sense it does for a
+// physical-quantity float).
+[[nodiscard]] inline bool should_skip_save(VarType type, float current_value, float default_value, bool force_save) {
+    if (force_save) {
+        return false;
+    }
+    if (math::is_equal(current_value, default_value)) {
+        return true;
+    }
+    if (type != VarType::Int32 && std::fabs(current_value - default_value) < 0.0001f * std::fabs(current_value)) {
+        return true;
+    }
+    return false;
+}
+
+enum class SaveOutcome : std::uint8_t {
+    kWritten,
+    kSkippedMatchesDefault,
+    kFailed,
+};
+
+// Saves the scalar at `value_ptr` under `phdr`, applying the default-
+// value-skip policy first for Int8/Int16/Int32/Float (Vector3f and
+// Group have no single scalar to compare - always written if reached,
+// though nothing in this port currently constructs a Vector3f-typed
+// ParamHeader to call this with). `default_value` is the caller's
+// already-resolved default (see defaults.hpp's get_default_value) -
+// this function doesn't reach into a GroupInfo/Info itself, keeping its
+// own scope to the write policy alone.
+[[nodiscard]] inline SaveOutcome save_scalar(storage::StorageAccess& storage, const ParamHeader& phdr, const void* value_ptr, float default_value, bool force_save = false) {
+    const auto type = static_cast<VarType>(phdr.type);
+    if (type == VarType::Int8 || type == VarType::Int16 || type == VarType::Int32 || type == VarType::Float) {
+        const float current = cast_to_float(type, value_ptr);
+        if (should_skip_save(type, current, default_value, force_save)) {
+            return SaveOutcome::kSkippedMatchesDefault;
+        }
+    }
+    const std::uint8_t size = type_size(type);
+    return save_raw(storage, phdr, value_ptr, size) ? SaveOutcome::kWritten : SaveOutcome::kFailed;
 }
 
 } // namespace fwcpp::param
