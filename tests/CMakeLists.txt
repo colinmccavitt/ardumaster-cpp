@@ -185,3 +185,11 @@ catch_discover_tests(tecs_test)
 add_executable(fw_control_test fw_control_test.cpp)
 target_link_libraries(fw_control_test PRIVATE ap-fw-control Catch2::Catch2WithMain)
 catch_discover_tests(fw_control_test)
+
+# ap-sim is a TEST-ONLY dependency here (CPP-031's closed-loop
+# integration test) - ap-vehicle itself does not link it, matching how
+# ap-sim deliberately shares no code with ap-ahrs (see sim_plane.hpp's
+# own file banner).
+add_executable(vehicle_test vehicle_test.cpp)
+target_link_libraries(vehicle_test PRIVATE ap-vehicle ap-sim Catch2::Catch2WithMain)
+catch_discover_tests(vehicle_test)
