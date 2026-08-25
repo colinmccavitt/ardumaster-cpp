@@ -570,3 +570,87 @@ TEST_CASE("get_vector_from_origin_NED_m negates z relative to get_vector_from_or
     REQUIRE(ned.x == Catch::Approx(neu.x));
     REQUIRE(ned.y == Catch::Approx(neu.y));
 }
+
+TEST_CASE("linearly_interpolate_alt sets altitude proportionally along the point1->point2 track", "[location][interpolate]") {
+    Location point1(0, 0, 1000, Location::AltFrame::ABSOLUTE); // 10m
+    Location point2 = point1;
+    point2.offset(1000.0f, 0.0f); // 1000m north
+    point2.alt = 3000; // 30m
+
+    Location halfway = point1;
+    halfway.offset(500.0f, 0.0f);
+    halfway.linearly_interpolate_alt(point1, point2);
+    REQUIRE(halfway.alt == Catch::Approx(2000).margin(20)); // halfway between 10m and 30m -> 20m
+    REQUIRE(halfway.get_alt_frame() == Location::AltFrame::ABSOLUTE); // takes point2's frame
+}
+
+TEST_CASE("linearly_interpolate_alt clamps to point1's altitude before the start of the track", "[location][interpolate]") {
+    Location point1(0, 0, 1000, Location::AltFrame::ABSOLUTE);
+    Location point2 = point1;
+    point2.offset(1000.0f, 0.0f);
+    point2.alt = 3000;
+
+    Location before_start = point1;
+    before_start.offset(-500.0f, 0.0f); // 500m before point1
+    before_start.linearly_interpolate_alt(point1, point2);
+    REQUIRE(before_start.alt == Catch::Approx(1000).margin(20)); // clamped to point1's alt
+}
+
+TEST_CASE("linearly_interpolate_alt clamps to point2's altitude past the end of the track", "[location][interpolate]") {
+    Location point1(0, 0, 1000, Location::AltFrame::ABSOLUTE);
+    Location point2 = point1;
+    point2.offset(1000.0f, 0.0f);
+    point2.alt = 3000;
+
+    Location past_end = point1;
+    past_end.offset(1500.0f, 0.0f);
+    past_end.linearly_interpolate_alt(point1, point2);
+    REQUIRE(past_end.alt == Catch::Approx(3000).margin(20)); // clamped to point2's alt
+}
+
+TEST_CASE("from_ekf_offset_NEU_cm sets alt/frame always, lat/lng only when the context has an EKF origin", "[location][ekf_offset]") {
+    fwcpp::math::Vector3f offset_neu_cm(1000.0f, 500.0f, 2000.0f); // 10m north, 5m east, 20m up
+    fwcpp::AltitudeContext ctx; // origin not set
+
+    Location out;
+    REQUIRE_FALSE(Location::from_ekf_offset_NEU_cm(offset_neu_cm, Location::AltFrame::ABOVE_HOME, ctx, out));
+    REQUIRE(out.lat == 0); // zero()'d, never got a lat/lng
+    REQUIRE(out.lng == 0);
+    REQUIRE(out.alt == 2000); // alt/frame ARE always set, matching upstream's constructor exactly
+    REQUIRE(out.get_alt_frame() == Location::AltFrame::ABOVE_HOME);
+}
+
+TEST_CASE("from_ekf_offset_NEU_cm offsets from ekf_origin when the context has one", "[location][ekf_offset]") {
+    Location origin(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    fwcpp::AltitudeContext ctx;
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = origin;
+
+    fwcpp::math::Vector3f offset_neu_cm(10000.0f, 0.0f, 500.0f); // 100m north
+    Location out;
+    REQUIRE(Location::from_ekf_offset_NEU_cm(offset_neu_cm, Location::AltFrame::ABSOLUTE, ctx, out));
+
+    Location expected = origin;
+    expected.offset(100.0f, 0.0f);
+    REQUIRE(out.lat == Catch::Approx(static_cast<double>(expected.lat)).margin(2000)); // within ~2e-4 deg
+    REQUIRE(out.alt == 500);
+}
+
+TEST_CASE("from_ekf_offset_NED_m matches from_ekf_offset_NEU_cm after unit/sign conversion", "[location][ekf_offset]") {
+    Location origin(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    fwcpp::AltitudeContext ctx;
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = origin;
+
+    fwcpp::math::Vector3f offset_ned_m(50.0f, 25.0f, -10.0f); // 50m north, 25m east, 10m up (NED: negative down = up)
+    fwcpp::math::Vector3f offset_neu_cm(5000.0f, 2500.0f, 1000.0f); // same offset, NEU-cm
+
+    Location via_ned;
+    Location via_neu;
+    REQUIRE(Location::from_ekf_offset_NED_m(offset_ned_m, Location::AltFrame::ABSOLUTE, ctx, via_ned));
+    REQUIRE(Location::from_ekf_offset_NEU_cm(offset_neu_cm, Location::AltFrame::ABSOLUTE, ctx, via_neu));
+
+    REQUIRE(via_ned.lat == via_neu.lat);
+    REQUIRE(via_ned.lng == via_neu.lng);
+    REQUIRE(via_ned.alt == via_neu.alt);
+}

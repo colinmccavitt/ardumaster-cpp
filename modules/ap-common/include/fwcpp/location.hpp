@@ -40,16 +40,29 @@
 // context missing), that branch is simply skipped - matching upstream's
 // own `if (...) { alt = ...; }` with no else, not a port-specific gap.
 //
-// Deliberately NOT in this slice: get_vector_from_origin_* (would reuse
-// AltitudeContext's ekf_origin, but returns Vector3f/Vector3p in upstream
-// and Vector3p doesn't exist in this port), the Vector3p/Vector2p/double
-// variants of get_distance_* (same Vector3p/Vector2p gap), the Vector3f/
-// Vector3d ekf_offset constructors (same ekf_origin dependency as
-// get_vector_from_origin_*, plus the Location-returning-Location
-// constructor shape needs more thought than this slice's scope), and
-// everything past line ~530 of Location.cpp (great-circle/line-
-// intersection helpers, closest-point-on-line-between-two-locations, and
-// more). Tracked in CPP-011's notes.
+// SLICE 6 (final): postype.hpp landed (see that file), unblocking
+// get_vector_xy_from_origin_NE_cm/get_vector_from_origin_NEU_cm/
+// get_vector_from_origin_NEU/get_vector_xy_from_origin_NE_m/
+// get_vector_from_origin_NED_m/get_vector_from_origin_NEU_m,
+// get_distance_NE_postype/get_distance_NED_postype, and the ekf_offset
+// constructors - reworked as static bool-returning factories
+// (from_ekf_offset_NEU_cm/from_ekf_offset_NED_m) rather than upstream's
+// silently-degrading constructor shape (see those functions' own
+// comment). linearly_interpolate_alt was also added - it turned out to
+// have no home/EKF-origin dependency at all (built entirely from already-
+// ported line_path_proportion/constrain_value/set_alt_cm), just placed
+// late in upstream's Location.cpp file order. That resolves an earlier
+// version of this banner's claim about "great-circle/line-intersection
+// helpers past line ~530" - re-checked directly against upstream and
+// there aren't any; that claim was wrong and is corrected here rather
+// than perpetuated. With this slice, CPP-011 covers every member of
+// upstream Location except get_alt_cm/friends' terrain-frame path (no
+// AP_Terrain in this port - see SLICE 3's own note, a real and permanent
+// gap until AP_Terrain exists) and the Vector2p/Vector3p double-typed
+// get_distance_*_postype's sibling `get_distance_NE_ftype`/
+// `get_distance_NED_double` (ftype doesn't exist in this port yet -
+// EKF-precision plumbing, CPP-011's own notes track it as a follow-on
+// once an EKF module needs it).
 //
 // LITERAL SAFETY: LOCATION_SCALING_FACTOR/_INV are upstream `#define
 // LATLON_TO_M 0.011131884502145034` etc, narrowed to an explicitly-typed
@@ -228,6 +241,32 @@ public:
 
     template <typename T>
     [[nodiscard]] bool get_vector_from_origin_NEU_m(T& vec_neu, const AltitudeContext& ctx) const;
+
+    // Builds a Location from an NEU (north/east/up) offset in CENTIMETERS
+    // relative to ctx.ekf_origin, at the given altitude frame.
+    //
+    // DELIBERATE DIVERGENCE from upstream's shape, not its behavior:
+    // upstream expresses this as a CONSTRUCTOR that silently leaves lat/lng
+    // at 0 if ctx has no EKF origin (a constructor has no way to signal
+    // failure). This port's own standing convention (get_alt_cm and
+    // everything built on it) is bool-return + out-param for anything that
+    // can fail - applied here too, as a static factory instead of a
+    // constructor. `out` receives EXACTLY what upstream's constructor
+    // would have produced in both the success and failure case (zero()'d,
+    // then alt/frame always set via set_alt_cm regardless of origin
+    // availability, lat/lng only set - via offset() from ctx.ekf_origin -
+    // when this returns true) - the return value is new information this
+    // port can expose that upstream's constructor shape couldn't, not a
+    // change to what `out` ends up containing.
+    template <typename T>
+    static bool from_ekf_offset_NEU_cm(const math::Vector3<T>& ekf_offset_neu_cm, AltFrame frame, const AltitudeContext& ctx, Location& out);
+
+    // Same as from_ekf_offset_NEU_cm, but takes an NED offset in METERS -
+    // matches upstream's own from_ekf_offset_NED_m named constructor
+    // exactly (x/y unchanged, z negated and both scaled by 100 to reach
+    // NEU-centimeters, then delegates).
+    template <typename T>
+    static bool from_ekf_offset_NED_m(const math::Vector3<T>& ekf_offset_ned_m, AltFrame frame, const AltitudeContext& ctx, Location& out);
 
     // See file banner: the SITL-only panic on an inconsistent
     // terrain_alt/relative_alt combination is not reproduced.
@@ -462,6 +501,18 @@ public:
     [[nodiscard]] bool past_interval_finish_line(const Location& point1, const Location& point2) const {
         return line_path_proportion(point1, point2) >= 1.0f;
     }
+
+    // Sets this Location's altitude (in point2's alt frame) by linearly
+    // interpolating between point1's and point2's altitudes, using this
+    // Location's own line_path_proportion along the point1->point2 track
+    // (clamped to [0,1] - even if this Location is technically before
+    // point1 or past point2, the interpolated altitude stays within
+    // [point1.alt, point2.alt]).
+    void linearly_interpolate_alt(const Location& point1, const Location& point2) {
+        const float t = math::constrain_value(line_path_proportion(point1, point2), 0.0f, 1.0f);
+        const float interpolated = static_cast<float>(point1.alt) + static_cast<float>(point2.alt - point1.alt) * t;
+        set_alt_cm(static_cast<std::int32_t>(interpolated), point2.get_alt_frame());
+    }
 };
 
 // Everything get_alt_cm needs from the AHRS for one altitude-frame
@@ -661,6 +712,26 @@ inline bool Location::get_vector_from_origin_NEU_m(T& vec_neu, const AltitudeCon
     }
     vec_neu *= 0.01f;
     return true;
+}
+
+template <typename T>
+inline bool Location::from_ekf_offset_NEU_cm(const math::Vector3<T>& ekf_offset_neu_cm, AltFrame frame, const AltitudeContext& ctx, Location& out) {
+    out.zero();
+    out.set_alt_cm(static_cast<std::int32_t>(ekf_offset_neu_cm.z), frame);
+    if (!ctx.origin_is_set) {
+        return false;
+    }
+    out.lat = ctx.ekf_origin.lat;
+    out.lng = ctx.ekf_origin.lng;
+    out.offset(static_cast<float>(ekf_offset_neu_cm.x) * 0.01f, static_cast<float>(ekf_offset_neu_cm.y) * 0.01f);
+    return true;
+}
+
+template <typename T>
+inline bool Location::from_ekf_offset_NED_m(const math::Vector3<T>& ekf_offset_ned_m, AltFrame frame, const AltitudeContext& ctx, Location& out) {
+    const math::Vector3<T> ekf_offset_neu_cm(
+        ekf_offset_ned_m.x * static_cast<T>(100), ekf_offset_ned_m.y * static_cast<T>(100), -ekf_offset_ned_m.z * static_cast<T>(100));
+    return from_ekf_offset_NEU_cm(ekf_offset_neu_cm, frame, ctx, out);
 }
 
 } // namespace fwcpp
