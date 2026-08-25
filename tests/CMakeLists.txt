@@ -73,3 +73,7 @@ catch_discover_tests(slew_limiter_test)
 add_executable(ac_pid_test ac_pid_test.cpp)
 target_link_libraries(ac_pid_test PRIVATE ap-pid Catch2::Catch2WithMain)
 catch_discover_tests(ac_pid_test)
+
+add_executable(l1_control_test l1_control_test.cpp)
+target_link_libraries(l1_control_test PRIVATE ap-nav Catch2::Catch2WithMain)
+catch_discover_tests(l1_control_test)
