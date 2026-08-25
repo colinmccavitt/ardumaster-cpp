@@ -49,3 +49,7 @@ catch_discover_tests(quaternion_test)
 add_executable(bitmask_test bitmask_test.cpp)
 target_link_libraries(bitmask_test PRIVATE ap-common Catch2::Catch2WithMain)
 catch_discover_tests(bitmask_test)
+
+add_executable(location_test location_test.cpp)
+target_link_libraries(location_test PRIVATE ap-common Catch2::Catch2WithMain)
+catch_discover_tests(location_test)

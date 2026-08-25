@@ -126,6 +126,14 @@ is_equal(A a, B b) {
 // than improving them.
 [[nodiscard]] double radians(double deg);
 [[nodiscard]] float radians(float deg);
+
+// The bare degrees-to-radians constant itself, exposed for the rare caller
+// (Location::longitude_scale) that needs to reproduce a specific upstream
+// literal-multiplication GROUPING rather than call radians() - floating
+// point multiplication isn't associative, so `x * (a * DEG_TO_RAD)` and
+// `radians(x * a)` (== `(x * a) * kDegToRad`) aren't guaranteed identical.
+// One definition, here, rather than a second hardcoded copy elsewhere.
+[[nodiscard]] float deg_to_rad_constant();
 [[nodiscard]] float radians(int deg);
 [[nodiscard]] float degrees(float rad); // upstream has no degrees(double) overload - not invented here either
 

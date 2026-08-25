@@ -43,6 +43,10 @@ float degrees(float rad) {
     return rad * kRadToDeg;
 }
 
+float deg_to_rad_constant() {
+    return kDegToRad;
+}
+
 float wrap_360(float angle) {
     float res = std::fmod(angle, 360.0f);
     if (res < 0) {
