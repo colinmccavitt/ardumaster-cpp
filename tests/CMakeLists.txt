@@ -193,3 +193,7 @@ catch_discover_tests(fw_control_test)
 add_executable(vehicle_test vehicle_test.cpp)
 target_link_libraries(vehicle_test PRIVATE ap-vehicle ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(vehicle_test)
+
+add_executable(gps_test gps_test.cpp)
+target_link_libraries(gps_test PRIVATE ap-gps Catch2::Catch2WithMain)
+catch_discover_tests(gps_test)
