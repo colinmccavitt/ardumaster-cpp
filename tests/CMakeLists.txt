@@ -101,3 +101,7 @@ catch_discover_tests(vector3_matops_test)
 add_executable(postype_test postype_test.cpp)
 target_link_libraries(postype_test PRIVATE ap-math Catch2::Catch2WithMain)
 catch_discover_tests(postype_test)
+
+add_executable(storage_test storage_test.cpp)
+target_link_libraries(storage_test PRIVATE ap-param Catch2::Catch2WithMain)
+catch_discover_tests(storage_test)
