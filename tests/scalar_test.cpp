@@ -90,6 +90,23 @@ TEST_CASE("wrap_2PI and wrap_PI wrap radians symmetrically around zero", "[scala
     REQUIRE(wrap_PI(static_cast<float>(3 * M_PI / 2)) == Catch::Approx(static_cast<float>(-M_PI / 2)));
 }
 
+TEST_CASE("safe_asin clamps out-of-domain inputs instead of returning NaN", "[scalar]") {
+    REQUIRE(safe_asin(0.0f) == Catch::Approx(0.0f));
+    REQUIRE(safe_asin(1.0f) == Catch::Approx(static_cast<float>(M_PI_2)));
+    REQUIRE(safe_asin(2.0f) == Catch::Approx(static_cast<float>(M_PI_2))); // clamped, not NaN
+    REQUIRE(safe_asin(-2.0f) == Catch::Approx(static_cast<float>(-M_PI_2)));
+    REQUIRE(safe_asin(std::nanf("")) == 0.0f);
+    REQUIRE(safe_asin(1) == Catch::Approx(static_cast<float>(M_PI_2))); // integral T
+}
+
+TEST_CASE("safe_sqrt returns zero for negative or NaN input instead of NaN", "[scalar]") {
+    REQUIRE(safe_sqrt(4.0f) == Catch::Approx(2.0f));
+    REQUIRE(safe_sqrt(0.0f) == Catch::Approx(0.0f));
+    REQUIRE(safe_sqrt(-1.0f) == 0.0f);
+    REQUIRE(safe_sqrt(std::nanf("")) == 0.0f);
+    REQUIRE(safe_sqrt(4) == Catch::Approx(2.0f)); // integral T
+}
+
 TEST_CASE("constrain_value clamps within range and passes through inside it", "[scalar]") {
     REQUIRE(constrain_value(5.0f, 0.0f, 10.0f) == 5.0f);
     REQUIRE(constrain_value(-5.0f, 0.0f, 10.0f) == 0.0f);

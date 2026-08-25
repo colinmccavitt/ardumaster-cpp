@@ -138,6 +138,37 @@ is_equal(A a, B b) {
 [[nodiscard]] float wrap_PI(float radian);
 [[nodiscard]] double wrap_PI(double radian);
 
+// safe_asin / safe_sqrt: both narrow to float BEFORE any comparison or call
+// (upstream's own comment on safe_sqrt: "cast before checking so we sqrtf
+// the same value we check"), so unlike the wrap_* family there is no
+// double-precision code path and no bare literal whose meaning depends on
+// the including TU's flags - M_PI_2 below is cast to float immediately
+// either way the flag parses it, and the two orderings round to the same
+// float. Safe to keep header-only.
+template <typename T>
+[[nodiscard]] inline float safe_asin(T v) {
+    const float f = static_cast<float>(v);
+    if (std::isnan(f)) {
+        return 0.0f;
+    }
+    if (f >= 1.0f) {
+        return static_cast<float>(M_PI_2);
+    }
+    if (f <= -1.0f) {
+        return static_cast<float>(-M_PI_2);
+    }
+    return std::asin(f);
+}
+
+template <typename T>
+[[nodiscard]] inline float safe_sqrt(T v) {
+    const float val = static_cast<float>(v);
+    if (std::isgreaterequal(val, 0.0f)) {
+        return std::sqrt(val);
+    }
+    return 0.0f;
+}
+
 // Sink for the NaN-clamp anomaly constrain_value reports. Upstream reaches a
 // global singleton (AP::internalerror()); ADR-0012 decision 6 forbids
 // reproducing that, so it is an explicit, optional, non-owning pointer
