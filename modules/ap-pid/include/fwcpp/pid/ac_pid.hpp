@@ -17,19 +17,27 @@
 // update_all(), threading through to the embedded SlewLimiter's own
 // modifier() call - same reasoning as SlewLimiter's own file banner.
 //
-// NOTCH FILTERS STILL NOT INCLUDED, and this is now the one deliberately
-// remaining gap (as of CPP-016 slice 2): unlike Filter/NotchFilter.h itself
-// (ported as fwcpp::filter::NotchFilter, CPP-018, done), AC_PID's notch
-// integration doesn't just construct a NotchFilter - it looks one up at
-// runtime by index through AP_Filter's global registry (`AP::filters()`,
-// a singleton returning a filter definition the user configured via GCS
-// parameters). Wiring that in means either porting AP_Filter's registry
-// (a real subsystem, its own ticket) or inventing a different lookup
-// mechanism upstream doesn't have - neither is a small addition to bolt
-// onto this file. set_notch_sample_rate and the AP_FILTER_ENABLED members
-// remain absent; every other function in this slice reproduces the
-// "notch filters not configured" behavior exactly, since upstream's own
-// notch application is a no-op whenever the pointer is null.
+// NOTCH FILTERS (CPP-016 slice 3 / CPP-024): set_notch_sample_rate takes
+// an explicit fwcpp::filter::FilterRegistry& instead of upstream's
+// AP::filters() singleton - matches this port's standing no-singleton
+// convention. NotchFilter<float> members are held BY VALUE (target_notch_/
+// error_notch_), not upstream's NotchFilterFloat* (heap-allocated via
+// NEW_NOTHROW on first configuration) - update_all/update_error are this
+// port's actual control-loop path (unlike FilterRegistry's own slots,
+// which are more like AP_Filters::update()'s 1Hz maintenance context),
+// and ADR-0012 forbids dynamic allocation there. target_notch_active_/
+// error_notch_active_ (bools) play the exact role upstream's `!= nullptr`
+// checks do - "has this notch been successfully configured" - without
+// needing a pointer or an allocation to express it.
+//
+// set_notch_sample_rate's control flow matches upstream precisely,
+// including a subtlety worth calling out: if FilterRegistry::
+// get_notch_filter returns nullptr (index out of range), upstream leaves
+// its existing _target_notch/_error_notch state COMPLETELY untouched -
+// only an in-range slot whose OWN setup_notch_filter fails causes the
+// filter to be disabled. This port's target_notch_active_/
+// notch_t_filter_ get the same treatment: an out-of-range index changes
+// nothing about previously-established state.
 //
 // load_gains/save_gains/var_info NOT PORTED: EEPROM/AP_Param-specific,
 // meaningless without AP_Param.
@@ -41,6 +49,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include <fwcpp/filter/filter_registry.hpp>
+#include <fwcpp/filter/notch_filter.hpp>
 #include <fwcpp/filter/slew_limiter.hpp>
 #include <fwcpp/internal_error.hpp>
 #include <fwcpp/math/scalar.hpp>
@@ -103,15 +113,32 @@ public:
         if (flags_reset_filter_) {
             flags_reset_filter_ = false;
             target_ = target;
+            if (target_notch_active_) {
+                target_notch_.reset();
+                target_ = target_notch_.apply(target_);
+            }
+
             error_ = target_ - measurement;
+            if (error_notch_active_) {
+                error_notch_.reset();
+                error_ = error_notch_.apply(error_);
+            }
+
             derivative_ = 0.0f;
             target_derivative_ = 0.0f;
         } else {
             const float target_last = target_;
+            if (target_notch_active_) {
+                target = target_notch_.apply(target);
+            }
             target_ += math::calc_lowpass_alpha_dt(dt, filt_t_hz_) * (target - target_);
 
             const float error_last = error_;
-            const float error = target_ - measurement;
+            float error = target_ - measurement;
+            if (error_notch_active_) {
+                error = error_notch_.apply(error);
+            }
+            // apply notch filters before FLTD/FLTE to minimize shot noise (matches upstream's own comment)
             error_ += math::calc_lowpass_alpha_dt(dt, filt_e_hz_) * (error - error_);
 
             if (math::is_positive(dt)) {
@@ -178,6 +205,39 @@ public:
         pid_info_.actual = 0.0f;
         return output;
     }
+
+    // Configures the target/error notch filters from `registry`'s slots
+    // (indexed by notch_t_filter_/notch_e_filter_, both 0 meaning
+    // "disabled") at the given sample rate. See file banner for the
+    // out-of-range-index subtlety this reproduces from upstream exactly.
+    void set_notch_sample_rate(float sample_rate, filter::FilterRegistry& registry) {
+        if (notch_t_filter_ == 0 && notch_e_filter_ == 0) {
+            return;
+        }
+
+        if (notch_t_filter_ != 0) {
+            target_notch_active_ = true; // matches upstream's unconditional lazy-allocate-if-null
+            filter::NotchFilterParams* params = registry.get_notch_filter(notch_t_filter_);
+            if (params != nullptr && !params->setup_notch_filter(target_notch_, sample_rate)) {
+                target_notch_active_ = false;
+                notch_t_filter_ = 0; // disable filter if setup fails
+            }
+        }
+
+        if (notch_e_filter_ != 0) {
+            error_notch_active_ = true;
+            filter::NotchFilterParams* params = registry.get_notch_filter(notch_e_filter_);
+            if (params != nullptr && !params->setup_notch_filter(error_notch_, sample_rate)) {
+                error_notch_active_ = false;
+                notch_e_filter_ = 0; // disable filter if setup fails
+            }
+        }
+    }
+
+    void set_notch_t_filter(std::uint8_t index) { notch_t_filter_ = index; }
+    void set_notch_e_filter(std::uint8_t index) { notch_e_filter_ = index; }
+    [[nodiscard]] bool target_notch_active() const { return target_notch_active_; }
+    [[nodiscard]] bool error_notch_active() const { return error_notch_active_; }
 
     void reset_filter() { flags_reset_filter_ = true; }
 
@@ -291,6 +351,13 @@ private:
     float derivative_ = 0.0f;
     float target_derivative_ = 0.0f;
     std::int8_t slew_limit_scale_ = 1;
+
+    std::uint8_t notch_t_filter_ = 0;
+    std::uint8_t notch_e_filter_ = 0;
+    filter::NotchFilter<float> target_notch_;
+    filter::NotchFilter<float> error_notch_;
+    bool target_notch_active_ = false;
+    bool error_notch_active_ = false;
 
     PidInfo pid_info_;
 };

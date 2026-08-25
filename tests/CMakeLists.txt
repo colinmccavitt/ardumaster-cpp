@@ -129,3 +129,7 @@ catch_discover_tests(defaults_test)
 add_executable(notch_filter_params_test notch_filter_params_test.cpp)
 target_link_libraries(notch_filter_params_test PRIVATE ap-filter ap-param Catch2::Catch2WithMain)
 catch_discover_tests(notch_filter_params_test)
+
+add_executable(filter_registry_test filter_registry_test.cpp)
+target_link_libraries(filter_registry_test PRIVATE ap-filter Catch2::Catch2WithMain)
+catch_discover_tests(filter_registry_test)

@@ -217,3 +217,75 @@ TEST_CASE("set_slew_limit actually affects the embedded slew limiter (reference-
     float out_unlimited = pid.update_all(10.0f, 0.0f, 0.01f, 1000); // raw P = 100
     REQUIRE(out_unlimited == Catch::Approx(100.0f));
 }
+
+TEST_CASE("set_notch_sample_rate with both filter indices 0 is a no-op", "[ac_pid][notch]") {
+    AcPid pid = make_pid(1.0f, 0.0f, 0.0f);
+    fwcpp::filter::FilterRegistry registry;
+    pid.set_notch_sample_rate(400.0f, registry);
+    REQUIRE_FALSE(pid.target_notch_active());
+    REQUIRE_FALSE(pid.error_notch_active());
+}
+
+TEST_CASE("set_notch_sample_rate activates the target notch when its registry slot is configured", "[ac_pid][notch]") {
+    AcPid pid = make_pid(1.0f, 0.0f, 0.0f);
+    fwcpp::filter::FilterRegistry registry;
+    registry.get_notch_filter(1)->center_freq_hz_.set(80.0f); // quality/attenuation stay at their nonzero defaults
+
+    pid.set_notch_t_filter(1);
+    pid.set_notch_sample_rate(400.0f, registry);
+    REQUIRE(pid.target_notch_active());
+    REQUIRE_FALSE(pid.error_notch_active());
+}
+
+TEST_CASE("set_notch_sample_rate leaves the filter inactive when its registry slot is unconfigured (center_freq_hz still 0)", "[ac_pid][notch]") {
+    AcPid pid = make_pid(1.0f, 0.0f, 0.0f);
+    fwcpp::filter::FilterRegistry registry; // slot 1 left at defaults: center_freq_hz == 0
+
+    pid.set_notch_t_filter(1);
+    pid.set_notch_sample_rate(400.0f, registry);
+    REQUIRE_FALSE(pid.target_notch_active()); // setup_notch_filter returned false -> disabled
+}
+
+TEST_CASE("set_notch_sample_rate with an out-of-range index leaves previously-established state untouched", "[ac_pid][notch]") {
+    // Matches upstream exactly: AP::filters().get_filter() returning
+    // nullptr for an out-of-range index does NOT touch the existing
+    // _target_notch/_notch_T_filter state at all - only an in-range slot
+    // whose OWN setup fails causes a disable.
+    AcPid pid = make_pid(1.0f, 0.0f, 0.0f);
+    fwcpp::filter::FilterRegistry registry;
+    registry.get_notch_filter(1)->center_freq_hz_.set(80.0f);
+
+    pid.set_notch_t_filter(1);
+    pid.set_notch_sample_rate(400.0f, registry);
+    REQUIRE(pid.target_notch_active());
+
+    // Now call again with an index the registry doesn't have.
+    pid.set_notch_t_filter(200);
+    pid.set_notch_sample_rate(400.0f, registry);
+    REQUIRE(pid.target_notch_active()); // still true - untouched by the out-of-range lookup
+}
+
+TEST_CASE("an active target notch filter measurably changes update_all's output vs an unfiltered controller", "[ac_pid][notch]") {
+    fwcpp::filter::FilterRegistry registry;
+    registry.get_notch_filter(1)->center_freq_hz_.set(50.0f);
+
+    AcPid filtered = make_pid(1.0f, 0.0f, 0.0f);
+    filtered.set_notch_t_filter(1);
+    filtered.set_notch_sample_rate(400.0f, registry);
+
+    AcPid unfiltered = make_pid(1.0f, 0.0f, 0.0f);
+
+    // Feed a step target through both on the very first (reset) call -
+    // the notch filter's own reset() forces a passthrough seed, so the
+    // two should still agree on this first sample...
+    float out_filtered_first = filtered.update_all(10.0f, 0.0f, 0.0025f, 1000);
+    float out_unfiltered_first = unfiltered.update_all(10.0f, 0.0f, 0.0025f, 1000);
+    REQUIRE(out_filtered_first == Catch::Approx(out_unfiltered_first));
+
+    // ...but a subsequent oscillating target exercises the notch's real
+    // filtering behavior, which a plain low-pass-only controller doesn't
+    // have - the two should now diverge.
+    float out_filtered_second = filtered.update_all(20.0f, 0.0f, 0.0025f, 1004);
+    float out_unfiltered_second = unfiltered.update_all(20.0f, 0.0f, 0.0025f, 1004);
+    REQUIRE(out_filtered_second != Catch::Approx(out_unfiltered_second).margin(0.0001f));
+}
