@@ -129,3 +129,32 @@ TEST_CASE("Location::get_distance_NED includes the altitude difference as Down",
     // a is higher than b, so "down to reach b" is positive
     REQUIRE(ned.z == Catch::Approx(5.0f)); // (1000-500)*0.01 = 5.0m
 }
+
+TEST_CASE("Location::get_bearing_to matches the cardinal directions", "[location][bearing]") {
+    Location origin(0, 0, 0, Location::AltFrame::ABSOLUTE);
+
+    Location north = origin;
+    north.offset(100.0f, 0.0f);
+    REQUIRE(origin.get_bearing_to(north) == Catch::Approx(0).margin(200)); // ~0 cd
+
+    Location east = origin;
+    east.offset(0.0f, 100.0f);
+    REQUIRE(origin.get_bearing_to(east) == Catch::Approx(9000).margin(200)); // ~90 deg = 9000 cd
+
+    Location south = origin;
+    south.offset(-100.0f, 0.0f);
+    REQUIRE(origin.get_bearing_to(south) == Catch::Approx(18000).margin(200)); // ~180 deg
+
+    Location west = origin;
+    west.offset(0.0f, -100.0f);
+    REQUIRE(origin.get_bearing_to(west) == Catch::Approx(27000).margin(200)); // ~270 deg
+}
+
+TEST_CASE("Location::get_bearing_to is always in [0, 35999]", "[location][bearing]") {
+    Location origin(0, 0, 0, Location::AltFrame::ABSOLUTE);
+    Location target = origin;
+    target.offset_bearing(200.0f, 500.0f); // bearing 200 degrees, arbitrary
+    std::int32_t bearing = origin.get_bearing_to(target);
+    REQUIRE(bearing >= 0);
+    REQUIRE(bearing <= 35999);
+}

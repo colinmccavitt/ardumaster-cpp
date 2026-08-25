@@ -244,6 +244,16 @@ public:
             static_cast<float>(diff_longitude(loc2.lng, lng)) * LOCATION_SCALING_FACTOR * longitude_scale((lat + loc2.lat) / 2),
             static_cast<float>(alt - loc2.alt) * 0.01f); // cm -> m; verified against upstream: (alt - loc2.alt) * 0.01
     }
+
+    // Bearing to loc2, radians, 0 to 2*pi. Defined in location.cpp - bare
+    // M_PI literals (matches this port's established pattern: scalar.cpp's
+    // wrap_* family, vector2.cpp's angle()).
+    [[nodiscard]] float get_bearing(const Location& loc2) const;
+
+    // Bearing to loc2, centidegrees, 0 to 35999.
+    [[nodiscard]] std::int32_t get_bearing_to(const Location& loc2) const {
+        return static_cast<std::int32_t>(math::rad_to_cd(get_bearing(loc2)) + 0.5f);
+    }
 };
 
 } // namespace fwcpp

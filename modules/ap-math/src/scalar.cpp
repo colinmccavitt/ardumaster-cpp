@@ -43,6 +43,18 @@ float degrees(float rad) {
     return rad * kRadToDeg;
 }
 
+// RAD_TO_CDEG upstream is `18000.0f / M_PI` - float precision, same as
+// kRadToDeg's reasoning, scaled by 100 (degrees -> centidegrees).
+static constexpr float kRadToCDeg = 18000.0f / static_cast<float>(kPi);
+
+float rad_to_cd(float rad) {
+    return rad * kRadToCDeg;
+}
+
+double pi_constant() {
+    return kPi;
+}
+
 float deg_to_rad_constant() {
     return kDegToRad;
 }

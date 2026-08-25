@@ -136,6 +136,12 @@ is_equal(A a, B b) {
 [[nodiscard]] float deg_to_rad_constant();
 [[nodiscard]] float radians(int deg);
 [[nodiscard]] float degrees(float rad); // upstream has no degrees(double) overload - not invented here either
+[[nodiscard]] float rad_to_cd(float rad);
+
+// scalar.cpp's internal kPi, exposed the same way deg_to_rad_constant()
+// exposes kDegToRad - for the rare caller (Location::get_bearing) that
+// needs the bare constant itself rather than a wrapping function.
+[[nodiscard]] double pi_constant();
 
 [[nodiscard]] float wrap_360(float angle);
 [[nodiscard]] double wrap_360(double angle);
