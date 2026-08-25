@@ -157,3 +157,7 @@ catch_discover_tests(analog_in_test)
 add_executable(srv_channel_test srv_channel_test.cpp)
 target_link_libraries(srv_channel_test PRIVATE ap-srv-channel Catch2::Catch2WithMain)
 catch_discover_tests(srv_channel_test)
+
+add_executable(hal_context_test hal_context_test.cpp)
+target_link_libraries(hal_context_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(hal_context_test)
