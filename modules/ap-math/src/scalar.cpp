@@ -16,6 +16,33 @@ namespace fwcpp::math {
 static constexpr double kPi = 3.141592653589793238462643383279502884;
 static constexpr double kTwoPi = kPi * 2;
 
+// DEG_TO_RAD/RAD_TO_DEG: upstream (definitions.h) writes these as
+// `M_PI / 180.0f` and `180.0f / M_PI` - under -fsingle-precision-constant
+// M_PI's bare digits parse as float, so the *whole* constant is float
+// precision even though it multiplies against a double `deg` in the double
+// radians() overload. kDegToRad below is deliberately computed from a
+// double kPi and then narrowed through float explicitly, to land on the
+// exact bit pattern upstream's own float-typed constant has - not the
+// higher-precision value a naive double computation would give.
+static constexpr float kDegToRad = static_cast<float>(kPi) / 180.0f;
+static constexpr float kRadToDeg = 180.0f / static_cast<float>(kPi);
+
+double radians(double deg) {
+    return deg * static_cast<double>(kDegToRad);
+}
+
+float radians(float deg) {
+    return deg * kDegToRad;
+}
+
+float radians(int deg) {
+    return static_cast<float>(deg) * kDegToRad;
+}
+
+float degrees(float rad) {
+    return rad * kRadToDeg;
+}
+
 float wrap_360(float angle) {
     float res = std::fmod(angle, 360.0f);
     if (res < 0) {

@@ -1,6 +1,7 @@
 add_library(ap-math STATIC
     src/scalar.cpp
     src/matrix_alg.cpp
+    src/vector2.cpp
 )
 target_include_directories(ap-math PUBLIC include)
 target_compile_features(ap-math PUBLIC cxx_std_20)

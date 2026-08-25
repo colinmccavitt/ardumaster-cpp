@@ -25,3 +25,7 @@ catch_discover_tests(scalar_test)
 add_executable(matrix_alg_test matrix_alg_test.cpp)
 target_link_libraries(matrix_alg_test PRIVATE ap-math Catch2::Catch2WithMain)
 catch_discover_tests(matrix_alg_test)
+
+add_executable(vector2_test vector2_test.cpp)
+target_link_libraries(vector2_test PRIVATE ap-math Catch2::Catch2WithMain)
+catch_discover_tests(vector2_test)

@@ -116,7 +116,17 @@ is_equal(A a, B b) {
     }
 }
 
-// Defined in scalar.cpp - see the file banner above.
+// Defined in scalar.cpp - see the file banner above. DEG_TO_RAD upstream is
+// `M_PI / 180.0f` (definitions.h), a FLOAT-precision constant even where
+// it's multiplied against a double `deg` - reproduced at that precision
+// deliberately, not "fixed" to full double precision, matching this port's
+// standing rule of reproducing upstream's flag-affected literals rather
+// than improving them.
+[[nodiscard]] double radians(double deg);
+[[nodiscard]] float radians(float deg);
+[[nodiscard]] float radians(int deg);
+[[nodiscard]] float degrees(float rad); // upstream has no degrees(double) overload - not invented here either
+
 [[nodiscard]] float wrap_360(float angle);
 [[nodiscard]] double wrap_360(double angle);
 [[nodiscard]] int wrap_360(int angle);
