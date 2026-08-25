@@ -184,6 +184,53 @@ public:
     }
 };
 
+// upstream: ModeFBWB (mode.h) + mode_fbwb.cpp, read in full (17 lines) -
+// CPP-031 slice 2. See plane.hpp's file banner addendum for the full
+// design rationale (altitude reference frame, current-altitude-input vs.
+// target-altitude-state split, why Tecs::update_50hz()/
+// update_pitch_throttle() are called from update_fbwb_speed_height()
+// below rather than mode.hpp's shared tick(), and the FBWB airspeed-
+// target surprise).
+//
+// _enter() IS NOT PORTED/CALLED AUTOMATICALLY - this slice has no mode-
+// switching machinery yet (mode.hpp's own file banner already documents
+// this exclusion for Mode::enter()/exit() generally). Upstream's real
+// _enter() body is just `plane.set_target_altitude_current()` (the
+// HAL_SOARING_ENABLED init_cruising() call is excluded - no soaring
+// subsystem). A CALLER CONSTRUCTING A ModeFBWB MUST CALL
+// plane.set_target_altitude_current(current_altitude_cm) ONCE, EXPLICITLY,
+// BEFORE THE FIRST tick()/update() - otherwise target_altitude_cm starts
+// at its bare default (0), not the vehicle's actual current altitude, and
+// FBWB's very first pitch/throttle demand would target that instead of
+// "hold where you are" as upstream's real mode-entry behavior guarantees.
+class ModeFBWB : public Mode {
+public:
+    using Mode::Mode;
+
+    // upstream: ModeFBWB::update() (mode_fbwb.cpp) - "set nav_roll from
+    // the roll stick exactly like FBWA, then update_load_factor(), then
+    // update_fbwb_speed_height()." Pitch is NOT set here at all (unlike
+    // FBWA) - update_fbwb_speed_height() (plane.hpp) computes nav_pitch_cd
+    // from TECS's own pitch demand instead, via calc_nav_pitch().
+    void update(const StabilizeInputs& in) override {
+        plane_.nav_roll_cd =
+            static_cast<std::int32_t>(plane_.channel_roll()->norm_input() * static_cast<float>(plane_.roll_limit_cd));
+        plane_.update_load_factor();
+        plane_.update_fbwb_speed_height(in);
+    }
+
+    // upstream: ModeFBWB has NO run() override at all - relies entirely on
+    // the base Mode::run() (stabilize all three axes, see Mode::run()
+    // above). Unlike ModeFBWA, FBWB does NOT call output_pilot_throttle()
+    // after stabilizing: calc_throttle() (called from
+    // update_fbwb_speed_height() above, i.e. during update() - BEFORE
+    // run()) already wrote TECS's computed throttle demand straight to
+    // the throttle servo function. Mode::does_auto_throttle() (not
+    // ported - see mode.hpp's own banner) is true for FBWB upstream; this
+    // "no run() override" shape IS that behavior, expressed structurally
+    // instead of via a ported boolean flag.
+};
+
 // upstream: the real scheduler task-table sequence (AHRS update ->
 // update_control_mode/navigate -> Plane::stabilize() -> Plane::
 // set_servos()/output), inferred from Mode::run()'s own body plus
@@ -198,6 +245,17 @@ public:
 // (both always just call mode.run() unconditionally here - matching this
 // slice's two modes, neither of which is mode_training or
 // scripting-driven).
+//
+// CPP-031 SLICE 2 (FBWB) NOTE: this function is UNCHANGED by ModeFBWB's
+// addition - Tecs::update_50hz()/update_pitch_throttle() are called from
+// within Plane::update_fbwb_speed_height() (plane.hpp), reached only via
+// ModeFBWB::update() above, not from here. See plane.hpp's file banner
+// addendum ("SURPRISING UPSTREAM FINDING #1") for why: upstream itself
+// gates both calls on `does_auto_throttle()` (true for FBWB only), and
+// calling them unconditionally from this shared tick() would run them for
+// MANUAL/FBWA too - wrong per upstream's own real behavior - without
+// resurrecting the mode-identification machinery this port deliberately
+// left unported.
 inline void tick(Plane& plane, Mode& mode, const ahrs::GyroSample& gyro_sample, const StabilizeInputs& in) {
     // 1. pull RC input (upstream: AP_Vehicle's read_radio() scheduled task)
     plane.rc_channels.read_input(plane.hal.rc_input);

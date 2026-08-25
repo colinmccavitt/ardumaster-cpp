@@ -131,6 +131,172 @@
 // below is an explicit float-suffixed literal, matching upstream's own
 // values (verified against Parameters.cpp/config.h/defines.h, not
 // invented).
+//
+// =====================================================================
+// CPP-031 SLICE 2 ADDENDUM: ModeFBWB. Upstream (Plane-4.7.0, read
+// directly): ArduPlane/mode_fbwb.cpp (17 lines, full) + its ModeFBWB
+// class decl (mode.h); ArduPlane/navigation.cpp's update_fbwb_speed_
+// height() (~line 402) AND calc_airspeed_errors()'s FBWB/CRUISE airspeed-
+// target branch (~line 160-190, previously out of scope - slice 1 only
+// ported that function's speed-scaler line); ArduPlane/altitude.cpp's
+// set_target_altitude_current()/change_target_altitude()/
+// relative_target_altitude_cm()/check_fbwb_altitude(); ArduPlane/
+// Attitude.cpp's calc_throttle()/calc_nav_pitch(); ArduPlane/Plane.cpp's
+// update_alt() (~line 620-680) and tecs_hgt_afe() (~line 822).
+//
+// SURPRISING UPSTREAM FINDING #1 - update_pitch_throttle()/update_50hz()
+// do NOT live inside update_fbwb_speed_height(): they're called from a
+// completely separate function, Plane::update_alt() (Plane.cpp), gated on
+// `should_run_tecs = control_mode->does_auto_throttle()` (true for FBWB,
+// false for MANUAL/FBWA) - update_fbwb_speed_height() itself only adjusts
+// target_altitude.amsl_cm from the elevator stick and then calls
+// calc_throttle()/calc_nav_pitch(), which merely READ BACK whatever
+// update_alt() most recently computed. This port has no independently-
+// rated scheduled-task table (mode.hpp's own "SHAPE CHOICE" banner note -
+// "a single fixed sequence suffices for two modes") and Mode::
+// does_auto_throttle() was deliberately not ported (mode.hpp's banner:
+// mode-IDENTIFICATION machinery, out of scope). Rather than fabricate a
+// does_auto_throttle()/mode-identification mechanism just to reproduce an
+// artificial task-boundary, this port folds update_alt()'s
+// update_50hz()+update_pitch_throttle() calls DIRECTLY into
+// update_fbwb_speed_height() below, called once per tick exclusively from
+// ModeFBWB::update() (mode.hpp) - which correctly reproduces upstream's
+// real does_auto_throttle() GATE (only ModeFBWB ever calls this function,
+// exactly matching "true for FBWB, false for MANUAL/FBWA") without
+// needing the boolean flag itself. Consequently mode.hpp's tick() is NOT
+// modified for this slice - see mode.hpp's own note.
+//
+// ALTITUDE REFERENCE FRAME - A JUDGMENT CALL: upstream juggles THREE
+// altitude frames (AMSL via target_altitude.amsl_cm, home-relative via
+// relative_target_altitude_cm()'s `- home.alt`, and terrain-relative,
+// excluded - no terrain subsystem). This port has no GPS/baro/home
+// concept at all (see below), so there is no meaningful distinction
+// between "AMSL" and "home-relative" here - they collapse into ONE frame:
+// altitude relative to the vehicle's fixed start point (matching
+// SimPlane's own `position` convention - NED, position={0,0,0} at
+// construction - see ap-sim/sim_plane.hpp). Concretely: `home.alt` is
+// DEFINITIONALLY 0 in this frame, so relative_target_altitude_cm() below
+// is a pure passthrough of target_altitude_cm, and check_fbwb_altitude()'s
+// `home.alt + min_alt_cm` becomes just `min_alt_cm`.
+//
+// CURRENT ALTITUDE INPUT vs. TARGET ALTITUDE STATE - the two concepts the
+// ticket asked to keep distinct:
+//   - StabilizeInputs::current_altitude_m (NEW) - what Tecs needs to know
+//     about where the vehicle ACTUALLY is right now, an explicit per-tick
+//     caller-supplied INPUT (upstream: _ahrs.get_relative_position_D_home()
+//     for Tecs::update_pitch_throttle()'s unconditional height_ read, AND
+//     - see below - a stand-in for AP::baro().get_altitude() too). A real
+//     caller derives this from whatever altitude source exists (SimPlane's
+//     `-position.z` in this slice's own closed-loop test).
+//   - Plane::target_altitude_cm (NEW) - upstream's target_altitude.amsl_cm,
+//     STATE this class owns and the elevator stick adjusts over time via
+//     change_target_altitude()/set_target_altitude_current() below. Only
+//     ever set FROM current_altitude_m (on lock-in) or nudged by a
+//     climb-rate integration - never itself a live sensor reading.
+//
+// NO GPS/BARO - REUSING THE BARO-FALLBACK PATH ON PURPOSE: Tecs::
+// update_50hz() has two branches - velocity_ned_valid=true (a real
+// GPS/EKF velocity reading feeds climb_rate_ directly) or =false (a
+// second-order complementary filter derives climb_rate_ from
+// baro_altitude_m + accel_ef_z instead). This port has neither a GPS/EKF
+// velocity estimate NOR a barometer, so build_tecs_inputs() below takes
+// velocity_ned_valid=false and feeds `current_altitude_m` into
+// baro_altitude_m too - i.e. current_altitude_m substitutes for BOTH
+// upstream sensor reads at once. This was a deliberate choice over
+// inventing a THIRD explicit input (e.g. a "climb_rate_ms"): the
+// baro-fallback branch is already fully-ported, already-tested Tecs code
+// (a real code path every barometer-only, no-GPS ArduPlane vehicle
+// actually takes), so reusing it needs no new machinery and stays
+// faithful to a real upstream configuration rather than inventing a
+// velocity-source configuration this port doesn't have. accel_ef_z
+// (upstream: _ahrs.get_accel_ef().z) and accel_body_x (upstream:
+// AP::ins().get_accel().x, derived here via dcm_matrix.transposed() *
+// ahrs.accel_ef) both read AhrsDcm::accel_ef, which defaults to the zero
+// vector until a caller wires a real accelerometer in - the EXACT same
+// "inert until wired" precedent slice 1's own banner already established
+// for StabilizeInputs::accel_y (see AhrsDcm's own file banner). Not a
+// stub: this is upstream's own real, already-implemented fallback
+// behavior, just fed a currently-zero (but real, settable) accel input.
+//
+// FBWB AIRSPEED TARGET - SURPRISING UPSTREAM FINDING #2: a natural guess
+// (the ticket's own included) is "a fixed cruise speed, since FBWB has no
+// airspeed stick of its own." Reading calc_airspeed_errors() in full
+// shows this is WRONG for an unconfigured vehicle: with FLIGHT_OPTIONS at
+// its real default (0 - neither CRUISE_TRIM_AIRSPEED nor
+// CRUISE_TRIM_THROTTLE set), upstream's actual FBWB/CRUISE branch maps
+// the THROTTLE STICK position linearly onto [airspeed_min, airspeed_max]
+// (`target_airspeed_cm = (airspeed_max-airspeed_min)*get_throttle_input()
+// + airspeed_min*100`) - i.e. in default FBWB, the throttle stick
+// commands airspeed (fed to TECS as the speed target), NOT direct engine
+// power; TECS's own throttle law then decides actual throttle output to
+// hold that speed while also holding the elevator-commanded altitude.
+// Ported faithfully below (get_throttle_input(false), matching upstream's
+// no-arg default). The CRUISE_TRIM_AIRSPEED/CRUISE_TRIM_THROTTLE branches
+// are excluded - no FlightOptions bitmask subsystem in this port, and
+// both default off, matching an unconfigured vehicle exactly (same
+// exclusion precedent as stick_mixing_enabled()'s fence_stickmixing()
+// note above).
+//
+// SURPRISING UPSTREAM FINDING #3 - Tecs::set_throttle_min() MUST BE
+// CALLED EVERY TICK, NOT ONCE: discovered empirically during this slice's
+// own closed-loop verification (see below) - without it, the vehicle
+// exhibited real reverse-thrust braking oscillation instead of a clean
+// climb. Tecs::thrminf_ext_ defaults to -1.0 (full reverse) and DECAYS
+// BACK toward -1.0 every single call to update_throttle_limits() (private,
+// called from within update_pitch_throttle()) unless re-asserted - see
+// tecs.hpp's own set_throttle_min() doc comment, "applicable for one
+// control cycle only." Upstream's real per-loop caller is Plane::
+// apply_throttle_limits() (servos.cpp), called from set_servos() every
+// loop regardless of mode - a materially bigger function than this
+// slice's scope (ICEngine/battery-watt-limiter/takeoff/quadplane branches,
+// none of which exist in this port). Rather than port all of that just
+// for one line, update_fbwb_speed_height() below calls the minimal
+// equivalent every tick: `if (!have_reverse_thrust()) tecs.set_throttle_min(0.0f);`
+// - keeping Tecs's floor consistent with THIS vehicle's own
+// aparm.throttle_min (default 0, no reverse thrust) instead of silently
+// leaving it at Tecs's own reverse-thrust-permissive default. This is a
+// genuine, in-scope necessity (without it, aparm.throttle_min is
+// configured but never actually enforced), not upstream-patching.
+//
+// EXCLUDED (documented, not silently dropped):
+//   - Terrain following (AP_TERRAIN_AVAILABLE) throughout - no terrain
+//     subsystem. set_target_altitude_current()'s terrain_alt_cm branch,
+//     relative_target_altitude_cm()'s terrain lookahead/rangefinder
+//     branch, and check_fbwb_altitude()'s terrain branch are all dropped.
+//   - Rangefinder correction (relative_target_altitude_cm()) - no
+//     rangefinder subsystem.
+//   - Mission altitude offset (relative_target_altitude_cm()'s
+//     mission_alt_offset()) - no mission/AUTO subsystem; always 0 outside
+//     AUTO anyway, so dropping it changes nothing even for upstream.
+//   - Fence min/max altitude (check_fbwb_altitude()'s AP_FENCE_ENABLED
+//     block) - no fence subsystem.
+//   - Soaring controller hooks (mode_fbwb.cpp's _enter() HAL_SOARING_
+//     ENABLED block, and update_fbwb_speed_height()'s HAL_SOARING_ENABLED
+//     target-altitude override) - no soaring subsystem.
+//   - RTL climb-min target-altitude boost (Plane.cpp's `control_mode ==
+//     &mode_rtl` branch inside update_alt()) - no RTL mode in this slice.
+//   - ModeFBWB::_enter() itself - this slice has no mode-switching
+//     machinery yet (same exclusion mode.hpp's banner already documents
+//     for Mode::enter()/exit()). _enter()'s real body is just
+//     `plane.set_target_altitude_current()` - a caller constructing a
+//     ModeFBWB for this slice's tests/use MUST call
+//     plane.set_target_altitude_current(current_altitude_cm) ONCE,
+//     EXPLICITLY, before the first tick() - see ModeFBWB's own class
+//     banner (mode.hpp) - not silently skipping real initialization.
+//
+// 100ms RATE LIMIT - REPRODUCED FAITHFULLY, PER THE TICKET'S OWN
+// INSTRUCTION: update_fbwb_speed_height()'s elevator-to-climb-rate-to-
+// target-altitude integration only runs when `now_us -
+// fbwb_last_elev_check_us >= 100000` (matches upstream's real
+// `target_altitude.last_elev_check_us` gate, including the dt clamp to
+// [0.1, 0.15] seconds) - this needs a real, independently-incrementing
+// MICROSECOND clock distinct from StabilizeInputs::now_ms (matches
+// ap-tecs's own TecsInputs::now_us/now_ms "two independent clocks, don't
+// derive one from the other" precedent) - hence StabilizeInputs::now_us
+// (NEW) below. check_fbwb_altitude()/calc_throttle()/calc_nav_pitch(),
+// by contrast, are NOT rate-limited - they run every call, exactly
+// matching upstream's own code shape (only the target-altitude
+// integration sits inside the `if` block).
 
 #include <algorithm>
 #include <cmath>
@@ -206,6 +372,11 @@ struct FixedWingTunables {
     std::int8_t man_expo_roll = 0;      // MAN_EXPO_ROLL / g2.man_expo_roll
     std::int8_t man_expo_pitch = 0;     // MAN_EXPO_PITCH / g2.man_expo_pitch
     std::int8_t man_expo_rudder = 0;    // MAN_EXPO_RUDDER / g2.man_expo_rudder
+
+    // --- CPP-031 slice 2 (FBWB) additions - see file banner addendum ---
+    float flybywire_climb_rate = 2.0f;  // FBWB_CLIMB_RATE / g.flybywire_climb_rate, m/s
+    float cruise_alt_floor = 0.0f;      // CRUISE_ALT_FLOOR / g.cruise_alt_floor, m (config.h's real CRUISE_ALT_FLOOR default)
+    bool flybywire_elev_reverse = false; // FBWB_ELEV_REV / g.flybywire_elev_reverse
 };
 
 // Explicit per-tick sensor/environment inputs stabilize_roll()/
@@ -220,6 +391,12 @@ struct StabilizeInputs {
     bool armed_and_safety_off = false; // upstream: arming.is_armed_and_safety_off()
     float dt = 0.0f;                   // seconds since the previous tick
     std::uint32_t now_ms = 0;
+
+    // --- CPP-031 slice 2 (FBWB) additions - see file banner addendum's
+    // "CURRENT ALTITUDE INPUT vs. TARGET ALTITUDE STATE" and "100ms RATE
+    // LIMIT" notes ---
+    float current_altitude_m = 0.0f; // current TRUE altitude above the vehicle's fixed start point (NOT AMSL/home - see file banner)
+    std::uint64_t now_us = 0;        // upstream: AP_HAL::micros64() - independent microsecond clock, see file banner
 };
 
 namespace detail {
@@ -614,6 +791,173 @@ public:
     [[nodiscard]] float roll_in_expo(bool use_dz) { return detail::channel_expo(channel_roll(), aparm.man_expo_roll, use_dz); }
     [[nodiscard]] float pitch_in_expo(bool use_dz) { return detail::channel_expo(channel_pitch(), aparm.man_expo_pitch, use_dz); }
     [[nodiscard]] float rudder_in_expo(bool use_dz) { return detail::channel_expo(channel_rudder(), aparm.man_expo_rudder, use_dz); }
+
+    // =====================================================================
+    // CPP-031 SLICE 2 (FBWB) - see file banner addendum for the full design
+    // rationale (altitude reference frame, current-altitude-input vs.
+    // target-altitude-state split, TECS scheduling, airspeed target).
+    // =====================================================================
+
+    // upstream: Plane::target_altitude (Plane.h) - only the non-terrain
+    // fields are in scope (see file banner). amsl_cm is reframed as
+    // "relative to the vehicle's fixed start point" (see file banner's
+    // "ALTITUDE REFERENCE FRAME" note), not literally AMSL.
+    std::int32_t target_altitude_cm = 0;       // upstream: target_altitude.amsl_cm
+    std::uint64_t fbwb_last_elev_check_us = 0; // upstream: target_altitude.last_elev_check_us
+    float fbwb_last_elevator_input = 0.0f;     // upstream: target_altitude.last_elevator_input
+
+    // upstream: Plane::set_target_altitude_current() (altitude.cpp).
+    // reset_offset_altitude() (slope-offset reset) is dropped - no
+    // altitude-slope/offset state in this port (no mission subsystem to
+    // slope between waypoints), so there is nothing to reset. Not called
+    // automatically on mode entry - see file banner's "_enter()" note.
+    void set_target_altitude_current(std::int32_t current_altitude_cm) { target_altitude_cm = current_altitude_cm; }
+
+    // upstream: Plane::change_target_altitude() (altitude.cpp).
+    void change_target_altitude(std::int32_t change_cm) { target_altitude_cm += change_cm; }
+
+    // upstream: Plane::relative_target_altitude_cm() (altitude.cpp), non-
+    // terrain/non-rangefinder/non-mission-offset part only (see file
+    // banner). A pure passthrough: `target_altitude_cm - home.alt`
+    // collapses to just target_altitude_cm since home.alt is
+    // definitionally 0 in this port's altitude frame (file banner).
+    [[nodiscard]] std::int32_t relative_target_altitude_cm() const { return target_altitude_cm; }
+
+    // upstream: Plane::check_fbwb_altitude() (altitude.cpp). With no
+    // AP_FENCE_ENABLED in this port, only the cruise_alt_floor branch is
+    // real scope (see file banner) - and since aparm.cruise_alt_floor's
+    // real upstream default is 0 (config.h's CRUISE_ALT_FLOOR, verified
+    // directly), this is a documented no-op for an unconfigured vehicle,
+    // exactly as it is upstream. `home.alt + min_alt_cm` collapses to
+    // just min_alt_cm (file banner).
+    void check_fbwb_altitude() {
+        if (aparm.cruise_alt_floor > 0.0f) {
+            const std::int32_t min_alt_cm = static_cast<std::int32_t>(aparm.cruise_alt_floor * 100.0f);
+            target_altitude_cm = std::max(target_altitude_cm, min_alt_cm);
+        }
+    }
+
+    // upstream: Plane::calc_throttle() (Attitude.cpp) - "This is called by
+    // TECS-enabled flight modes." The `aparm.throttle_cruise <= 1` zero-
+    // throttle escape hatch is upstream's own real behavior (a mission
+    // wanting the engine off), ported verbatim.
+    void calc_throttle() {
+        if (aparm.throttle_cruise <= 1.0f) {
+            srv_channels.set_output_scaled(srv::Function::kThrottle, 0.0f);
+            return;
+        }
+        srv_channels.set_output_scaled(srv::Function::kThrottle, tecs.get_throttle_demand());
+    }
+
+    // upstream: Plane::calc_nav_pitch() (Attitude.cpp).
+    void calc_nav_pitch() {
+        const std::int32_t commanded_pitch = tecs.get_pitch_demand();
+        nav_pitch_cd = math::constrain_value(commanded_pitch, static_cast<std::int32_t>(pitch_limit_min * 100.0f),
+                                              static_cast<std::int32_t>(aparm.pitch_limit_max_deg * 100.0f));
+    }
+
+    // upstream: everything TecsInputs needs from the AHRS for one tick
+    // (get_relative_position_D_home/get_rotation_body_to_ned/get_EAS2TAS/
+    // using_airspeed_sensor/airspeed_EAS/get_pitch_rad, plus
+    // AP::ins().get_accel()/AP::baro().get_altitude()) - see file banner's
+    // "NO GPS/BARO" note for why velocity_ned_valid is always false here
+    // and current_altitude_m substitutes for both the position and baro
+    // reads. Factored out so both update_50hz() and update_pitch_
+    // throttle() (called from update_fbwb_speed_height() below) build the
+    // exact same inputs for one tick, matching upstream's own single-tick
+    // consistency (both calls happen back-to-back inside update_alt()).
+    [[nodiscard]] tecs::TecsInputs build_tecs_inputs(const StabilizeInputs& in) const {
+        tecs::TecsInputs t;
+        t.relative_position_d_home_m = -in.current_altitude_m;
+        t.velocity_ned_valid = false;
+        t.baro_altitude_m = in.current_altitude_m;
+        t.accel_ef_z = ahrs.accel_ef.z;
+        t.rotation_body_to_ned = ahrs.dcm_matrix;
+        t.accel_body_x = (ahrs.dcm_matrix.transposed() * ahrs.accel_ef).x;
+        t.eas2tas = in.eas2tas;
+        t.using_airspeed_sensor = in.airspeed_valid;
+        t.airspeed_eas_valid = in.airspeed_valid;
+        t.airspeed_eas = in.airspeed_eas;
+        t.roll_rad = ahrs.roll;
+        t.pitch_rad = ahrs.pitch;
+        t.now_us = in.now_us;
+        t.now_ms = in.now_ms;
+        return t;
+    }
+
+    // upstream: Plane::update_fbwb_speed_height() (navigation.cpp), PLUS
+    // (see file banner's "SURPRISING UPSTREAM FINDING #1") Plane::
+    // update_alt()'s TECS-driving update_50hz()/update_pitch_throttle()
+    // calls, PLUS calc_airspeed_errors()'s FBWB airspeed-target branch
+    // (see file banner's "SURPRISING UPSTREAM FINDING #2"). Called once
+    // per tick, exclusively from ModeFBWB::update() (mode.hpp).
+    void update_fbwb_speed_height(const StabilizeInputs& in) {
+        const tecs::TecsInputs tecs_in = build_tecs_inputs(in);
+        tecs.update_50hz(tecs_in);
+
+        if (in.now_us - fbwb_last_elev_check_us >= 100000ULL) {
+            // we don't run this on every loop - see file banner's "100ms
+            // RATE LIMIT" note.
+            float dt = static_cast<float>(in.now_us - fbwb_last_elev_check_us) * 1.0e-6f;
+            dt = math::constrain_value(dt, 0.1f, 0.15f);
+            fbwb_last_elev_check_us = in.now_us;
+
+            float elevator_input = static_cast<float>(channel_pitch()->control_in) * (1.0f / 4500.0f);
+            if (aparm.flybywire_elev_reverse) {
+                elevator_input = -elevator_input;
+            }
+
+            const bool input_stop_climb = !(elevator_input > 0.0f) && fbwb_last_elevator_input > 0.0f;
+            const bool input_stop_descent = !(elevator_input < 0.0f) && fbwb_last_elevator_input < 0.0f;
+            if (input_stop_climb || input_stop_descent) {
+                // user elevator input reached or passed zero - lock in the
+                // current altitude.
+                set_target_altitude_current(static_cast<std::int32_t>(in.current_altitude_m * 100.0f));
+            }
+
+            float climb_rate = aparm.flybywire_climb_rate * elevator_input;
+            climb_rate = math::constrain_value(climb_rate, -tecs.get_max_sinkrate(), tecs.get_max_climbrate());
+
+            const std::int32_t alt_change_cm = static_cast<std::int32_t>(climb_rate * dt * 100.0f);
+            change_target_altitude(alt_change_cm);
+
+            fbwb_last_elevator_input = elevator_input;
+        }
+
+        check_fbwb_altitude();
+
+        // FBW_B/cruise airspeed target - see file banner's "SURPRISING
+        // UPSTREAM FINDING #2": the throttle stick (not a fixed cruise
+        // speed) maps linearly onto [airspeed_min, airspeed_max].
+        const float throttle_input_pct = get_throttle_input(false);
+        const std::int32_t eas_dem_cm = static_cast<std::int32_t>(
+            (aparm.airspeed_max - aparm.airspeed_min) * throttle_input_pct + aparm.airspeed_min * 100.0f);
+
+        // upstream: the one always-called piece of Plane::
+        // apply_throttle_limits() (servos.cpp) this slice actually needs -
+        // keeping Tecs's own internal throttle floor (set_throttle_min(),
+        // "applicable for one control cycle only" per tecs.hpp) consistent
+        // with THIS vehicle's aparm.throttle_min every tick. Without this,
+        // Tecs::thrminf_ext_ decays back toward ITS OWN default of -1.0
+        // (full reverse) every cycle regardless of whether this vehicle is
+        // actually configured for reverse thrust (have_reverse_thrust()).
+        // apply_throttle_limits() itself is NOT ported in full - its
+        // ICEngine/battery-watt-limiter/takeoff/quadplane branches all
+        // depend on subsystems this port doesn't have, making it a
+        // materially bigger function than this slice's scope - but
+        // leaving Tecs's floor silently inconsistent with this port's own
+        // have_reverse_thrust() would be a real, avoidable gap, not a
+        // faithful "not yet built" exclusion.
+        if (!have_reverse_thrust()) {
+            tecs.set_throttle_min(0.0f);
+        }
+
+        tecs.update_pitch_throttle(relative_target_altitude_cm(), eas_dem_cm, in.current_altitude_m, aerodynamic_load_factor,
+                                    tecs_in);
+
+        calc_throttle();
+        calc_nav_pitch();
+    }
 
 private:
     // Used only during the member-init list above - see file banner's
