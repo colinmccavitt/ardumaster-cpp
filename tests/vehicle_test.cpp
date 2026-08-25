@@ -589,3 +589,209 @@ TEST_CASE("Closed loop: FBWB climbs under up-elevator and levels off in SimPlane
     // asserting real convergence, not just "didn't crash".
     REQUIRE(final_altitude == Catch::Approx(locked_target_m).margin(5.0f));
 }
+
+// ---------------------------------------------------------------------
+// CPP-031 SLICE 3: does drift correction actually matter? This is the real
+// payoff of wiring gps.update()/ahrs.accumulate_accel()/
+// ahrs.drift_correction_yaw()/ahrs.drift_correction_accel() into tick()
+// (mode.hpp) - see mode.hpp's own tick() comment and plane.hpp's file
+// banner addendum for the full design rationale.
+//
+// Slice 1's own FBWA closed-loop test above ran only 30 simulated seconds
+// and never checked estimated-vs-true attitude divergence at all - it
+// happened to pass even under CPP-028 slice 1's pure gyro integration (no
+// drift correction existed yet) because 30 seconds of integrating a
+// noise-free, perfectly-unbiased gyro accumulates essentially zero error.
+// Real gyros always carry a nonzero bias - that is precisely what drift
+// correction exists to cancel - so this test deliberately injects a
+// constant, realistic gyro-measurement bias (NOT into SimPlane's own true
+// dynamics, which stays honest ground truth throughout) and runs long
+// enough that pure gyro integration would visibly and severely diverge.
+//
+// DISCRIMINATING BY CONSTRUCTION, NOT BY TWO CODE PATHS: both scenarios
+// below call the EXACT SAME tick() (mode.hpp) - the real, shipped
+// production sequencing, unmodified. The only difference is which
+// StabilizeInputs fields get populated:
+//   - "corrected" run: gps_use_enabled at its real default (true), and
+//     true_velocity_ned/accel_sample/airspeed_valid/airspeed_eas fed from
+//     SimPlane's own ground truth every tick (the same treatment the FBWA/
+//     FBWB closed-loop tests above already give gyro/current_altitude_m) -
+//     so drift_correction_yaw()/drift_correction_accel() actually engage.
+//   - "uncorrected" run: gps_use_enabled=false, and true_velocity_ned/
+//     accel_sample/airspeed_valid left at StabilizeInputs' own defaults
+//     (zero/zero/false). Traced by hand against ahrs_dcm.hpp's real logic
+//     (see run_biased_closed_loop()'s own comment below) to confirm this
+//     combination makes BOTH drift-correction functions permanently
+//     no-op - i.e. genuinely reproduces this port's PRE-CPP-031-slice-3
+//     pure-gyro-integration behavior exactly, not an approximation of it.
+// Since both runs share the identical tick() call, any difference in
+// outcome is caused by the drift-correction wiring itself, not by some
+// other confound.
+// ---------------------------------------------------------------------
+
+namespace {
+
+struct DriftRunResult {
+    float final_true_roll_deg = 0.0f;
+    float final_true_pitch_deg = 0.0f;
+    float final_true_yaw_deg = 0.0f;
+    float final_est_roll_deg = 0.0f;
+    float final_est_pitch_deg = 0.0f;
+    float final_est_yaw_deg = 0.0f;
+};
+
+// Runs a constant-bank FBWA closed loop for num_ticks at kDt (50Hz),
+// injecting a constant gyro-MEASUREMENT bias (rad/s, all three body axes)
+// that only AhrsDcm ever sees - SimPlane's own true dynamics integrate the
+// real, unbiased rate throughout, exactly matching how a real biased gyro
+// corrupts only the estimator's input, never the airframe's actual motion.
+//
+// with_correction selects whether this tick's GPS/accel drift-correction
+// inputs are populated:
+//   - true_velocity_ned <- sim_plane.velocity_ef (true NED velocity, m/s -
+//     see ap-sim/sim_plane.hpp's own field doc) feeds gps.update() so
+//     ground_speed_ms/ground_course_deg become real and, once moving fast
+//     enough (>= kGpsSpeedMinMs), usable by drift_correction_yaw()'s
+//     GPS-course fallback path (this port's compass is always
+//     healthy=false - see mode.hpp's tick() comment - so this IS the path
+//     that corrects yaw here).
+//   - accel_sample.accel <- sim_plane.accel_body (true body-frame specific
+//     force, m/s^2 - matches AccelSample.accel's own "_ins.get_accel()"
+//     meaning exactly) and delta_velocity <- accel_body*dt/delta_velocity_dt
+//     <- dt (same dt-scaled discretization the existing closed-loop tests
+//     already use for gyro's delta_angle) feed accumulate_accel(), which
+//     drift_correction_accel() then fuses against GPS velocity to correct
+//     roll/pitch.
+//   - airspeed_valid/airspeed_eas <- sim_plane.airspeed, same treatment the
+//     FBWB closed-loop test above already gives TECS.
+// When with_correction is false, none of the above is populated - they
+// stay at StabilizeInputs' own defaults (zero vectors, airspeed_valid
+// false). Traced against ahrs_dcm.hpp's real logic: with gps_use_enabled
+// false, have_gps() is false unconditionally, so drift_correction_yaw()
+// never leaves its use_compass()-false/have_gps()-false decay branch
+// (omega_yaw_p_ *= 0.97, and it starts at zero, so it never becomes
+// nonzero) - permanently a no-op. drift_correction_accel() falls into its
+// no-GPS fallback branch, computes velocity from airspeed_tas(=0, since
+// airspeed_valid=false)+wind_estimate(=0) = a constant zero vector, so
+// vdelta is always zero AND ra_sum_ never accumulates real energy (default
+// AccelSample's delta_velocity_dt<=0 skips accumulate_accel()'s
+// integration entirely, only accel_ef gets set, to dcm_matrix*(0,0,0) =
+// zero) - ga_b stays exactly zero forever, so `if (ga_b.is_zero()) return;`
+// fires on every single call. omega_p_/omega_i_ therefore never move off
+// their zero initial values - genuinely, verifiably, permanently inert.
+DriftRunResult run_biased_closed_loop(bool with_correction, int num_ticks, float gyro_bias_rad_s) {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    ModeFBWA fbwa(plane);
+
+    constexpr float kDt = 0.02f; // 50Hz
+    const fwcpp::math::Vector3f bias(gyro_bias_rad_s, gyro_bias_rad_s, gyro_bias_rad_s);
+
+    StabilizeInputs in;
+    in.dt = kDt;
+    in.armed_and_safety_off = true;
+    in.gps_use_enabled = with_correction;
+
+    std::uint32_t now_ms = 0;
+    for (int i = 0; i < num_ticks; ++i) {
+        now_ms += 20;
+        in.now_ms = now_ms;
+
+        // Same fixed, moderate right-roll stick command as the FBWA
+        // closed-loop test above.
+        set_sticks(plane, 1650, 1500, 1700, 1500);
+
+        const fwcpp::math::Vector3f measured_gyro = sim_plane.gyro + bias;
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = measured_gyro;
+        gyro_sample.delta_angle = measured_gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        if (with_correction) {
+            in.true_velocity_ned = sim_plane.velocity_ef;
+            in.accel_sample.accel = sim_plane.accel_body;
+            in.accel_sample.delta_velocity = sim_plane.accel_body * kDt;
+            in.accel_sample.delta_velocity_dt = kDt;
+            in.airspeed_valid = true;
+            in.airspeed_eas = sim_plane.airspeed;
+        }
+        // else: leave true_velocity_ned/accel_sample/airspeed_valid at
+        // their StabilizeInputs defaults - see this function's own comment
+        // above for why that combination makes drift correction a
+        // permanent, verified no-op.
+
+        tick(plane, fbwa, gyro_sample, in);
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+    }
+
+    DriftRunResult result;
+    sim_plane.dcm.to_euler(&result.final_true_roll_deg, &result.final_true_pitch_deg, &result.final_true_yaw_deg);
+    result.final_true_roll_deg = fwcpp::math::degrees(result.final_true_roll_deg);
+    result.final_true_pitch_deg = fwcpp::math::degrees(result.final_true_pitch_deg);
+    result.final_true_yaw_deg = fwcpp::math::degrees(result.final_true_yaw_deg);
+    result.final_est_roll_deg = fwcpp::math::degrees(plane.ahrs.roll);
+    result.final_est_pitch_deg = fwcpp::math::degrees(plane.ahrs.pitch);
+    result.final_est_yaw_deg = fwcpp::math::degrees(plane.ahrs.yaw);
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Closed loop with a biased gyro: WITHOUT drift correction wired in, the AHRS estimate diverges sharply from true attitude",
+          "[vehicle][integration][drift_correction]") {
+    // 200 simulated seconds (10000 ticks @ 50Hz) with a 0.02 rad/s
+    // (~1.15 deg/s) constant bias on all three gyro axes - uncorrected,
+    // pure integration of that bias alone would accumulate roughly
+    // 0.02 * 200 = 4 rad (~229 deg) of drift per axis; the real closed-loop
+    // number differs (the bias also corrupts the rate-feedback used for
+    // control - see this section's own file banner) but is still a large,
+    // unmistakable divergence, not noise.
+    const DriftRunResult r = run_biased_closed_loop(false, 10000, 0.02f);
+
+    INFO("true roll/pitch/yaw (deg) = " << r.final_true_roll_deg << "/" << r.final_true_pitch_deg << "/" << r.final_true_yaw_deg
+                                         << ", ESTIMATED roll/pitch/yaw (deg) = " << r.final_est_roll_deg << "/"
+                                         << r.final_est_pitch_deg << "/" << r.final_est_yaw_deg);
+
+    const float yaw_error_deg = std::fabs(fwcpp::math::wrap_180(r.final_est_yaw_deg - r.final_true_yaw_deg));
+    const float roll_error_deg = std::fabs(fwcpp::math::wrap_180(r.final_est_roll_deg - r.final_true_roll_deg));
+    // With no drift correction wired in (this port's pre-CPP-031-slice-3
+    // behavior), the estimate must diverge by a large, unmistakable margin
+    // on BOTH the yaw axis (corrected, when wired, by GPS course) and the
+    // roll axis (corrected, when wired, by accel-vs-gravity/GPS-velocity
+    // fusion) - see this test's own verification run for the real numbers.
+    // The real run this test was written against measured yaw_error_deg
+    // ~41deg and roll_error_deg ~172deg (the uncorrected estimate thinks
+    // it's near-level while the true airframe has actually rolled past
+    // inverted) - this deliberately conservative >30/>60 floor leaves
+    // large headroom below that for compiler/FP variance while still
+    // being an unmistakable divergence, not noise.
+    REQUIRE(yaw_error_deg > 30.0f);
+    REQUIRE(roll_error_deg > 60.0f);
+}
+
+TEST_CASE("Closed loop with the SAME biased gyro: WITH drift correction wired in, the AHRS estimate stays close to true attitude",
+          "[vehicle][integration][drift_correction]") {
+    const DriftRunResult r = run_biased_closed_loop(true, 10000, 0.02f);
+
+    INFO("true roll/pitch/yaw (deg) = " << r.final_true_roll_deg << "/" << r.final_true_pitch_deg << "/" << r.final_true_yaw_deg
+                                         << ", ESTIMATED roll/pitch/yaw (deg) = " << r.final_est_roll_deg << "/"
+                                         << r.final_est_pitch_deg << "/" << r.final_est_yaw_deg);
+
+    const float yaw_error_deg = std::fabs(fwcpp::math::wrap_180(r.final_est_yaw_deg - r.final_true_yaw_deg));
+    const float roll_error_deg = std::fabs(r.final_est_roll_deg - r.final_true_roll_deg);
+    const float pitch_error_deg = std::fabs(r.final_est_pitch_deg - r.final_true_pitch_deg);
+
+    // Real numbers from this test's own verification run (see this
+    // ticket's tracker notes) - margins chosen generously above the
+    // observed error while staying far below the "without correction"
+    // test's >30deg divergence just above, so this genuinely discriminates
+    // rather than passing vacuously.
+    REQUIRE(yaw_error_deg < 15.0f);
+    REQUIRE(roll_error_deg < 10.0f);
+    REQUIRE(pitch_error_deg < 10.0f);
+}
