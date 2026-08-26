@@ -1133,6 +1133,201 @@
 // contract for every OTHER case. Documented here, not silently added,
 // exactly as the ticket asked.
 
+// =====================================================================
+// CPP-031 SLICE 8 ADDENDUM: RC short (throttle) failsafe - detection,
+// debounce, automatic mode switch, and recovery. Upstream (Plane-4.7.0,
+// read directly, in full where the ticket asked): ArduPlane/radio.cpp's
+// Plane::rc_throttle_value_ok() (~line 333), Plane::rc_failsafe_active()
+// (~line 348), and the calling context around ~line 227-262 (the
+// allow_failsafe_bypass/has_had_input guard and the 10-up/3-down debounce
+// counter, both inside Plane::control_failsafe(), called from
+// read_radio()); ArduPlane/events.cpp's Plane::rc_failsafe_short_on_event()
+// (~line 21, full) and Plane::rc_failsafe_short_off_event() (~line 243,
+// full); ArduPlane/system.cpp's Plane::check_short_rc_failsafe() (~line
+// 411, full); ArduPlane/defines.h's failsafe_action_short enum;
+// ArduPlane/Parameters.h's ThrFailsafe enum; ArduPlane/Parameters.cpp's
+// THR_FAILSAFE/THR_FS_VALUE/FS_SHORT_ACTN real GSCALAR defaults;
+// libraries/RC_Channel/RC_Channel.h's RC_Channels::get_fs_timeout_ms() and
+// RC_Channels_VarInfo.h's RC_FS_TIMEOUT default.
+//
+// NEW ENUMS - ThrFailsafe (THR_FAILSAFE, real default Enabled) and
+// FsActionShort (FS_SHORT_ACTN, real default BestGuess/0) - both ported
+// verbatim from upstream's own enum, including values this port's scope
+// never actively branches on distinctly (ThrFailsafe::EnabledNoFS,
+// FsActionShort::Circle/Disabled) so that upstream's real comparisons
+// (`!= ThrFailsafe::Enabled`, `!= FsActionShort::Disabled`) stay literal
+// and correct rather than collapsed into a smaller enum that would need
+// re-deriving those comparisons by hand.
+//
+// FIXEDWINGTUNABLES GAINS FOUR NEW FIELDS (see the struct below):
+// throttle_fs_enabled (THR_FAILSAFE, default Enabled), throttle_fs_value
+// (THR_FS_VALUE, default 950), fs_action_short (FS_SHORT_ACTN, default
+// BestGuess), rc_fs_timeout_ms (RC_FS_TIMEOUT, default 1.0s parameter but
+// stored here PRE-CONVERTED to milliseconds - upstream's real
+// get_fs_timeout_ms() is `MAX(_fs_timeout * 1000, 100)`; with the real
+// 1.0s default that floor never actually binds (1000 > 100), so this
+// field's default (1000) IS the real converted value, not a re-derivation
+// - a future caller changing it below the 0.1s floor would need to
+// reproduce the MAX() clamp itself, documented here rather than silently
+// dropped since no caller in this slice's own tests exercises that edge).
+//
+// RC_THROTTLE_VALUE_OK() / RC_FAILSAFE_ACTIVE() - ported directly, with
+// ONE necessary signature divergence (ADR-0012, matching this port's
+// established "explicit clock parameter, no singleton millis()"
+// precedent - e.g. every now_ms/now_us parameter throughout this file):
+// rc_failsafe_active() takes an explicit `now_ms` rather than reading a
+// singleton clock.
+//
+// FAILSAFESTATE - REDUCED FROM UPSTREAM'S Plane::failsafe: upstream's real
+// `failsafe` struct (Plane.h) also carries AFS_last_valid_rc_ms (AP_Frsky_
+// Telem/rangefinder-linked advanced-failsafe, no such subsystem),
+// gcs_last_seen_ms/gcs_check_byte (GCS heartbeat failsafe, out of scope),
+// adsb (no ADSB), and a `failsafe_state state` enum with FOUR values
+// (NONE/GCS/SHORT/LONG). This port's FailsafeState keeps exactly
+// rc_failsafe/throttle_counter/last_valid_rc_ms (all real, in-scope) plus
+// last_seen_input_update_count (NEW, see update_throttle_failsafe()'s own
+// "NEW-FRAME DETECTION" note) and short_failsafe_active - a plain bool
+// substituting for `state != FAILSAFE_NONE` restricted to the NONE/SHORT
+// distinction this slice's check_short_rc_failsafe() actually needs
+// (FAILSAFE_GCS/FAILSAFE_LONG don't exist in this port's scope at all -
+// see the EXCLUDED list below).
+//
+// MODE-RESTORATION DESIGN - failsafe_saved_mode / mode_set_by_failsafe /
+// set_mode()'s NEW from_failsafe PARAMETER: see rc_failsafe_short_off_
+// event()'s own doc comment below for the full design rationale (this is
+// the ticket's own explicitly-requested "simpler, equally-correct
+// substitute" for upstream's saved_mode_number/ModeReason machinery,
+// commit 6db7924/CPP-031 slice 7's own note on why ModeReason was dropped
+// entirely rather than merely defaulted).
+//
+// RC_FAILSAFE_SHORT_ON_EVENT() - SCOPE TRACE, PER THE TICKET'S OWN
+// INSTRUCTION TO CHECK WHETHER AUTO/RTL HAVE THEIR OWN REAL HANDLING
+// FURTHER IN THE FUNCTION (they do, for AUTO - traced by reading events.cpp
+// in full, not assumed): upstream's real switch has three case groups plus
+// a "never take action" group.
+//   - Group 1 (MANUAL/STABILIZE/ACRO/FLY_BY_WIRE_A/AUTOTUNE/FLY_BY_WIRE_B/
+//     CRUISE/TRAINING): this port has 4 of those 8 modes (MANUAL/FBWA/
+//     FBWB/CRUISE) - all four apply fs_action_short (FBWA/FBWB/else-
+//     circle). The emergency_landing-overrides-to-FBWA branch is dropped
+//     (no emergency-landing subsystem).
+//   - Group 2 (QSTABILIZE/QLOITER/QHOVER/QAUTOTUNE/QACRO, entirely
+//     HAL_QUADPLANE_ENABLED): no quadplane modes exist in this port -
+//     dropped outright, not one line of it applicable.
+//   - Group 3 (AUTO/AUTOLAND/AVOID_ADSB/GUIDED/LOITER/THERMAL) - THE REAL
+//     FINDING: AUTO is a MEMBER OF THIS GROUP, not the "never take action"
+//     one - it gets the SAME fs_action_short-driven FBWA/FBWB/circle
+//     switch as Group 1, gated additionally on `fs_action_short !=
+//     BESTGUESS` (i.e. BESTGUESS/0 means "take no action" for THIS group
+//     specifically, unlike Group 1 where BESTGUESS falls into the
+//     circle/RTL-substitute else-branch) AND on
+//     `!failsafe_in_landing_sequence()`. The landing-sequence guard is
+//     dropped (no landing-sequence/mission-in-landing-sequence subsystem
+//     anywhere in this port - Mission, plane.hpp above, has no such
+//     concept) and treated as always-false (never in a landing sequence),
+//     per the ticket's own instruction - so AUTO's real gate collapses to
+//     just the fs_action_short check, reproduced directly.
+//   - Group 4 (CIRCLE/TAKEOFF/RTL/quadplane QLAND/QRTL/LOITER_ALT_QLAND/
+//     INITIALISING) - "these modes never take any short failsafe action
+//     and continue": RTL is this port's one mode in this group - a real,
+//     traced no-op (RTL is already the safe, autonomous response;
+//     upstream doesn't re-trigger anything for a vehicle already flying
+//     it), not a gap.
+//
+// NO CIRCLE MODE - A REAL, NAMED GAP, PER THE TICKET'S OWN INSTRUCTION:
+// upstream's real "else" branch (fs_action_short is BESTGUESS, CIRCLE, or
+// DISABLED - upstream's own if/else-if/else only special-cases FBWA/FBWB
+// explicitly, so ALL THREE of those values fall into the same else branch,
+// ported literally rather than "fixed" - this port's own "port fixes bugs
+// in the port, not upstream" rule) is `set_mode(mode_circle, ...)` - this
+// port has never built a CIRCLE mode (not in this slice's six). RTL is
+// substituted instead - the closest "safe, autonomous, doesn't need the
+// pilot" mode this port actually has. A future slice that adds a real
+// CIRCLE mode should replace this substitution in apply_fs_action_short()
+// below, not build around it permanently.
+//
+// RC_FAILSAFE_SHORT_OFF_EVENT() - see its own doc comment below for the
+// mode-restoration design. gcs().send_text() calls throughout both event
+// handlers are dropped (no GCS subsystem, matching this port's exclusion
+// everywhere else).
+//
+// CHECK_SHORT_RC_FAILSAFE()'S flight_stage GUARD - TREATED AS ALWAYS TRUE:
+// upstream's real guard also requires `flight_stage != AP_FixedWing::
+// FlightStage::LAND` - no flight_stage/landing-stage subsystem exists in
+// this port (same exclusion this file's own calc_speed_scaler() note
+// already established for the TAKEOFF flight-stage clamp) - a vehicle in
+// this port is never in a landing stage, so this condition is always true
+// here, per the ticket's own instruction.
+//
+// UPDATE_THROTTLE_FAILSAFE()'S ALLOW_FAILSAFE_BYPASS - SIMPLIFIED, A NAMED
+// JUDGMENT CALL: upstream's real compound guard is `(g.throttle_fs_enabled
+// != ThrFailsafe::Enabled && !failsafe.rc_failsafe) || (allow_failsafe_
+// bypass && !has_had_input)`, where `allow_failsafe_bypass = !arming.
+// is_armed() && !is_flying() && (rc().enabled_protocols() != 0)`. This
+// port has NO arming or is_flying() subsystem anywhere (a repeated
+// exclusion throughout this file - see e.g. the "GROUND_MODE /
+// REVERSED_THROTTLE" note) - there is no state to read for either half of
+// that conjunction. Following this file's own established precedent for a
+// missing subsystem (accel_healthy()/ins_healthy()/ground_mode all
+// "assume the nominal, unconfigured value" rather than inventing a state
+// machine) - a freshly-constructed, not-yet-armed-or-flying vehicle is
+// exactly `!arming.is_armed() && !is_flying()` == true, and this port's RC
+// is always "enabled" (no protocol-negotiation concept to be zero) - so
+// allow_failsafe_bypass collapses to the constant `true` here, and the
+// compound guard collapses to just `!has_had_input` (rc_channels.
+// has_valid_input() - this port's own real equivalent of has_had_rc_
+// receiver(): ap-rc-channel/rc_channels.hpp's own file banner documents it
+// as LITERALLY upstream's _has_ever_seen_rc_input, the same latch has_had_
+// rc_receiver() reads; has_had_rc_override() is dropped, no GCS-override
+// subsystem, rc_channels.hpp's own exclusion list). This IS a real,
+// narrow behavior difference from upstream: this port's bypass fires
+// purely on "never yet received a valid frame", with no way to also
+// require "and currently disarmed/not-flying" - it could only ever matter
+// for a caller that arms/flies a vehicle in this port's own tests without
+// EVER feeding it one single valid RC frame, not a real flight scenario
+// for a failsafe that exists specifically because a real RC link is
+// expected.
+//
+// UPDATE_THROTTLE_FAILSAFE()'S NEW-FRAME DETECTION - see that method's own
+// doc comment below; a necessary departure from re-checking RcInput::
+// new_input(), traced directly against this port's own existing test
+// harness (vehicle_test.cpp's set_sticks() helper), not assumed.
+//
+// CONTROL_FAILSAFE()'S PILOT-STICK-TO-TRIM RESET - NOT PORTED, A REAL,
+// NAMED GAP: upstream's control_failsafe() ALSO overwrites channel_roll/
+// channel_pitch/channel_rudder's radio_in/control_in to trim/zero (and
+// channel_throttle's control_in to 0, or half-range for a spooled-up
+// quadplane) every tick that rc_failsafe_active() is true (BEFORE the
+// guard/debounce block, radio.cpp), so a mode like FBWA that reads stick
+// input directly doesn't fly on stale/frozen PWM values while the link is
+// down. This is out of scope per the ticket's own explicit 4-item scope
+// list (detection/debounce, on/off events, tick() wiring) - not one of
+// the four - so it is NOT ported here. A vehicle in FBWA during an active
+// RC failsafe in this port's own current state will keep reading whatever
+// stale channel_roll()/channel_pitch()/rudder_input() values were last
+// received, which upstream would instead have already zeroed/trimmed. A
+// real, documented divergence for a future slice, not a silent omission.
+//
+// EXCLUDED (documented, not silently dropped):
+//   - check_long_failsafe()/FAILSAFE_LONG/FAILSAFE_GCS (radio.cpp/
+//     system.cpp) - a separate, longer-timeout failsafe tier with its own
+//     action table (RTL/continue/parachute/land, gated on GCS heartbeat OR
+//     a long RC outage) - this slice is short-RC-failsafe only, per the
+//     ticket.
+//   - GCS heartbeat failsafe (gcs_heartbeat_fs_enabled, GCS_FAILSAFE_*) -
+//     no GCS subsystem anywhere in this port.
+//   - Battery failsafe (handle_battery_failsafe) - no battery subsystem.
+//   - AP_Notify (AP_Notify::flags.failsafe_radio, AP_Notify::events.
+//     user_mode_change/user_mode_change_failed) / GCS messaging (gcs().
+//     send_text()) throughout both event handlers and set_mode() - no
+//     consumer, matching this port's exclusion everywhere else.
+//   - HAL_QUADPLANE_ENABLED's VTOL-availability check inside set_mode()
+//     (unchanged from CPP-031 slice 7 - no quadplane modes to guard).
+//
+// See update_throttle_failsafe()/check_short_rc_failsafe()/
+// rc_failsafe_short_on_event()/rc_failsafe_short_off_event()/apply_
+// fs_action_short() below (Plane class body) and mode.hpp's own "CPP-031
+// SLICE 8 NOTE" (on tick()) for the concrete code.
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -1192,6 +1387,24 @@ inline constexpr std::uint8_t kServoRudder = 3;
 // AND aparm.loiter_radius are <=1 - see update_loiter() below.
 inline constexpr float kLoiterRadiusDefault = 60.0f;
 
+// upstream: ArduPlane/Parameters.h's Plane::ThrFailsafe (nested enum
+// class) - THR_FAILSAFE. See file banner's "CPP-031 SLICE 8 ADDENDUM".
+enum class ThrFailsafe : std::uint8_t {
+    Disabled = 0,
+    Enabled = 1,
+    EnabledNoFS = 2,
+};
+
+// upstream: ArduPlane/defines.h's failsafe_action_short - FS_SHORT_ACTN.
+// See file banner's "CPP-031 SLICE 8 ADDENDUM".
+enum class FsActionShort : std::uint8_t {
+    BestGuess = 0, // CIRCLE/no-change(if already AUTO|GUIDED|LOITER) - see file banner
+    Circle = 1,
+    Fbwa = 2,
+    Disabled = 3,
+    Fbwb = 4,
+};
+
 // Every AP_Param-backed tunable MANUAL/FBWA's real code paths (as scoped
 // by the ticket) actually read, as a plain aggregate defaulted to
 // upstream's real GSCALAR/ASCALAR/config.h value - same established
@@ -1234,6 +1447,12 @@ struct FixedWingTunables {
     float rtl_altitude = 100.0f; // RTL_ALTITUDE / g.RTL_altitude, upstream default ALT_HOLD_HOME (config.h), m
     float rtl_radius = 0.0f;     // RTL_RADIUS / g.rtl_radius, upstream default 0 (Parameters.cpp), m
     float rtl_climb_min = 0.0f;  // RTL_CLIMB_MIN / g2.rtl_climb_min, upstream default 0 (Parameters.cpp), m
+
+    // --- CPP-031 slice 8 (RC short failsafe) additions - see file banner addendum ---
+    ThrFailsafe throttle_fs_enabled = ThrFailsafe::Enabled;   // THR_FAILSAFE / g.throttle_fs_enabled, Parameters.cpp default int(ThrFailsafe::Enabled)
+    std::int16_t throttle_fs_value = 950;                     // THR_FS_VALUE / g.throttle_fs_value, Parameters.cpp default 950
+    FsActionShort fs_action_short = FsActionShort::BestGuess; // FS_SHORT_ACTN / g.fs_action_short, Parameters.cpp default FS_ACTION_SHORT_BESTGUESS (0)
+    std::uint32_t rc_fs_timeout_ms = 1000;                    // RC_FS_TIMEOUT / RC_Channels_VarInfo.h's _fs_timeout, default 1.0s -> RC_Channels::get_fs_timeout_ms()'s real MAX(_fs_timeout*1000, 100), ms - see file banner
 };
 
 // Explicit per-tick sensor/environment inputs stabilize_roll()/
@@ -2881,6 +3100,29 @@ public:
     // here would skip all of that).
     Mode* control_mode = &mode_manual;
 
+    // CPP-031 slice 8 (RC short failsafe) - see this file's own "CPP-031
+    // SLICE 8 ADDENDUM" for the full design. FailsafeState is this port's
+    // reduced equivalent of upstream's Plane::failsafe struct (Plane.h) -
+    // only the fields the real, in-scope RC-short-failsafe logic below
+    // actually reads or writes. failsafe_saved_mode/mode_set_by_failsafe
+    // are this port's own substitute for upstream's saved_mode_number/
+    // ModeReason - see rc_failsafe_short_off_event()'s own doc comment
+    // below for the full design rationale.
+    struct FailsafeState {
+        bool rc_failsafe = false;                       // upstream: failsafe.rc_failsafe
+        bool short_failsafe_active = false;              // upstream: failsafe.state != FAILSAFE_NONE, reduced to the NONE/SHORT distinction this slice needs
+        std::uint8_t throttle_counter = 0;               // upstream: failsafe.throttle_counter
+        std::uint32_t last_valid_rc_ms = 0;              // upstream: failsafe.last_valid_rc_ms
+        std::uint32_t last_seen_input_update_count = 0;  // NEW - see update_throttle_failsafe()'s own "NEW-FRAME DETECTION" note
+    };
+    FailsafeState failsafe;
+
+    // CPP-031 slice 8 - see rc_failsafe_short_off_event()'s own doc
+    // comment below for the full mode-restoration design these two fields
+    // (plus set_mode()'s new from_failsafe parameter) implement together.
+    Mode* failsafe_saved_mode = nullptr;
+    bool mode_set_by_failsafe = false;
+
     // upstream: Plane::set_mode(Mode& new_mode, const ModeReason reason)
     // (system.cpp, ~line 252-352) - see file banner's "SET_MODE()" note
     // for why the ModeReason parameter is dropped entirely (no GCS/
@@ -2890,18 +3132,36 @@ public:
     // including upstream's own ordering (tentative swap BEFORE calling
     // enter(), roll back to the old mode if it returns false, exit() the
     // old mode only on success).
-    bool set_mode(Mode& new_mode) {
+    //
+    // CPP-031 SLICE 8: gained ONE new, DEFAULTED parameter, from_failsafe
+    // (every pre-existing call site is therefore source- and behavior-
+    // unchanged) - the minimal substitute for upstream's ModeReason this
+    // slice needs. See this file's own "CPP-031 SLICE 8 ADDENDUM" and
+    // rc_failsafe_short_off_event()'s doc comment for the full design.
+    // `mode_set_by_failsafe` is stamped tentatively at the SAME point (and
+    // rolled back together, on a failed enter()) that upstream tentatively
+    // stamps `control_mode_reason = reason` - the exact same ordering,
+    // just one bool instead of a whole enum.
+    bool set_mode(Mode& new_mode, bool from_failsafe = false) {
         if (control_mode == &new_mode) {
             // upstream: "don't switch modes if we are already in the
             // correct mode" - AP_Notify's happy-noise-on-repeat-request
-            // gating is dropped (no AP_Notify subsystem).
+            // gating is dropped (no AP_Notify subsystem). Note this means
+            // mode_set_by_failsafe is NOT updated on this early-return
+            // path either - matches upstream's own control_mode_reason
+            // not being updated here (system.cpp), a real, minor, shared
+            // subtlety: if the failsafe's target mode already happens to
+            // be the active one, that mode's "ownership" (failsafe vs
+            // deliberate) doesn't change.
             return true;
         }
 
         Mode& old_mode = *control_mode;
+        const bool old_mode_set_by_failsafe = mode_set_by_failsafe; // CPP-031 slice 8 - rolled back together with control_mode below, matching upstream's own control_mode_reason/previous_mode_reason rollback (system.cpp)
 
         // upstream: "update control_mode assuming success".
         control_mode = &new_mode;
+        mode_set_by_failsafe = from_failsafe;
 
         if (!new_mode.enter()) {
             // upstream: "we failed entering new mode, roll back to old".
@@ -2911,12 +3171,267 @@ public:
             // verified by a dedicated rollback test using a test-only
             // failing mode (vehicle_test.cpp).
             control_mode = &old_mode;
+            mode_set_by_failsafe = old_mode_set_by_failsafe;
             return false;
         }
 
         // upstream: "exit previous mode".
         old_mode.exit();
         return true;
+    }
+
+    // upstream: Plane::rc_throttle_value_ok() (radio.cpp ~line 333). See
+    // file banner's "CPP-031 SLICE 8 ADDENDUM".
+    [[nodiscard]] bool rc_throttle_value_ok() const {
+        if (aparm.throttle_fs_enabled == ThrFailsafe::Disabled) {
+            return true;
+        }
+        const rc::RcChannel* thr = rc_channels.channel(kChannelThrottle);
+        if (thr->reversed) {
+            return thr->radio_in < aparm.throttle_fs_value;
+        }
+        return thr->radio_in > aparm.throttle_fs_value;
+    }
+
+    // upstream: Plane::rc_failsafe_active() (radio.cpp ~line 348). ONE
+    // necessary signature divergence: an explicit `now_ms` parameter
+    // rather than reading a singleton clock (ADR-0012, matching this
+    // port's now-ms-parameter convention throughout - e.g. every other
+    // `now_ms`-taking method in this file).
+    [[nodiscard]] bool rc_failsafe_active(std::uint32_t now_ms) const {
+        if (!rc_throttle_value_ok()) {
+            return true;
+        }
+        if (now_ms - failsafe.last_valid_rc_ms > aparm.rc_fs_timeout_ms) {
+            // we haven't had a valid RC frame for rc_fs_timeout_ms.
+            return true;
+        }
+        return false;
+    }
+
+    // upstream: the guard + 10-up/3-down debounce block inside Plane::
+    // control_failsafe() (radio.cpp ~lines 227-262), called every tick
+    // from read_radio(), PLUS read_radio()'s own last_valid_rc_ms update
+    // (radio.cpp ~lines 128-132) - folded into one method here rather
+    // than kept as two, since both are always called together every tick
+    // (mode.hpp's tick()). See file banner's "CONTROL_FAILSAFE()'S
+    // PILOT-STICK-TO-TRIM RESET" note for what's deliberately NOT ported
+    // from control_failsafe() (out of scope per the ticket), and
+    // "UPDATE_THROTTLE_FAILSAFE()'S ALLOW_FAILSAFE_BYPASS" for why the
+    // guard below is `!has_had_input` alone rather than upstream's full
+    // `allow_failsafe_bypass && !has_had_input` compound.
+    //
+    // NEW-FRAME DETECTION - A NECESSARY DEPARTURE FROM RE-CHECKING
+    // RcInput::new_input(), TRACED DIRECTLY AGAINST THIS PORT'S OWN TEST
+    // HARNESS, NOT ASSUMED: upstream's real gate for updating
+    // last_valid_rc_ms is "did read_input() see a genuinely new frame
+    // THIS call" (RC_Channels::read_input()'s own bool return). tick()
+    // (mode.hpp) already calls `rc_channels.read_input(...)` as its own
+    // step 1 - but vehicle_test.cpp's OWN set_sticks() helper (used by
+    // nearly every existing test, predating this slice) ALREADY calls
+    // `rc_channels.read_input()` directly, itself, before tick() ever
+    // runs. RcInput::new_input() is a genuine single-shot flag ("true
+    // exactly once, however many times someone asks" - hal/rc_input.hpp's
+    // own doc comment) - so by the time tick()'s OWN read_input() call
+    // runs, the flag is ALREADY consumed and it always returns false, NOT
+    // because no frame arrived, but because set_sticks() already looked.
+    // Gating last_valid_rc_ms's refresh on tick()'s own read_input()
+    // return value would therefore report "stale" on EVERY tick of EVERY
+    // existing closed-loop test that uses set_sticks() (nearly all of
+    // them) - tripping this slice's own failsafe within ~200ms of
+    // simulated time and silently breaking every one of them (discovered
+    // by tracing set_sticks()'s real body, not assumed). The fix touches
+    // neither set_sticks() nor any existing test (both forbidden) -
+    // instead RcChannels gained ONE new, purely-additive, non-consuming
+    // counter, input_update_count() (rc_channels.hpp, see its own file
+    // banner addendum), incremented every time read_input() processes a
+    // real new frame REGARDLESS OF WHICH CALLER triggered it. Comparing it
+    // against `failsafe.last_seen_input_update_count` (this Plane's own
+    // last-checked snapshot) correctly reports "yes, a new frame arrived
+    // since I last checked" even when THIS call didn't personally consume
+    // RcInput's flag - verified directly by this slice's own dedicated
+    // staleness test (vehicle_test.cpp), which confirms the timeout path
+    // fires correctly when set_sticks() is simply never called for over a
+    // second of simulated ticks (the counter then genuinely never
+    // advances).
+    void update_throttle_failsafe(std::uint32_t now_ms) {
+        if (rc_channels.input_update_count() != failsafe.last_seen_input_update_count) {
+            failsafe.last_seen_input_update_count = rc_channels.input_update_count();
+            if (rc_throttle_value_ok()) {
+                failsafe.last_valid_rc_ms = now_ms;
+            }
+        }
+
+        const bool has_had_input = rc_channels.has_valid_input();
+        if ((aparm.throttle_fs_enabled != ThrFailsafe::Enabled && !failsafe.rc_failsafe) || !has_had_input) {
+            // If throttle fs not enabled and not in failsafe, or we've
+            // never yet seen a valid RC frame - see file banner's
+            // "ALLOW_FAILSAFE_BYPASS" note for why this port's guard is
+            // simpler than upstream's real compound condition.
+            return;
+        }
+
+        if (rc_failsafe_active(now_ms)) {
+            // we detect a failsafe from radio - throttle has dropped
+            // below the mark (or the last valid frame is stale).
+            failsafe.throttle_counter++;
+            if (failsafe.throttle_counter == 10) {
+                failsafe.rc_failsafe = true;
+            }
+            if (failsafe.throttle_counter > 10) {
+                failsafe.throttle_counter = 10;
+            }
+        } else if (failsafe.throttle_counter > 0) {
+            // we are no longer in failsafe condition, but we need to
+            // recover quickly - note the asymmetric 3 cap vs the 10 cap
+            // above, read exactly from upstream, not assumed symmetric.
+            failsafe.throttle_counter--;
+            if (failsafe.throttle_counter > 3) {
+                failsafe.throttle_counter = 3;
+            }
+            if (failsafe.throttle_counter == 0) {
+                failsafe.rc_failsafe = false;
+            }
+        }
+    }
+
+    // upstream: Plane::check_short_rc_failsafe() (system.cpp ~line 411,
+    // full) - reacts to failsafe.rc_failsafe's transitions (set by
+    // update_throttle_failsafe() above) by calling the on/off event
+    // handlers. `flight_stage != AP_FixedWing::FlightStage::LAND` is
+    // dropped - see file banner's own note - always true here.
+    void check_short_rc_failsafe() {
+        if (aparm.fs_action_short != FsActionShort::Disabled && !failsafe.short_failsafe_active) {
+            if (failsafe.rc_failsafe) {
+                rc_failsafe_short_on_event();
+            }
+        }
+
+        if (failsafe.short_failsafe_active) {
+            if (!failsafe.rc_failsafe || aparm.fs_action_short == FsActionShort::Disabled) {
+                rc_failsafe_short_off_event();
+            }
+        }
+    }
+
+    // upstream: the identical if/else-if/else body upstream repeats
+    // verbatim across the MANUAL-group and AUTO-group case blocks of
+    // rc_failsafe_short_on_event() (a third, quadplane-only repetition is
+    // excluded, no quadplane) - factored into one helper since this port
+    // has no reason to duplicate it. mode_circle substituted with
+    // mode_rtl - see file banner's "NO CIRCLE MODE" note: a real, named
+    // gap, not silently papered over.
+    void apply_fs_action_short() {
+        if (aparm.fs_action_short == FsActionShort::Fbwa) {
+            set_mode(mode_fbwa, /*from_failsafe=*/true);
+        } else if (aparm.fs_action_short == FsActionShort::Fbwb) {
+            set_mode(mode_fbwb, /*from_failsafe=*/true);
+        } else {
+            // upstream: `set_mode(mode_circle, ...)` - BESTGUESS(0),
+            // CIRCLE(1), and DISABLED(3) all fall here (upstream's real
+            // if/else-if/else only special-cases FBWA/FBWB explicitly) -
+            // ported literally, not "fixed", per this port's own "port
+            // fixes bugs in the port, not upstream" rule. See file
+            // banner's "NO CIRCLE MODE" note for the RTL substitution.
+            set_mode(mode_rtl, /*from_failsafe=*/true);
+        }
+    }
+
+    // upstream: Plane::rc_failsafe_short_on_event() (events.cpp ~line 21,
+    // read in full). See file banner's "CPP-031 SLICE 8 ADDENDUM" for the
+    // full switch-case-by-switch-case trace of which of this port's six
+    // modes fall into which upstream case group, the CIRCLE->RTL
+    // substitution, and AUTO's own real (traced, not assumed)
+    // fs_action_short handling.
+    void rc_failsafe_short_on_event() {
+        failsafe.short_failsafe_active = true; // upstream: failsafe.state = FAILSAFE_SHORT
+        failsafe_saved_mode = control_mode;    // upstream: failsafe.saved_mode_number = control_mode->mode_number(), unconditionally - see file banner
+
+        if (control_mode == &mode_manual || control_mode == &mode_fbwa || control_mode == &mode_fbwb ||
+            control_mode == &mode_cruise) {
+            // upstream's MANUAL/STABILIZE/ACRO/FLY_BY_WIRE_A/AUTOTUNE/
+            // FLY_BY_WIRE_B/CRUISE/TRAINING case group - the four of
+            // those eight upstream modes this port has. The
+            // emergency_landing-overrides-to-FBWA branch is dropped (no
+            // emergency-landing subsystem, file banner).
+            apply_fs_action_short();
+        } else if (control_mode == &mode_auto) {
+            // upstream's AUTO/AUTOLAND/AVOID_ADSB/GUIDED/LOITER/THERMAL
+            // case group - AUTO is the only one of those six this port
+            // has. failsafe_in_landing_sequence() is dropped (no
+            // landing-sequence subsystem - always false, i.e. never skip,
+            // per the ticket's own instruction), so upstream's real `if
+            // (g.fs_action_short != FS_ACTION_SHORT_BESTGUESS)` gate is
+            // reproduced unguarded by anything else - AUTO is NOT one of
+            // the "never take short failsafe action" modes (that group is
+            // CIRCLE/TAKEOFF/RTL/quadplane-LAND-modes/INITIALISING only);
+            // it gets the SAME FBWA/FBWB/circle action as the group above,
+            // just additionally gated on fs_action_short != BESTGUESS.
+            if (aparm.fs_action_short != FsActionShort::BestGuess) {
+                apply_fs_action_short();
+            }
+        }
+        // else: control_mode == &mode_rtl - upstream's CIRCLE/TAKEOFF/
+        // RTL/(quadplane QLAND/QRTL/LOITER_ALT_QLAND)/INITIALISING case:
+        // "these modes never take any short failsafe action and
+        // continue" - a real, traced no-op (RTL is already the safe,
+        // autonomous, no-pilot-needed response), not a gap.
+    }
+
+    // upstream: Plane::rc_failsafe_short_off_event() (events.cpp ~line
+    // 243, full).
+    //
+    // MODE-RESTORATION DESIGN - THIS PORT'S SUBSTITUTE FOR
+    // saved_mode_number/ModeReason: upstream restores by `saved_mode_
+    // number` (a Mode::Number enum) via set_mode_by_number(), gated on
+    // `control_mode_reason == ModeReason::RADIO_FAILSAFE` (i.e. don't
+    // restore over a DELIBERATE later mode change made while failsafe was
+    // active). This port has no number-indexed mode lookup and no
+    // ModeReason tracking at all (commit 6db7924, CPP-031 slice 7,
+    // deliberately dropped the whole enum - no consumer anywhere in this
+    // port's scope ever read "why" a mode changed, until now).
+    // Resurrecting the whole enum for ONE boolean question ("was the
+    // CURRENT mode chosen by us, or by something else since?") would be
+    // exactly the dead plumbing that slice's own note argued against.
+    // Instead:
+    //   - `Mode* failsafe_saved_mode` (above) - a direct pointer to
+    //     whichever mode was active the moment the failsafe triggered,
+    //     substituting for saved_mode_number's enum-plus-lookup-table
+    //     indirection (this port's set_mode() already takes a `Mode&`
+    //     directly, so a pointer needs no separate lookup step at all).
+    //   - `bool mode_set_by_failsafe` (above) + `set_mode(Mode&, bool
+    //     from_failsafe = false)`'s new (defaulted, so every pre-existing
+    //     call site is unchanged) second parameter - the minimal
+    //     substitute for `control_mode_reason == ModeReason::
+    //     RADIO_FAILSAFE`. set_mode() stamps `mode_set_by_failsafe =
+    //     from_failsafe` at the SAME point (and with the SAME
+    //     tentative-before-enter()/rolled-back-on-failure ordering)
+    //     upstream stamps `control_mode_reason = reason` - see set_mode()
+    //     itself above. rc_failsafe_short_on_event() (via apply_fs_
+    //     action_short()) calls set_mode() with from_failsafe=true; EVERY
+    //     OTHER caller (a pilot's/autopilot's own deliberate set_mode()
+    //     call, e.g. ModeAUTO's mission-complete-to-RTL transition,
+    //     mode.hpp) uses the default `false` - so if one of those fires
+    //     WHILE this failsafe is still active, mode_set_by_failsafe
+    //     correctly flips back to false, and the check below correctly
+    //     refuses to stomp that deliberate later choice once the RC link
+    //     eventually recovers - the exact behavior the ticket asked for,
+    //     verified by a dedicated test (vehicle_test.cpp).
+    //   - Restoring via a plain `set_mode(*failsafe_saved_mode)` call
+    //     (from_failsafe defaulting false) is deliberate: the restored
+    //     mode is no longer "owned" by the failsafe machinery once
+    //     restored, so a SECOND failsafe triggering later correctly
+    //     saves/restores fresh rather than seeing a stale
+    //     mode_set_by_failsafe=true left over from the restoration
+    //     itself.
+    void rc_failsafe_short_off_event() {
+        failsafe.short_failsafe_active = false; // upstream: failsafe.state = FAILSAFE_NONE
+        if (mode_set_by_failsafe && failsafe_saved_mode != nullptr) {
+            // upstream: `if (control_mode_reason == ModeReason::
+            // RADIO_FAILSAFE) { set_mode_by_number(failsafe.saved_mode_
+            // number, ModeReason::RADIO_FAILSAFE_RECOVERY); }`
+            set_mode(*failsafe_saved_mode);
+        }
     }
 
 private:

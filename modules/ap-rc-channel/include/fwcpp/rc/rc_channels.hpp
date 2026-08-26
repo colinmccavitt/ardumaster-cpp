@@ -127,6 +127,7 @@ public:
         }
 
         has_ever_seen_rc_input_ = true;
+        ++input_update_count_; // CPP-031 slice 8 (ap-vehicle RC short failsafe) - see input_update_count() below
 
         bool success = false;
         for (std::uint8_t i = 0; i < kNumRcChannels; ++i) {
@@ -134,6 +135,24 @@ public:
         }
         return success;
     }
+
+    // CPP-031 slice 8 (ap-vehicle RC short failsafe) addition: a monotonic
+    // count of how many times read_input() above has actually processed a
+    // genuinely new frame (i.e. how many times it has returned true) -
+    // NOT reset or consumed by being read, unlike RcInput::new_input()'s
+    // own single-shot flag. Exists so a caller checking "did a new frame
+    // arrive since I last looked" (fwcpp::vehicle::Plane::
+    // update_throttle_failsafe()) gets a correct answer even when SOME
+    // OTHER caller already consumed RcInput::new_input() earlier in the
+    // same logical tick - this port's own vehicle_test.cpp set_sticks()
+    // helper does exactly that, calling read_input() directly before
+    // tick() calls it again, which would otherwise make a second,
+    // flag-based check always see "no new input" whether or not one
+    // genuinely arrived. Counting updates rather than latching a bool
+    // also means two real frames arriving between two checks are not
+    // conflated with one - not needed by today's one caller, but the
+    // honest, no-information-lost version of "did anything change".
+    [[nodiscard]] std::uint32_t input_update_count() const { return input_update_count_; }
 
     // Port of RC_Channels::has_valid_input() (RC_Channels.cpp) exactly:
     // the base-class implementation is *only* the has-ever-seen-input
@@ -173,6 +192,9 @@ private:
 
     // _has_ever_seen_rc_input, RC_Channel.h (RC_Channels private section).
     bool has_ever_seen_rc_input_ = false;
+
+    // CPP-031 slice 8 addition - see input_update_count() above.
+    std::uint32_t input_update_count_ = 0;
 };
 
 } // namespace fwcpp::rc

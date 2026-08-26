@@ -357,11 +357,42 @@ inline void ModeRTL::navigate(const StabilizeInputs& in) {
 // dedicated test (vehicle_test.cpp) that installs a mode whose navigate()
 // calls set_mode() mid-tick and confirms THIS tick's update()/run() still
 // ran on the old mode, with the switch only visible on the next tick().
+//
+// CPP-031 SLICE 8 NOTE: adds step 1b (plane.update_throttle_failsafe()/
+// plane.check_short_rc_failsafe()) - see plane.hpp's own "CPP-031 SLICE 8
+// ADDENDUM" file banner for the full RC short (throttle) failsafe design.
+// Placed immediately after step 1's RC read, matching upstream's own
+// adjacent same-rate scheduling of read_radio()/control_failsafe() and
+// check_short_rc_failsafe() (Plane.cpp's scheduler_tasks[], priorities 6
+// and 9, both 50Hz). Neither call changes any EXISTING mode's behavior
+// for a caller that never lets rc_failsafe actually latch (the real,
+// in-scope default: THR_FAILSAFE defaults Enabled, but FixedWingTunables::
+// fs_action_short/throttle_fs_value/rc_fs_timeout_ms all default to
+// upstream's own real values, and every existing test's own
+// set_sticks()-driven throttle PWM stays comfortably above
+// THR_FS_VALUE's default threshold (950) every tick it runs) - verified
+// directly by running every pre-existing test unchanged (vehicle_test.cpp).
 inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const StabilizeInputs& in) {
     Mode& mode = *plane.control_mode; // see this function's own "CPP-031 SLICE 7 NOTE" above
 
     // 1. pull RC input (upstream: AP_Vehicle's read_radio() scheduled task)
     plane.rc_channels.read_input(plane.hal.rc_input);
+
+    // 1b. RC short (throttle) failsafe - CPP-031 slice 8, see plane.hpp's
+    //     own "CPP-031 SLICE 8 ADDENDUM" file banner for the full design
+    //     (detection debounce, mode-switch on/off events, and the
+    //     NEW-FRAME-DETECTION note explaining why this reads
+    //     RcChannels::input_update_count() rather than re-checking
+    //     RcInput::new_input(), already consumed by vehicle_test.cpp's own
+    //     set_sticks() helper in every closed-loop test that calls it
+    //     before tick()). Matches upstream's own adjacent, same-rate
+    //     scheduling (read_radio() -> control_failsafe() ->
+    //     check_short_rc_failsafe(), Plane.cpp's scheduler_tasks[]
+    //     priorities 6/9, both 50Hz) - this port's single fixed-sequence
+    //     tick() reproduces that ordering directly rather than needing a
+    //     separate task-table entry.
+    plane.update_throttle_failsafe(in.now_ms);
+    plane.check_short_rc_failsafe();
 
     // 2. GPS update (upstream: AP_GPS::update(), a separate, earlier
     //    scheduled task feeding the AHRS update that follows it - see
