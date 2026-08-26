@@ -2588,6 +2588,17 @@ TEST_CASE("Plane::check_short_rc_failsafe: wires the debounce counter to rc_fail
 // mission-completion, rather than gold-plating a fix for an unrelated,
 // out-of-scope module inside this RC-failsafe slice. Flagged prominently
 // in this slice's own report for a future ticket to investigate.
+//
+// UPDATE (CPP-034): investigated and fixed - see mode.hpp's own "CPP-034
+// FIX" note on ModeRTL::update() and this file's own "Closed loop:
+// CRUISE-then-RTL converges toward home" test (below, near the RTL
+// section) for the root cause (ModeRTL::update() never drove Tecs via
+// update_auto_speed_height(), so it flew every loiter approach on a
+// frozen, stale trim inherited from whichever mode ran before it - not
+// an L1Control/ap-nav bug at all) and the fix. Left this note and its
+// history intact rather than deleting it - it's still an accurate record
+// of how the bug was FOUND, and this slice's own decision not to chase it
+// was the right call at the time.
 // ---------------------------------------------------------------------
 
 TEST_CASE("Closed loop: AUTO flying a mission, RC signal loss (throttle drops to the classic receiver-failsafe PWM) "
@@ -2720,4 +2731,136 @@ TEST_CASE("Closed loop: AUTO flying a mission, RC signal loss (throttle drops to
     }
     REQUIRE_FALSE(plane.failsafe.rc_failsafe);
     REQUIRE(plane.control_mode == &plane.mode_auto);
+}
+
+// ---------------------------------------------------------------------
+// CPP-034: CRUISE-then-RTL closed-loop regression test. See mode.hpp's
+// own "CPP-034 FIX" note on ModeRTL::update() for the full root-cause
+// writeup: ModeRTL::update() called calc_nav_pitch()/calc_throttle()
+// (which only READ Tecs's last computed pitch/throttle demand) but never
+// called update_auto_speed_height() (which actually DRIVES that demand),
+// unlike ModeAUTO::update() (mode.hpp, above) - a gap present since RTL
+// was first added (CPP-031 slice 6). The practical effect: RTL flew its
+// entire loiter approach on a frozen, stale trim inherited from whichever
+// mode was previously active (e.g. ModeCRUISE's own level-cruise trim,
+// nothing like RTL's real RTL_ALTITUDE climb target), which combined with
+// L1Control's loiter capture-then-circle law to produce a large, non-
+// decaying orbit oscillation instead of a real convergence - exactly the
+// scenario this file's own "WHY AUTO, NOT CRUISE" note (CPP-031 slice 8,
+// above) flagged for a future ticket to investigate. This test is that
+// investigation's own closed-loop repro: it FAILED (oscillating, never
+// settling) before the CPP-034 fix and converges cleanly after it.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Closed loop: CRUISE-then-RTL converges toward home", "[vehicle][integration][rtl][cruise][set_mode]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    plane.control_mode = &plane.mode_cruise;
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    // Home at the shared fixed reference point, alt 0 - same convention
+    // every other RTL closed-loop test above uses.
+    plane.set_home(fwcpp::Location());
+    // ModeCRUISE's real _enter() behavior - see its own class banner (same
+    // as CRUISE's own dedicated closed-loop test above).
+    plane.set_target_altitude_current(static_cast<std::int32_t>(-sim_plane.position.z * 100.0f));
+
+    auto step = [&]() {
+        now_us += 20000;
+        now_ms += 20;
+        // Cruise-ish throttle, centered roll/pitch/rudder - matches
+        // CRUISE's own dedicated closed-loop test above exactly, so the
+        // heading-lock behavior below is the SAME proven scenario.
+        set_sticks(plane, 1500, 1500, 1700, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.armed_and_safety_off = true;
+        in.now_ms = now_ms;
+        in.now_us = now_us;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+        in.position_ned = sim_plane.position;
+        // Real GPS wiring - CRUISE's own heading-lock gating (navigate())
+        // reads plane.gps.sample() directly, same treatment CRUISE's own
+        // closed-loop test above gives it.
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+
+        tick(plane, gyro_sample, in);
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+    };
+
+    // Phase 1: build real GPS ground speed and lock the heading - same
+    // 10-second budget CRUISE's own closed-loop test above uses.
+    for (int i = 0; i < 500; ++i) step();
+
+    std::int32_t heading_cd = 0;
+    const bool locked = plane.mode_cruise.get_target_heading_cd(heading_cd);
+    INFO("locked = " << locked << ", locked heading (cd) = " << heading_cd);
+    REQUIRE(locked); // the heading-lock state machine actually engaged
+
+    // Phase 2: keep flying CRUISE, away from home along the locked
+    // heading, for 20 more simulated seconds - by the time we switch to
+    // RTL below, the vehicle has genuinely flown away from home under its
+    // own power, not just been placed there by the test.
+    for (int i = 0; i < 1000; ++i) step();
+
+    const float dist_at_switch = plane.current_loc.get_distance(plane.home);
+    INFO("distance from home at CRUISE->RTL switch (m) = " << dist_at_switch);
+    REQUIRE(dist_at_switch > 300.0f); // genuinely flew away first, not still near home
+
+    // Phase 3: the real entry point - set_mode() runs ModeRTL::enter()
+    // (do_RTL()) for real, exactly like the AUTO-then-RTL closed-loop test
+    // above.
+    REQUIRE(plane.set_mode(plane.mode_rtl));
+    REQUIRE(plane.control_mode == &plane.mode_rtl);
+
+    float min_dist_to_home = dist_at_switch;
+    constexpr int kTotalTicks = 16000; // 320 simulated seconds
+    constexpr int kTailTicks = 2000;   // last 40 simulated seconds - steady-state loiter window
+    float tail_dist_sum = 0.0f;
+    float tail_dist_max = 0.0f;
+
+    for (int i = 0; i < kTotalTicks; ++i) {
+        step();
+
+        const float dist_to_home = plane.current_loc.get_distance(plane.home);
+        min_dist_to_home = std::min(min_dist_to_home, dist_to_home);
+        if (i >= kTotalTicks - kTailTicks) {
+            tail_dist_sum += dist_to_home;
+            tail_dist_max = std::max(tail_dist_max, dist_to_home);
+        }
+    }
+
+    const float tail_dist_avg = tail_dist_sum / static_cast<float>(kTailTicks);
+    INFO("distance at switch (m) = " << dist_at_switch << ", min distance reached (m) = " << min_dist_to_home
+                                      << ", final-window avg distance (m) = " << tail_dist_avg
+                                      << ", final-window max distance (m) = " << tail_dist_max);
+
+    // Real convergence (see this test's own verification run, CPP-034):
+    // distance shrinks from ~510m to a steady loiter oscillating roughly
+    // 65-75m from home, the SAME real convergence standard RTL's own
+    // dedicated closed-loop test above establishes (min ~53m, final-window
+    // avg ~71m there). Before the CPP-034 fix, this exact scenario instead
+    // produced a large, non-decaying oscillation (final-window max-min
+    // spread 100m+, never settling) - these thresholds are what actually
+    // catch that regression returning, not just "didn't crash".
+    REQUIRE(min_dist_to_home < 120.0f);
+    REQUIRE(tail_dist_avg < 120.0f);
+    REQUIRE(tail_dist_max - min_dist_to_home < 60.0f); // settled into a real loiter, not still oscillating widely
 }

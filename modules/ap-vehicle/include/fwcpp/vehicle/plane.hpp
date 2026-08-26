@@ -2914,13 +2914,29 @@ public:
     // rather than a reuse of update_fbwb_speed_height() above (that
     // function's elevator-stick/throttle-stick logic is real FBWB/CRUISE-
     // only behavior upstream itself never runs for AUTO). Called once per
-    // tick, exclusively from ModeAUTO::update() (mode.hpp), BEFORE
-    // calc_nav_pitch()/calc_throttle() read TECS's demand.
+    // tick from ModeAUTO::update() (mode.hpp) BEFORE calc_nav_pitch()/
+    // calc_throttle() read TECS's demand - and, as of CPP-034 (see mode.
+    // hpp's own "CPP-034 FIX" note on ModeRTL::update()), from ModeRTL::
+    // update() too, for the exact same reason: RTL is an auto-throttle
+    // mode just like AUTO (both call calc_nav_pitch()/calc_throttle()),
+    // so it needs the exact same "drive TECS before reading its demand"
+    // treatment - a call ModeRTL::update() was missing from CPP-031 slice
+    // 6 (when RTL was added) until CPP-034 fixed it. Not "exclusively"
+    // ModeAUTO's anymore; kept as ONE shared function rather than forking
+    // an RTL-specific copy since RTL's own needs (drive TECS toward
+    // aparm.airspeed_cruise at the current target_altitude_cm) are
+    // identical to AUTO's - RTL has no mission leg of its own to want a
+    // different airspeed target from.
     //
     // EXCLUDED (documented, not silently dropped): barometer.update()/
     // sink-rate low-pass/parachute (no such subsystems); update_flight_
     // stage()/LAND flight-stage distance-beyond-land-wp (no landing
-    // subsystem); the RTL climb-min boost (no RTL mode in this port);
+    // subsystem); the RTL climb-min boost - upstream's update_alt() bumps
+    // the TECS target altitude during an RTL climb-out; this port's
+    // RTL_CLIMB_MIN equivalent (ModeRTL::update(), mode.hpp) only limits
+    // roll angle until the climb threshold is reached, it does not touch
+    // the TECS altitude target - still a real, standing exclusion as of
+    // CPP-034, just no longer because RTL doesn't exist;
     // DO_CHANGE_SPEED's new_airspeed_cm override (no do-commands in this
     // slice's MissionItem vocabulary, so mode_auto_target_airspeed_cm()'s
     // real body always falls to its own "fallover to normal airspeed"

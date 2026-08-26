@@ -248,7 +248,52 @@ inline bool ModeRTL::enter() {
     return true;
 }
 
+// CPP-034 FIX - see plane.hpp's own "UPDATE_AUTO_SPEED_HEIGHT()" note
+// (Plane class, just above that method) and calc_throttle()'s own doc
+// comment ("This is called by TECS-enabled flight modes"): any mode that
+// calls calc_nav_pitch()/calc_throttle() only READS Tecs's last computed
+// pitch/throttle demand - something else has to actually DRIVE that
+// demand (tecs.update_50hz() + tecs.update_pitch_throttle(), bundled as
+// update_auto_speed_height()) earlier the SAME tick, exactly as
+// ModeAUTO::update() does above. ModeRTL::update() has called calc_nav_
+// pitch()/calc_throttle() since RTL was first added (CPP-031 slice 6) but
+// NEVER called update_auto_speed_height() - a genuine port-side gap, not
+// an upstream-fidelity choice: upstream's real TECS update runs from a
+// separate, mode-independent scheduled task (Plane::update_speed_height(),
+// scheduler_tasks[], called every loop regardless of control_mode), so
+// upstream never needed a "which mode is responsible for driving TECS"
+// convention at all. This port chose instead to drive TECS from inside
+// each auto-throttle mode's own update() (see UPDATE_AUTO_SPEED_HEIGHT()/
+// UPDATE_FBWB_SPEED_HEIGHT()'s own notes) - a reasonable substitute for
+// the missing scheduler, but that self-imposed convention was simply
+// never extended to ModeRTL when slice 6 added it.
+//
+// EFFECT, ROOT-CAUSED VIA A REAL CLOSED-LOOP REPRO (CPP-034 ticket -
+// vehicle_test.cpp's own "Closed loop: CRUISE-then-RTL converges toward
+// home" test, which FAILED to converge before this fix and converges
+// after it, with no other change): without this call, tecs.get_pitch_
+// demand()/get_throttle_demand() (read by calc_nav_pitch()/calc_throttle()
+// below) stayed FROZEN at whatever the PREVIOUS active mode last computed
+// - e.g. ModeCRUISE's own last update_fbwb_speed_height() call, tuned for
+// level flight at CRUISE's OWN altitude/speed, not RTL's real RTL_ALTITUDE
+// climb target (do_RTL() sets target_altitude_cm correctly, but nothing
+// ever fed it to Tecs again once RTL took over). The aircraft therefore
+// never actually climbed to home.alt+RTL_ALTITUDE, and flew its entire
+// loiter approach on a stale throttle/pitch trim never re-tuned for RTL's
+// own speed/energy regime - which combined with L1Control's loiter
+// capture-then-circle law (l1_control.hpp) to produce a large,
+// non-decaying orbit oscillation (radius swinging roughly 45m-330m,
+// never settling) instead of the tight, steady loiter every OTHER passing
+// RTL closed-loop test already reaches. RTL-alone and AUTO-then-RTL both
+// already converged fine despite this same gap - their own frozen/default
+// Tecs demand at the moment RTL took over happened to still be close
+// enough to survivable for L1's lateral loop to visibly work - which is
+// exactly why this was invisible until the RC-failsafe slice's own agent
+// tried CRUISE-then-RTL specifically (see vehicle_test.cpp's own "WHY
+// AUTO, NOT CRUISE" note, CPP-031 slice 8) and flagged it for this ticket
+// rather than assuming CRUISE was simply unlucky.
 inline void ModeRTL::update(const StabilizeInputs& in) {
+    plane_.update_auto_speed_height(in);
     plane_.calc_nav_roll(in);
     plane_.calc_nav_pitch();
     plane_.calc_throttle();
