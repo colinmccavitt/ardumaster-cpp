@@ -864,7 +864,13 @@
 // the entire time ModeRTL is active), and update_loiter() goes straight
 // to nav_controller.update_loiter() every call - a real, honest
 // consequence of RTL always flying a single, non-crosstracked leg to
-// home, not a bug. The HAL_QUADPLANE_ENABLED branch (the "switching to
+// home, not a bug. UPDATE (CPP-031 SLICE 10): ModeLOITER is now a SECOND
+// caller of this same shared function - see this file's own "CPP-031
+// SLICE 10 ADDENDUM" ("UPDATE_LOITER_UPDATE_NAV()'S 'JUST crosstrack'
+// SIMPLIFICATION GETS A SECOND CALLER" note) for why the collapse remains
+// safe for it too, for a DIFFERENT structural reason than RTL's own
+// (crosstrack-always-false) one - not a claim that RTL is still the only
+// caller. The HAL_QUADPLANE_ENABLED branch (the "switching to
 // QRTL" direct-waypoint-nav condition) is dropped entirely - no
 // quadplane. update_loiter()'s own `auto_state.wp_proportion > 1`
 // alternate "reached" condition is also dropped - wp_proportion is an
@@ -1698,6 +1704,207 @@
 // sample() stays exactly the same default/unhealthy CompassSample every
 // pre-existing caller already got.
 
+// =====================================================================
+// CPP-031 SLICE 10 ADDENDUM: ModeLOITER (mode.hpp, same module - see its
+// own class banner for the mode-level design). Upstream (Plane-4.7.0,
+// read directly, in full per the ticket): ArduPlane/mode_loiter.cpp (161
+// lines, full) - ModeLoiter::_enter()/update()/navigate()/
+// isHeadingLinedUp()/isHeadingLinedUp_cd()/update_target_altitude();
+// ArduPlane/commands_logic.cpp's Plane::do_loiter_at_location (~line 952,
+// trivial, full); ArduPlane/navigation.cpp's Plane::loiter_angle_reset
+// (~line 6, full).
+//
+// THE SECOND MODE TO USE L1Control's LOITER SUPPORT - AND THE SMALLEST
+// SLICE YET, BY DESIGN: ModeRTL (SLICE 6) already built and exercised
+// everything this mode's own enter()/update()/navigate() need
+// (update_loiter()/update_loiter_update_nav(), the LoiterState struct,
+// update_auto_speed_height()'s "drive Tecs yourself" convention below) -
+// this slice's real new work is genuinely small: one trivial Plane method
+// (do_loiter_at_location()) and three short ModeLOITER method bodies.
+// NO NEW Plane-level state is added at all (unlike SLICE 6's `home`/`rtl`
+// or SLICE 5's `mission`) - `loiter`/`next_WP_loc` are both reused
+// directly, exactly the "a future mode would also need this" reuse
+// ModeRTL's own class banner (mode.hpp) predicted when `loiter` was first
+// added.
+//
+// DO_LOITER_AT_LOCATION() - READ IN FULL, GENUINELY TRIVIAL: `if
+// (aparm.loiter_radius < 0) loiter.direction = -1; else loiter.direction
+// = 1; next_WP_loc = current_loc;` - two statements. The FIRST statement
+// is BYTE-FOR-BYTE IDENTICAL to do_RTL()'s own loiter.direction sign-
+// setting block above (verified by reading both upstream functions
+// directly, not assumed from similarity) - rather than duplicate it a
+// third time in this port, both now call a single new private helper,
+// set_loiter_direction_from_loiter_radius() (below, in this slice's own
+// "CPP-031 SLICE 10 (ModeLOITER)" section, right after update_loiter()) -
+// do_RTL()'s own inline block is replaced with a call to it. The SECOND
+// statement (`next_WP_loc = current_loc`) has no shared precedent to
+// reuse (do_RTL()'s own next_WP_loc assignment targets `home`, a
+// different value) - ported directly as ModeLOITER::enter()'s own second
+// line (mode.hpp).
+//
+// UPDATE_AUTO_SPEED_HEIGHT() - A REAL, DELIBERATE DIVERGENCE FROM
+// UPSTREAM'S OWN LITERAL mode_loiter.cpp, NOT AN OVERSIGHT: upstream's
+// real ModeLoiter::update() (read in full) is exactly `calc_nav_roll();
+// [else-branch] calc_nav_pitch(); calc_throttle();` - it NEVER calls
+// anything resembling update_auto_speed_height(), because upstream drives
+// TECS from a completely separate, mode-independent scheduled task
+// (Plane::update_speed_height(), Plane.cpp's scheduler_tasks[]) that runs
+// every loop regardless of which mode is active. This port has no
+// scheduler task table (SLICE 1's own "a single fixed sequence suffices"
+// choice) - CPP-034's own root-cause writeup (mode.hpp's ModeRTL::
+// update() "CPP-034 FIX" note) already generalizes the resulting
+// convention explicitly: "any mode that calls calc_nav_pitch()/
+// calc_throttle() only READS Tecs's last computed pitch/throttle demand -
+// something else has to actually DRIVE that demand... exactly as
+// ModeAUTO::update() does" - and CPP-034 was filed specifically because
+// ModeRTL::update() was missing that call for three slices (6 through the
+// RC-failsafe slice) before anyone noticed the resulting non-convergent
+// CRUISE-then-RTL orbit. ModeLOITER::update() (mode.hpp) is a SECOND real
+// auto-throttle mode (does_auto_throttle() below returns true) calling
+// calc_nav_pitch()/calc_throttle() - skipping update_auto_speed_height()
+// here would silently reproduce THE EXACT SAME BUG CLASS a second time,
+// this time from the very first commit rather than needing a later fix.
+// So it is called here from the start, matching ModeAUTO's/the
+// now-fixed ModeRTL's own real pattern - NOT a port-specific enhancement
+// beyond upstream, but the correct, scheduler-less equivalent of
+// upstream's real always-on TECS task, applied consistently to every
+// mode that needs it. VERIFIED DIRECTLY, NOT JUST ARGUED: this slice's
+// own closed-loop test (vehicle_test.cpp) was first run WITHOUT this
+// call, entering ModeLOITER directly from a freshly-constructed Plane
+// (TECS never previously driven) - the aircraft's throttle/pitch demand
+// stayed frozen at Tecs's own zero-initialized defaults for the entire
+// run, and SimPlane's true altitude fell away without bound instead of
+// leveling off, which fed back into airspeed/roll dynamics badly enough
+// that the horizontal orbit never settled either. Adding the call fixed
+// both altitude hold and the orbit's own convergence, first try - see
+// this ticket's own report for the exact before/after numbers.
+//
+// LOITER_ANGLE_RESET() - EXCLUDED, VERIFIED BY READING ITS REAL BODY, NOT
+// ASSUMED INAPPLICABLE: upstream's real function (navigation.cpp, read in
+// full) is exactly `loiter.sum_cd = 0; loiter.total_cd = 0; loiter.
+// reached_target_alt = false; loiter.unable_to_achieve_target_alt =
+// false;` - FOUR fields, none of which this port's own smaller LoiterState
+// (ModeRTL's own class banner, "LOITER STATE" note) ever declared in the
+// first place (verified directly against the struct above: exactly
+// direction/start_time_ms/radius, nothing else) - every upstream reader of
+// those four fields is itself out of this port's scope (LOITER_TURNS/
+// LOITER_TIME/LOITER_TO_ALT mission commands, never in MissionItem's
+// vocabulary - SLICE 5's own exclusion list - and isHeadingLinedUp_cd()'s
+// own N-lap acceptance-widening math, itself excluded below). Calling a
+// function whose entire body writes fields that don't exist would be
+// nonsensical, not merely low-value - skipped entirely, not stubbed.
+//
+// ISHEADINGLINEDUP()/ISHEADINGLINEDUP_CD() (BOTH OVERLOADS) - EXCLUDED,
+// NO CONSUMER ANYWHERE IN THIS PORT'S SCOPE, CONFIRMED BY TRACING BOTH
+// REAL UPSTREAM CALL PATHS DIRECTLY RATHER THAN ASSUMING: upstream's ONLY
+// callers of isHeadingLinedUp() are Plane::verify_loiter_heading() and
+// Plane::verify_loiter_to_alt() (commands_logic.cpp's own mission-command
+// verification functions - grepped for both directly), which upstream's
+// own AP_Mission dispatches for the LOITER_TO_ALT/LOITER_TIME NAV_LOITER
+// mission-command types while flying in AUTO. This port never ported
+// ANY of the verify_loiter_*() functions, and ModeAUTO::navigate()
+// (mode.hpp, read directly) calls exactly one verification function,
+// verify_nav_wp() - nothing resembling verify_loiter_heading/to_alt
+// exists anywhere in this port's Mission/ModeAUTO. MissionItem's own
+// vocabulary (SLICE 5's exclusion list) has no LOITER_TO_ALT/LOITER_TIME/
+// LOITER_TURNS/LOITER_UNLIM command types at all for such a verify
+// function to even dispatch from. Both overloads would therefore be
+// genuinely dead code - a real function with zero callers - if ported;
+// left unbuilt entirely, not stubbed or partially wired.
+//
+// UPDATE_TARGET_ALTITUDE() OVERRIDE - ALREADY-ESTABLISHED, PRE-EXISTING
+// EXCLUSION, NOT A NEW GAP THIS SLICE INTRODUCES: verified directly
+// against the Mode base class declaration above - `update_target_
+// altitude()` is not a concept this port's Mode hierarchy has AT ALL (no
+// virtual method by that name, and no OTHER mode - MANUAL/FBWA/FBWB/
+// CRUISE/AUTO/RTL - overrides one either, since none of their own class
+// banners mention it). Upstream's real Mode::update_target_altitude()
+// (mode.h/mode.cpp) is itself part of the terrain-relative/rangefinder-
+// altitude machinery this port has never ported (same "no terrain
+// subsystem" exclusion throughout this file) - there is simply nothing to
+// override.
+//
+// UPDATE_LOITER_UPDATE_NAV()'S "JUST crosstrack" SIMPLIFICATION GETS A
+// SECOND CALLER - RE-VERIFIED SAFE FOR IT, NOT JUST ASSUMED: SLICE 6's own
+// file banner note ("UPDATE_LOITER()") collapsed upstream's real gate
+// (`loiter.start_time_ms == 0 && (control_mode == &mode_auto ||
+// control_mode == &mode_guided) && auto_state.crosstrack && distance > 3
+// * radius`) down to just `crosstrack`, reasoning ModeRTL was this port's
+// ONLY caller of update_loiter() and do_RTL() always resets crosstrack to
+// false anyway. ModeLOITER (this slice) is now a SECOND caller, and
+// upstream's own real per-mode half of that gate (`control_mode ==
+// &mode_auto || control_mode == &mode_guided`) would ALSO exclude
+// mode_loiter (LOITER is neither AUTO nor GUIDED upstream either) - so in
+// principle a caller that switched directly from a mid-crosstrack AUTO
+// leg straight into LOITER (bypassing do_RTL()'s own crosstrack=false
+// reset entirely, since ModeLOITER's own do_loiter_at_location() never
+// touches `crosstrack`) could make this port's simplified `crosstrack`-
+// only check diverge from upstream's real per-mode-gated behavior for the
+// FIRST time. Traced through directly rather than left as a theoretical
+// worry: do_loiter_at_location() sets `next_WP_loc = current_loc` -
+// i.e. the loiter center coincides EXACTLY with the aircraft's own
+// position at the moment of entry, so `current_loc.get_distance(next_WP_
+// loc)` is 0m at that instant regardless of crosstrack's value, and stays
+// within roughly one loiter radius of 0 for as long as the resulting
+// orbit is stable (this slice's own closed-loop test confirms the orbit
+// settles near kLoiterRadiusDefault, i.e. nowhere close to `3 * radius`)
+// - so the distance half of the compound condition alone keeps this
+// branch from ever actually firing for ModeLOITER, in every realistic
+// invocation this port can currently produce, independent of whatever
+// crosstrack happens to be. Unlike ModeRTL (where `home` can be
+// arbitrarily far from `current_loc`, so only crosstrack being false
+// protects it), ModeLOITER is protected by its own geometry instead - a
+// different real reason for the same practical outcome, not a
+// coincidence being relied on twice. Still, this is a narrowing of margin
+// worth naming plainly: a FUTURE mode/command that sets next_WP_loc to
+// somewhere OTHER than current_loc before dispatching through this same
+// shared update_loiter_update_nav() (a mission LOITER_UNLIM command, say)
+// would not have this same structural protection, and should tighten the
+// check back to a real `control_mode == &mode_auto` comparison (this
+// port's own closest equivalent of upstream's real gate - no ModeGUIDED
+// exists to compare against either) rather than inherit the "just
+// crosstrack" shortcut by default.
+//
+// RC-FAILSAFE CLASSIFICATION - A REAL, NAMED, NOT-YET-WIRED GAP THIS
+// SLICE SURFACES BUT DELIBERATELY DOES NOT CLOSE (OUT OF THIS TICKET'S
+// OWN SCOPE): upstream's real rc_failsafe_short_on_event() (events.cpp,
+// see file banner's "CPP-031 SLICE 8 ADDENDUM") groups LOITER together
+// with AUTO/GUIDED/AUTOLAND/AVOID_ADSB/THERMAL - i.e. LOITER gets the
+// SAME FBWA/FBWB/circle-substitute failsafe action AUTO does (gated on
+// fs_action_short != BESTGUESS), NOT the CIRCLE/TAKEOFF/RTL "never take
+// any action" group `rc_failsafe_short_on_event()`'s own `else` branch
+// (plane.hpp, below) currently assumes is exhaustively "control_mode ==
+// &mode_rtl". Before this slice, that assumption was airtight - mode_
+// loiter did not exist, so nothing could ever prove it wrong. As of this
+// slice, `plane.mode_loiter` is a real, settable-via-set_mode() Plane
+// member for the FIRST time - a caller that manually did `plane.set_mode
+// (plane.mode_loiter)` and then triggered a short RC failsafe would
+// silently fall into that `else` branch and get RTL's real "never take
+// any action" treatment instead of upstream's real AUTO-like action. No
+// code shipped by this ticket can actually reach that path (this slice
+// wires no RC-failsafe/mission-command/aux-switch target into
+// mode_loiter at all - see this file's own "WHAT'S NEXT" pointer just
+// below - so mode_loiter's ONLY callers, this ticket's own tests, drive
+// it directly via ModeLOITER's own methods or set_mode(), never through
+// a failsafe event), so no EXISTING test's behavior changes - but the gap
+// is now real and reachable in principle, not merely hypothetical, and is
+// flagged with an inline pointer comment at rc_failsafe_short_on_event()
+// itself (below) rather than silently left for a future reader to
+// rediscover.
+//
+// WHAT'S NEXT (not this ticket's scope, flagged per its own closing
+// question): with a real, working ModeLOITER now built and tested, the
+// natural follow-ups are (1) the RC-failsafe classification fix just
+// described, (2) wiring LOITER as a real RC-mode-switch-channel target
+// (no aux-function-dispatch/mode-switch-channel subsystem decodes stick
+// positions into mode changes anywhere in this port yet - set_mode() itself
+// remains programmatic-only, same standing gap SLICE 7's own file banner
+// already named), and (3) a LOITER_UNLIM-equivalent NAV command in
+// MissionItem's vocabulary so ModeAUTO could dispatch into a loiter
+// programmatically mid-mission - none of these are needed for THIS
+// slice's own scope (a standalone mode that loiters wherever it was
+// entered), and none of this slice's own code depends on any of them.
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -2529,6 +2736,106 @@ public:
     // upstream: ModeRTL::does_auto_throttle() (mode.h) - `{ return true; }`,
     // ported directly. CPP-031 slice 9 - see plane.hpp file banner's
     // "DOES_AUTO_THROTTLE() UN-EXCLUDED" note.
+    [[nodiscard]] bool does_auto_throttle() const override { return true; }
+};
+
+// upstream: ModeLoiter (mode.h) + mode_loiter.cpp (161 lines, read in
+// full) - CPP-031 "slice 10". Loiters wherever it was entered - the
+// SECOND mode to use L1Control's loiter support (update_loiter()/
+// reached_loiter_target()/loiter_radius(), see ModeRTL's own class banner
+// above for why real new work here is small: everything this mode's own
+// enter()/update()/navigate() need already exists from RTL). See this
+// file's own "CPP-031 SLICE 10 ADDENDUM" (file banner, above the
+// `#include` block) for the full upstream-vs-port mapping and every
+// judgment call - not repeated here beyond a short pointer per item,
+// matching this port's own established per-class-banner convention.
+//
+// STATE OWNERSHIP - same precedent as ModeRTL/ModeAUTO's own class
+// banners: ModeLOITER itself holds NO private state. `loiter` (the exact
+// same Plane-level LoiterState ModeRTL already uses) and `next_WP_loc`
+// are both reused directly - NO new Plane-level state this slice needs
+// (unlike ModeRTL, which needed `home`/`rtl`; unlike ModeAUTO, which
+// needed `mission`).
+//
+// _ENTER() - upstream's real _enter() body, after the two EXCLUDED pieces
+// below, is exactly `plane.do_loiter_at_location();` (body: mode.hpp),
+// always returns true - no real failure condition in this port's scope,
+// matching every other mode's own enter() (Mode base class's own doc
+// comment above). EXCLUDED, both already-established exclusions
+// elsewhere in this port, not new ones this slice introduces - see file
+// banner's "CPP-031 SLICE 10 ADDENDUM" for the full trace of each:
+//   - `plane.setup_terrain_target_alt(...)` - no terrain subsystem.
+//   - the `stick_mixing_enabled() && flight_option_enabled(
+//     ENABLE_LOITER_ALT_CONTROL)`-gated `set_target_altitude_current()`
+//     call - both stick-mixing-as-an-altitude-controller and the
+//     FlightOptions bitmask are already-excluded subsystems. Consequence,
+//     same caller-responsibility precedent ModeFBWB's own class banner
+//     already established ("_enter() IS NOT PORTED" note): this port's
+//     ModeLOITER::enter() NEVER sets target_altitude_cm - A CALLER MUST
+//     CALL plane.set_target_altitude_current(current_altitude_cm)
+//     EXPLICITLY BEFORE THE FIRST tick()/update() for a stable altitude
+//     hold, otherwise TECS targets whatever target_altitude_cm was last
+//     left at (0, for a Plane that has never held an altitude-target mode
+//     before).
+//   - `loiter_angle_reset()` - its real body only resets four fields
+//     (sum_cd/total_cd/reached_target_alt/unable_to_achieve_target_alt)
+//     this port's own smaller LoiterState never declared in the first
+//     place - see file banner.
+//
+// UPDATE() - calc_nav_roll() (unconditional), then - since stick_mixing_
+// enabled()/ENABLE_LOITER_ALT_CONTROL are both excluded (see _ENTER()
+// above) - ALWAYS takes upstream's own `else` branch: calc_nav_pitch() +
+// calc_throttle() (both pre-existing since FBWB/AUTO/RTL). AP_SCRIPTING_
+// ENABLED's "reset altitude while a trick runs" branch is excluded - no
+// scripting subsystem. ALSO calls plane.update_auto_speed_height(in)
+// FIRST, a real, deliberate divergence from upstream's own literal
+// mode_loiter.cpp (which never calls it) - see file banner's "CPP-031
+// SLICE 10 ADDENDUM" ("UPDATE_AUTO_SPEED_HEIGHT()" note) for the full
+// CPP-034-precedented reasoning and the direct before/after verification.
+//
+// NAVIGATE() - the ENABLE_LOITER_ALT_CONTROL next_WP_loc-altitude-update
+// branch and the AP_SCRIPTING_ENABLED early-return are both excluded
+// (same reasons as UPDATE()/_ENTER() above), leaving upstream's own real
+// final line: `plane.update_loiter(0);` - "Zero indicates to use
+// WP_LOITER_RAD" (upstream's own comment) - verified against update_
+// loiter()'s own real `radius <= 1` fallback (plane.hpp, ModeRTL's own
+// slice) to confirm 0 genuinely reaches it, not a port-specific
+// reinterpretation of "0".
+//
+// EXCLUDED ENTIRELY, OUT OF THIS PORT'S SCOPE (per the ticket, not a
+// partial-dispatch stub) - see file banner's "CPP-031 SLICE 10 ADDENDUM"
+// for the full trace of each:
+//   - isHeadingLinedUp()/isHeadingLinedUp_cd() (both overloads) - no
+//     consumer anywhere in this port's scope (mission-exit-from-loiter
+//     heading check, needs verify_loiter_heading()/verify_loiter_to_alt(),
+//     neither ever ported, and no LOITER_TO_ALT/LOITER_TIME command type
+//     in MissionItem's vocabulary to dispatch them from).
+//   - update_target_altitude() override - Mode::update_target_altitude()
+//     is not a concept this port's Mode base class has at all - an
+//     already-established, pre-existing exclusion, not a new gap.
+class ModeLOITER : public Mode {
+public:
+    using Mode::Mode;
+
+    // upstream: ModeLoiter::_enter() - see class banner. Body: mode.hpp.
+    bool enter() override;
+
+    // upstream: ModeLoiter::update() - see class banner for the
+    // stick-mixing/ENABLE_LOITER_ALT_CONTROL exclusion and the
+    // update_auto_speed_height() divergence. Body: mode.hpp.
+    void update(const StabilizeInputs& in) override;
+
+    // upstream: ModeLoiter::navigate() - see class banner for the
+    // ENABLE_LOITER_ALT_CONTROL/scripting exclusions. Body: mode.hpp.
+    void navigate(const StabilizeInputs& in) override;
+
+    // upstream: ModeLoiter has NO run() override at all - relies entirely
+    // on base Mode::run(), same "auto-throttle mode relies on the base"
+    // shape as ModeFBWB/ModeCRUISE/ModeAUTO/ModeRTL.
+
+    // upstream: ModeLoiter::does_auto_throttle() (mode.h) - `{ return
+    // true; }`, ported directly - same real override every other
+    // auto-throttle mode in this port's scope has.
     [[nodiscard]] bool does_auto_throttle() const override { return true; }
 };
 
@@ -3542,11 +3849,15 @@ public:
         // directly here instead.
         target_altitude_cm = next_WP_loc.alt;
 
-        if (aparm.loiter_radius < 0.0f) {
-            loiter.direction = -1;
-        } else {
-            loiter.direction = 1;
-        }
+        // CPP-031 SLICE 10: this exact three-line sign-setting block is
+        // byte-for-byte duplicated by upstream's own Plane::
+        // do_loiter_at_location() (commands_logic.cpp) - factored into a
+        // shared helper (below, this file's own "CPP-031 SLICE 10
+        // (ModeLOITER)" section, right after update_loiter()) rather than
+        // duplicated a third time in this port. See that section's own doc
+        // comment and the file banner's "CPP-031 SLICE 10 ADDENDUM" note
+        // ("DO_LOITER_AT_LOCATION()") for the full reasoning.
+        set_loiter_direction_from_loiter_radius();
 
         // setup_alt_slope() - deferred, see SLICE 2's note; nothing left
         // to do here (target_altitude_cm was just set above).
@@ -3604,6 +3915,35 @@ public:
     }
 
     // =====================================================================
+    // CPP-031 SLICE 10 (ModeLOITER) - see file banner addendum for the full
+    // design rationale (do_loiter_at_location()'s reuse of do_RTL()'s own
+    // sign-setting logic, the update_auto_speed_height() divergence from
+    // upstream's literal mode_loiter.cpp, loiter_angle_reset()/
+    // isHeadingLinedUp()/update_target_altitude()'s exclusions, and the
+    // update_loiter_update_nav() second-caller safety re-verification).
+    // =====================================================================
+
+    // upstream: the identical `if (aparm.loiter_radius < 0) loiter.
+    // direction = -1; else loiter.direction = 1;` block, duplicated
+    // verbatim by BOTH Plane::do_RTL() (commands_logic.cpp, ~line 337) and
+    // Plane::do_loiter_at_location() (commands_logic.cpp, ~line 952) -
+    // verified by reading both directly. Factored into one shared helper
+    // here rather than duplicated a third time in this port - do_RTL()
+    // (above) now calls this too, matching build_l1_inputs()'s own
+    // factoring precedent (SLICE 4's own file banner note).
+    void set_loiter_direction_from_loiter_radius() { loiter.direction = (aparm.loiter_radius < 0.0f) ? -1 : 1; }
+
+    // upstream: Plane::do_loiter_at_location() (commands_logic.cpp, ~line
+    // 952, read in full) - genuinely trivial: set loiter.direction from
+    // aparm.loiter_radius's sign (see set_loiter_direction_from_loiter_
+    // radius() just above), then start a loiter centered on wherever the
+    // aircraft currently is. ModeLOITER::enter()'s (mode.hpp) sole caller.
+    void do_loiter_at_location() {
+        set_loiter_direction_from_loiter_radius();
+        next_WP_loc = current_loc;
+    }
+
+    // =====================================================================
     // CPP-031 SLICE 7 (real mode-switching) - see file banner addendum for
     // the full design rationale (why Mode's class hierarchy is declared
     // above rather than in mode.hpp, enter()/exit() becoming real virtual
@@ -3633,6 +3973,11 @@ public:
     ModeCRUISE mode_cruise{*this};
     ModeAUTO mode_auto{*this};
     ModeRTL mode_rtl{*this};
+    // CPP-031 SLICE 10 - see file banner's own "CPP-031 SLICE 10 ADDENDUM"
+    // ("RC-FAILSAFE CLASSIFICATION" note) for a real, named, not-yet-wired
+    // gap this addition surfaces: rc_failsafe_short_on_event() (below)
+    // does not yet classify this mode.
+    ModeLOITER mode_loiter{*this};
 
     // upstream: Plane::control_mode (Plane.h), `Mode *control_mode =
     // &mode_initializing;` - see file banner's "CONTROL_MODE'S DEFAULT"
@@ -3927,6 +4272,21 @@ public:
         // "these modes never take any short failsafe action and
         // continue" - a real, traced no-op (RTL is already the safe,
         // autonomous, no-pilot-needed response), not a gap.
+        //
+        // CPP-031 SLICE 10 - NOT YET EXHAUSTIVE, A REAL NAMED GAP: this
+        // `else` implicitly assumes "not manual-group, not AUTO" means
+        // RTL - true when this function was written (only six modes
+        // existed), but `mode_loiter` is now also a real, settable-via-
+        // set_mode() Plane member and would silently fall in here too,
+        // getting RTL's "never act" treatment instead of upstream's real
+        // AUTO-like action (upstream groups LOITER with AUTO/GUIDED, not
+        // CIRCLE/RTL - see file banner's "CPP-031 SLICE 10 ADDENDUM",
+        // "RC-FAILSAFE CLASSIFICATION" note for the full trace). No
+        // shipped code path can reach this today - nothing wires a
+        // failsafe/aux-switch/mission-command target into mode_loiter yet
+        // - but it is a real, reachable-in-principle gap now, not merely
+        // hypothetical, flagged here rather than left for a future reader
+        // to rediscover.
     }
 
     // upstream: Plane::rc_failsafe_short_off_event() (events.cpp ~line

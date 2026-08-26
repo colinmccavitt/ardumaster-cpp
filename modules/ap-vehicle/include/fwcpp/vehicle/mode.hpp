@@ -331,6 +331,42 @@ inline void ModeRTL::navigate(const StabilizeInputs& in) {
     plane_.update_loiter(radius, in);
 }
 
+// ---------------------------------------------------------------------
+// ModeLOITER - out-of-line bodies. Declarations + full judgment-call
+// documentation: plane.hpp (class banner and file banner's own "CPP-031
+// SLICE 10 ADDENDUM").
+// ---------------------------------------------------------------------
+
+inline bool ModeLOITER::enter() {
+    plane_.do_loiter_at_location();
+    return true;
+}
+
+// CPP-031 SLICE 10 - see plane.hpp's own "CPP-031 SLICE 10 ADDENDUM" file
+// banner note ("UPDATE_AUTO_SPEED_HEIGHT()") for why this calls
+// update_auto_speed_height(in) even though upstream's own literal
+// mode_loiter.cpp does not - the same "an auto-throttle mode calling
+// calc_nav_pitch()/calc_throttle() must drive Tecs itself, since this port
+// has no mode-independent scheduled TECS task" reasoning CPP-034
+// established for ModeRTL::update() above, applied here from the start
+// rather than needing its own later fix.
+inline void ModeLOITER::update(const StabilizeInputs& in) {
+    plane_.update_auto_speed_height(in);
+    plane_.calc_nav_roll(in);
+    plane_.calc_nav_pitch();
+    plane_.calc_throttle();
+}
+
+inline void ModeLOITER::navigate(const StabilizeInputs& in) {
+    // Zero indicates to use WP_LOITER_RAD (upstream's own comment,
+    // mode_loiter.cpp) - see plane.hpp's update_loiter() doc comment for
+    // why a zero radius genuinely reaches its real `radius <= 1` default
+    // fallback. Contrast with ModeRTL::navigate() just above, which
+    // passes a real nonzero RTL_RADIUS-derived radius when configured -
+    // LOITER always wants the plain default.
+    plane_.update_loiter(0, in);
+}
+
 // upstream: the real scheduler task-table sequence (AHRS update ->
 // update_control_mode/navigate -> Plane::stabilize() -> Plane::
 // set_servos()/output), inferred from Mode::run()'s own body plus

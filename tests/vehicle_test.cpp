@@ -2188,6 +2188,270 @@ TEST_CASE("Closed loop: RTL flies back toward home and then holds a loiter near 
 }
 
 // ---------------------------------------------------------------------
+// CPP-031 SLICE 10: ModeLOITER - loiters wherever it was entered. See
+// plane.hpp's own file banner "CPP-031 SLICE 10 ADDENDUM" and mode.hpp's
+// ModeLOITER class banner for the full design rationale and exclusion
+// list (loiter_angle_reset()/isHeadingLinedUp()/isHeadingLinedUp_cd()/
+// update_target_altitude() - all excluded, no consumer/no such base-class
+// concept in this port; the update_auto_speed_height() call in update()
+// IS a real, deliberate divergence from upstream's own literal
+// mode_loiter.cpp, not a stub - see that note for the CPP-034-precedented
+// reasoning).
+// ---------------------------------------------------------------------
+
+TEST_CASE("Plane::do_loiter_at_location: centers the loiter on current_loc and sets loiter.direction from "
+          "loiter_radius's sign",
+          "[vehicle][loiter]") {
+    Plane plane;
+    plane.current_loc = make_loc(200.0f, -150.0f, 30.0f);
+    plane.next_WP_loc = make_loc(9999.0f, 9999.0f, 0.0f); // dirty it first - prove it's really overwritten
+
+    SECTION("positive loiter_radius (the real upstream default, 60m) -> clockwise") {
+        plane.aparm.loiter_radius = 60.0f;
+        plane.do_loiter_at_location();
+        REQUIRE(plane.loiter.direction == 1);
+    }
+
+    SECTION("negative loiter_radius -> counter-clockwise, the SAME sign convention do_RTL() already uses "
+            "(both now share one factored helper)") {
+        plane.aparm.loiter_radius = -60.0f;
+        plane.do_loiter_at_location();
+        REQUIRE(plane.loiter.direction == -1);
+    }
+
+    REQUIRE(plane.next_WP_loc.same_latlon_as(plane.current_loc));
+    REQUIRE(plane.next_WP_loc.alt == plane.current_loc.alt);
+}
+
+TEST_CASE("ModeLOITER::enter: calls do_loiter_at_location() for real and always succeeds", "[vehicle][loiter]") {
+    Plane plane;
+    ModeLOITER loiter_mode(plane);
+    plane.current_loc = make_loc(500.0f, -200.0f, 40.0f);
+    plane.aparm.loiter_radius = -25.0f; // counter-clockwise
+
+    REQUIRE(loiter_mode.enter());
+    REQUIRE(plane.next_WP_loc.same_latlon_as(plane.current_loc));
+    REQUIRE(plane.next_WP_loc.alt == plane.current_loc.alt);
+    REQUIRE(plane.loiter.direction == -1);
+}
+
+TEST_CASE("ModeLOITER::navigate: dispatches into update_loiter(0, ...), which resolves 0 to the real default/"
+          "configured loiter radius - not a literal zero-radius loiter",
+          "[vehicle][loiter]") {
+    Plane plane;
+    ModeLOITER loiter_mode(plane);
+
+    StabilizeInputs in;
+    in.eas2tas = 1.0f;
+    in.now_ms = 1000;
+    in.now_us = 1000000;
+    in.true_velocity_ned = fwcpp::math::Vector3f(0.0f, 12.0f, 0.0f); // flying east - tangential to a loiter centered at the origin
+    plane.gps.update(in.true_velocity_ned, in.now_ms);
+
+    SECTION("aparm.loiter_radius at its real default (60m, an unconfigured vehicle)") {
+        plane.current_loc = make_loc(0.0f, 0.0f, 0.0f);
+        loiter_mode.enter();                              // next_WP_loc = current_loc = the shared origin
+        plane.current_loc = make_loc(0.0f, 200.0f, 0.0f); // 200m east of the loiter center
+
+        loiter_mode.navigate(in);
+        REQUIRE(plane.loiter.radius == Catch::Approx(kLoiterRadiusDefault));
+        // A literal zero-radius loiter would read crosstrack_error()
+        // (distance-to-center - radius) as (200-0)=200m; the real
+        // default (60m) instead reads (200-60)=140m - clearly
+        // distinguishable, proving the real fallback ran, not a
+        // port-specific reinterpretation of "0".
+        INFO("crosstrack_error (m) = " << plane.nav_controller.crosstrack_error());
+        REQUIRE(plane.nav_controller.crosstrack_error() == Catch::Approx(140.0f).margin(2.0f));
+    }
+
+    SECTION("a caller-configured aparm.loiter_radius (45m) is honored, not overridden by kLoiterRadiusDefault") {
+        plane.aparm.loiter_radius = 45.0f;
+        plane.current_loc = make_loc(0.0f, 0.0f, 0.0f);
+        loiter_mode.enter();
+        plane.current_loc = make_loc(0.0f, 200.0f, 0.0f);
+
+        loiter_mode.navigate(in);
+        REQUIRE(plane.loiter.radius == Catch::Approx(45.0f));
+        INFO("crosstrack_error (m) = " << plane.nav_controller.crosstrack_error());
+        REQUIRE(plane.nav_controller.crosstrack_error() == Catch::Approx(155.0f).margin(2.0f));
+    }
+}
+
+TEST_CASE("ModeLOITER::update: update_auto_speed_height() actually drives Tecs - not a frozen/stale default "
+          "demand, and calc_nav_roll() reads a genuine lateral loiter demand",
+          "[vehicle][loiter]") {
+    Plane plane;
+    ModeLOITER loiter_mode(plane);
+    plane.current_loc = make_loc(0.0f, 100.0f, 20.0f);
+    plane.next_WP_loc = make_loc(0.0f, 0.0f, 0.0f); // loiter center 100m west of current_loc
+    plane.aparm.loiter_radius = 60.0f;
+
+    StabilizeInputs in;
+    in.eas2tas = 1.0f;
+    in.now_ms = 1000;
+    in.now_us = 1000000;
+    in.airspeed_valid = true;
+    in.airspeed_eas = 15.0f;
+    in.current_altitude_m = 20.0f; // well below the target set below - a large, unambiguous altitude error
+    in.true_velocity_ned = fwcpp::math::Vector3f(0.0f, 15.0f, 0.0f);
+    plane.gps.update(in.true_velocity_ned, in.now_ms);
+    // update_flight_limits() is normally called by tick() every loop
+    // before mode.update() - called explicitly here since this test
+    // drives ModeLOITER's methods directly, matching the RTL unit test's
+    // own precedent above.
+    plane.update_flight_limits();
+    plane.set_target_altitude_current(15000); // 150m - 130m above current_altitude_m, a real, large climb demand
+
+    // Before any update() call, Tecs has never been driven at all - its
+    // own pitch/throttle demand still reads back a freshly-constructed
+    // Tecs's own untouched default.
+    const std::int32_t pitch_before = plane.tecs.get_pitch_demand();
+    const float throttle_before = plane.tecs.get_throttle_demand();
+
+    loiter_mode.navigate(in);
+    loiter_mode.update(in);
+
+    INFO("pitch demand before/after (cd) = " << pitch_before << "/" << plane.tecs.get_pitch_demand()
+                                              << ", throttle demand before/after = " << throttle_before << "/"
+                                              << plane.tecs.get_throttle_demand());
+    // A real, LIVE Tecs demand - proof update_auto_speed_height() actually
+    // ran as part of THIS update() call, not the CPP-034 bug class (a
+    // frozen/never-driven demand ModeRTL::update() had until fixed - see
+    // mode.hpp's own "CPP-034 FIX" note) repeated silently for LOITER.
+    REQUIRE(plane.tecs.get_pitch_demand() != pitch_before);
+    REQUIRE(plane.tecs.get_throttle_demand() != Catch::Approx(throttle_before));
+
+    // calc_nav_roll(): a genuine lateral demand toward the loiter circle -
+    // not the zero it would read with navigate() never having run.
+    INFO("nav_roll_cd = " << plane.nav_roll_cd);
+    REQUIRE(plane.nav_roll_cd != 0);
+    REQUIRE(std::abs(plane.nav_roll_cd) <= plane.roll_limit_cd);
+}
+
+// ---------------------------------------------------------------------
+// Closed-loop integration test (the real point of this ticket's slice
+// 10): drive a genuine Plane + ModeLOITER against SimPlane's ground-truth
+// flight dynamics, entered directly with NO navigation phase at all
+// (unlike RTL's own closed-loop test above, which first flies toward a
+// distant home) and confirm SimPlane's TRUE position (ground truth, not
+// any estimate) settles into a stable circular orbit around the ENTRY
+// point at roughly the real default loiter radius - matching this port's
+// now-established "prove the loop actually closes" standard (FBWA/FBWB/
+// CRUISE/AUTO/RTL closed-loop tests above). ModeLOITER's post-entry
+// behavior is essentially "RTL's own loiter phase, entered directly
+// instead of navigated to" - this test reuses RTL's own structural
+// template directly, per the ticket's own instruction.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Closed loop: LOITER holds a stable orbit around the point it was entered at, in SimPlane's ground truth",
+          "[vehicle][integration][loiter]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    ModeLOITER loiter_mode(plane);
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    // Level trimmed flight at 70m altitude, heading due north - the SAME
+    // starting posture RTL's own closed-loop test uses, so there is no
+    // initial attitude/velocity mismatch transient to settle before
+    // LOITER's own convergence can fairly be judged.
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 0.0f, -70.0f);
+    sim_plane.velocity_ef = fwcpp::math::Vector3f(15.0f, 0.0f, 0.0f);
+    sim_plane.airspeed = 15.0f;
+
+    // ModeLOITER's real enter() behavior (do_loiter_at_location()) needs a
+    // real current_loc to center the loiter on - seed it from SimPlane's
+    // own true starting state, matching how a real vehicle would already
+    // have a valid position estimate before LOITER engages.
+    plane.update_current_loc(sim_plane.position);
+    const fwcpp::Location entry_point = plane.current_loc;
+
+    // ModeLOITER::enter() never sets target_altitude_cm - see plane.hpp's
+    // own "CPP-031 SLICE 10 ADDENDUM" ("_ENTER()" note) and mode.hpp's
+    // ModeLOITER class banner: both stick-mixing and ENABLE_LOITER_ALT_
+    // CONTROL are already-excluded subsystems upstream itself gates that
+    // assignment on. A CALLER MUST CALL plane.set_target_altitude_
+    // current() EXPLICITLY for a stable altitude hold - the SAME caller-
+    // responsibility precedent ModeFBWB's own closed-loop test above
+    // already established.
+    plane.set_target_altitude_current(static_cast<std::int32_t>(-sim_plane.position.z * 100.0f));
+    loiter_mode.enter();
+    // CPP-031 slice 7: tick() dispatches through plane.control_mode now -
+    // see the FBWA closed-loop test above's own comment.
+    plane.control_mode = &loiter_mode;
+
+    float min_dist_to_entry = 1.0e9f;
+    constexpr int kTotalTicks = 12000; // 240 simulated seconds
+    constexpr int kTailTicks = 2000;   // last 40 simulated seconds - steady-state loiter window
+    float tail_dist_sum = 0.0f;
+    float tail_dist_max = 0.0f;
+    float tail_dist_min_window = 1.0e9f;
+
+    for (int i = 0; i < kTotalTicks; ++i) {
+        now_us += 20000;
+        now_ms += 20;
+
+        // LOITER reads no pilot stick input at all - centered sticks
+        // confirm this, they are never read (same convention every other
+        // auto-throttle mode's own closed-loop test already established).
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        // CPP-031 slice 9: armed_and_safety_off is now COMPUTED - set the
+        // two real underlying primitives it used to fake directly instead
+        // (same pattern the RTL closed-loop test above already uses).
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
+        in.now_ms = now_ms;
+        in.now_us = now_us;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+        in.position_ned = sim_plane.position;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+
+        tick(plane, gyro_sample, in);
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+
+        const float dist_to_entry = plane.current_loc.get_distance(entry_point);
+        min_dist_to_entry = std::min(min_dist_to_entry, dist_to_entry);
+        if (i >= kTotalTicks - kTailTicks) {
+            tail_dist_sum += dist_to_entry;
+            tail_dist_max = std::max(tail_dist_max, dist_to_entry);
+            tail_dist_min_window = std::min(tail_dist_min_window, dist_to_entry);
+        }
+    }
+
+    const float tail_dist_avg = tail_dist_sum / static_cast<float>(kTailTicks);
+    INFO("min distance from entry point (m) = " << min_dist_to_entry << ", final-window avg distance (m) = "
+                                                 << tail_dist_avg << ", final-window min/max distance (m) = "
+                                                 << tail_dist_min_window << "/" << tail_dist_max);
+
+    // Real convergence to a stable orbit at roughly the real default
+    // WP_LOITER_RAD (60m, kLoiterRadiusDefault) - see this ticket's own
+    // report for the exact measured numbers. Generous margins still
+    // meaningfully assert a real, settled circular orbit at the right
+    // scale, not just "didn't crash" nor "spiraled away unboundedly".
+    REQUIRE(tail_dist_avg > 30.0f);
+    REQUIRE(tail_dist_avg < 100.0f);
+    REQUIRE(tail_dist_max - tail_dist_min_window < 15.0f); // settled into a tight, steady orbit, not still drifting
+}
+
+// ---------------------------------------------------------------------
 // CPP-031 SLICE 7: real mode-switching (Plane::set_mode()). See plane.hpp's
 // own "CPP-031 SLICE 7 ADDENDUM" file banner note and mode.hpp's own
 // tick()/ModeAUTO::navigate() comments for the full design this section
