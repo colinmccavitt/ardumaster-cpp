@@ -573,9 +573,176 @@
 //     ModeCRUISE::navigate() itself already only acts once locked_heading_
 //     is true.
 
+// =====================================================================
+// CPP-031 SLICE 5 ADDENDUM: ModeAUTO (mode.hpp, same module - see its own
+// class banner for the mode-level design). Upstream (Plane-4.7.0, read
+// directly, in full where the ticket asked): ArduPlane/mode_auto.cpp (202
+// lines, full); ArduPlane/commands.cpp's Plane::set_next_WP (~line 10,
+// full); ArduPlane/commands_logic.cpp's Plane::do_nav_wp (~line 400,
+// trivial) and Plane::verify_nav_wp (~line 634, full); ArduPlane/
+// navigation.cpp's Plane::setup_turn_angle (~line 457) and
+// Plane::get_wp_radius (commands_logic.cpp ~line 1196); AP_Mission's
+// AP_Mission::get_next_ground_course_cd (AP_Mission.cpp ~line 574, needed
+// to trace setup_turn_angle's real look-ahead source).
+//
+// SCOPE - HONEST AND DELIBERATELY SMALLER THAN AP_Mission, NOT A STUB: a
+// real, in-memory, ordered, fixed-size list of WAYPOINT-ONLY mission items
+// flown sequentially via the L1Control/TECS machinery CRUISE/FBWB already
+// wired in - "fly this list of waypoints in order" is a genuine, tested,
+// closed-loop capability (see vehicle_test.cpp's own multi-waypoint
+// integration test), just not upstream's general-purpose mission-command
+// interpreter. See MissionItem/Mission below and ModeAUTO's own class
+// banner (mode.hpp) for exactly where the scope line falls and why.
+//
+// MissionItem / Mission / kMaxMissionItems - THIS PORT'S OWN, SMALLER
+// EQUIVALENT of AP_Mission::Mission_Command / AP_Mission (~4200 lines
+// upstream, supporting dozens of MAVLink command types, jump, do-commands,
+// splines, and a binary EEPROM storage format for MAVLink mission upload/
+// download - none of that exists here, see the exclusion list below).
+// MissionItem carries exactly `Location loc` + `float acceptance_radius_m`
+// (0 meaning "use the default turn_distance()-based radius" - matches
+// upstream's own cmd_acceptance_distance==0 fallback in verify_nav_wp,
+// just as a plain float instead of a packed LOWBYTE(p1) byte, which
+// upstream itself caps at 255m - this port's field has no such packing
+// constraint to reproduce). Mission is a fixed-size std::array<MissionItem,
+// kMaxMissionItems> (ADR-0012: no dynamic allocation - same precedent as
+// RcChannels'/SrvChannels' own fixed channel arrays) with a current-index
+// counter, `load()` (TEST/PROGRAMMATIC-ONLY - no MAVLink mission upload/
+// EEPROM storage format in this port, see exclusion list), `current()`/
+// `peek_next()` accessors, and `advance()`. kMaxMissionItems (32) is THIS
+// PORT'S OWN bound (a plain fixed-array size), NOT a smaller version of
+// upstream's real limit (however many commands fit in EEPROM storage,
+// hardware-dependent, hundreds to thousands) - a different real constraint
+// this port doesn't have, not a shrunken copy of it.
+//
+// SET_NEXT_WP / DO_NAV_WP / VERIFY_NAV_WP / SETUP_TURN_ANGLE - ported
+// faithfully for the in-scope subset (see mode.hpp's ModeAUTO class banner
+// for do_nav_wp/verify_nav_wp's exact upstream-vs-port call-signature
+// difference - both now read `mission` directly rather than taking an
+// AP_Mission::Mission_Command parameter, since this port's Plane owns the
+// whole mission already). The real crosstrack-state machine
+// (next_wp_crosstrack/crosstrack, upstream: auto_state's own two bools),
+// the "already past the new waypoint" catch-up
+// (current_loc.past_interval_finish_line(prev_WP_loc, next_WP_loc) ->
+// prev_WP_loc = current_loc), and setup_turn_angle()'s real look-ahead are
+// ALL reproduced exactly, not simplified - see the two new Plane fields
+// below (next_wp_crosstrack/crosstrack default to false, matching
+// upstream's own auto_state being a zero-initialized global at boot,
+// which is why a mission's FIRST leg never crosstracks - traced, not
+// assumed).
+//
+// SURPRISING UPSTREAM FINDING - setup_turn_angle()'s real "no next leg"
+// fallback is 90.0f DEGREES, NOT 0: AP_Mission::get_next_ground_course_cd
+// returns its `default_angle` parameter (-1) when there's no next nav
+// command, and Plane::setup_turn_angle() checks for exactly that sentinel
+// and sets `auto_state.next_turn_angle = 90.0f` explicitly (also matching
+// AutoState's own in-class initializer, `float next_turn_angle {90};`) -
+// verified directly against both sites, not assumed from the field's name.
+// next_turn_angle defaults to 90.0f below for the same reason.
+//
+// ALTITUDE SLOPE - DEFERRED, A NAMED SIMPLIFICATION: upstream's
+// setup_alt_slope()/adjust_altitude_target() (altitude.cpp) linearly
+// interpolate the TECS target altitude between prev_WP_loc's and
+// next_WP_loc's altitudes AS THE VEHICLE FLIES THE LEG - a real,
+// already-useful feature (Location::linearly_interpolate_alt already
+// exists, CPP-011, unused until a future slice wires it in here). This
+// slice uses a SIMPLER, HONEST substitute instead: set_next_WP() sets
+// `target_altitude_cm` to the NEW waypoint's own altitude immediately,
+// flat for the whole leg (no slope) - directly reusing the SAME
+// target_altitude_cm/relative_target_altitude_cm() FBWB/CRUISE already
+// established (see SLICE 2's own "CURRENT ALTITUDE INPUT vs TARGET
+// ALTITUDE STATE" note), rather than inventing a second altitude-target
+// mechanism. A vehicle in AUTO will therefore step its altitude target at
+// each waypoint transition rather than ramping it - a real, documented
+// behavior difference from upstream, not a silently dropped feature.
+//
+// TERRAIN-RELATIVE ALTITUDE - NOT MODELED: no terrain subsystem (same
+// exclusion this port has documented everywhere else, e.g. Location's own
+// file banner) - fix_terrain_WP() and change_alt_frame(ABSOLUTE) are both
+// skipped in set_next_WP(); a MissionItem's Location is assumed supplied
+// already in this port's one collapsed altitude frame (SLICE 2's own
+// "ALTITUDE REFERENCE FRAME" note - home.alt is definitionally 0), exactly
+// like next_WP_loc/prev_WP_loc/current_loc already are everywhere else in
+// this vehicle.
+//
+// GET_WP_RADIUS() / AIRSPEED_CRUISE - two new FixedWingTunables fields:
+// waypoint_radius (WP_RADIUS/g.waypoint_radius, upstream default
+// WP_RADIUS_DEFAULT=90, config.h) backs get_wp_radius()'s real body
+// (quadplane branch excluded - no quadplane in this port, so it collapses
+// to a plain field read); airspeed_cruise (AIRSPEED_CRUISE/
+// aparm.airspeed_cruise, upstream default 12 m/s, config.h) backs
+// update_auto_speed_height()'s airspeed target - see that function's own
+// comment for why AUTO needs a DIFFERENT airspeed-target source than
+// FBWB/CRUISE's throttle-stick-driven one.
+//
+// UPDATE_AUTO_SPEED_HEIGHT() - A NEW FUNCTION, NOT A REUSE OF
+// update_fbwb_speed_height() - discovered while tracing exactly where
+// upstream drives TECS for AUTO. ModeAuto::update()'s real body is JUST
+// `calc_nav_roll(); calc_nav_pitch(); calc_throttle();` (mode_auto.cpp) -
+// none of those DRIVE Tecs, they only READ its last-computed demand. The
+// real driver is Plane::update_alt() (Plane.cpp), a SEPARATE 10Hz
+// SCHED_TASK gated on `control_mode->does_auto_throttle()` (true for
+// AUTO too) - the SAME real function SLICE 2's own "SURPRISING UPSTREAM
+// FINDING #1" already traced for FBWB, and which this port folded into
+// update_fbwb_speed_height() there. Reusing update_fbwb_speed_height()
+// for AUTO would be WRONG, not just imprecise: its elevator-stick target-
+// altitude adjustment and throttle-stick airspeed target are both real
+// FBWB/CRUISE-only behaviors upstream itself never runs for AUTO (see
+// calc_airspeed_errors()'s own `control_mode == &mode_fbwb || control_mode
+// == &mode_cruise` guard, navigation.cpp ~line 161). So this slice adds
+// update_auto_speed_height() as AUTO's own minimal equivalent of
+// update_alt()'s should_run_tecs branch, called once per tick exclusively
+// from ModeAUTO::update() (mode.hpp) BEFORE the three ticket-specified
+// calc_*() calls - mirroring update_fbwb_speed_height()'s own established
+// shape (fold the real driving call into the one mode that needs it)
+// rather than resurrecting the mode-identification machinery
+// (does_auto_throttle()) this port deliberately left unported.
+//
+// MISSION COMPLETE / FINAL-WAYPOINT-HOLD - A NAMED, DELIBERATE DIVERGENCE
+// FROM UPSTREAM: reaching the last waypoint upstream advances the mission
+// index past the end and (for a real mission) typically transitions to
+// RTL - no RTL mode exists in this port. This slice's Mission::advance()
+// is simply a no-op (returns false) once at_last() is true, and
+// ModeAUTO::navigate() (mode.hpp) does not call do_nav_wp()/set_next_WP()
+// again when advance() returns false - next_WP_loc stays pinned at the
+// final waypoint, and verify_nav_wp()'s own nav_controller.update_waypoint()
+// call keeps re-running toward it every tick, so the vehicle holds course
+// on the final leg indefinitely rather than stopping, looping the mission,
+// or falling back to some other mode. This is real, chosen behavior
+// (documented here, not silently different from "what real AUTO would do
+// at mission end" - real AUTO enters RTL) - a reasonable stand-in until a
+// future slice adds RTL.
+//
+// EXCLUDED (documented, not silently dropped) - see mode.hpp's ModeAUTO
+// class banner for the mode-level exclusions (takeoff/land/scripting
+// special-case update() branches); the Plane/mission-level exclusions are:
+//   - Every non-NAV_WAYPOINT command type: TAKEOFF, LAND, LOITER_UNLIM/
+//     TURNS/TIME/TO_ALT, RTL, jump, do-commands (including DO_CHANGE_SPEED
+//     - see update_auto_speed_height()'s own comment), splines, VTOL -
+//     none exist in MissionItem's vocabulary at all, not even as a
+//     recognized-but-unimplemented enum value.
+//   - MAVLink mission upload/download, EEPROM mission storage format -
+//     Mission::load() is a test/programmatic-only entry point.
+//   - AP_Mission::MISSION_RUNNING state-machine / GCS mission-state
+//     reporting (mission.state() checks, ModeAuto::update()'s own
+//     `plane.mission.state() != AP_Mission::MISSION_RUNNING` guard) - this
+//     slice's Mission has no external state-reporting consumers yet; a
+//     Mission with no items loaded is handled directly (current()/
+//     peek_next() return nullptr, ModeAUTO::navigate() checks for that)
+//     rather than via a ported state enum.
+//   - verify_nav_wp's pass-by distance (cmd_passby/HIGHBYTE(p1)) and
+//     waypoint_max_radius override (g.waypoint_max_radius) - see mode.hpp's
+//     ModeAUTO class banner for the exact upstream lines skipped.
+//   - Watchdog mission-resume (hal.util->was_watchdog_armed()) and
+//     HAL_SOARING_ENABLED's init_cruising() (both in ModeAuto::_enter()) -
+//     no watchdog-persistence or soaring subsystem in this port.
+
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include <fwcpp/ahrs/ahrs_dcm.hpp>
 #include <fwcpp/fw_control/fw_controller.hpp>
@@ -655,6 +822,10 @@ struct FixedWingTunables {
     float flybywire_climb_rate = 2.0f;  // FBWB_CLIMB_RATE / g.flybywire_climb_rate, m/s
     float cruise_alt_floor = 0.0f;      // CRUISE_ALT_FLOOR / g.cruise_alt_floor, m (config.h's real CRUISE_ALT_FLOOR default)
     bool flybywire_elev_reverse = false; // FBWB_ELEV_REV / g.flybywire_elev_reverse
+
+    // --- CPP-031 slice 5 (ModeAUTO) additions - see file banner addendum ---
+    float waypoint_radius = 90.0f; // WP_RADIUS / g.waypoint_radius, upstream default WP_RADIUS_DEFAULT (config.h), m
+    float airspeed_cruise = 12.0f; // AIRSPEED_CRUISE / aparm.airspeed_cruise, upstream default AIRSPEED_CRUISE (config.h), m/s
 };
 
 // Explicit per-tick sensor/environment inputs stabilize_roll()/
@@ -693,6 +864,92 @@ struct StabilizeInputs {
                                   // reads current_loc), and a caller not populating this simply never gets a
                                   // usable CRUISE heading-lock geometry (prev_WP_loc/next_WP_loc/current_loc all
                                   // coincide), not a silent wrong answer.
+};
+
+// upstream: this port's own bound on mission length, NOT upstream's - see
+// file banner's "MissionItem / Mission / kMaxMissionItems" note. Upstream's
+// real limit is however many commands fit in EEPROM storage (hardware-
+// dependent, hundreds to thousands) - a different real constraint this
+// port doesn't have, not a shrunken copy of it. 32 comfortably covers this
+// slice's own tests and any realistic hand-authored test mission.
+inline constexpr std::size_t kMaxMissionItems = 32;
+
+// upstream: AP_Mission::Mission_Command, reduced to exactly what this
+// slice's vocabulary supports - see file banner. Deliberately NOT tagged
+// with a command "type" at all: every MissionItem IS a NAV_WAYPOINT: there
+// is no other kind in this slice (TAKEOFF/LAND/LOITER*/RTL/jump/do-
+// commands/splines/VTOL are all excluded - see file banner's exclusion
+// list).
+struct MissionItem {
+    Location loc;
+    // 0 means "use the default turn_distance()-based radius" - matches
+    // upstream's own cmd_acceptance_distance==0 fallback (commands_logic.cpp
+    // Plane::verify_nav_wp) exactly, as a plain float rather than a packed
+    // LOWBYTE(p1) byte (which upstream itself caps at 255m - this field has
+    // no such packing constraint to reproduce).
+    float acceptance_radius_m = 0.0f;
+};
+
+// upstream: AP_Mission (libraries/AP_Mission) - THIS PORT'S DELIBERATELY
+// SMALLER EQUIVALENT, not a port of it - see file banner's "SCOPE" note.
+// A fixed-size (ADR-0012: no dynamic allocation), in-memory, ordered list
+// of MissionItems, flown sequentially via current()/peek_next()/advance().
+class Mission {
+public:
+    // Sets the mission list, replacing any previous one, and resets to the
+    // first item. TEST/PROGRAMMATIC-ONLY entry point - no MAVLink mission
+    // upload or EEPROM storage format in this port (see file banner).
+    // Returns false (leaving any existing mission untouched) if
+    // items.size() exceeds kMaxMissionItems.
+    bool load(std::span<const MissionItem> items) {
+        if (items.size() > kMaxMissionItems) {
+            return false;
+        }
+        count_ = items.size();
+        for (std::size_t i = 0; i < count_; ++i) {
+            items_[i] = items[i];
+        }
+        current_index_ = 0;
+        return true;
+    }
+
+    [[nodiscard]] std::size_t size() const { return count_; }
+    [[nodiscard]] bool empty() const { return count_ == 0; }
+
+    // upstream: AP_Mission::get_current_nav_cmd() - the waypoint currently
+    // being flown toward. nullptr if no mission is loaded.
+    [[nodiscard]] const MissionItem* current() const {
+        return current_index_ < count_ ? &items_[current_index_] : nullptr;
+    }
+
+    // upstream: AP_Mission::get_next_nav_cmd(_nav_cmd.index+1), as used by
+    // get_next_ground_course_cd() - the waypoint AFTER the current one,
+    // read only by Plane::setup_turn_angle()'s look-ahead. nullptr if the
+    // current item is the last one (or no mission is loaded).
+    [[nodiscard]] const MissionItem* peek_next() const {
+        return (current_index_ + 1 < count_) ? &items_[current_index_ + 1] : nullptr;
+    }
+
+    // True once current() is the LAST item in the mission (or the mission
+    // is empty) - see plane.hpp file banner's "MISSION COMPLETE" note.
+    [[nodiscard]] bool at_last() const { return current_index_ + 1 >= count_; }
+
+    // Moves to the next item. No-op, returns false, if already at_last()
+    // (or empty) - see file banner's "MISSION COMPLETE" note for what a
+    // caller does with that false return (nothing - holds at the current,
+    // final item).
+    bool advance() {
+        if (at_last()) {
+            return false;
+        }
+        ++current_index_;
+        return true;
+    }
+
+private:
+    std::array<MissionItem, kMaxMissionItems> items_{};
+    std::size_t count_ = 0;
+    std::size_t current_index_ = 0;
 };
 
 namespace detail {
@@ -778,6 +1035,21 @@ public:
     // heading is locked; default-constructed (zero) otherwise.
     Location prev_WP_loc;
     Location next_WP_loc;
+
+    // CPP-031 slice 5 (ModeAUTO, see file banner addendum) - upstream:
+    // Plane::mission (AP_Mission) and auto_state's next_wp_crosstrack/
+    // crosstrack/next_turn_angle fields (Plane.h). Defaults match
+    // upstream's own real defaults exactly: next_wp_crosstrack/crosstrack
+    // default false because AP_FixedWing::AutoState is a zero-initialized
+    // global at boot (traced, not assumed - see file banner's "SET_NEXT_WP"
+    // note for why this matters: a mission's first leg never crosstracks);
+    // next_turn_angle defaults to 90.0f, matching AutoState's own in-class
+    // initializer AND setup_turn_angle()'s real "no next leg" fallback
+    // (see file banner's "SURPRISING UPSTREAM FINDING").
+    Mission mission;
+    bool next_wp_crosstrack = false;
+    bool crosstrack = false;
+    float next_turn_angle = 90.0f;
 
     // See file banner's "GROUND_MODE / REVERSED_THROTTLE" note.
     bool ground_mode = false;
@@ -1341,6 +1613,187 @@ public:
 
         calc_throttle();
         calc_nav_pitch();
+    }
+
+    // =====================================================================
+    // CPP-031 SLICE 5 (ModeAUTO) - see file banner addendum for the full
+    // design rationale (MissionItem/Mission, the crosstrack state machine,
+    // the flat-altitude simplification, update_auto_speed_height()'s own
+    // reason for existing separately from update_fbwb_speed_height()).
+    // =====================================================================
+
+    // upstream: Plane::get_wp_radius() (commands_logic.cpp) - the
+    // HAL_QUADPLANE_ENABLED branch is dropped (no quadplane in this port),
+    // so this collapses to upstream's own non-quadplane fallback: a plain
+    // tunable read.
+    [[nodiscard]] float get_wp_radius() const { return aparm.waypoint_radius; }
+
+    // upstream: Plane::setup_turn_angle() (navigation.cpp), including
+    // AP_Mission::get_next_ground_course_cd()'s real look-ahead (traced
+    // directly, not assumed - see file banner's "SURPRISING UPSTREAM
+    // FINDING"). Called only from set_next_WP() below, after prev_WP_loc/
+    // next_WP_loc have already been updated for the leg being started.
+    void setup_turn_angle() {
+        const MissionItem* next_item = mission.peek_next();
+        if (next_item == nullptr) {
+            // upstream: get_next_ground_course_cd(-1)'s sentinel return
+            // (no next nav command) - the real fallback is 90 degrees, not
+            // 0 (see file banner).
+            next_turn_angle = 90.0f;
+            return;
+        }
+        const std::int32_t next_ground_course_cd = next_WP_loc.get_bearing_to(next_item->loc);
+        const std::int32_t ground_course_cd = prev_WP_loc.get_bearing_to(next_WP_loc);
+        next_turn_angle = static_cast<float>(math::wrap_180_cd(next_ground_course_cd - ground_course_cd)) * 0.01f;
+    }
+
+    // upstream: Plane::set_next_WP() (commands.cpp), read in full. EXCLUDED
+    // (see file banner): the `next_WP_loc.lat==0 && lng==0` "loiter on the
+    // spot" convenience (no loiter commands in this slice's vocabulary),
+    // fix_terrain_WP()/change_alt_frame() (no terrain subsystem, and a
+    // MissionItem's Location is assumed already in this port's one
+    // collapsed altitude frame), loiter_angle_reset() (loiter-specific),
+    // and setup_alt_slope()/adjust_altitude_target() (replaced with the
+    // flat `target_altitude_cm = next_WP_loc.alt` assignment below - see
+    // file banner's "ALTITUDE SLOPE - DEFERRED" note). Everything else -
+    // the crosstrack-state machine and the "already past the waypoint"
+    // catch-up - is reproduced exactly.
+    void set_next_WP(const Location& loc) {
+        if (next_wp_crosstrack) {
+            // copy the current WP into the OldWP slot
+            prev_WP_loc = next_WP_loc;
+            crosstrack = true;
+        } else {
+            // we should not try to cross-track for this waypoint
+            prev_WP_loc = current_loc;
+            // use cross-track for the next waypoint
+            next_wp_crosstrack = true;
+            crosstrack = false;
+        }
+
+        next_WP_loc = loc;
+
+        // are we already past the waypoint? This happens when we jump
+        // waypoints, and it can cause us to skip a waypoint. If we are
+        // past the waypoint when we start on a leg, then use the current
+        // location as the previous waypoint, to prevent immediately
+        // considering the waypoint complete.
+        if (current_loc.past_interval_finish_line(prev_WP_loc, next_WP_loc)) {
+            prev_WP_loc = current_loc;
+        }
+
+        // Flat per-waypoint target altitude - see file banner's "ALTITUDE
+        // SLOPE - DEFERRED" note. Reuses the SAME target_altitude_cm SLICE
+        // 2 (FBWB) established, rather than inventing a second mechanism.
+        target_altitude_cm = next_WP_loc.alt;
+
+        setup_turn_angle();
+    }
+
+    // upstream: Plane::do_nav_wp() (commands_logic.cpp) - "set_next_WP(cmd.
+    // content.location);" DELIBERATE SIGNATURE DIFFERENCE from upstream:
+    // no AP_Mission::Mission_Command parameter - this port's Plane already
+    // owns the whole `mission`, so do_nav_wp() reads mission.current()
+    // itself rather than requiring a caller to resolve and pass it. A
+    // no-op if no mission is loaded (defensive - every real caller in this
+    // slice checks mission.current() first, see ModeAUTO, mode.hpp).
+    void do_nav_wp() {
+        const MissionItem* item = mission.current();
+        if (item == nullptr) {
+            return;
+        }
+        set_next_WP(item->loc);
+    }
+
+    // upstream: Plane::verify_nav_wp() (commands_logic.cpp), read in full -
+    // the in-scope subset only, per the ticket's own instruction. Takes an
+    // explicit L1Inputs (ADR-0012, same treatment calc_nav_roll() already
+    // gets) built by the caller from build_l1_inputs() - see ModeAUTO's own
+    // navigate() (mode.hpp). EXCLUDED (see file banner and mode.hpp's
+    // ModeAUTO class banner for the exact upstream lines skipped): the
+    // pass-by distance (cmd_passby/HIGHBYTE(p1)) and its flex_next_WP_loc
+    // offset-along-track machinery, and the waypoint_max_radius override
+    // (g.waypoint_max_radius) - both entirely absent, not merely
+    // defaulted-off. steer_state.hold_course_cd's reset is dropped (no
+    // ground-steering subsystem, same exclusion plane.hpp's SLICE 1 banner
+    // already documents).
+    [[nodiscard]] bool verify_nav_wp(const nav::L1Inputs& l1_in) {
+        const MissionItem* item = mission.current();
+        if (item == nullptr) {
+            return false;
+        }
+
+        if (crosstrack) {
+            nav_controller.update_waypoint(prev_WP_loc, next_WP_loc, l1_in);
+        } else {
+            nav_controller.update_waypoint(current_loc, next_WP_loc, l1_in);
+        }
+
+        // upstream: `cmd_acceptance_distance > 0 ? cmd_acceptance_distance
+        // : (cmd_passby == 0 ? nav_controller->turn_distance(get_wp_radius(),
+        // auto_state.next_turn_angle) : 0)` - cmd_passby is always 0 in
+        // this slice's vocabulary (no pass-by field on MissionItem), so
+        // this collapses to the two real remaining cases.
+        const float acceptance_distance_m = item->acceptance_radius_m > 0.0f
+            ? item->acceptance_radius_m
+            : nav_controller.turn_distance(get_wp_radius(), next_turn_angle, l1_in);
+
+        const float wp_dist = current_loc.get_distance(next_WP_loc);
+        if (wp_dist <= acceptance_distance_m) {
+            return true;
+        }
+
+        // have we flown past the waypoint?
+        if (current_loc.past_interval_finish_line(prev_WP_loc, next_WP_loc)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    // upstream: the "should_run_tecs" branch of Plane::update_alt()
+    // (Plane.cpp) PLUS calc_airspeed_errors()'s AUTO airspeed-target branch
+    // (mode_auto_target_airspeed_cm(), navigation.cpp) - see file banner's
+    // "UPDATE_AUTO_SPEED_HEIGHT()" note for why this is its OWN function
+    // rather than a reuse of update_fbwb_speed_height() above (that
+    // function's elevator-stick/throttle-stick logic is real FBWB/CRUISE-
+    // only behavior upstream itself never runs for AUTO). Called once per
+    // tick, exclusively from ModeAUTO::update() (mode.hpp), BEFORE
+    // calc_nav_pitch()/calc_throttle() read TECS's demand.
+    //
+    // EXCLUDED (documented, not silently dropped): barometer.update()/
+    // sink-rate low-pass/parachute (no such subsystems); update_flight_
+    // stage()/LAND flight-stage distance-beyond-land-wp (no landing
+    // subsystem); the RTL climb-min boost (no RTL mode in this port);
+    // DO_CHANGE_SPEED's new_airspeed_cm override (no do-commands in this
+    // slice's MissionItem vocabulary, so mode_auto_target_airspeed_cm()'s
+    // real body always falls to its own "fallover to normal airspeed"
+    // branch: aparm.airspeed_cruise); groundspeed-undershoot airspeed
+    // nudging and throttle-nudging (both need subsystems - groundspeed-
+    // undershoot tracking, aux-function dispatch - this port doesn't
+    // have). The airspeed_stall/airspeed_min lower-bound clamp on the
+    // target IS kept below (not excluded) - it needs nothing this port
+    // lacks.
+    void update_auto_speed_height(const StabilizeInputs& in) {
+        const tecs::TecsInputs tecs_in = build_tecs_inputs(in);
+        tecs.update_50hz(tecs_in);
+
+        // upstream: Plane::mode_auto_target_airspeed_cm()'s real fallback
+        // (no DO_CHANGE_SPEED override in this slice - see above), then
+        // calc_airspeed_errors()'s own airspeed_lower_bound clamp.
+        const float airspeed_lower_bound = aparm.airspeed_stall > 0.0f ? aparm.airspeed_stall : aparm.airspeed_min;
+        const float airspeed_target = math::constrain_value(aparm.airspeed_cruise, airspeed_lower_bound, aparm.airspeed_max);
+        const std::int32_t eas_dem_cm = static_cast<std::int32_t>(airspeed_target * 100.0f);
+
+        // Same real per-loop necessity SLICE 2's own "SURPRISING UPSTREAM
+        // FINDING #3" documents - Tecs's throttle floor decays back toward
+        // reverse-permissive every cycle unless re-asserted.
+        if (!have_reverse_thrust()) {
+            tecs.set_throttle_min(0.0f);
+        }
+
+        tecs.update_pitch_throttle(relative_target_altitude_cm(), eas_dem_cm, in.current_altitude_m, aerodynamic_load_factor,
+                                    tecs_in);
     }
 
 private:

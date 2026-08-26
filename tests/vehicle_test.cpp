@@ -6,6 +6,7 @@
 // TEST-ONLY dependency (see tests/CMakeLists.txt) used only by the final
 // closed-loop integration test below - ap-vehicle itself never links it.
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 
@@ -1218,4 +1219,376 @@ TEST_CASE("Closed loop: CRUISE locks the GPS heading and then holds a straight g
     // course - a generous margin leaves headroom for compiler/FP variance
     // while still meaningfully asserting the loop actually closes.
     REQUIRE(heading_error_deg < 10.0f);
+}
+
+// ---------------------------------------------------------------------
+// CPP-031 SLICE 5: ModeAUTO - a fixed-size, in-memory, ordered list of
+// waypoint-only MissionItems flown sequentially. See plane.hpp's own file
+// banner addendum and mode.hpp's ModeAUTO class banner for the full
+// design rationale and exclusion list (this port's deliberately smaller
+// equivalent of AP_Mission - no jump/do-commands/loiter/RTL/takeoff/land
+// vocabulary, no MAVLink upload, no altitude-slope-following).
+// ---------------------------------------------------------------------
+
+namespace {
+
+// Builds a Location at (north_m, east_m) from the shared fixed reference
+// point every Plane::current_loc in this port is ultimately anchored to
+// (Location() - see plane.hpp's "CURRENT_LOC" file banner note), with the
+// given altitude in this port's one collapsed altitude frame (home.alt
+// definitionally 0 - see plane.hpp's SLICE 2 "ALTITUDE REFERENCE FRAME"
+// note). ABSOLUTE frame matches how current_loc/prev_WP_loc/next_WP_loc
+// are already used everywhere else in this vehicle.
+fwcpp::Location make_loc(float north_m, float east_m, float alt_m) {
+    fwcpp::Location loc;
+    loc.offset(north_m, east_m);
+    loc.set_alt_m(alt_m, fwcpp::Location::AltFrame::ABSOLUTE);
+    return loc;
+}
+
+} // namespace
+
+TEST_CASE("Mission: load/current/peek_next/advance basic semantics, including mission-complete", "[vehicle][auto][mission]") {
+    Plane plane;
+    REQUIRE(plane.mission.current() == nullptr);
+    REQUIRE(plane.mission.empty());
+    REQUIRE(plane.mission.peek_next() == nullptr);
+
+    std::array<MissionItem, 3> items;
+    items[0].loc = make_loc(100.0f, 0.0f, 50.0f);
+    items[1].loc = make_loc(100.0f, 100.0f, 60.0f);
+    items[2].loc = make_loc(0.0f, 100.0f, 60.0f);
+
+    REQUIRE(plane.mission.load(items));
+    REQUIRE(plane.mission.size() == 3);
+    REQUIRE_FALSE(plane.mission.empty());
+    REQUIRE(plane.mission.current() != nullptr);
+    REQUIRE(plane.mission.current()->loc.same_latlon_as(items[0].loc));
+    REQUIRE(plane.mission.peek_next() != nullptr);
+    REQUIRE(plane.mission.peek_next()->loc.same_latlon_as(items[1].loc));
+    REQUIRE_FALSE(plane.mission.at_last());
+
+    REQUIRE(plane.mission.advance());
+    REQUIRE(plane.mission.current()->loc.same_latlon_as(items[1].loc));
+    REQUIRE(plane.mission.peek_next()->loc.same_latlon_as(items[2].loc));
+    REQUIRE_FALSE(plane.mission.at_last());
+
+    REQUIRE(plane.mission.advance());
+    REQUIRE(plane.mission.current()->loc.same_latlon_as(items[2].loc));
+    REQUIRE(plane.mission.peek_next() == nullptr);
+    REQUIRE(plane.mission.at_last());
+
+    // Mission-complete: advance() at the last item is a documented no-op
+    // (see plane.hpp's "MISSION COMPLETE" note) - stays put, doesn't loop.
+    REQUIRE_FALSE(plane.mission.advance());
+    REQUIRE(plane.mission.current()->loc.same_latlon_as(items[2].loc));
+    REQUIRE(plane.mission.at_last());
+}
+
+TEST_CASE("Mission::load rejects a list larger than kMaxMissionItems, leaving any existing mission untouched",
+          "[vehicle][auto][mission]") {
+    Plane plane;
+    std::array<MissionItem, 2> ok_items;
+    ok_items[0].loc = make_loc(50.0f, 0.0f, 40.0f);
+    ok_items[1].loc = make_loc(100.0f, 0.0f, 40.0f);
+    REQUIRE(plane.mission.load(ok_items));
+    REQUIRE(plane.mission.size() == 2);
+
+    std::array<MissionItem, kMaxMissionItems + 1> too_many{};
+    REQUIRE_FALSE(plane.mission.load(too_many));
+    // Unchanged - the port-specific bound (see plane.hpp's
+    // kMaxMissionItems comment) rejects the load rather than truncating.
+    REQUIRE(plane.mission.size() == 2);
+}
+
+TEST_CASE("Plane::set_next_WP: crosstrack state machine across waypoint changes", "[vehicle][auto]") {
+    Plane plane;
+    plane.current_loc = make_loc(0.0f, 0.0f, 50.0f);
+
+    // FIRST call: next_wp_crosstrack starts false (matches upstream's
+    // zero-initialized auto_state at boot - see plane.hpp file banner) -
+    // this leg does NOT crosstrack: prev_WP_loc becomes current_loc.
+    REQUIRE_FALSE(plane.next_wp_crosstrack);
+    const fwcpp::Location wp0 = make_loc(500.0f, 0.0f, 50.0f);
+    plane.set_next_WP(wp0);
+    REQUIRE(plane.prev_WP_loc.same_latlon_as(plane.current_loc));
+    REQUIRE_FALSE(plane.crosstrack);
+    REQUIRE(plane.next_wp_crosstrack); // now armed for the NEXT leg
+    REQUIRE(plane.next_WP_loc.same_latlon_as(wp0));
+    REQUIRE(plane.target_altitude_cm == wp0.alt); // flat per-waypoint altitude target
+
+    // SECOND call: next_wp_crosstrack is now true, so THIS leg DOES
+    // crosstrack, and prev_WP_loc becomes the OLD next_WP_loc (wp0), not
+    // current_loc.
+    plane.current_loc = make_loc(500.0f, 0.0f, 50.0f); // pretend we flew there
+    const fwcpp::Location wp1 = make_loc(500.0f, 500.0f, 60.0f);
+    plane.set_next_WP(wp1);
+    REQUIRE(plane.prev_WP_loc.same_latlon_as(wp0));
+    REQUIRE(plane.crosstrack);
+    REQUIRE(plane.next_WP_loc.same_latlon_as(wp1));
+    REQUIRE(plane.target_altitude_cm == wp1.alt);
+}
+
+TEST_CASE("Plane::set_next_WP: past-the-waypoint catch-up fires when a leg is jumped/skipped past", "[vehicle][auto]") {
+    Plane plane;
+    plane.current_loc = make_loc(0.0f, 0.0f, 50.0f);
+    plane.set_next_WP(make_loc(500.0f, 0.0f, 50.0f)); // first leg - arms next_wp_crosstrack
+
+    // Pretend the vehicle is already well past the NEXT waypoint we're
+    // about to load (e.g. a jumped/skipped leg): current_loc sits beyond
+    // wp2's finish line on the (old next_WP_loc) -> wp2 track.
+    plane.current_loc = make_loc(1000.0f, 0.0f, 50.0f);
+    const fwcpp::Location wp2 = make_loc(700.0f, 0.0f, 50.0f);
+    plane.set_next_WP(wp2);
+
+    // Without the catch-up, prev_WP_loc would be the OLD next_WP_loc
+    // (500,0) since next_wp_crosstrack was already true; WITH it,
+    // past_interval_finish_line(prev_WP_loc, next_WP_loc) is true, so
+    // prev_WP_loc snaps to current_loc instead - preventing an instant-
+    // complete on this jumped leg.
+    REQUIRE(plane.prev_WP_loc.same_latlon_as(plane.current_loc));
+}
+
+TEST_CASE("Plane::verify_nav_wp: reaches the waypoint via the real turn_distance()-derived acceptance radius",
+          "[vehicle][auto]") {
+    Plane plane;
+    plane.current_loc = make_loc(0.0f, 0.0f, 50.0f);
+
+    std::array<MissionItem, 1> items;
+    items[0].loc = make_loc(500.0f, 0.0f, 50.0f); // acceptance_radius_m = 0 -> default, real turn_distance()
+    REQUIRE(plane.mission.load(items));
+    plane.do_nav_wp(); // establishes prev_WP_loc/next_WP_loc/crosstrack/next_turn_angle
+
+    StabilizeInputs base_in;
+    base_in.eas2tas = 1.0f;
+
+    // Far away: not reached, and not past the finish line either.
+    fwcpp::nav::L1Inputs l1_in = plane.build_l1_inputs(base_in);
+    l1_in.groundspeed_vector = fwcpp::math::Vector2f(12.0f, 0.0f); // flying north at 12 m/s
+    l1_in.now_us = 1000000;
+    REQUIRE_FALSE(plane.verify_nav_wp(l1_in));
+
+    // Within the real turn_distance()-derived radius of the waypoint (well
+    // under WP_RADIUS's default 90m, and under l1_dist_'s own cap - see
+    // l1_control.hpp) - reached via the plain distance check, not the
+    // "flew past" catch.
+    plane.current_loc = make_loc(490.0f, 0.0f, 50.0f);
+    l1_in = plane.build_l1_inputs(base_in);
+    l1_in.groundspeed_vector = fwcpp::math::Vector2f(12.0f, 0.0f);
+    l1_in.now_us = 1020000;
+    REQUIRE(plane.verify_nav_wp(l1_in));
+}
+
+TEST_CASE("Plane::verify_nav_wp: the 'flew past it' catch fires when the waypoint is passed wide of the acceptance radius",
+          "[vehicle][auto]") {
+    Plane plane;
+    plane.current_loc = make_loc(0.0f, 0.0f, 50.0f);
+
+    std::array<MissionItem, 1> items;
+    items[0].loc = make_loc(500.0f, 0.0f, 50.0f);
+    REQUIRE(plane.mission.load(items));
+    plane.do_nav_wp(); // prev_WP_loc=(0,0), next_WP_loc=(500,0)
+
+    // Fly past the waypoint's perpendicular finish line, but well off to
+    // the side (200m east) - far outside the real turn_distance()-derived
+    // acceptance radius (well under 90m), so the plain distance check
+    // alone would say "not reached"; only past_interval_finish_line()
+    // catches this.
+    plane.current_loc = make_loc(600.0f, 200.0f, 50.0f);
+
+    StabilizeInputs base_in;
+    base_in.eas2tas = 1.0f;
+    fwcpp::nav::L1Inputs l1_in = plane.build_l1_inputs(base_in);
+    l1_in.groundspeed_vector = fwcpp::math::Vector2f(12.0f, 0.0f);
+    l1_in.now_us = 1000000;
+
+    const float wp_dist = plane.current_loc.get_distance(plane.next_WP_loc);
+    REQUIRE(wp_dist > 90.0f); // confirms this isn't accidentally within WP_RADIUS anyway
+    REQUIRE(plane.verify_nav_wp(l1_in));
+}
+
+TEST_CASE("Plane::verify_nav_wp: a nonzero MissionItem::acceptance_radius_m overrides the default turn_distance() radius",
+          "[vehicle][auto]") {
+    Plane plane;
+    plane.current_loc = make_loc(0.0f, 0.0f, 50.0f);
+
+    std::array<MissionItem, 1> items;
+    items[0].loc = make_loc(500.0f, 0.0f, 50.0f);
+    items[0].acceptance_radius_m = 300.0f; // much larger than the ~70-90m default
+    REQUIRE(plane.mission.load(items));
+    plane.do_nav_wp();
+
+    // 200m out - well beyond the real turn_distance()-derived default
+    // radius (would NOT be reached with acceptance_radius_m=0), but
+    // within the overridden 300m radius, and not past the finish line.
+    plane.current_loc = make_loc(300.0f, 0.0f, 50.0f);
+
+    StabilizeInputs base_in;
+    base_in.eas2tas = 1.0f;
+    fwcpp::nav::L1Inputs l1_in = plane.build_l1_inputs(base_in);
+    l1_in.groundspeed_vector = fwcpp::math::Vector2f(12.0f, 0.0f);
+    l1_in.now_us = 1000000;
+
+    REQUIRE(plane.verify_nav_wp(l1_in));
+}
+
+TEST_CASE("ModeAUTO: enter() loads the first mission item, and navigate() advances through a full mission in sequence",
+          "[vehicle][auto]") {
+    Plane plane;
+    ModeAUTO mode(plane);
+    plane.current_loc = make_loc(0.0f, 0.0f, 50.0f);
+
+    std::array<MissionItem, 3> items;
+    items[0].loc = make_loc(200.0f, 0.0f, 50.0f);
+    items[1].loc = make_loc(200.0f, 200.0f, 60.0f);
+    items[2].loc = make_loc(0.0f, 200.0f, 60.0f);
+    REQUIRE(plane.mission.load(items));
+
+    mode.enter();
+    REQUIRE(plane.next_WP_loc.same_latlon_as(items[0].loc));
+    REQUIRE(plane.prev_WP_loc.same_latlon_as(plane.current_loc));
+
+    StabilizeInputs in;
+    in.eas2tas = 1.0f;
+    in.now_us = 0;
+
+    // Teleport current_loc onto each waypoint in turn (white-box - the
+    // closed-loop test below drives this via real SimPlane dynamics
+    // instead) and confirm navigate() advances the mission each time.
+    plane.current_loc = items[0].loc;
+    in.now_us += 20000;
+    mode.navigate(in);
+    REQUIRE(plane.mission.current()->loc.same_latlon_as(items[1].loc));
+    REQUIRE(plane.next_WP_loc.same_latlon_as(items[1].loc));
+
+    plane.current_loc = items[1].loc;
+    in.now_us += 20000;
+    mode.navigate(in);
+    REQUIRE(plane.mission.current()->loc.same_latlon_as(items[2].loc));
+    REQUIRE(plane.next_WP_loc.same_latlon_as(items[2].loc));
+
+    plane.current_loc = items[2].loc;
+    in.now_us += 20000;
+    mode.navigate(in);
+    // Mission complete: at_last() stays true, current() stays item 2.
+    REQUIRE(plane.mission.at_last());
+    REQUIRE(plane.mission.current()->loc.same_latlon_as(items[2].loc));
+    REQUIRE(plane.next_WP_loc.same_latlon_as(items[2].loc));
+
+    // Further navigate() calls hold at the final waypoint (see plane.hpp's
+    // "MISSION COMPLETE" note) - not looping back to item 0.
+    plane.current_loc = items[2].loc;
+    in.now_us += 20000;
+    mode.navigate(in);
+    REQUIRE(plane.next_WP_loc.same_latlon_as(items[2].loc));
+    REQUIRE(plane.mission.at_last());
+}
+
+// ---------------------------------------------------------------------
+// Closed-loop integration test (the real point of this ticket's slice 5):
+// drive a genuine Plane + ModeAUTO against SimPlane's ground-truth flight
+// dynamics through a real 3-waypoint, two-turn course and confirm
+// SimPlane's TRUE position (ground truth, not any estimate) actually
+// reaches the vicinity of EACH waypoint IN ORDER - matching this port's
+// now-established "prove the loop actually closes" standard (FBWA/FBWB/
+// CRUISE closed-loop tests above).
+//
+// The proof that every waypoint was genuinely visited in sequence, not
+// skipped or reached out of order: mission.current()/mission.advance()
+// are driven ENTIRELY by verify_nav_wp(), which reads ONLY plane.current_
+// loc - itself recomputed every tick (mode.hpp's tick(), step 5b) from
+// SimPlane's own true position_ned. There is no shortcut path that could
+// advance the mission index without SimPlane's true position actually
+// having reached (or passed) each leg's acceptance radius in turn.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Closed loop: AUTO flies a 3-waypoint mission in sequence, reaching each waypoint's vicinity in SimPlane's "
+          "ground truth",
+          "[vehicle][integration][auto]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    ModeAUTO auto_mode(plane);
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    // An L-shaped, 3-waypoint course - two real 90-degree turns, exercising
+    // setup_turn_angle()/turn_distance() for real, not just a straight
+    // line (CRUISE's own closed-loop test already covers the pure-
+    // straight-line case).
+    std::array<MissionItem, 3> items;
+    items[0].loc = make_loc(300.0f, 0.0f, 60.0f);
+    items[1].loc = make_loc(300.0f, 300.0f, 80.0f);
+    items[2].loc = make_loc(0.0f, 300.0f, 80.0f);
+    REQUIRE(plane.mission.load(items));
+
+    // ModeAUTO's real _enter() behavior - see its own class banner.
+    auto_mode.enter();
+
+    int transition_to_wp1_tick = -1;
+    int transition_to_wp2_tick = -1;
+    constexpr int kTotalTicks = 9000; // 180 simulated seconds
+
+    for (int i = 0; i < kTotalTicks; ++i) {
+        now_us += 20000;
+        now_ms += 20;
+
+        // AUTO reads no pilot stick input at all (see ModeAUTO's own class
+        // banner) - centered sticks confirm this, they are never read.
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.armed_and_safety_off = true;
+        in.now_ms = now_ms;
+        in.now_us = now_us;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+        in.position_ned = sim_plane.position;
+        // Real GPS wiring - verify_nav_wp()'s nav_controller.update_
+        // waypoint() call needs real ground velocity, same treatment the
+        // CRUISE closed-loop test above already gives it.
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+
+        tick(plane, auto_mode, gyro_sample, in);
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+
+        if (transition_to_wp1_tick < 0 && plane.mission.current() != nullptr
+            && plane.mission.current()->loc.same_latlon_as(items[1].loc)) {
+            transition_to_wp1_tick = i;
+        }
+        if (transition_to_wp2_tick < 0 && plane.mission.current() != nullptr
+            && plane.mission.current()->loc.same_latlon_as(items[2].loc)) {
+            transition_to_wp2_tick = i;
+        }
+    }
+
+    const float final_dist_to_wp2 = plane.current_loc.get_distance(items[2].loc);
+    INFO("transition to wp1 at tick " << transition_to_wp1_tick << ", to wp2 at tick " << transition_to_wp2_tick
+                                       << ", final distance to wp2 (m) = " << final_dist_to_wp2
+                                       << ", final true position (N,E,D) = (" << sim_plane.position.x << ", "
+                                       << sim_plane.position.y << ", " << sim_plane.position.z << ")");
+
+    // The mission progressed through EVERY waypoint IN ORDER.
+    REQUIRE(transition_to_wp1_tick >= 0);
+    REQUIRE(transition_to_wp2_tick >= 0);
+    REQUIRE(transition_to_wp2_tick > transition_to_wp1_tick);
+    REQUIRE(plane.mission.at_last());
+
+    // And it actually ended up near the final waypoint - ground truth, not
+    // just "the index advanced somehow".
+    REQUIRE(final_dist_to_wp2 < 150.0f);
 }

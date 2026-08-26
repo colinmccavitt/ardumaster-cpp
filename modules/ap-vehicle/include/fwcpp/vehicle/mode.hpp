@@ -114,6 +114,89 @@
 // on every mode but ModeCRUISE), so this change to the SHARED tick()
 // sequence is verified not to alter any of their behavior - see
 // vehicle_test.cpp's own unchanged-tests confirmation.
+//
+// =====================================================================
+// CPP-031 SLICE 5 ADDENDUM (ModeAUTO): see plane.hpp's own file banner
+// addendum for the full shared-infrastructure design rationale
+// (MissionItem/Mission/kMaxMissionItems, the crosstrack state machine,
+// the flat-altitude simplification, update_auto_speed_height()'s own
+// reason for existing separately from update_fbwb_speed_height(), and the
+// full exclusion list). This note covers only ModeAUTO's own mode-level
+// shape - no change to tick() itself is needed: navigate() already runs
+// before update()/run() for every mode (added for ModeCRUISE, SLICE 4).
+//
+// upstream (Plane-4.7.0, read in full per the ticket): ArduPlane/
+// mode_auto.cpp (202 lines) - ModeAuto::_enter()/update()/navigate(). This
+// slice's update()/navigate() cover ONLY the normal NAV_WAYPOINT case -
+// upstream's own MAV_CMD_NAV_TAKEOFF/MAV_CMD_NAV_LAND/
+// MAV_CMD_NAV_SCRIPT_TIME/quadplane special-case branches in update() are
+// skipped entirely (not even a recognized-but-unimplemented dispatch arm -
+// MissionItem's vocabulary has no such commands to dispatch on, see
+// plane.hpp's exclusion list).
+//
+// _ENTER() - NOT AUTOMATICALLY CALLED, matching ModeFBWB/ModeCRUISE's own
+// precedent (this port has no mode-switching machinery yet). Upstream's
+// real _enter() body (after the quadplane/watchdog-resume/soaring
+// branches, all excluded - no such subsystems) is: `plane.next_WP_loc =
+// plane.prev_WP_loc = plane.current_loc; plane.mission.start_or_resume();`
+// - start_or_resume() ultimately reaches set_current_cmd(0) ->
+// start_command(cmd) -> do_nav_wp(cmd) for the mission's first NAV_WAYPOINT
+// (this slice's vocabulary has no jump/DO_LAND_START resume point to make
+// start_or_resume() do anything more interesting than "start at index 0").
+// Reproduced directly below as enter(): a caller MUST call
+// `plane.mission.load(...)` THEN this method ONCE, before the first
+// tick()/update() while ModeAUTO is active.
+//
+// UPDATE() - the real body for a normal NAV_WAYPOINT command is exactly
+// `plane.calc_nav_roll(); plane.calc_nav_pitch(); plane.calc_throttle();`
+// (all three already exist, from FBWB/CRUISE) - but see plane.hpp's
+// "UPDATE_AUTO_SPEED_HEIGHT()" note for why this port needs one more call
+// first (plane.update_auto_speed_height(in)) to actually drive TECS before
+// calc_nav_pitch()/calc_throttle() read its demand - upstream's real
+// driver (Plane::update_alt()) lives outside ModeAuto::update() entirely,
+// in a separate scheduled task this port's tick() has no slot for, so it
+// is folded in here instead, exactly as SLICE 2 already folded FBWB's own
+// TECS-driving call into ModeFBWB::update().
+//
+// NAVIGATE() - upstream's real body is `if (AP::ahrs().home_is_set()) {
+// plane.mission.update(); }` where AP_Mission::update() is the ~200-line
+// state machine this slice deliberately does NOT port (see plane.hpp's
+// "SCOPE" note) - dispatching to do_nav_wp()/verify_nav_wp() for whatever
+// command is current, advancing on completion, resuming across a mission-
+// index jump, etc. THIS slice's navigate() below is the minimal, real
+// equivalent for exactly this slice's one command type (NAV_WAYPOINT):
+// build one L1Inputs snapshot (same "one caller-visible snapshot per tick"
+// precedent as build_tecs_inputs()/build_l1_inputs() elsewhere), call
+// verify_nav_wp() (which itself calls nav_controller.update_waypoint() -
+// see plane.hpp, matching upstream's real verify_nav_wp() exactly), and on
+// a true (reached-or-passed) result call mission.advance() + do_nav_wp()
+// to move to the next leg - or, at the final waypoint, do neither (see
+// plane.hpp's "MISSION COMPLETE" note). `AP::ahrs().home_is_set()`'s guard
+// is dropped (no home/EKF-origin subsystem to have a "not set yet" state -
+// this port's current_loc is always valid once tick() has run once, same
+// treatment build_l1_inputs()'s own `location_valid = true UNCONDITIONALLY`
+// note already documents).
+//
+// VERIFY_NAV_WP() SKIPPED LINES, EXACT UPSTREAM LOCATIONS (commands_logic.
+// cpp Plane::verify_nav_wp, ~line 634, read in full per the ticket): the
+// `uint8_t cmd_passby = HIGHBYTE(cmd.p1)` extraction and its
+// flex_next_WP_loc offset_bearing() adjustment (pass-by is not part of
+// MissionItem's vocabulary at all); the `g.waypoint_max_radius > 0`
+// override block (waypoint_max_radius is not a ported tunable); the GCS
+// text messages (gcs().send_text(...) - no GCS subsystem). Everything else
+// - the crosstrack-vs-current-location nav_controller.update_waypoint()
+// choice, the turn_distance()-derived acceptance radius, the plain
+// distance check, and the past_interval_finish_line() "flew past it" catch
+// - is real, faithfully-ported behavior (see plane.hpp's Plane::
+// verify_nav_wp() for the port-side implementation).
+//
+// DOES_AUTO_NAVIGATION()/DOES_AUTO_THROTTLE()/RUN() - NOT PORTED, same
+// "mode-IDENTIFICATION machinery, out of scope" exclusion this file's own
+// banner already documents for every mode - ModeAUTO has NO run()
+// override, relying entirely on base Mode::run() (stabilize all three
+// axes), exactly like ModeFBWB/ModeCRUISE's own "auto-throttle mode relies
+// on the base" shape (see their banners) - does_auto_throttle() is true
+// for AUTO too, expressed structurally the same way.
 
 #include <cmath>
 #include <cstdint>
@@ -483,6 +566,95 @@ private:
     bool locked_heading_ = false;
     std::uint32_t lock_timer_ms_ = 0;
     std::int32_t locked_heading_cd_ = 0;
+};
+
+// upstream: ModeAuto (mode.h) + mode_auto.cpp (202 lines, read in full) -
+// CPP-031 "slice 5". Flies a fixed-size, in-memory, ordered list of
+// waypoint-only MissionItems (plane.hpp's Mission, this port's own
+// deliberately smaller equivalent of AP_Mission) sequentially, using the
+// SAME L1Control/TECS machinery CRUISE/FBWB already wired in - see this
+// file's own "CPP-031 SLICE 5 ADDENDUM" note (above) for the full
+// upstream-vs-port mapping, and plane.hpp's file banner addendum for the
+// shared-infrastructure design rationale (MissionItem/Mission, the
+// crosstrack state machine, the flat-altitude simplification,
+// update_auto_speed_height()).
+//
+// STATE OWNERSHIP - matches CRUISE's own precedent: mission/next_wp_
+// crosstrack/crosstrack/next_turn_angle all live on Plane (plane.hpp,
+// matching upstream's own Plane.h placement for `mission` and
+// `auto_state`), NOT as ModeAUTO-private members - ModeAUTO itself holds
+// NO private state at all, unlike ModeCRUISE's locked_heading_/
+// lock_timer_ms_/locked_heading_cd_ (there is nothing mode-local to track;
+// every piece of AUTO's navigation state is exactly what a future mode
+// reading prev_WP_loc/next_WP_loc - e.g. a real RTL - would also need).
+//
+// EXCLUDED (documented, not silently dropped):
+//   - The MAV_CMD_NAV_TAKEOFF/MAV_CMD_NAV_LAND/MAV_CMD_NAV_SCRIPT_TIME/
+//     quadplane special-case branches in update() - no such commands in
+//     MissionItem's vocabulary (see plane.hpp's exclusion list).
+//   - AP_SCRIPTING_ENABLED's nav_scripting_active()/wiggle_servos()/
+//     MAV_CMD_NAV_ALTITUDE_WAIT handling in run() - no scripting
+//     subsystem, and ModeAUTO has no run() override at all (see below).
+//   - does_auto_navigation()/does_auto_throttle()/_pre_arm_checks()/
+//     is_landing() - mode-IDENTIFICATION machinery, same exclusion this
+//     file's own banner already documents for every mode.
+//   - Watchdog mission-resume and HAL_SOARING_ENABLED's init_cruising()
+//     (both in _enter()) - no watchdog-persistence or soaring subsystem.
+class ModeAUTO : public Mode {
+public:
+    using Mode::Mode;
+
+    // upstream: ModeAuto::_enter() - see this file's own "CPP-031 SLICE 5
+    // ADDENDUM" note for the real body this reproduces. NOT AUTOMATICALLY
+    // CALLED (no mode-switching machinery in this port, same exclusion
+    // ModeFBWB/ModeCRUISE's own banners document) - a caller MUST call
+    // `plane.mission.load(...)` THEN this method ONCE, before the first
+    // tick()/update() while ModeAUTO is active.
+    void enter() {
+        plane_.next_WP_loc = plane_.prev_WP_loc = plane_.current_loc;
+        if (plane_.mission.current() != nullptr) {
+            plane_.do_nav_wp();
+        }
+    }
+
+    // upstream: ModeAuto::update() - the normal-NAV_WAYPOINT branch only
+    // (see this file's own "CPP-031 SLICE 5 ADDENDUM" note for why
+    // update_auto_speed_height() is called first).
+    void update(const StabilizeInputs& in) override {
+        plane_.update_auto_speed_height(in);
+        plane_.calc_nav_roll(in);
+        plane_.calc_nav_pitch();
+        plane_.calc_throttle();
+    }
+
+    // upstream: ModeAuto::navigate() - see this file's own "CPP-031 SLICE
+    // 5 ADDENDUM" note for the full upstream-vs-port mapping (this port's
+    // do_nav_wp()/verify_nav_wp()/mission.advance() replacing AP_Mission::
+    // update()'s much larger state machine for exactly this slice's one
+    // command type).
+    void navigate(const StabilizeInputs& in) override {
+        if (plane_.mission.current() == nullptr) {
+            return; // no mission loaded
+        }
+        const nav::L1Inputs l1_in = plane_.build_l1_inputs(in);
+        if (plane_.verify_nav_wp(l1_in)) {
+            if (plane_.mission.advance()) {
+                plane_.do_nav_wp();
+            }
+            // else: reached/passed the FINAL waypoint - see plane.hpp's
+            // "MISSION COMPLETE" note. Deliberately do NOT call
+            // do_nav_wp()/set_next_WP() again: next_WP_loc stays pinned at
+            // the last waypoint, and verify_nav_wp()'s own
+            // nav_controller.update_waypoint() call above already re-ran
+            // this tick, so the vehicle holds course on the final leg
+            // indefinitely.
+        }
+    }
+
+    // upstream: ModeAuto has NO run() override for the normal-flight case
+    // (only the MAV_CMD_NAV_ALTITUDE_WAIT special case does, excluded -
+    // see class banner) - relies entirely on base Mode::run(), same "auto-
+    // throttle mode relies on the base" shape as ModeFBWB/ModeCRUISE.
 };
 
 // upstream: the real scheduler task-table sequence (AHRS update ->
