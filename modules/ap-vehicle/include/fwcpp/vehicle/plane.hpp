@@ -1328,6 +1328,352 @@
 // fs_action_short() below (Plane class body) and mode.hpp's own "CPP-031
 // SLICE 8 NOTE" (on tick()) for the concrete code.
 
+// =====================================================================
+// CPP-031 SLICE 9 ADDENDUM: Plane::arm()/disarm() - the real armed/
+// disarmed state transition, and the REAL connection of that state to
+// RcOutput's already-built (CPP-025), never-before-called safety-switch
+// machinery (force_safety_off()/force_safety_on()/safety_state(),
+// fwcpp/hal/rc_output.hpp). Upstream (Plane-4.7.0, read directly):
+// ArduPlane/AP_Arming_Plane.cpp (477 lines, read in FULL, per the
+// ticket) - AP_Arming_Plane::arm()/disarm()/change_arm_state()/
+// update_soft_armed() (~line 284-419), rc_received_if_enabled_check()
+// (~line 462, full), and pre_arm_checks()/mandatory_checks()/
+// ins_checks()/quadplane_checks()/mission_checks() (~lines 47-233, 420,
+// skimmed per the ticket's own instruction to confirm applicability, not
+// ported); libraries/AP_Arming/AP_Arming.cpp (2196 lines - NOT read in
+// full, a deliberately out-of-scope file per the ticket - just
+// AP_Arming::arm()/disarm() themselves, ~line 1866-1995, to find the base
+// class's own real core beneath AP_Arming_Plane's override) and
+// AP_Arming::is_armed_and_safety_off()/is_armed() (~line 304-313).
+//
+// SCOPE - NOT A PORT OF AP_Arming (~2200 lines, mostly pre-arm checks for
+// subsystems this port doesn't have: battery, compass, EKF/NavFilter
+// variance, GPS fix-quality/hdop thresholds, board-voltage, logging,
+// fence, parameter-range validation, RC-channel-configuration sanity, INS
+// health beyond a single simulated IMU, quadplane/mission checks) - this
+// slice ports the real, small, APPLICABLE core: the armed/disarmed state
+// transition itself, its real and-relevant side effects, and the ONE
+// pre-arm check that genuinely applies given this port's actual
+// subsystems (RcChannels/SrvChannels/AhrsDcm/Gps/Tecs/L1Control/Mission).
+//
+// `Plane::armed` - a plain, real bool this port owns directly (default
+// false, matching AP_Arming::armed's own real default - a vehicle boots
+// disarmed). NOT AP_Arming's `Method`/full checks-enabled/checks-to-skip/
+// running_arming_checks/last_arm_time_us state machine - see "METHOD NOT
+// PORTED" below.
+//
+// RC_RECEIVED_IF_ENABLED_CHECK() - THE ONE APPLICABLE PRE-ARM CHECK,
+// VERIFIED BY READING ITS REAL BODY (not assumed from the ticket's own
+// guess): upstream's real function is exactly
+//   if (rc().enabled_protocols() == 0) return true;
+//   if (g.throttle_fs_enabled == ThrFailsafe::Enabled &&
+//       !(rc().has_had_rc_receiver() || rc().has_had_rc_override()))
+//       { check_failed(...); return false; }
+//   return true;
+// - genuinely small, and genuinely applicable: this port already has a
+// real ThrFailsafe/throttle_fs_enabled field (CPP-031 slice 8, RC
+// failsafe) and a real "has this vehicle EVER seen a valid RC frame"
+// latch (RcChannels::has_valid_input(), reused directly - the file
+// banner's own "PRE-ARM CHECKS" precedent update_throttle_failsafe()
+// already established for has_had_rc_receiver()). Two upstream pieces
+// are dropped, both real, named simplifications:
+//   - `rc().enabled_protocols() == 0` bypass - no RC-protocol-enablement
+//     subsystem in this port (no SERIALx_PROTOCOL/RC_PROTOCOLS bitmask),
+//     so this port's RC is always "some protocol enabled" (the common,
+//     unconfigured-board case) - the bypass never fires for a
+//     configuration this port could represent anyway.
+//   - `has_had_rc_override()` - no MAVLink RC-override subsystem; only
+//     the has_had_rc_receiver() half of upstream's OR has a real
+//     equivalent here (has_valid_input()).
+// Every OTHER pre_arm_checks()/mandatory_checks() check (skimmed in full,
+// per the ticket) needs a subsystem this port doesn't have: airspeed
+// sensor health, ROLL_LIMIT/PTCH_LIM/AIRSPEED_MIN parameter-range
+// validation, reversed-throttle-vs-failsafe-value cross-check, quadplane
+// checks (HAL_QUADPLANE_ENABLED, no quadplane), ADSB avoidance failsafe
+// (no ADSB), FlightOptions::CENTER_THROTTLE_TRIM (no FlightOptions
+// bitmask), mission-in-landing-sequence (no landing-sequence concept,
+// same exclusion the RC-failsafe slice's own banner already established
+// for AUTO's short-failsafe handling), and Mode::pre_arm_checks() (mode-
+// identification machinery already excluded, see mode.hpp's own banner -
+// every mode in this port's `enter()` already returns `true`
+// unconditionally, matching upstream's own real no-op behavior for
+// MANUAL/FBWA/FBWB/CRUISE/AUTO/RTL, none of which override
+// pre_arm_checks() upstream either). ins_checks()'s AHRS::pre_arm_check()
+// is likewise skipped - no INS-health-monitoring subsystem (same
+// exclusion accel_healthy()/ins_healthy() already established, file
+// banner's SLICE 3 addendum).
+//
+// ARM() - THE REAL CORE OF BOTH AP_Arming_Plane::arm() AND THE BASE
+// CLASS'S AP_Arming::arm() IT CALLS, COLLAPSED INTO ONE FUNCTION (no
+// Method/do_arming_checks parameters - see "METHOD NOT PORTED" below):
+//   - idempotency guard (AP_Arming::arm(): "if (armed) return false;") -
+//     real, ported directly.
+//   - rc_received_if_enabled_check() (above) - the one applicable
+//     pre-arm check; AP_Arming::arm() itself calls mandatory_checks()/
+//     pre_arm_checks()+arm_checks(), all of which collapse to just this
+//     one check for this port's subsystems (see above).
+//   - `armed = true` - AP_Arming::arm()'s own real state transition.
+//   - `hal.rc_output.force_safety_off()` - see "SAFETY STATE" below for
+//     why this is THIS PORT'S real substitute for a board-level physical
+//     safety switch, not upstream's own arm()/disarm() behavior verbatim.
+//   - `set_home(current_loc)` - see "HOME ON ARM" below.
+// AP_Arming::arm()'s remaining real body (verified by reading it
+// directly, not assumed) - last_arm_time_us/_last_arm_method bookkeeping
+// (no consumer, see "METHOD NOT PORTED"), Log_Write_Arm()/arming_
+// failure() (no logging subsystem), terrain->set_reference_location()
+// (no terrain subsystem), fence->auto_enable_fence_on_arming() (no
+// fence), update_arm_gpio() (no HAL_ARM_GPIO_PIN), the GyroFFT
+// prepare_for_arming() hook (no FFT subsystem), and the "Warning: Arming
+// Checks Disabled" GCS message (no GCS, and this port has no checks-
+// bypass concept to warn about anyway) - all genuinely inapplicable, not
+// silently dropped. AP_Arming_Plane::arm()'s OWN additions beyond the
+// base class - delay_arming's rising edge (MODE_AUTOLAND-only, no such
+// mode), mode_autoland.arm_check() (no AUTOLAND mode), the RUDDER-method
+// takeoff-warning timer (see "RUDDER ARMING NOT PORTED" below), and
+// send_arm_disarm_statustext() (no GCS) - are excluded for the same
+// reasons.
+//
+// DISARM() - THE REAL CORE OF BOTH LAYERS, SAME COLLAPSE:
+//   - idempotency guard (AP_Arming::disarm(): "if (!armed) return
+//     false;") - real, ported directly.
+//   - `armed = false` - AP_Arming::disarm()'s own real state transition.
+//   - `hal.rc_output.force_safety_on()` - see "SAFETY STATE" below. NOTE:
+//     this is this port's OWN substitute for AP_Arming_Plane::disarm()'s
+//     real behavior here, which is actually a NO-OP for force_safety_on
+//     on a typical board (that call lives in the BASE class,
+//     AP_Arming::disarm(), gated on `BOARD_SAFETY_OPTION_SAFETY_ON_
+//     DISARM` - a board-config option that defaults OFF, verified by
+//     reading AP_Arming.cpp directly) - upstream's REAL default behavior
+//     leaves the physical safety switch alone on disarm, relying on the
+//     separate `is_armed_and_safety_off()` AND-condition to stop motors
+//     instead. This port has no separate physical-safety-switch input to
+//     leave alone (see "SAFETY STATE" below) - unconditionally forcing
+//     safety on at disarm is the honest, safe substitute given that
+//     divergence, not a faithful default-BOARD_SAFETY_OPTION reproduction.
+//   - `if (control_mode != &mode_auto) mission.reset();` - AP_Arming_
+//     Plane::disarm()'s own real line, ported verbatim (new Mission::
+//     reset() method, below).
+//   - `throttle_suppressed = control_mode->does_auto_throttle();` -
+//     AP_Arming_Plane::disarm()'s own real line, ported verbatim (see
+//     "DOES_AUTO_THROTTLE() UN-EXCLUDED" and "THROTTLE_SUPPRESSED" below).
+// AP_Arming::disarm()'s remaining real body - the RUDDER-method throttle-
+// stick/rudder-arming-type gate (see "RUDDER ARMING NOT PORTED" below),
+// Log_Write_Disarm()/check_forced_logging() (no logging), GyroFFT save_
+// params_on_disarm() (no FFT), fence->auto_disable_fence_on_disarming()
+// (no fence), update_arm_gpio() (no HAL_ARM_GPIO_PIN) - all inapplicable.
+// AP_Arming_Plane::disarm()'s OWN additions beyond the base class -
+// is_flying()-gated GCS/rudder disarm refusal (see "DISARM-WHILE-FLYING
+// GAP" below, a REAL, NAMED divergence, not a silent omission), the no-
+// aux-switch-assigned airmode-off branch (HAL_QUADPLANE_ENABLED, no
+// quadplane), qautotune.disarmed() (no qautotune), new_airspeed_cm reset
+// (no DO_CHANGE_SPEED in this port's MissionItem vocabulary - see file
+// banner's SLICE 5 addendum, so nothing ever sets new_airspeed_cm away
+// from its unused default in the first place), takeoff_state.initial_
+// direction reset (MODE_AUTOLAND-only), and send_arm_disarm_statustext()
+// (no GCS) - are excluded for the same reasons.
+//
+// DISARM-WHILE-FLYING GAP - A REAL SAFETY DIFFERENCE FROM UPSTREAM,
+// FLAGGED EXPLICITLY, NOT A SILENT OMISSION: upstream's real
+// AP_Arming_Plane::disarm() refuses to disarm at all (`return false`,
+// motors keep running) for a GCS- or RUDDER-originated disarm while
+// `plane.is_flying()` is true - a real in-flight safety interlock. This
+// port has no is_flying() concept anywhere (a repeated, standing
+// exclusion throughout this file - see e.g. the "GROUND_MODE /
+// REVERSED_THROTTLE" and "UPDATE_THROTTLE_FAILSAFE()'S ALLOW_FAILSAFE_
+// BYPASS" notes) and, per this slice's own scope (see "METHOD NOT
+// PORTED" below), disarm() has no method/caller-origin to distinguish
+// GCS/RUDDER from a trusted internal caller in the first place. The
+// honest consequence: THIS PORT'S disarm() SUCCEEDS UNCONDITIONALLY (once
+// armed), INCLUDING MID-FLIGHT - a caller can cut RcOutput's safety
+// switch (and therefore every servo/throttle output) on a vehicle
+// SimPlane's own ground truth shows is genuinely airborne. This matches
+// this port's established "explicit caller control, no hidden safety net
+// beyond what's actually built" pattern (every mode's own enter()/exit()
+// is likewise caller-invoked with no automatic guard) - but it is a REAL
+// GAP versus upstream's real in-flight protection, not something to
+// treat as equivalent. A future slice adding a real is_flying() concept
+// should reintroduce this refusal.
+//
+// SAFETY STATE - RcOutput'S SafetyState IS THIS PORT'S STAND-IN FOR
+// UPSTREAM'S PHYSICAL SAFETY SWITCH, A DELIBERATE AND NAMED DIVERGENCE:
+// upstream's real hardware safety switch is a BOARD-LEVEL, PHYSICALLY
+// INDEPENDENT component - a human presses a button, a GPIO interrupt
+// (AP_BoardConfig's own safety-button handling) flips hal.rcout's
+// internal safety_switch_state, and arm()/disarm() THEMSELVES NEVER TOUCH
+// IT (verified by reading AP_Arming.cpp's real arm()/disarm() bodies in
+// full - the ONLY force_safety_on() call in the entire arm/disarm path is
+// the BOARD_SAFETY_OPTION_SAFETY_ON_DISARM opt-in noted above; arm() calls
+// it NEVER). `is_armed_and_safety_off()` (AP_Arming.cpp: `is_armed() &&
+// hal.util->safety_switch_state() != SAFETY_DISARMED`) is upstream's own
+// AND of two INDEPENDENTLY-driven states for exactly this reason. This
+// port has no physical-safety-switch hardware/GPIO-interrupt subsystem to
+// model that independence with - RcOutput::force_safety_off()/
+// force_safety_on() (CPP-025) already exist as REAL, tested,
+// never-before-connected machinery with EXACTLY the right shape
+// (SafetyState::kArmed/kDisarmed, zeroing every non-exempt output channel
+// while disarmed) to serve as this port's substitute - so this slice
+// makes arm()/disarm() THEMSELVES drive it directly, i.e. treats "safety
+// off" as synonymous with "armed" rather than a separate human action.
+// This is LESS SAFE than upstream's real independent-switch model in one
+// specific way worth naming: upstream lets an operator arm SOFTWARE
+// (motors spin down, ready) while the PHYSICAL switch stays safety-on
+// (motors genuinely can't move) as a deliberate two-step safety
+// procedure; this port's arm() collapses that to one step. Given this
+// port has no physical switch hardware to two-step WITH, collapsing is
+// the only honest option available (leaving RcOutput's safety machinery
+// permanently disconnected, as it was before this slice, would be
+// strictly worse - dead code, not a safety feature) - documented here as
+// the real, named simplification it is.
+//
+// IS_ARMED_AND_SAFETY_OFF() BECOMES COMPUTED, NOT CALLER-SUPPLIED - THE
+// DESIGN DECISION THE TICKET ASKED FOR: `StabilizeInputs::
+// armed_and_safety_off` (SLICE 1's own field, set directly by every
+// caller/test until now) is REMOVED. Plane::is_armed_and_safety_off()
+// (below) computes it directly from the two real states this slice just
+// wired together - `armed && hal.rc_output.safety_state() ==
+// hal::SafetyState::kArmed` - matching AP_Arming::is_armed_and_safety_
+// off()'s own real AND-of-two-independent-states shape exactly (see
+// "SAFETY STATE" above for why, in THIS port, those two states are always
+// driven together rather than independently). tick() (mode.hpp) now calls
+// `plane.is_armed_and_safety_off()` at its three read sites (drift_
+// correction_yaw()/drift_correction_accel()/update_speed_scaler()) instead
+// of reading `in.armed_and_safety_off` - the SAME three sites, unchanged
+// otherwise. This was chosen over the alternative (keep the field, have
+// callers populate it FROM plane.is_armed_and_safety_off() themselves
+// before calling tick()) because a field a caller must remember to
+// re-derive every tick is exactly the double-source-of-truth bug class
+// this design question exists to close - a compile-time guarantee (the
+// field no longer EXISTS to set inconsistently) beats a documentation-only
+// convention. Blast radius, traced fully: calc_speed_scaler()/
+// update_speed_scaler() keep their OWN explicit `armed_and_safety_off`
+// bool PARAMETER unchanged (that is a different, already-explicit-context
+// design, ADR-0012, not the field being removed here) - only the
+// STRUCT FIELD and its 3 read sites in tick() change. Every pre-existing
+// vehicle_test.cpp closed-loop test that set `in.armed_and_safety_off =
+// true;` (9 sites) is updated to `plane.armed = true; plane.hal.rc_output.
+// force_safety_off();` instead - the two real, lower-level primitives that
+// combination used to fake, set directly and unconditionally, EXACTLY
+// preserving each test's original intent ("pretend armed-and-safety-off is
+// true regardless of any real precondition") rather than routing through
+// arm()'s own new rc_received_if_enabled_check() gate, which several of
+// those tests would fail (set_sticks() isn't called until inside their own
+// per-tick loop, AFTER this line runs) - a real, deliberate choice, not an
+// oversight: these are integration tests of MANUAL/FBWA/FBWB/CRUISE/AUTO/
+// RTL's OWN stabilization/navigation logic, not of arm()'s pre-arm gate
+// (which gets its own dedicated tests, see vehicle_test.cpp's new "Plane::
+// arm()/disarm()" section), so bypassing that gate exactly as the old
+// fake-field approach implicitly did is the correct, minimal-blast-radius
+// choice - verified one by one that each test still exercises the same
+// real behavior it always did (see this slice's own report for the full
+// per-site confirmation).
+//
+// HOME ON ARM - A REAL, NAMED SIMPLIFICATION OF update_home()'s REAL
+// CONDITIONAL LOGIC: AP_Arming_Plane::arm()'s own body is `if (plane.
+// update_home()) { if (plane.ahrs.set_home(plane.current_loc)) {
+// plane.update_current_loc(); } }` - i.e. home is only actually reset to
+// current_loc when update_home() ALSO returns true. Reading update_home()
+// (commands.cpp) in full: it gates on `!hal.util->was_watchdog_armed()`
+// (no watchdog subsystem), a baro-drift threshold check
+// (`g2.home_reset_threshold`, no barometer in this port), and `ahrs.
+// home_is_set() && !ahrs.home_is_locked() && gps.status() >=
+// GPS_OK_FIX_3D` (a "home was already set once, by a real GPS-lock event,
+// and isn't locked" gate this port's Gps/AhrsDcm have no equivalent
+// concept for - no home_is_set()/home_is_locked() state machine anywhere
+// in this port). Every one of those gates depends on a subsystem this
+// port doesn't have, so there is no faithful "sometimes skip it" version
+// to reproduce - this slice's arm() calls `set_home(current_loc)`
+// UNCONDITIONALLY on every successful arm instead, the honest simplified
+// behavior of "home is wherever the vehicle was when it was last armed",
+// reusing SLICE 6's own real set_home() unchanged. Ordering consequence,
+// documented not silently assumed: current_loc is only ever fresh
+// starting from the first tick() call (update_current_loc(), SLICE 4) -
+// a caller calling arm() before ever calling tick() gets
+// `set_home(Location())` (the shared fixed reference point), exactly
+// matching how a freshly-constructed Plane's current_loc already reads
+// before its first tick, not a new gap this slice introduces.
+//
+// DOES_AUTO_THROTTLE() UN-EXCLUDED, MINIMALLY - A REAL CONSUMER NOW
+// EXISTS: SLICE 1's own file banner (Mode class hierarchy section)
+// explicitly excluded does_auto_throttle() as "mode-IDENTIFICATION
+// machinery, not stabilization logic... no consumer needs it" - true
+// until now. AP_Arming_Plane::disarm()'s own real
+// `plane.throttle_suppressed = plane.control_mode->does_auto_throttle();`
+// line is a genuine, small, in-scope consumer this slice adds - so
+// `virtual bool does_auto_throttle() const { return false; }` is added to
+// the Mode base class (mode.hpp/plane.hpp Mode-hierarchy section),
+// overridden `{ return true; }` in ModeFBWB/ModeCRUISE/ModeAUTO/ModeRTL -
+// verified against mode.h's own real per-class overrides (ModeManual/
+// ModeFBWA rely on the base class's real `false` default; ModeFBWB/
+// ModeCruise/ModeAuto/ModeRTL all override `true`; ModeAuto's real body
+// is `return !nav_scripting_active();`, AP_SCRIPTING_ENABLED-gated - no
+// scripting subsystem in this port, so it collapses to the unconditional
+// `true` its own `#else` fallthrough already is) - a plain one-liner per
+// class, matching ModeCruise's own get_target_heading_cd() inline-
+// accessor precedent, not a re-opening of the broader mode-identification
+// exclusion (is_vtol_mode()/does_auto_navigation()/etc. all stay excluded
+// - still no real consumer for any of them).
+//
+// THROTTLE_SUPPRESSED - THE ASSIGNMENT IS PORTED, THE FULL CONSUMER IS
+// NOT, A DELIBERATE AND NAMED DISTINCTION: `Plane::throttle_suppressed`
+// (new field, default false) receives AP_Arming_Plane::disarm()'s own
+// real one-line assignment faithfully. Upstream's REAL consumer of this
+// flag, `Plane::suppress_throttle()` (servos.cpp, ~150 lines), is a large
+// takeoff-detection/un-suppression state machine (GPS-groundspeed
+// thresholds, altitude-above-home checks, launch-duration timers,
+// is_flying(), auto_takeoff_check()) - genuinely out of scope, no
+// takeoff/is_flying() subsystem anywhere in this port (same standing
+// exclusion as the "DISARM-WHILE-FLYING GAP" above). This slice
+// deliberately does NOT wire throttle_suppressed into calc_throttle() or
+// update_fbwb_speed_height()/update_auto_speed_height()'s TECS-driving
+// gate (upstream's OWN real gate, `should_run_tecs && !throttle_
+// suppressed` in update_alt(), Plane.cpp) as a partial substitute for
+// suppress_throttle() - a considered rejection, not an oversight: wiring
+// the gate WITHOUT the un-suppression state machine that upstream ALWAYS
+// pairs it with would leave throttle_suppressed a ONE-WAY LATCH in this
+// port (nothing would ever clear it back to false - arm() doesn't,
+// upstream's own arm() doesn't either, only suppress_throttle()'s own
+// state machine does), permanently freezing TECS's throttle demand after
+// the FIRST disarm in any auto-throttle mode, for every future re-arm -
+// strictly WORSE than upstream, not an equivalent simplification of it.
+// Matches this port's own "ground_mode/reversed_throttle" precedent
+// (SLICE 1's file banner) - a real field, correctly written by the one
+// real assignment this slice's scope covers, left otherwise inert
+// pending a future slice that ports suppress_throttle() itself (or a
+// smaller, honest substitute for it) as its own dedicated piece of work.
+// Covered by a dedicated unit test (vehicle_test.cpp) confirming the
+// FLAG's value transitions correctly (true after disarm in an auto-
+// throttle mode, unaffected in MANUAL/FBWA) - not an "invented value
+// nothing reads" case (SLICE 4's own standing concern) precisely because
+// it DOES have a real, named, documented future reader, just not one
+// this slice builds.
+//
+// METHOD NOT PORTED - AP_Arming::Method (RUDDER/GCS/MAVLINK/AUXSWITCH/
+// MOTORTEST/SCRIPTING/... - HOW arming was requested) has no consumer
+// anywhere in this port's scope: no logging (Log_Write_Arm/Disarm take
+// it purely for reporting), no GCS (send_arm_disarm_statustext doesn't
+// read it), and the only BEHAVIORAL branches on it (the RUDDER-specific
+// checks in both arm()/disarm(), see "RUDDER ARMING NOT PORTED" below)
+// are themselves excluded. A single caller-invoked arm()/disarm() with no
+// method-tracking is this slice's honest scope - matching this port's own
+// established precedent for every mode's enter()/exit() (also caller-
+// invoked, no dispatch-reason tracking).
+//
+// RUDDER ARMING NOT PORTED - a real, separate upstream mechanism (holding
+// the rudder stick to one side for a sustained period arms/disarms,
+// AP_Arming::RudderArming, checked inside both AP_Arming::arm()'s method==
+// RUDDER branch and disarm()'s throttle-must-be-down/rudder-arming-type
+// gate) - this slice's arm()/disarm() are programmatic/test-callable entry
+// points, same precedent as every mode's own enter()/exit() being directly
+// callable rather than gesture-triggered. A future slice could add rudder-
+// gesture detection as its own dedicated piece of work, calling this
+// slice's arm()/disarm() as its two real terminal actions once a gesture
+// is recognized.
+//
+// See Plane::armed/is_armed_and_safety_off()/rc_received_if_enabled_
+// check()/arm()/disarm() and Mission::reset() below (Plane class body,
+// just after `home`/`set_home()`) for the concrete code, and mode.hpp's
+// own tick() for the 3 updated read sites.
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -1464,7 +1810,11 @@ struct StabilizeInputs {
     float airspeed_eas = 0.0f;         // m/s EAS, meaningful only if airspeed_valid
     float eas2tas = 1.0f;              // upstream: ahrs.get_EAS2TAS()
     float accel_y = 0.0f;              // m/s^2, bias-corrected body-frame lateral accel - see file banner
-    bool armed_and_safety_off = false; // upstream: arming.is_armed_and_safety_off()
+    // armed_and_safety_off REMOVED (CPP-031 slice 9, see file banner's
+    // "IS_ARMED_AND_SAFETY_OFF() BECOMES COMPUTED" note) - upstream:
+    // arming.is_armed_and_safety_off(), now Plane::is_armed_and_safety_off(),
+    // computed from the real Plane::armed/RcOutput::safety_state() this
+    // slice wires together, not a field a caller sets directly.
     float dt = 0.0f;                   // seconds since the previous tick
     std::uint32_t now_ms = 0;
 
@@ -1572,6 +1922,21 @@ public:
         ++current_index_;
         return true;
     }
+
+    // upstream: AP_Mission::reset() (AP_Mission.cpp) - "reset mission to
+    // the first command." CPP-031 slice 9 (Plane::disarm(), see plane.hpp
+    // file banner's "CPP-031 SLICE 9 ADDENDUM"). Upstream's real reset()
+    // also clears nav_cmd_loaded/do_cmd_loaded/do_cmd_all_done/in_landing_
+    // sequence/in_return_path flags, jump-tracking, and waypoint history -
+    // none of that state exists in THIS port's Mission (see this class's
+    // own "SCOPE" note: no do-commands, no landing-sequence concept, no
+    // jump/loop commands, no crosstrack-history to reset here - the
+    // crosstrack state that DOES exist, Plane::next_wp_crosstrack/
+    // crosstrack, is not part of Mission itself, matching upstream's own
+    // placement in `auto_state`, not `AP_Mission`) - so this port's
+    // reset() is exactly the one piece of upstream's real reset() that
+    // has a real equivalent here: go back to the first item.
+    void reset() { current_index_ = 0; }
 
 private:
     std::array<MissionItem, kMaxMissionItems> items_{};
@@ -1706,6 +2071,14 @@ public:
     // Body: mode.hpp.
     void reset_controllers();
 
+    // upstream: Mode::does_auto_throttle() (mode.h) - CPP-031 slice 9, see
+    // plane.hpp file banner's "DOES_AUTO_THROTTLE() UN-EXCLUDED" note for
+    // why this one piece of mode-identification machinery is now real
+    // (Plane::disarm()'s own genuine, in-scope consumer). Default false,
+    // matching ModeManual/ModeFBWA's real upstream behavior (both rely on
+    // this base default, neither overrides it).
+    [[nodiscard]] virtual bool does_auto_throttle() const { return false; }
+
 protected:
     // upstream: Mode::output_pilot_throttle() (mode.cpp) - "Output pilot
     // throttle, this is used in stabilized modes without auto throttle
@@ -1810,10 +2183,12 @@ public:
     // after stabilizing: calc_throttle() (called from
     // update_fbwb_speed_height() above, i.e. during update() - BEFORE
     // run()) already wrote TECS's computed throttle demand straight to
-    // the throttle servo function. Mode::does_auto_throttle() (not
-    // ported - see mode.hpp's own banner) is true for FBWB upstream; this
-    // "no run() override" shape IS that behavior, expressed structurally
-    // instead of via a ported boolean flag.
+    // the throttle servo function. This "no run() override" shape is a
+    // structural expression of does_auto_throttle()==true for FBWB; the
+    // override just below makes that boolean itself real too (CPP-031
+    // slice 9 - see plane.hpp file banner's "DOES_AUTO_THROTTLE()
+    // UN-EXCLUDED" note), now that Plane::disarm() is a real consumer.
+    [[nodiscard]] bool does_auto_throttle() const override { return true; }
 };
 
 // upstream: ModeCruise (mode.h) + mode_cruise.cpp, read in full (CPP-031
@@ -1909,7 +2284,10 @@ public:
 
     // upstream: ModeCruise has NO run() override at all - same "auto-
     // throttle mode relies entirely on base Mode::run()" shape as ModeFBWB
-    // (see its own banner) - does_auto_throttle() is true for CRUISE too.
+    // (see its own banner). does_auto_throttle() (CPP-031 slice 9 - see
+    // plane.hpp file banner's "DOES_AUTO_THROTTLE() UN-EXCLUDED" note) is
+    // real, ported, true for CRUISE too, matching upstream's own override.
+    [[nodiscard]] bool does_auto_throttle() const override { return true; }
 
 private:
     // upstream: ModeCruise's own private members (mode.h) - see class
@@ -1993,6 +2371,14 @@ public:
     // (only the MAV_CMD_NAV_ALTITUDE_WAIT special case does, excluded -
     // see class banner) - relies entirely on base Mode::run(), same "auto-
     // throttle mode relies on the base" shape as ModeFBWB/ModeCRUISE.
+
+    // upstream: ModeAuto::does_auto_throttle() (mode_auto.cpp) - real body
+    // is `#if AP_SCRIPTING_ENABLED return !nav_scripting_active(); #endif
+    // return true;` - no scripting subsystem in this port (same exclusion
+    // throughout this class's own banner), so this collapses to the
+    // unconditional `true` its own fallthrough already is. CPP-031 slice 9
+    // - see plane.hpp file banner's "DOES_AUTO_THROTTLE() UN-EXCLUDED" note.
+    [[nodiscard]] bool does_auto_throttle() const override { return true; }
 };
 
 // upstream: ModeRTL (mode.h) + mode_rtl.cpp (169 lines, read in full) -
@@ -2081,6 +2467,11 @@ public:
     // upstream: ModeRTL has NO run() override at all - relies entirely on
     // base Mode::run(), same "auto-throttle mode relies on the base"
     // shape as ModeFBWB/ModeCRUISE/ModeAUTO.
+
+    // upstream: ModeRTL::does_auto_throttle() (mode.h) - `{ return true; }`,
+    // ported directly. CPP-031 slice 9 - see plane.hpp file banner's
+    // "DOES_AUTO_THROTTLE() UN-EXCLUDED" note.
+    [[nodiscard]] bool does_auto_throttle() const override { return true; }
 };
 
 class Plane {
@@ -2173,6 +2564,85 @@ public:
     // substitute, matching this port's "explicit setup, no automatic
     // magic" pattern.
     void set_home(const Location& loc) { home = loc; }
+
+    // =================================================================
+    // CPP-031 SLICE 9 (Plane::arm()/disarm()) - see file banner addendum
+    // "CPP-031 SLICE 9 ADDENDUM" for the full upstream-vs-port design
+    // rationale, every excluded AP_Arming/AP_Arming_Plane check, and the
+    // real, named safety divergences (SAFETY STATE, DISARM-WHILE-FLYING
+    // GAP) - not repeated here beyond a short pointer per judgment call.
+    // =================================================================
+
+    // upstream: AP_Arming::armed (private there; AP_Arming::is_armed()
+    // exposes it) - default false, a vehicle boots disarmed.
+    bool armed = false;
+
+    // upstream: Plane::throttle_suppressed (Plane.h) - see file banner's
+    // "THROTTLE_SUPPRESSED" note for why this is a real field with only
+    // ONE real writer (disarm(), below) and no wired consumer yet.
+    bool throttle_suppressed = false;
+
+    // upstream: AP_Arming::is_armed_and_safety_off() (AP_Arming.cpp:
+    // `is_armed() && hal.util->safety_switch_state() != SAFETY_DISARMED`).
+    // See file banner's "SAFETY STATE" and "IS_ARMED_AND_SAFETY_OFF()
+    // BECOMES COMPUTED" notes for why RcOutput::safety_state() is this
+    // port's real stand-in for the physical safety switch, and why this
+    // is now a computed method rather than a caller-supplied
+    // StabilizeInputs field. AP_Arming::is_armed()'s own `|| arming_
+    // required() == Required::NO` OR-term is dropped - no ARMING_REQUIRE
+    // parameter/subsystem in this port (a vehicle that never needs
+    // arming at all), so `is_armed()` collapses to plain `armed` here.
+    [[nodiscard]] bool is_armed_and_safety_off() const {
+        return armed && hal.rc_output.safety_state() == hal::SafetyState::kArmed;
+    }
+
+    // upstream: AP_Arming_Plane::rc_received_if_enabled_check()
+    // (AP_Arming_Plane.cpp) - see file banner's "RC_RECEIVED_IF_ENABLED_
+    // CHECK()" note for the real body this reproduces and the two
+    // upstream pieces (enabled_protocols()==0 bypass, has_had_rc_
+    // override()) dropped as named simplifications.
+    [[nodiscard]] bool rc_received_if_enabled_check() const {
+        return aparm.throttle_fs_enabled != ThrFailsafe::Enabled || rc_channels.has_valid_input();
+    }
+
+    // upstream: AP_Arming_Plane::arm() calling AP_Arming::arm() - see file
+    // banner's "ARM()" note for the full mapping of what belongs in this
+    // port's core versus what's excluded (Method/do_arming_checks,
+    // logging, terrain/fence hooks, GPIO, rudder-arming timers). Returns
+    // false (armed left false) if already armed or the one applicable
+    // pre-arm check fails.
+    bool arm() {
+        if (armed) {
+            return false;
+        }
+        if (!rc_received_if_enabled_check()) {
+            return false;
+        }
+        armed = true;
+        hal.rc_output.force_safety_off(); // see file banner's "SAFETY STATE" note
+        set_home(current_loc);            // see file banner's "HOME ON ARM" note
+        return true;
+    }
+
+    // upstream: AP_Arming_Plane::disarm() calling AP_Arming::disarm() -
+    // see file banner's "DISARM()" note for the full mapping, and
+    // "DISARM-WHILE-FLYING GAP" for the real, named safety difference
+    // this port has versus upstream's is_flying()-gated refusal (NOT
+    // reproduced here - no is_flying() concept in this port, so disarm()
+    // always succeeds once armed, even mid-flight). Returns false (no
+    // state change) if already disarmed.
+    bool disarm() {
+        if (!armed) {
+            return false;
+        }
+        armed = false;
+        hal.rc_output.force_safety_on(); // see file banner's "SAFETY STATE" note
+        if (control_mode != &mode_auto) {
+            mission.reset();
+        }
+        throttle_suppressed = control_mode->does_auto_throttle(); // see file banner's "THROTTLE_SUPPRESSED" note
+        return true;
+    }
 
     // CPP-031 slice 6 (ModeRTL, see file banner addendum's "LOITER STATE"
     // note) - upstream: Plane::loiter (Plane.h), reduced to exactly the

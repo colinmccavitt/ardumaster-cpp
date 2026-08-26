@@ -314,7 +314,15 @@ TEST_CASE("Closed loop: FBWA holding a constant commanded bank angle converges i
 
     StabilizeInputs in;
     in.dt = kDt;
-    in.armed_and_safety_off = true;
+    // CPP-031 slice 9: armed_and_safety_off is now COMPUTED
+    // (plane.is_armed_and_safety_off()), not a StabilizeInputs field - set
+    // the two real underlying primitives it used to fake directly instead,
+    // exactly preserving this test's original intent (see plane.hpp file
+    // banner's "IS_ARMED_AND_SAFETY_OFF() BECOMES COMPUTED" note for why
+    // arm() itself isn't used here: its rc_received_if_enabled_check()
+    // gate would fail this early, before set_sticks() is ever called).
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
 
     std::uint32_t now_ms = 0;
     float commanded_roll_deg = 0.0f;
@@ -546,7 +554,16 @@ TEST_CASE("Closed loop: FBWB climbs under up-elevator and levels off in SimPlane
 
             StabilizeInputs in;
             in.dt = kDt;
-            in.armed_and_safety_off = true;
+            // CPP-031 slice 9: armed_and_safety_off is now COMPUTED
+            // (plane.is_armed_and_safety_off()), not a StabilizeInputs
+            // field - set the two real underlying primitives it used to
+            // fake directly instead, exactly preserving this test's
+            // original intent (see plane.hpp file banner's "IS_ARMED_AND_
+            // SAFETY_OFF() BECOMES COMPUTED" note for why arm() itself
+            // isn't used here: its rc_received_if_enabled_check() gate
+            // would fail this early, before set_sticks() is ever called).
+            plane.armed = true;
+            plane.hal.rc_output.force_safety_off();
             in.now_ms = now_ms;
             in.now_us = now_us;
             in.current_altitude_m = -sim_plane.position.z;
@@ -703,7 +720,15 @@ DriftRunResult run_biased_closed_loop(bool with_correction, int num_ticks, float
 
     StabilizeInputs in;
     in.dt = kDt;
-    in.armed_and_safety_off = true;
+    // CPP-031 slice 9: armed_and_safety_off is now COMPUTED
+    // (plane.is_armed_and_safety_off()), not a StabilizeInputs field - set
+    // the two real underlying primitives it used to fake directly instead,
+    // exactly preserving this test's original intent (see plane.hpp file
+    // banner's "IS_ARMED_AND_SAFETY_OFF() BECOMES COMPUTED" note for why
+    // arm() itself isn't used here: its rc_received_if_enabled_check()
+    // gate would fail this early, before set_sticks() is ever called).
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
     in.gps_use_enabled = with_correction;
 
     std::uint32_t now_ms = 0;
@@ -1176,7 +1201,16 @@ TEST_CASE("Closed loop: CRUISE locks the GPS heading and then holds a straight g
 
             StabilizeInputs in;
             in.dt = kDt;
-            in.armed_and_safety_off = true;
+            // CPP-031 slice 9: armed_and_safety_off is now COMPUTED
+            // (plane.is_armed_and_safety_off()), not a StabilizeInputs
+            // field - set the two real underlying primitives it used to
+            // fake directly instead, exactly preserving this test's
+            // original intent (see plane.hpp file banner's "IS_ARMED_AND_
+            // SAFETY_OFF() BECOMES COMPUTED" note for why arm() itself
+            // isn't used here: its rc_received_if_enabled_check() gate
+            // would fail this early, before set_sticks() is ever called).
+            plane.armed = true;
+            plane.hal.rc_output.force_safety_off();
             in.now_ms = now_ms;
             in.now_us = now_us;
             in.current_altitude_m = -sim_plane.position.z;
@@ -1594,7 +1628,16 @@ TEST_CASE("Closed loop: AUTO flies a 3-waypoint mission in sequence, reaching ea
 
         StabilizeInputs in;
         in.dt = kDt;
-        in.armed_and_safety_off = true;
+        // CPP-031 slice 9: armed_and_safety_off is now COMPUTED
+        // (plane.is_armed_and_safety_off()), not a StabilizeInputs field -
+        // set the two real underlying primitives it used to fake directly
+        // instead, exactly preserving this test's original intent (see
+        // plane.hpp file banner's "IS_ARMED_AND_SAFETY_OFF() BECOMES
+        // COMPUTED" note for why arm() itself isn't used here: its
+        // rc_received_if_enabled_check() gate would fail this early,
+        // before set_sticks() is ever called).
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
         in.now_ms = now_ms;
         in.now_us = now_us;
         in.current_altitude_m = -sim_plane.position.z;
@@ -1919,7 +1962,16 @@ TEST_CASE("Closed loop: RTL flies back toward home and then holds a loiter near 
 
         StabilizeInputs in;
         in.dt = kDt;
-        in.armed_and_safety_off = true;
+        // CPP-031 slice 9: armed_and_safety_off is now COMPUTED
+        // (plane.is_armed_and_safety_off()), not a StabilizeInputs field -
+        // set the two real underlying primitives it used to fake directly
+        // instead, exactly preserving this test's original intent (see
+        // plane.hpp file banner's "IS_ARMED_AND_SAFETY_OFF() BECOMES
+        // COMPUTED" note for why arm() itself isn't used here: its
+        // rc_received_if_enabled_check() gate would fail this early,
+        // before set_sticks() is ever called).
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
         in.now_ms = now_ms;
         in.now_us = now_us;
         in.current_altitude_m = -sim_plane.position.z;
@@ -2191,7 +2243,16 @@ TEST_CASE("Closed loop: AUTO flies its mission to completion, hands off to RTL v
 
         StabilizeInputs in;
         in.dt = kDt;
-        in.armed_and_safety_off = true;
+        // CPP-031 slice 9: armed_and_safety_off is now COMPUTED
+        // (plane.is_armed_and_safety_off()), not a StabilizeInputs field -
+        // set the two real underlying primitives it used to fake directly
+        // instead, exactly preserving this test's original intent (see
+        // plane.hpp file banner's "IS_ARMED_AND_SAFETY_OFF() BECOMES
+        // COMPUTED" note for why arm() itself isn't used here: its
+        // rc_received_if_enabled_check() gate would fail this early,
+        // before set_sticks() is ever called).
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
         in.now_ms = now_ms;
         in.now_us = now_us;
         in.current_altitude_m = -sim_plane.position.z;
@@ -2648,7 +2709,16 @@ TEST_CASE("Closed loop: AUTO flying a mission, RC signal loss (throttle drops to
 
         StabilizeInputs in;
         in.dt = kDt;
-        in.armed_and_safety_off = true;
+        // CPP-031 slice 9: armed_and_safety_off is now COMPUTED
+        // (plane.is_armed_and_safety_off()), not a StabilizeInputs field -
+        // set the two real underlying primitives it used to fake directly
+        // instead, exactly preserving this test's original intent (see
+        // plane.hpp file banner's "IS_ARMED_AND_SAFETY_OFF() BECOMES
+        // COMPUTED" note for why arm() itself isn't used here: its
+        // rc_received_if_enabled_check() gate would fail this early,
+        // before set_sticks() is ever called).
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
         in.now_ms = now_ms;
         in.now_us = now_us;
         in.current_altitude_m = -sim_plane.position.z;
@@ -2783,7 +2853,16 @@ TEST_CASE("Closed loop: CRUISE-then-RTL converges toward home", "[vehicle][integ
 
         StabilizeInputs in;
         in.dt = kDt;
-        in.armed_and_safety_off = true;
+        // CPP-031 slice 9: armed_and_safety_off is now COMPUTED
+        // (plane.is_armed_and_safety_off()), not a StabilizeInputs field -
+        // set the two real underlying primitives it used to fake directly
+        // instead, exactly preserving this test's original intent (see
+        // plane.hpp file banner's "IS_ARMED_AND_SAFETY_OFF() BECOMES
+        // COMPUTED" note for why arm() itself isn't used here: its
+        // rc_received_if_enabled_check() gate would fail this early,
+        // before set_sticks() is ever called).
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
         in.now_ms = now_ms;
         in.now_us = now_us;
         in.current_altitude_m = -sim_plane.position.z;
@@ -2863,4 +2942,275 @@ TEST_CASE("Closed loop: CRUISE-then-RTL converges toward home", "[vehicle][integ
     REQUIRE(min_dist_to_home < 120.0f);
     REQUIRE(tail_dist_avg < 120.0f);
     REQUIRE(tail_dist_max - min_dist_to_home < 60.0f); // settled into a real loiter, not still oscillating widely
+}
+
+// ---------------------------------------------------------------------
+// Plane::arm()/disarm() (CPP-031 slice 9) - see plane.hpp file banner's
+// "CPP-031 SLICE 9 ADDENDUM" for the full design rationale. set_sticks()
+// (top of file) is reused as this section's own "a valid RC frame has
+// arrived" trigger - it both feeds RcChannels a real frame AND sets
+// RcChannels::has_valid_input()'s latch, exactly the precondition
+// rc_received_if_enabled_check() gates on.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Plane::rc_received_if_enabled_check(): blocks until a valid RC frame has arrived when throttle "
+          "failsafe is enabled, never blocks when disabled",
+          "[vehicle][arming]") {
+    SECTION("THR_FAILSAFE enabled (the real default) - blocks until RC input arrives") {
+        Plane plane;
+        REQUIRE(plane.aparm.throttle_fs_enabled == ThrFailsafe::Enabled); // confirm the real default this section relies on
+        REQUIRE_FALSE(plane.rc_channels.has_valid_input());
+        REQUIRE_FALSE(plane.rc_received_if_enabled_check());
+
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+        REQUIRE(plane.rc_channels.has_valid_input());
+        REQUIRE(plane.rc_received_if_enabled_check());
+    }
+
+    SECTION("THR_FAILSAFE disabled - never blocks, even with no RC input ever received") {
+        Plane plane;
+        plane.aparm.throttle_fs_enabled = ThrFailsafe::Disabled;
+        REQUIRE_FALSE(plane.rc_channels.has_valid_input());
+        REQUIRE(plane.rc_received_if_enabled_check());
+    }
+}
+
+TEST_CASE("Plane::arm(): gated on the real RC pre-arm check, drives RcOutput's real safety state, and is "
+          "idempotent",
+          "[vehicle][arming]") {
+    Plane plane;
+    REQUIRE_FALSE(plane.armed);
+    REQUIRE(plane.hal.rc_output.safety_state() == fwcpp::hal::SafetyState::kDisarmed);
+    REQUIRE_FALSE(plane.is_armed_and_safety_off());
+
+    // No RC frame ever received yet - the one applicable pre-arm check
+    // (rc_received_if_enabled_check(), see plane.hpp file banner) fails,
+    // so arm() must fail WITHOUT touching `armed` or RcOutput's safety
+    // state - a real, meaningful gate, not a decoration.
+    REQUIRE_FALSE(plane.arm());
+    REQUIRE_FALSE(plane.armed);
+    REQUIRE(plane.hal.rc_output.safety_state() == fwcpp::hal::SafetyState::kDisarmed);
+
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    REQUIRE(plane.arm());
+    REQUIRE(plane.armed);
+    REQUIRE(plane.hal.rc_output.safety_state() == fwcpp::hal::SafetyState::kArmed);
+    REQUIRE(plane.is_armed_and_safety_off());
+
+    // Idempotency guard, ported from AP_Arming::arm() (see file banner's
+    // "ARM()" note) - a second arm() call while already armed is a real,
+    // harmless no-op, not re-validated.
+    REQUIRE_FALSE(plane.arm());
+    REQUIRE(plane.armed); // unchanged
+}
+
+TEST_CASE("Plane::arm() sets home from current_loc", "[vehicle][arming]") {
+    Plane plane;
+    REQUIRE(plane.home.lat == 0);
+    REQUIRE(plane.home.lng == 0);
+
+    // A caller must have ticked (or otherwise called update_current_loc())
+    // at least once for current_loc to reflect anything but the shared
+    // fixed reference point - see plane.hpp file banner's "HOME ON ARM"
+    // note. update_current_loc() is a public method (CPP-031 slice 4) -
+    // call it directly, since nothing else about a full tick() is
+    // relevant to this test.
+    plane.update_current_loc(fwcpp::math::Vector3f{120.0f, -40.0f, -15.0f});
+    REQUIRE_FALSE(plane.current_loc.same_latlon_as(fwcpp::Location())); // genuinely moved off the origin
+
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    REQUIRE(plane.arm());
+
+    REQUIRE(plane.home.same_latlon_as(plane.current_loc));
+}
+
+TEST_CASE("Plane::disarm(): drives RcOutput's real safety state back to disarmed, and is idempotent",
+          "[vehicle][arming]") {
+    Plane plane;
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    REQUIRE(plane.arm());
+
+    REQUIRE(plane.disarm());
+    REQUIRE_FALSE(plane.armed);
+    REQUIRE(plane.hal.rc_output.safety_state() == fwcpp::hal::SafetyState::kDisarmed);
+    REQUIRE_FALSE(plane.is_armed_and_safety_off());
+
+    // Idempotency guard, ported from AP_Arming::disarm().
+    REQUIRE_FALSE(plane.disarm());
+    REQUIRE_FALSE(plane.armed);
+}
+
+TEST_CASE("Plane::disarm() resets the mission when not in AUTO, and leaves it untouched when in AUTO",
+          "[vehicle][arming][mission]") {
+    std::array<MissionItem, 3> items;
+    items[0].loc = make_loc(100.0f, 0.0f, 50.0f);
+    items[1].loc = make_loc(100.0f, 100.0f, 60.0f);
+    items[2].loc = make_loc(0.0f, 100.0f, 60.0f);
+
+    SECTION("not in AUTO (FBWA): mission resets to the first item") {
+        Plane plane;
+        REQUIRE(plane.mission.load(items));
+        plane.mission.advance();
+        plane.mission.advance();
+        REQUIRE(plane.mission.current()->loc.same_latlon_as(items[2].loc));
+
+        plane.control_mode = &plane.mode_fbwa; // direct assignment - this test exercises disarm()'s own
+                                                // `control_mode != &mode_auto` guard, not ModeFBWA::enter()
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+        REQUIRE(plane.arm());
+        REQUIRE(plane.disarm());
+
+        REQUIRE(plane.mission.current()->loc.same_latlon_as(items[0].loc));
+    }
+
+    SECTION("in AUTO: mission is left untouched") {
+        Plane plane;
+        REQUIRE(plane.mission.load(items));
+        plane.mission.advance();
+        plane.mission.advance();
+        REQUIRE(plane.mission.current()->loc.same_latlon_as(items[2].loc));
+
+        plane.control_mode = &plane.mode_auto; // direct assignment - same reasoning as the FBWA section above
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+        REQUIRE(plane.arm());
+        REQUIRE(plane.disarm());
+
+        REQUIRE(plane.mission.current()->loc.same_latlon_as(items[2].loc)); // unchanged
+    }
+}
+
+TEST_CASE("Plane::disarm() suppresses the throttle in auto-throttle modes, not in MANUAL",
+          "[vehicle][arming]") {
+    SECTION("FBWB (auto-throttle, does_auto_throttle()==true): throttle_suppressed becomes true") {
+        Plane plane;
+        plane.control_mode = &plane.mode_fbwb;
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+        REQUIRE(plane.arm());
+        REQUIRE_FALSE(plane.throttle_suppressed); // arm() itself never touches this - only disarm() does
+
+        REQUIRE(plane.disarm());
+        REQUIRE(plane.throttle_suppressed);
+    }
+
+    SECTION("MANUAL (does_auto_throttle()==false, the real default control_mode): throttle_suppressed stays "
+            "false") {
+        Plane plane;
+        REQUIRE(plane.control_mode == &plane.mode_manual);
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+        REQUIRE(plane.arm());
+        REQUIRE(plane.disarm());
+
+        REQUIRE_FALSE(plane.throttle_suppressed);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Closed-loop integration test: arm()/disarm() genuinely gate REAL
+// hardware-facing output (RcOutput), not just an internal flag. Reuses
+// the exact FBWA bank-hold convergence scenario from the dedicated FBWA
+// closed-loop test above (same commanded roll, same physics, same
+// 3-degree convergence margin) - this test's own new claim is layered on
+// TOP of that already-proven scenario, not a replacement for it.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Closed loop: a disarmed vehicle's servo outputs stay safety-zeroed at the RcOutput level even "
+          "while the flight-control loop computes real non-zero demands, and arming un-zeroes them so FBWA "
+          "can actually fly",
+          "[vehicle][integration][arming]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    ModeFBWA fbwa(plane);
+    plane.control_mode = &fbwa;
+
+    constexpr float kDt = 0.02f;       // 50Hz
+    constexpr int kArmAtTick = 50;     // 1 simulated second flown disarmed first
+    constexpr int kNumTicks = 1500;    // 30 simulated seconds total - same budget as the dedicated FBWA test above
+
+    StabilizeInputs in;
+    in.dt = kDt;
+
+    std::uint32_t now_ms = 0;
+    float commanded_roll_deg = 0.0f;
+
+    for (int i = 0; i < kNumTicks; ++i) {
+        now_ms += 20;
+        in.now_ms = now_ms;
+
+        // Same fixed stick command as the dedicated FBWA closed-loop test
+        // above - also this test's own "a valid RC frame has arrived"
+        // trigger for arm()'s pre-arm check, flowing from tick 0 onward
+        // regardless of when arm() is actually called below.
+        set_sticks(plane, 1650, 1500, 1700, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        tick(plane, gyro_sample, in);
+
+        if (i == 0) {
+            commanded_roll_deg = static_cast<float>(plane.nav_roll_cd) * 0.01f;
+        }
+
+        if (i < kArmAtTick) {
+            // Still disarmed (plane.armed defaults false, RcOutput
+            // defaults SafetyState::kDisarmed - CPP-025's own real
+            // default): the control loop above already computed a real,
+            // non-zero aileron demand (confirmed via SrvChannels directly,
+            // just below, right before arming) - but RcOutput's own
+            // already-tested disarmed-zeroing (rc_output.hpp's write(),
+            // CPP-025) must force every channel's ACTUAL hardware-facing
+            // PWM to zero regardless, since arm()/force_safety_off()
+            // haven't run yet. This is the real point of this test: the
+            // gate lives at the hardware-facing boundary, not as a flag a
+            // caller could accidentally read around.
+            REQUIRE(plane.hal.rc_output.read(kServoAileron) == 0);
+            REQUIRE(plane.hal.rc_output.read(kServoElevator) == 0);
+            REQUIRE(plane.hal.rc_output.read(kServoThrottle) == 0);
+            if (i == kArmAtTick - 1) {
+                REQUIRE(plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) != Catch::Approx(0.0f));
+            }
+        } else if (i == kArmAtTick) {
+            // RC has been flowing since tick 0 (set_sticks() above), so
+            // the one applicable pre-arm check passes.
+            REQUIRE(plane.arm());
+            REQUIRE(plane.hal.rc_output.safety_state() == fwcpp::hal::SafetyState::kArmed);
+        } else {
+            // Armed: RcOutput now passes the real PWM through unmodified -
+            // genuinely non-zero (SrvChannel's own PWM encoding never
+            // produces a literal 0, even at centered trim - srv_channel.hpp's
+            // pwm_from_scaled_value()).
+            REQUIRE(plane.hal.rc_output.read(kServoAileron) != 0);
+        }
+
+        // SimPlane is driven from SrvChannels' own internal scaled demand
+        // throughout (matching the dedicated FBWA closed-loop test above
+        // exactly, unaffected by arm state) - the flight-dynamics
+        // convergence claim below is the SAME already-proven scenario;
+        // this test's own new claim is the RcOutput-level zeroing/
+        // un-zeroing checked above.
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+    }
+
+    REQUIRE(plane.armed);
+    REQUIRE(commanded_roll_deg > 0.0f);
+
+    float true_roll = 0.0f;
+    float true_pitch = 0.0f;
+    float true_yaw = 0.0f;
+    sim_plane.dcm.to_euler(&true_roll, &true_pitch, &true_yaw);
+    const float true_roll_deg = fwcpp::math::degrees(true_roll);
+
+    INFO("commanded roll (deg) = " << commanded_roll_deg << ", true roll (deg) = " << true_roll_deg
+                                    << ", true airspeed = " << sim_plane.airspeed);
+    // Same real convergence standard as the dedicated FBWA closed-loop
+    // test above - arm() happening 1 simulated second into the 30-second
+    // run, rather than the vehicle starting pre-armed, does not
+    // meaningfully change the convergence budget.
+    REQUIRE(true_roll_deg == Catch::Approx(commanded_roll_deg).margin(3.0f));
 }

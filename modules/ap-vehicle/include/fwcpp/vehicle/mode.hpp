@@ -467,11 +467,16 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     const ahrs::GpsSample& gps_sample = plane.gps.sample();
     const float wind_speed_ms = in.wind_estimate.xy().length(); // see plane.hpp's file banner addendum
     const float airspeed_tas = in.airspeed_valid ? in.airspeed_eas * in.eas2tas : 0.0f; // matches ap-tecs's own EAS*eas2tas->TAS precedent
+    // CPP-031 slice 9: armed_and_safety_off is now COMPUTED from the real
+    // Plane::armed/RcOutput::safety_state() this slice wires together,
+    // not a StabilizeInputs field a caller sets directly - see plane.hpp
+    // file banner's "IS_ARMED_AND_SAFETY_OFF() BECOMES COMPUTED" note.
+    const bool armed_and_safety_off = plane.is_armed_and_safety_off();
 
     plane.ahrs.accumulate_accel(in.accel_sample, in.dt);
-    plane.ahrs.drift_correction_yaw(compass, gps_sample, plane.fly_forward(), in.armed_and_safety_off, in.gps_use_enabled,
+    plane.ahrs.drift_correction_yaw(compass, gps_sample, plane.fly_forward(), armed_and_safety_off, in.gps_use_enabled,
                                      wind_speed_ms, in.now_ms);
-    plane.ahrs.drift_correction_accel(compass, gps_sample, plane.fly_forward(), in.armed_and_safety_off, in.gps_use_enabled,
+    plane.ahrs.drift_correction_accel(compass, gps_sample, plane.fly_forward(), armed_and_safety_off, in.gps_use_enabled,
                                        in.wind_estimate, airspeed_tas, plane.accel_healthy(), plane.ins_healthy(), in.now_ms);
 
     // 4. scaled roll/pitch limits from current attitude (upstream: the
@@ -481,7 +486,7 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     // 5. speed-scaler low-pass filter (upstream: calc_airspeed_errors(),
     //    normally a separate 10Hz scheduled task - see Plane::
     //    update_speed_scaler()'s own doc comment)
-    plane.update_speed_scaler(in.airspeed_valid, in.airspeed_eas, in.armed_and_safety_off, in.dt);
+    plane.update_speed_scaler(in.airspeed_valid, in.airspeed_eas, armed_and_safety_off, in.dt);
 
     // 5b. current position as a Location (upstream: nothing this simple -
     //     see plane.hpp's file banner addendum). Always called, every mode:
