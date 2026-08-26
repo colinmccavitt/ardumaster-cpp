@@ -201,3 +201,7 @@ catch_discover_tests(gps_test)
 add_executable(compass_test compass_test.cpp)
 target_link_libraries(compass_test PRIVATE ap-compass Catch2::Catch2WithMain)
 catch_discover_tests(compass_test)
+
+add_executable(steer_controller_test steer_controller_test.cpp)
+target_link_libraries(steer_controller_test PRIVATE ap-steer-control Catch2::Catch2WithMain)
+catch_discover_tests(steer_controller_test)

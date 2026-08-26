@@ -50,6 +50,14 @@ inline void Mode::reset_controllers() {
     plane_.roll_controller.reset_i();
     plane_.pitch_controller.reset_i();
     plane_.yaw_controller.reset_I();
+
+    // GROUND STEERING ADDENDUM - see plane.hpp's own file banner and this
+    // method's own declaration comment (plane.hpp). Upstream's own real
+    // reset_controllers() body ("reset steering controls") does exactly
+    // this, unconditionally.
+    plane_.steer_state.locked_course = false;
+    plane_.steer_state.locked_course_err = 0.0f;
+
     plane_.tecs.reset();
 }
 

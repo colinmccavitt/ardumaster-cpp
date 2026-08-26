@@ -99,15 +99,21 @@
 // airborne vehicle would read them, with a caller free to set either
 // explicitly once a real arming/aux-dispatch subsystem exists.
 //
-// STICK MIXING / GROUND STEERING - NOT PORTED (documented, not silently
-// dropped): Mode::run()'s StickMixing switch (stabilize_stick_mixing_fbw/
-// stabilize_stick_mixing_direct) and stabilize_yaw()'s ground-steering
-// branch (calc_nav_yaw_course/calc_nav_yaw_ground, the `ground_steering`
-// bool itself) are both secondary input-blending/taxi features, not core
-// in-air stabilization - see mode.hpp and stabilize_yaw() below for
-// exactly which upstream branch each collapses to instead. A caller may
-// leave SrvChannel::kSteering unwired for ground ops in this slice, per
-// the ticket's own allowance.
+// STICK MIXING - NOT PORTED (documented, not silently dropped): Mode::
+// run()'s StickMixing switch (stabilize_stick_mixing_fbw/stabilize_stick_
+// mixing_direct) is a secondary input-blending feature, not core in-air
+// stabilization - see mode.hpp for exactly which upstream branch it
+// collapses to instead.
+//
+// GROUND STEERING - NOW REAL (see this file's own "GROUND STEERING
+// ADDENDUM" below, added after this slice's initial CPP-031/slice-1
+// scoping): stabilize_yaw()'s ground-steering branch (calc_nav_yaw_
+// course()/calc_nav_yaw_ground(), the `ground_steering` bool itself) was
+// excluded through every earlier slice referenced by this banner, but is
+// now ported - this paragraph is kept for historical context on WHY it
+// stayed excluded so long (a secondary taxi feature, not core in-air
+// stabilization, genuinely lower priority than the flight modes every
+// earlier slice built first), not because it is still true.
 //
 // SPEED-SCALER LOW-PASS "1Hz" COMMENT/CODE MISMATCH - REPRODUCED, NOT
 // FIXED: upstream's calc_airspeed_errors() (navigation.cpp) comment says
@@ -2045,6 +2051,177 @@
 // (Plane class body, below) plus mode.hpp's own new tick() step for the
 // vehicle-level dispatch.
 
+// =====================================================================
+// GROUND STEERING ADDENDUM: real ground/taxi steering, replacing the
+// always-`false` `ground_steering` this port's stabilize_yaw() has had
+// since it was first written (CPP-031 slice 1). Upstream (Plane-4.7.0,
+// read directly, in full where the ticket asked): ArduPlane/Attitude.cpp's
+// Plane::stabilize_yaw() (~line 369, whole function), Plane::
+// calc_nav_yaw_course() (~line 575, trivial) and Plane::
+// calc_nav_yaw_ground() (~line 590, whole function); libraries/
+// APM_Control/AP_SteerController.{h,cpp} (72 + 258 lines, both in full -
+// see steer_controller.hpp, ap-steer-control, for the controller port
+// itself and its own "new module, not folded into ap-fw-control"
+// rationale); ArduPlane/Plane.h's `steer_state` struct member and
+// ArduPlane/Plane.cpp's `steer_state.locked_course_err +=
+// ahrs.get_yaw_rate_earth() * G_Dt;` line (ahrs_update(), ~line 196);
+// ArduPlane/Parameters.cpp's GROUND_STEER_ALT/GROUND_STEER_DPS GSCALAR
+// entries; ArduPlane/altitude.cpp/Plane.cpp for `relative_altitude`'s real
+// provenance (Plane::update_current_loc(), Plane.cpp ~line 1076:
+// `ahrs.get_relative_position_D_home(plane.relative_altitude);
+// relative_altitude *= -1.0f;`).
+//
+// GROUND_STEERING - THE REAL, REMAINING CONDITION: upstream's full
+// `ground_steering` decision has THREE parts - `landing.is_flaring()`
+// forces it true, `!landing.is_ground_steering_allowed()` forces it
+// false, and otherwise `channel_roll->get_control_in() == 0 &&
+// fabsf(relative_altitude) < g.ground_steer_alt`. This port has no
+// landing subsystem at all (no flare, no landing-approach concept - same
+// "no landing/flight_stage subsystem" exclusion this file's own SLICE
+// 6/8 addenda already established for RTL/failsafe), so BOTH
+// landing-specific branches are dropped, collapsing `ground_steering` to
+// exactly its one remaining real condition, ported verbatim:
+// `channel_roll()->control_in == 0 && std::fabs(relative_altitude_m()) <
+// aparm.ground_steer_alt`.
+//
+// GROUND_STEER_ALT's REAL DEFAULT IS 0 - A DELIBERATE UPSTREAM CHOICE
+// THAT MATTERS FOR THIS PORT'S EXISTING TESTS: GROUND_STEER_ALT defaults
+// to 0 (Parameters.cpp, verified directly, not assumed). `fabsf(x) < 0`
+// is never true for any real float x, so with this default,
+// `ground_steering` is UNCONDITIONALLY false regardless of roll-stick
+// position or altitude, for every caller that never explicitly raises
+// aparm.ground_steer_alt above 0 - exactly upstream's own real behavior
+// for an unconfigured vehicle (ground steering is opt-in, not
+// opt-out). Every existing closed-loop test in vehicle_test.cpp (FBWA/
+// FBWB/CRUISE/AUTO/RTL/LOITER) constructs a default-valued
+// FixedWingTunables and never touches ground_steer_alt - so every one of
+// them keeps taking upstream's real non-ground-steering branch through
+// this change, for this reason alone, independent of whatever their roll
+// stick or altitude happens to be doing (each test's own scenario is
+// still traced individually below for completeness, but this default is
+// the actual primary reason none of them regress).
+//
+// RELATIVE_ALTITUDE - REUSING current_loc.alt/home.alt, NOT A NEW FIELD:
+// upstream's `relative_altitude` (Plane.h float, meters) is written once
+// per tick by update_current_loc() from a direct AHRS call. This port's
+// `update_current_loc()` (SLICE 4/6 addenda above) already derives
+// current_loc.alt from the exact same position_ned input, and home.alt is
+// home's own snapshot of current_loc.alt (set_home(), SLICE 6 addendum) -
+// so `current_loc.alt - home.alt`, converted centimeters-to-meters, IS
+// upstream's real relative_altitude concept, just computed via Location
+// arithmetic this port already trusts elsewhere (get_RTL_altitude_cm())
+// rather than a second, redundant AHRS call. Exposed as
+// relative_altitude_m() below - computed ON DEMAND, not cached, matching
+// roll_sensor_cd()/pitch_sensor_cd()'s own "convert on demand, no
+// redundant cached copy" precedent immediately above them in this class.
+//
+// STEER_STATE - hold_course_cd INCLUDED, BUT NEVER WRITTEN IN THIS PORT'S
+// SCOPE: upstream's real `steer_state` struct (Plane.h) has FOUR fields -
+// hold_course_cd, locked_course, locked_course_err, last_steer_ms.
+// calc_nav_yaw_ground() below only reads/writes the latter three, but
+// stabilize_yaw()'s own real dispatch (`steer_state.hold_course_cd != -1
+// && ground_steering -> calc_nav_yaw_course()`) reads hold_course_cd too -
+// so it is carried on SteerState as well, defaulted to -1 exactly like
+// upstream. Nothing in this port's current scope ever WRITES it away
+// from -1: upstream's only writers are commands_logic.cpp's
+// do_takeoff()/verify_takeoff()/do_landing() paths - an auto-takeoff/
+// landing subsystem this port has never built (see this addendum's own
+// "GROUND_STEERING" note above for the same exclusion applied to
+// `landing.is_flaring()`). Consequently calc_nav_yaw_course()'s dispatch
+// branch is real, faithfully-wired code, but practically UNREACHABLE via
+// stabilize_yaw() itself in this slice - exercised directly via a
+// dedicated unit test instead (vehicle_test.cpp). A future TAKEOFF-mode
+// slice (see this addendum's own final note) is the natural place to
+// start writing hold_course_cd for real.
+//
+// LOCKED_COURSE_ERR ACCUMULATION - A PLACEMENT JUDGMENT CALL: upstream
+// integrates `steer_state.locked_course_err += ahrs.get_yaw_rate_earth()
+// * G_Dt; steer_state.locked_course_err = wrap_PI(...)` inside
+// Plane::ahrs_update() - a function that runs EVERY scheduler loop,
+// completely independent of which mode is active or whether
+// stabilize_yaw() is even called that tick. This port has no equivalent
+// "always runs every loop, independent of stabilize_yaw()" AHRS hook
+// distinct from stabilize_yaw() itself (adding one would mean touching
+// mode.hpp's tick() well beyond this ticket's own scoped file list, for a
+// distinction that has no observable effect here - see below). Instead,
+// this integration is folded into the TOP of stabilize_yaw() below,
+// running unconditionally every time it's called. This reproduces
+// upstream's real per-loop cadence for every mode this port's dispatch
+// actually reaches: Mode::run() (mode.hpp) calls stabilize_yaw() exactly
+// once per tick() for every mode except ModeManual (which upstream's own
+// ModeManual::run() also never calls stabilize_yaw() from - MANUAL bypasses
+// stabilization entirely, ground steering included, matching upstream
+// exactly), so the two cadences coincide for every reachable case. Using
+// `ahrs.omega * ahrs.dcm_matrix.c` (a dot product - matches
+// AP_AHRS::get_yaw_rate_earth()'s real `get_gyro() *
+// get_rotation_body_to_ned().c` exactly: this port's `ahrs.omega` is the
+// bias-corrected gyro AP_AHRS::get_gyro() returns, and `ahrs.dcm_matrix.c`
+// is the DCM's third row, the same "body-to-NED rotation's C row" upstream
+// reads - both already exist and are already read the same way elsewhere
+// in this class, e.g. `dcm_matrix.c.z * yaw_error` in ahrs_dcm.hpp's own
+// drift-correction code).
+//
+// OUTPUT-CHANNEL SELECTION - SRV_Channels::function_assigned() NOT
+// PORTED, TRACED (NOT GUESSED) INSTEAD: upstream's real output selection
+// is a THREE-way branch - `!ground_steering` (both channels get
+// rudder_output), `ground_steering && !function_assigned(k_steering)`
+// (both channels get steering_output - "no steering output configured"),
+// and `ground_steering && function_assigned(k_steering)` (rudder gets
+// rudder_output, steering gets steering_output separately). This port's
+// SrvChannels has no function_assigned()-equivalent concept. Rather than
+// invent one, this is traced against what THIS port's own
+// configure_channels() (below) actually does: it assigns exactly four
+// physical channels (kAileron/kElevator/kThrottle/kRudder) and NEVER
+// assigns anything to Function::kSteering - so for every vehicle this
+// port can construct, `function_assigned(k_steering)` would always
+// evaluate false, meaning the middle branch above is the ONLY ground-
+// steering output branch reachable in this port's real configuration.
+// stabilize_yaw() below therefore always takes exactly two branches, not
+// three: `!ground_steering` -> both channels get rudder_output (unchanged
+// from before this addendum), `ground_steering` -> BOTH channels get
+// steering_output. This is upstream's own real, traced behavior for an
+// unconfigured-steering-channel vehicle, not a new simplification layered
+// on top of it.
+//
+// CALC_NAV_YAW_GROUND()/CALC_NAV_YAW_COURSE() EXCLUSIONS:
+//   - flight_stage == TAKEOFF/ABORT_LANDING branches (calc_nav_yaw_
+//     ground()'s early-return guard and its `steer_rate = 0` override) -
+//     no flight-stage/takeoff/landing subsystem in this port (same
+//     exclusion this file's own SLICE 6/8 addenda already established) -
+//     always treated as false, matching every other flight_stage
+//     exclusion's precedent exactly. Concretely: the early-return guard's
+//     `flight_stage != TAKEOFF && flight_stage != ABORT_LANDING` terms
+//     are always true here, so the guard collapses to just `gps.sample().
+//     ground_speed_ms < 1.0f && is_zero(get_throttle_input(false))`; the
+//     `steer_rate = 0` override is dead code (its own guard is always
+//     false), so steer_rate is always the pilot-commanded value; and the
+//     locked_course_err reset when newly locking is unconditional (its own
+//     `flight_stage != TAKEOFF && != ABORT_LANDING` guard is always true).
+//   - Stick mixing in calc_nav_yaw_course() (`channel_rudder->
+//     stick_mixing(steering)`) - stick mixing is an established exclusion
+//     already documented elsewhere in this file (see the "STICK MIXING /
+//     GROUND STEERING" note above, itself now partially superseded by
+//     this very addendum for the ground-steering half - stick mixing
+//     itself remains excluded).
+//
+// WHAT A FUTURE TAKEOFF-MODE SLICE NEEDS ON TOP OF THIS: TAKEOFF is
+// upstream's other real ground-steering consumer (per upstream's own
+// flight_stage checks throughout calc_nav_yaw_ground()). It would need:
+// (1) a flight_stage/is_taking_off() concept so the TAKEOFF/ABORT_LANDING
+// branches excluded above become real; (2) something to actually WRITE
+// steer_state.hold_course_cd away from -1 (upstream: takeoff.cpp's
+// takeoff_calc_roll()/takeoff_calc_pitch() and commands_logic.cpp's
+// do_takeoff(), which capture the initial ground-roll heading) so
+// calc_nav_yaw_course()'s dispatch branch (real and tested here, but
+// unreachable via stabilize_yaw() itself until this exists) actually
+// fires during a real takeoff roll; (3) the AP_SteerController::
+// get_steering_out_rate()-vs-angle_error() split calc_nav_yaw_ground()
+// already implements would then also need reset_I()-on-mode-change wiring
+// (upstream: Mode::enter()'s `plane.steerController.reset_I();`, not
+// ported by this addendum - out of scope, see this ticket's own
+// exclusion list) for clean integrator behavior across a takeoff-to-
+// climb-out mode transition.
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -2065,6 +2242,7 @@
 #include <fwcpp/nav/l1_control.hpp>
 #include <fwcpp/rc/rc_channels.hpp>
 #include <fwcpp/srv/srv_channels.hpp>
+#include <fwcpp/steer_control/steer_controller.hpp>
 #include <fwcpp/tecs/tecs.hpp>
 
 namespace fwcpp::vehicle {
@@ -2171,6 +2349,11 @@ struct FixedWingTunables {
     std::int16_t throttle_fs_value = 950;                     // THR_FS_VALUE / g.throttle_fs_value, Parameters.cpp default 950
     FsActionShort fs_action_short = FsActionShort::BestGuess; // FS_SHORT_ACTN / g.fs_action_short, Parameters.cpp default FS_ACTION_SHORT_BESTGUESS (0)
     std::uint32_t rc_fs_timeout_ms = 1000;                    // RC_FS_TIMEOUT / RC_Channels_VarInfo.h's _fs_timeout, default 1.0s -> RC_Channels::get_fs_timeout_ms()'s real MAX(_fs_timeout*1000, 100), ms - see file banner
+
+    // --- ground steering addition - see file banner's "GROUND STEERING"
+    // addendum ---
+    float ground_steer_alt = 0.0f;      // GROUND_STEER_ALT / g.ground_steer_alt, Parameters.cpp default 0, m
+    std::int16_t ground_steer_dps = 90; // GROUND_STEER_DPS / g.ground_steer_dps, Parameters.cpp default 90, deg/s
 };
 
 // Explicit per-tick sensor/environment inputs stabilize_roll()/
@@ -2471,9 +2654,16 @@ public:
     // upstream: Mode::reset_controllers() (mode.cpp) - PUBLIC there (not
     // protected): mode.hpp's tick() calls it directly on the active mode
     // from outside the Mode hierarchy, exactly as upstream's Plane::
-    // stabilize() does on its own 2-second-stale check. steer_state reset
-    // is skipped: no ground-steering subsystem (see plane.hpp's banner).
-    // Body: mode.hpp.
+    // stabilize() does on its own 2-second-stale check. GROUND STEERING
+    // ADDENDUM: steer_state.locked_course/locked_course_err are now reset
+    // too (upstream's own real reset_controllers() body does exactly
+    // this, unconditionally, regardless of ground steering being active -
+    // "reset steering controls" is its own comment there) - see plane.hpp
+    // file banner's "GROUND STEERING ADDENDUM". steerController.reset_I()
+    // is NOT called here - upstream calls that from Mode::enter() (a
+    // mode-CHANGE hook, not the 2-second-stale reset this function is),
+    // which this port has not wired to it - see the addendum's own final
+    // "WHAT A FUTURE TAKEOFF-MODE SLICE NEEDS" note. Body: mode.hpp.
     void reset_controllers();
 
     // upstream: Mode::does_auto_throttle() (mode.h) - CPP-031 slice 9, see
@@ -3015,6 +3205,14 @@ public:
     fw_control::YawController yaw_controller;
     tecs::Tecs tecs;
 
+    // GROUND STEERING ADDENDUM (see file banner) - upstream: Plane::
+    // steerController (Plane.h). No declaration-order constraint (unlike
+    // roll_controller/pitch_controller/yaw_controller/tecs above):
+    // SteerController's constructor reads only the Gains passed to it,
+    // never `aparm` - matching nav_controller's own same-shaped note
+    // immediately below.
+    steer_control::SteerController steer_controller{steer_control::SteerController::Gains{}};
+
     // CPP-031 slice 4 (see file banner addendum) - Gains{} already carries
     // upstream's real NAVL1_* defaults (l1_control.hpp, CPP-017). No
     // declaration-order constraint (unlike the four controllers above):
@@ -3173,6 +3371,18 @@ public:
         bool done_climb = false;
     };
     RtlState rtl;
+
+    // GROUND STEERING ADDENDUM (see file banner) - upstream: Plane::
+    // steer_state (Plane.h). See the banner's own "STEER_STATE" note for
+    // why hold_course_cd is carried even though calc_nav_yaw_ground()
+    // itself never touches it.
+    struct SteerState {
+        std::int32_t hold_course_cd = -1; // read by stabilize_yaw()'s dispatch; never written in this port's scope
+        bool locked_course = false;
+        float locked_course_err = 0.0f; // radians - upstream stores this in radians too (Plane.cpp's wrap_PI() call)
+        std::uint32_t last_steer_ms = 0;
+    };
+    SteerState steer_state;
 
     // See file banner's "GROUND_MODE / REVERSED_THROTTLE" note.
     bool ground_mode = false;
@@ -3337,19 +3547,129 @@ public:
         srv_channels.set_output_scaled(srv::Function::kElevator, pitch_out);
     }
 
+    // Everything SteerController needs from this Plane's own AHRS/GPS for
+    // one call - same "one caller-visible snapshot, factored out and
+    // shared" precedent as build_l1_inputs()/build_tecs_inputs() above,
+    // shared here between calc_nav_yaw_course() and calc_nav_yaw_ground()
+    // (both of SteerController's only two real call sites).
+    [[nodiscard]] steer_control::SteerInputs build_steer_inputs(const StabilizeInputs& in) const {
+        steer_control::SteerInputs sin;
+        sin.ground_speed_ms = gps.sample().ground_speed_ms; // upstream: AP::ahrs().groundspeed()
+        // upstream: degrees(AP::ahrs().get_yaw_rate_earth()) - see file
+        // banner's "LOCKED_COURSE_ERR ACCUMULATION" note for the identical
+        // dot-product this port already uses for the same upstream call.
+        sin.yaw_rate_earth_dps = math::degrees(ahrs.omega * ahrs.dcm_matrix.c);
+        sin.dt = in.dt;
+        sin.now_ms = in.now_ms;
+        return sin;
+    }
+
+    // upstream: Plane::relative_altitude (Plane.h, float, meters) - see
+    // this file's "GROUND STEERING ADDENDUM" banner's "RELATIVE_ALTITUDE"
+    // note for why this is computed on demand from current_loc.alt/
+    // home.alt (both real since SLICE 4/6) rather than a separately
+    // cached field.
+    [[nodiscard]] float relative_altitude_m() const { return static_cast<float>(current_loc.alt - home.alt) * 0.01f; }
+
+    // upstream: Plane::calc_nav_yaw_course() (Attitude.cpp, ~line 575) -
+    // "holding a specific navigation course on the ground. Used in
+    // auto-takeoff and landing." nav_controller.bearing_error_cd() already
+    // exists (ap-nav, l1_control.hpp) and needs no StabilizeInputs (a
+    // pure accessor over L1Control's own last update_waypoint()/
+    // update_heading_hold() result). Stick mixing
+    // (`channel_rudder->stick_mixing(steering)`) is dropped - see this
+    // file's own "STICK MIXING" note. Real call site: stabilize_yaw()
+    // below, gated on steer_state.hold_course_cd != -1 - see this file's
+    // "GROUND STEERING ADDENDUM" banner for why that gate is currently
+    // unreachable in this port's scope; also directly unit-tested
+    // (vehicle_test.cpp) so its own real behavior is verified independent
+    // of that gate ever firing.
+    [[nodiscard]] std::int16_t calc_nav_yaw_course(const StabilizeInputs& in) {
+        const std::int32_t bearing_error_cd = nav_controller.bearing_error_cd();
+        steer_control::SteerInputs sin = build_steer_inputs(in);
+        const std::int32_t steering = steer_controller.get_steering_out_angle_error(bearing_error_cd, sin);
+        return static_cast<std::int16_t>(
+            math::constrain_value(steering, static_cast<std::int32_t>(-4500), static_cast<std::int32_t>(4500)));
+    }
+
+    // upstream: Plane::calc_nav_yaw_ground() (Attitude.cpp, ~line 590) - a
+    // real taxi-steering state machine: locks/unlocks a held course based
+    // on rudder stick input and a 1-second steering-inactivity timeout.
+    // flight_stage==TAKEOFF/ABORT_LANDING branches are dropped throughout
+    // (always false - no flight-stage/takeoff/landing subsystem in this
+    // port) - see this file's own "GROUND STEERING ADDENDUM" banner for
+    // exactly which three sub-branches that collapses and why each is
+    // safe to drop.
+    [[nodiscard]] std::int16_t calc_nav_yaw_ground(const StabilizeInputs& in) {
+        if (gps.sample().ground_speed_ms < 1.0f && math::is_zero(get_throttle_input(false))) {
+            // manual rudder control while still
+            steer_state.locked_course = false;
+            steer_state.locked_course_err = 0.0f;
+            return rudder_input();
+        }
+
+        // if we haven't been steering for 1s then clear locked course
+        if (in.now_ms - steer_state.last_steer_ms > 1000U) {
+            steer_state.locked_course = false;
+        }
+        steer_state.last_steer_ms = in.now_ms;
+
+        const float steer_rate = (static_cast<float>(rudder_input()) / 4500.0f) * static_cast<float>(aparm.ground_steer_dps);
+        if (!math::is_zero(steer_rate)) {
+            // pilot is giving rudder input
+            steer_state.locked_course = false;
+        } else if (!steer_state.locked_course) {
+            // pilot has released the rudder stick or we are still - lock
+            // the course
+            steer_state.locked_course = true;
+            steer_state.locked_course_err = 0.0f;
+        }
+
+        const steer_control::SteerInputs sin = build_steer_inputs(in);
+        std::int32_t steering;
+        if (!steer_state.locked_course) {
+            // use a rate controller at the pilot specified rate
+            steering = steer_controller.get_steering_out_rate(steer_rate, sin);
+        } else {
+            // use an error controller on the summed error
+            const std::int32_t yaw_error_cd = static_cast<std::int32_t>(-math::degrees(steer_state.locked_course_err) * 100.0f);
+            steering = steer_controller.get_steering_out_angle_error(yaw_error_cd, sin);
+        }
+        return static_cast<std::int16_t>(
+            math::constrain_value(steering, static_cast<std::int32_t>(-4500), static_cast<std::int32_t>(4500)));
+    }
+
     // upstream: Plane::stabilize_yaw()/calc_nav_yaw_coordinated()
-    // (Attitude.cpp). Ground steering (calc_nav_yaw_course/calc_nav_yaw_
-    // ground, and the `ground_steering` bool that selects between them
-    // and the coordinated-turn path) is entirely excluded - see file
-    // banner. This always takes upstream's own non-ground-steering
-    // branch (`if (!ground_steering) { both k_rudder and k_steering get
-    // rudder_output; }`), which is exactly upstream's real in-air
-    // behavior for a vehicle with roll stick deflected or above
-    // GROUND_STEER_ALT. calc_nav_yaw_coordinated()'s guided-mode and
-    // AUTOTUNE-yaw-rate branches are dropped too (no guided/autotune mode
-    // in this slice) - always upstream's own final `else` branch
-    // (get_servo_out() + aileron-roll-mix + rudder_in).
+    // (Attitude.cpp). Ground steering is now real - see this file's own
+    // "GROUND STEERING ADDENDUM" banner for the full design (the real
+    // `ground_steering` condition, the locked_course_err integration's
+    // placement here, and why the output-channel selection below always
+    // takes exactly two branches, not upstream's three).
+    // calc_nav_yaw_coordinated()'s guided-mode and AUTOTUNE-yaw-rate
+    // branches are dropped too (no guided/autotune mode in this slice) -
+    // always upstream's own final `else` branch (get_servo_out() +
+    // aileron-roll-mix + rudder_in).
     void stabilize_yaw(const StabilizeInputs& in) {
+        // upstream: Plane::ahrs_update()'s `steer_state.locked_course_err
+        // += ahrs.get_yaw_rate_earth() * G_Dt; steer_state.locked_course_err
+        // = wrap_PI(...);` - see "LOCKED_COURSE_ERR ACCUMULATION" note for
+        // why it is folded in here rather than a separate always-runs-
+        // every-loop hook.
+        steer_state.locked_course_err += (ahrs.omega * ahrs.dcm_matrix.c) * in.dt;
+        steer_state.locked_course_err = math::wrap_PI(steer_state.locked_course_err);
+
+        // upstream: Plane::stabilize_yaw()'s real, remaining
+        // `ground_steering` condition - see "GROUND_STEERING" note.
+        const bool ground_steering =
+            (channel_roll()->control_in == 0) && (std::fabs(relative_altitude_m()) < aparm.ground_steer_alt);
+
+        float steering_output = 0.0f;
+        if (steer_state.hold_course_cd != -1 && ground_steering) {
+            steering_output = static_cast<float>(calc_nav_yaw_course(in));
+        } else if (ground_steering) {
+            steering_output = static_cast<float>(calc_nav_yaw_ground(in));
+        }
+
         const float scaler = get_speed_scaler();
         fw_control::YawCoordinationInputs yin;
         yin.bank_angle_rad = ahrs.roll;
@@ -3369,8 +3689,21 @@ public:
 
         const float rudder_output = static_cast<float>(
             math::constrain_value(commanded_rudder, static_cast<std::int32_t>(-4500), static_cast<std::int32_t>(4500)));
-        srv_channels.set_output_scaled(srv::Function::kRudder, rudder_output);
-        srv_channels.set_output_scaled(srv::Function::kSteering, rudder_output);
+
+        if (!ground_steering) {
+            // Not doing ground steering, output rudder on steering channel.
+            srv_channels.set_output_scaled(srv::Function::kRudder, rudder_output);
+            srv_channels.set_output_scaled(srv::Function::kSteering, rudder_output);
+        } else {
+            // Ground steering active. This port's configure_channels()
+            // never assigns Function::kSteering to any physical channel,
+            // so upstream's own function_assigned(k_steering) would always
+            // be false here - taking upstream's real "no steering output
+            // configured" branch unconditionally: BOTH channels get
+            // steering_output. See "OUTPUT-CHANNEL SELECTION" note.
+            srv_channels.set_output_scaled(srv::Function::kRudder, steering_output);
+            srv_channels.set_output_scaled(srv::Function::kSteering, steering_output);
+        }
     }
 
     // upstream: Plane::update_load_factor() (Attitude.cpp).

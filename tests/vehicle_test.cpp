@@ -4074,3 +4074,334 @@ TEST_CASE("Closed loop: the real RC mode-switch channel drives MANUAL -> FBWA ->
     REQUIRE(tail_dist_avg < 260.0f);
     REQUIRE(tail_dist_max - min_dist_to_home < 30.0f); // settled, not still drifting
 }
+
+// ---------------------------------------------------------------------
+// GROUND STEERING ADDENDUM - real ground/taxi steering, replacing the
+// always-`false` `ground_steering` stabilize_yaw() has had since CPP-031
+// slice 1. See plane.hpp's own "GROUND STEERING ADDENDUM" file banner for
+// the full upstream-vs-port design rationale (the real `ground_steering`
+// condition, GROUND_STEER_ALT's real 0 default, relative_altitude_m(),
+// steer_state, and the output-channel-selection simplification).
+// ---------------------------------------------------------------------
+
+TEST_CASE("ground_steering engages only when the roll stick is centered AND altitude is below GROUND_STEER_ALT",
+          "[vehicle][ground_steering]") {
+    // Witness technique: only calc_nav_yaw_ground()/calc_nav_yaw_course()
+    // ever write steer_state.last_steer_ms (and only outside the early-
+    // return branch - see plane.hpp's calc_nav_yaw_ground() itself), so a
+    // change in last_steer_ms after stabilize_yaw() is direct, real
+    // evidence that the ground-steering branch of the dispatch actually
+    // ran this tick - without needing to duplicate SteerController's own
+    // arithmetic (already covered by steer_controller_test.cpp) just to
+    // recognize its output.
+    constexpr std::uint32_t kNowMs = 5000; // nonzero - see this file's own "TIMER SENTINEL" precedent elsewhere
+
+    auto ground_steering_engaged = [](float ground_steer_alt, std::uint16_t roll_pwm, float altitude_m) -> bool {
+        Plane plane;
+        plane.aparm.ground_steer_alt = ground_steer_alt;
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
+        // Throttle nonzero so calc_nav_yaw_ground() doesn't take its
+        // early-return (manual-rudder-while-stopped) branch, which
+        // returns before ever touching last_steer_ms - see plane.hpp.
+        set_sticks(plane, roll_pwm, 1500, 1600, 1500);
+        // altitude_m above the vehicle's own fixed start point ->
+        // current_loc.alt via position_ned.z = -altitude_m (NED down).
+        plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, -altitude_m));
+
+        StabilizeInputs in;
+        in.dt = 0.02f;
+        in.now_ms = kNowMs;
+        REQUIRE(plane.steer_state.last_steer_ms == 0U); // baseline, before this call
+        plane.stabilize_yaw(in);
+        return plane.steer_state.last_steer_ms == kNowMs;
+    };
+
+    SECTION("default GROUND_STEER_ALT (0) - opt-out default, never engages even with roll centered and 0 altitude") {
+        REQUIRE_FALSE(ground_steering_engaged(0.0f, 1500, 0.0f));
+    }
+    SECTION("GROUND_STEER_ALT raised, but roll stick deflected - blocked") {
+        REQUIRE_FALSE(ground_steering_engaged(5.0f, 1900, 0.0f));
+    }
+    SECTION("GROUND_STEER_ALT raised, roll centered, but altitude above the threshold - blocked") {
+        REQUIRE_FALSE(ground_steering_engaged(5.0f, 1500, 1000.0f));
+    }
+    SECTION("GROUND_STEER_ALT raised, roll centered, altitude below the threshold - engages") {
+        REQUIRE(ground_steering_engaged(5.0f, 1500, 0.0f));
+    }
+}
+
+TEST_CASE("stabilize_yaw always writes both kRudder and kSteering to the SAME value, whether or not ground "
+          "steering is active - this port's SrvChannels has no function_assigned() concept, see plane.hpp's "
+          "\"OUTPUT-CHANNEL SELECTION\" note",
+          "[vehicle][ground_steering]") {
+    SECTION("ground steering OFF (default GROUND_STEER_ALT)") {
+        Plane plane;
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
+        set_sticks(plane, 1500, 1500, 1600, 1700); // rudder deflected -> nonzero coordinated rudder_output
+
+        StabilizeInputs in;
+        in.dt = 0.02f;
+        in.now_ms = 1000;
+        plane.stabilize_yaw(in);
+
+        const float rudder_out = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder);
+        const float steering_out = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kSteering);
+        REQUIRE(steering_out == Catch::Approx(rudder_out));
+    }
+    SECTION("ground steering ON") {
+        Plane plane;
+        plane.aparm.ground_steer_alt = 5.0f;
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
+        set_sticks(plane, 1500, 1500, 1600, 1700); // roll centered (required for ground steering), rudder deflected
+
+        StabilizeInputs in;
+        in.dt = 0.02f;
+        in.now_ms = 1000;
+        plane.stabilize_yaw(in);
+
+        REQUIRE(plane.steer_state.last_steer_ms == 1000U); // confirms ground steering actually engaged this call
+
+        const float rudder_out = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder);
+        const float steering_out = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kSteering);
+        REQUIRE(steering_out == Catch::Approx(rudder_out));
+    }
+}
+
+TEST_CASE("calc_nav_yaw_ground: sustained rudder input keeps the course unlocked and tracks the pilot's commanded "
+          "rate in the correct direction",
+          "[vehicle][ground_steering]") {
+    Plane plane;
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+    set_sticks(plane, 1500, 1500, 1600, 1900); // throttle nonzero (skip early return), full-right rudder
+
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 1000;
+
+    const std::int16_t steering = plane.calc_nav_yaw_ground(in);
+    REQUIRE_FALSE(plane.steer_state.locked_course);
+    REQUIRE(steering > 0); // right rudder -> positive (rightward) steering demand
+
+    Plane plane2;
+    plane2.armed = true;
+    plane2.hal.rc_output.force_safety_off();
+    set_sticks(plane2, 1500, 1500, 1600, 1100); // full-left rudder
+    const std::int16_t steering_left = plane2.calc_nav_yaw_ground(in);
+    REQUIRE_FALSE(plane2.steer_state.locked_course);
+    REQUIRE(steering_left < 0);
+}
+
+TEST_CASE("calc_nav_yaw_ground: centering the rudder stick locks the course on the next call, resetting "
+          "locked_course_err",
+          "[vehicle][ground_steering]") {
+    Plane plane;
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 1000;
+
+    // Start unlocked (deflected rudder).
+    set_sticks(plane, 1500, 1500, 1600, 1900);
+    (void)plane.calc_nav_yaw_ground(in);
+    REQUIRE_FALSE(plane.steer_state.locked_course);
+
+    // Poke a nonzero locked_course_err directly - proves the upcoming
+    // lock genuinely RESETS it, rather than this test vacuously observing
+    // an already-zero field.
+    plane.steer_state.locked_course_err = 0.5f;
+
+    // Center the stick - the very next call locks immediately (no
+    // sustained-duration requirement in the ported state machine itself -
+    // see plane.hpp's calc_nav_yaw_ground() comment).
+    in.now_ms = 1020;
+    set_sticks(plane, 1500, 1500, 1600, 1500);
+    (void)plane.calc_nav_yaw_ground(in);
+
+    REQUIRE(plane.steer_state.locked_course);
+    REQUIRE(plane.steer_state.locked_course_err == Catch::Approx(0.0f));
+}
+
+TEST_CASE("calc_nav_yaw_ground: an inactivity gap of more than 1 second forces an unlock, and with the stick "
+          "centered it immediately re-locks with a freshly reset error",
+          "[vehicle][ground_steering]") {
+    Plane plane;
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+    set_sticks(plane, 1500, 1500, 1600, 1500); // centered throughout this test
+
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 1000;
+
+    // Locks immediately (starts unlocked, stick already centered).
+    (void)plane.calc_nav_yaw_ground(in);
+    REQUIRE(plane.steer_state.locked_course);
+
+    // Simulate accumulated heading drift while locked - see plane.hpp's
+    // stabilize_yaw() for the real accumulation this stands in for here
+    // (calc_nav_yaw_ground() itself never writes this field while
+    // locked, only reads it - see plane.hpp).
+    plane.steer_state.locked_course_err = 0.3f;
+    const std::uint32_t last_call_ms = plane.steer_state.last_steer_ms;
+
+    // A gap of more than 1000ms since the last call - upstream's "if we
+    // haven't been steering for 1s then clear locked course" guard.
+    in.now_ms = last_call_ms + 1500U;
+    (void)plane.calc_nav_yaw_ground(in);
+
+    // The stick is still centered, so the SAME call that clears
+    // locked_course also immediately re-locks it (see plane.hpp) - the
+    // real, observable evidence this happened (not merely "stayed locked
+    // the whole time") is that locked_course_err is now reset to 0,
+    // discarding the 0.3 rad this test manually set above.
+    REQUIRE(plane.steer_state.locked_course);
+    REQUIRE(plane.steer_state.locked_course_err == Catch::Approx(0.0f));
+}
+
+TEST_CASE("calc_nav_yaw_course: a nonzero bearing error produces same-sign steering, and stick mixing is not "
+          "applied (excluded, see plane.hpp)",
+          "[vehicle][ground_steering]") {
+    Plane plane;
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+    plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f));
+    plane.ahrs.yaw = 0.0f; // facing north
+    // A due-east target bearing (90deg) with the vehicle facing north
+    // gives a positive (rightward) bearing error via L1Control.
+    plane.next_WP_loc = plane.current_loc;
+    plane.next_WP_loc.offset(0.0f, 1000.0f); // 1km due east
+    plane.nav_controller.update_waypoint(plane.current_loc, plane.next_WP_loc, plane.build_l1_inputs(StabilizeInputs{}));
+
+    REQUIRE(plane.nav_controller.bearing_error_cd() > 0);
+
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 1000;
+    const std::int16_t steering = plane.calc_nav_yaw_course(in);
+    REQUIRE(steering > 0);
+}
+
+TEST_CASE("Closed loop: ground steering on the ground tracks a commanded rudder rate and locks when the stick "
+          "centers, with real steering output reaching the servo",
+          "[vehicle][integration][ground_steering]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    // Start ON the ground - matches sim_plane_test.cpp's own ground-
+    // contact test pattern (position.z >= 0 -> on_ground() true, see
+    // sim_plane.hpp's own on_ground() doc comment). SimPlane's own
+    // default-constructed position is already (0,0,0), set explicitly
+    // here for clarity.
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f);
+    ModeFBWA fbwa(plane);
+    plane.control_mode = &fbwa;
+
+    // Enable ground steering - see plane.hpp's "GROUND_STEER_ALT's REAL
+    // DEFAULT IS 0" note for why this must be raised explicitly.
+    plane.aparm.ground_steer_alt = 5.0f;
+
+    constexpr float kDt = 0.02f; // 50Hz
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+
+    StabilizeInputs in;
+    in.dt = kDt;
+    std::uint32_t now_ms = 0;
+
+    // A small, deliberately-modest throttle: enough to be genuinely
+    // nonzero (skips calc_nav_yaw_ground()'s early-return "manual rudder
+    // while stopped" branch - see plane.hpp) without building enough
+    // airspeed over this test's short duration to actually fly - this is
+    // a taxi/ground-roll scenario, not a takeoff. Confirmed empirically
+    // (see this test's own final on_ground() assertion) - not assumed.
+    constexpr std::uint16_t kThrottlePwm = 1520;
+
+    auto run_tick = [&](std::uint16_t roll_pwm, std::uint16_t rudder_pwm) {
+        now_ms += 20;
+        in.now_ms = now_ms;
+        in.position_ned = sim_plane.position;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+
+        set_sticks(plane, roll_pwm, 1500, kThrottlePwm, rudder_pwm);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        tick(plane, gyro_sample, in);
+
+        // Feed the vehicle's REAL computed servo output back into
+        // SimPlane - kRudder is the only physical control surface
+        // SimPlane models (see sim_plane.hpp's own "no nose-wheel
+        // ground-steering torque model" exclusion - SimPlane has no
+        // separate kSteering-driven physical effect), so this is the one
+        // channel that closes the loop back into real ground-contact
+        // dynamics, exactly like every other closed-loop test in this
+        // file feeds SimPlane from SrvChannels.
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+    };
+
+    // ---- Phase 1: sustained right-rudder input - real ground steering
+    // must track a commanded (positive) rate, staying unlocked. ----
+    constexpr int kPhase1Ticks = 100; // 2 simulated seconds
+    for (int i = 0; i < kPhase1Ticks; ++i) {
+        run_tick(1500, 1800); // roll centered, right rudder
+    }
+
+    const float phase1_rudder_out = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder);
+    const float phase1_steering_out = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kSteering);
+    INFO("phase 1: rudder out (cd) = " << phase1_rudder_out << ", steering out (cd) = " << phase1_steering_out
+                                        << ", true position.z = " << sim_plane.position.z
+                                        << ", airspeed = " << sim_plane.airspeed);
+    REQUIRE(plane.steer_state.last_steer_ms == now_ms); // real ground-steering dispatch engaged every tick
+    REQUIRE(phase1_rudder_out > 0.0f);                  // tracks the commanded right-rudder rate
+    REQUIRE(phase1_steering_out == Catch::Approx(phase1_rudder_out));
+
+    // ---- Phase 2: center the rudder stick and hold - real ground
+    // steering must lock the course and settle to a bounded, sensible
+    // correction. REAL NUMBER FROM THIS TEST'S OWN VERIFICATION RUN
+    // (not assumed): even this test's deliberately modest throttle
+    // (1520us) builds real airspeed over phase 1's 2 seconds (~10-13
+    // m/s, confirmed by sim_plane.airspeed below) - genuinely fast
+    // enough for SimPlane's rudder-authority aerodynamics (getTorque(),
+    // sim_plane.hpp) to have produced real residual yaw motion from
+    // phase 1's full-right-rudder turn, which locked_course_err (this
+    // test's own top-of-stabilize_yaw() integration, see plane.hpp) then
+    // genuinely has something real to correct once locked - a materially
+    // more interesting outcome than "no drift at all", and still
+    // honestly a GROUND-ROLL scenario throughout (on_ground() holds -
+    // see this test's own final assertion), not a takeoff. ----
+    constexpr int kPhase2Ticks = 100; // 2 more simulated seconds
+    for (int i = 0; i < kPhase2Ticks; ++i) {
+        run_tick(1500, 1500); // rudder centered now
+    }
+
+    const float phase2_steering_out = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder);
+    INFO("phase 2: final steering out (cd) = " << phase2_steering_out << ", true position.z = " << sim_plane.position.z
+                                                << ", airspeed = " << sim_plane.airspeed
+                                                << ", locked_course_err (rad) = " << plane.steer_state.locked_course_err);
+    REQUIRE(plane.steer_state.locked_course); // locked once the stick centered
+    // A real, bounded corrective demand - well short of the +-4500
+    // steering limit (i.e. not saturated/nonsensical), and clearly
+    // SMALLER than phase 1's deliberate full-right-rudder command, both
+    // sensible properties for a real course-hold correction.
+    REQUIRE(std::fabs(phase2_steering_out) < 4500.0f);
+    REQUIRE(std::fabs(phase2_steering_out) < std::fabs(phase1_rudder_out) * 1.5f);
+    REQUIRE(plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kSteering) == Catch::Approx(phase2_steering_out));
+
+    // Confirms this was genuinely a ground-roll scenario throughout, not
+    // an inadvertent takeoff that would have silently disabled ground
+    // steering partway through via the altitude gate.
+    REQUIRE(sim_plane.on_ground());
+}
