@@ -454,16 +454,25 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     //    slices 2/3) split into accumulate_accel() (every tick, unrated)
     //    plus drift_correction_yaw()/drift_correction_accel() (each
     //    internally gated on a new GPS-fix-time observation - see their own
-    //    doc comments in ahrs_dcm.hpp). CompassSample is constructed fresh
-    //    here with healthy=false (its own default) EVERY TICK - no compass
-    //    hardware in this port yet, a REAL CURRENT LIMITATION, not a
-    //    permanent design choice (see plane.hpp's file banner addendum).
-    //    This means drift_correction_yaw()'s GPS-course fallback path -
-    //    reachable exactly because use_compass() returns false immediately
-    //    for an unhealthy compass - is what actually corrects yaw for this
-    //    port's vehicle today, once it is moving fast enough for a
-    //    meaningful GPS course (kGpsSpeedMinMs, 3 m/s).
-    const ahrs::CompassSample compass; // healthy=false (default) - see above
+    //    doc comments in ahrs_dcm.hpp). CPP-035: plane.compass is now a
+    //    real (fixed-earth-field) compass model - see plane.hpp's file
+    //    banner "CPP-035 ADDENDUM" and modules/ap-compass/include/fwcpp/
+    //    compass/compass.hpp's own file banner for the full design. It is
+    //    only updated this tick when the caller's StabilizeInputs::
+    //    compass_healthy is true (in.compass_field_bf then holds the
+    //    already-body-frame field the caller computed from true attitude -
+    //    Compass::update() itself never touches attitude, see compass.hpp's
+    //    "WHO COMPUTES..." note) - a caller that never populates these two
+    //    fields gets EXACTLY the prior behavior (plane.compass.sample()
+    //    stays default-constructed, healthy=false, forever). With a real
+    //    compass wired in, drift_correction_yaw()'s use_compass() prefers
+    //    it over GPS ground course - see ahrs_dcm.hpp's use_compass() - so
+    //    yaw drift can now be corrected even below kGpsSpeedMinMs (3 m/s),
+    //    closing the gap CPP-035's own ticket exists to close.
+    if (in.compass_healthy) {
+        plane.compass.update(in.compass_field_bf, in.now_us);
+    }
+    const ahrs::CompassSample compass = plane.compass.sample();
     const ahrs::GpsSample& gps_sample = plane.gps.sample();
     const float wind_speed_ms = in.wind_estimate.xy().length(); // see plane.hpp's file banner addendum
     const float airspeed_tas = in.airspeed_valid ? in.airspeed_eas * in.eas2tas : 0.0f; // matches ap-tecs's own EAS*eas2tas->TAS precedent

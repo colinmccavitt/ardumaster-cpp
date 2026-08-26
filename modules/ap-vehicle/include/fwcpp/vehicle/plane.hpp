@@ -1673,6 +1673,30 @@
 // check()/arm()/disarm() and Mission::reset() below (Plane class body,
 // just after `home`/`set_home()`) for the concrete code, and mode.hpp's
 // own tick() for the 3 updated read sites.
+//
+// CPP-035 ADDENDUM: a real compass. mode.hpp's tick() has, since CPP-031
+// slice 3, constructed a `const ahrs::CompassSample compass;` fresh every
+// tick with healthy=false (its own default) - no compass hardware existed
+// in this port at all, so AhrsDcm::drift_correction_yaw()'s use_compass()
+// (ahrs_dcm.hpp) always fell through to its GPS-ground-course fallback,
+// itself only usable above kGpsSpeedMinMs (3 m/s). A stationary or slow
+// vehicle had NO way to correct yaw drift. This slice adds a new `Plane`
+// member (`compass::Compass compass`, see modules/ap-compass/include/
+// fwcpp/compass/compass.hpp's own file banner for the full design: a
+// fixed, cited earth-frame magnetic field - real lat/lon-keyed declination
+// is a PERMANENT scope boundary, this port has no geodesy - rotated into
+// body frame by whichever caller holds true attitude, never by Compass
+// itself) and two new StabilizeInputs fields (compass_field_bf/
+// compass_healthy, see their own doc comment just below) that a caller
+// populates exactly like true_velocity_ned/accel_sample already are.
+// mode.hpp's tick() now calls `plane.compass.update(...)` only when
+// compass_healthy is true this tick, and builds drift_correction_yaw()'s/
+// drift_correction_accel()'s CompassSample argument from
+// `plane.compass.sample()` instead of a hardcoded unhealthy default - see
+// mode.hpp's own tick() comment for the exact wiring. No existing test's
+// behavior changes: compass_healthy defaults false, so plane.compass.
+// sample() stays exactly the same default/unhealthy CompassSample every
+// pre-existing caller already got.
 
 #include <algorithm>
 #include <array>
@@ -1682,6 +1706,7 @@
 #include <span>
 
 #include <fwcpp/ahrs/ahrs_dcm.hpp>
+#include <fwcpp/compass/compass.hpp>
 #include <fwcpp/fw_control/fw_controller.hpp>
 #include <fwcpp/fw_control/pitch_controller.hpp>
 #include <fwcpp/fw_control/roll_controller.hpp>
@@ -1841,6 +1866,39 @@ struct StabilizeInputs {
                                   // reads current_loc), and a caller not populating this simply never gets a
                                   // usable CRUISE heading-lock geometry (prev_WP_loc/next_WP_loc/current_loc all
                                   // coincide), not a silent wrong answer.
+
+    // --- CPP-035 additions - see modules/ap-compass/include/fwcpp/
+    // compass/compass.hpp's own file banner ("WHO COMPUTES THE TRUE
+    // BODY-FRAME FIELD" note) for the full design rationale. ---
+    //
+    // tick() (mode.hpp) cannot supply Compass::update() with true attitude
+    // in production - a real compass sensor doesn't need it either (it
+    // directly senses the true field; SITL's own Aircraft physics class
+    // already did that rotation before AP_Compass_SITL ever sees the
+    // result - see compass.hpp's file banner). So, exactly like
+    // true_velocity_ned/accel_sample above, the CALLER (a production
+    // hardware driver, or a test/SITL-integration harness holding true
+    // attitude) supplies the already-body-frame field directly.
+    //
+    // compass_healthy DEFAULTS FALSE, DELIBERATELY, SO EVERY EXISTING
+    // CALLER KEEPS TODAY'S EXACT BEHAVIOR UNCHANGED: mode.hpp's tick()
+    // only calls plane.compass.update() when compass_healthy is true THIS
+    // TICK; a caller that never touches these two fields never triggers
+    // that call, so plane.compass.sample() stays default-constructed
+    // (healthy=false, field/declination_rad/last_update_usec all zero)
+    // forever - bit-for-bit the same CompassSample every existing test
+    // already exercises (mode.hpp used to construct one fresh, unhealthy,
+    // every tick; now it reads one that starts unhealthy and STAYS
+    // unhealthy under the same "no caller ever asked for a compass"
+    // condition). A default/zero compass_field_bf on its own is
+    // deliberately NOT treated as "healthy with a zero reading" - a
+    // zero-magnitude field is not a real compass reading (it would let
+    // calculate_heading()'s first-call atan2(-0,0) silently seed a
+    // meaningless heading) - so compass_healthy is a SEPARATE, explicit
+    // opt-in, not inferred from compass_field_bf being nonzero.
+    math::Vector3f compass_field_bf; // pre-rotated body-frame magnetic field, milliGauss - meaningful only if
+                                      // compass_healthy is true this tick.
+    bool compass_healthy = false;    // whether compass_field_bf holds a real reading this tick - see above.
 };
 
 // upstream: this port's own bound on mission length, NOT upstream's - see
@@ -2493,6 +2551,13 @@ public:
     srv::SrvChannels srv_channels;
     ahrs::AhrsDcm ahrs;
     gps::Gps gps; // CPP-031 slice 3 (see file banner addendum) - CPP-033's minimal SITL GPS backend.
+    // CPP-035 (see modules/ap-compass's own file banner) - fixed-earth-field
+    // compass model, default-constructed to a real, cited earth field (see
+    // compass.hpp's own "FIXED EARTH-FIELD DEFAULT" note). tick() (mode.hpp)
+    // only calls compass.update() when the caller's StabilizeInputs::
+    // compass_healthy is true this tick - see that field's own doc comment
+    // below for why.
+    compass::Compass compass;
 
     // MUST precede roll_controller/pitch_controller/yaw_controller/tecs -
     // see file banner's "DECLARATION-ORDER CONSTRAINT" note.

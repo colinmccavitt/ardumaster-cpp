@@ -13,6 +13,7 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <fwcpp/compass/compass.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/sim/sim_plane.hpp>
 #include <fwcpp/vehicle/mode.hpp>
@@ -833,6 +834,177 @@ TEST_CASE("Closed loop with the SAME biased gyro: WITH drift correction wired in
     REQUIRE(yaw_error_deg < 15.0f);
     REQUIRE(roll_error_deg < 10.0f);
     REQUIRE(pitch_error_deg < 10.0f);
+}
+
+// ---------------------------------------------------------------------
+// CPP-035: does the COMPASS specifically matter, separately from GPS? The
+// biased-gyro tests just above (CPP-031 slice 3) already prove drift
+// correction matters in general, but they do it entirely via the
+// GPS-ground-course fallback path (this port had no compass hardware at
+// all until CPP-035) - the aircraft is flying, comfortably above
+// kGpsSpeedMinMs (3 m/s), the whole time. That leaves a real gap
+// unproven: a STATIONARY vehicle (or one moving too slowly for a
+// meaningful GPS course - e.g. still on the runway, engine idling) had NO
+// yaw reference at all before CPP-035 - drift_correction_yaw()'s
+// use_compass() always returned false (unhealthy default CompassSample),
+// and its GPS-course fallback branch could never fire below
+// kGpsSpeedMinMs either. This section proves CPP-035's own compass wiring
+// closes exactly that gap.
+//
+// HOW THE VEHICLE IS KEPT GENUINELY STATIONARY, NOT ARTIFICIALLY ZEROED:
+// SimPlane starts on the ground (position.z == 0, so on_ground() is true
+// from tick 1 - see sim_plane.hpp's own on_ground() doc comment) and this
+// helper always calls `sim_plane.update(0, 0, 0, 0, kDt)` - zero
+// aileron/elevator/rudder/throttle - regardless of what tick() actually
+// computed for the servos that tick (deliberately decoupled: this test
+// isolates "does compass-based yaw correction work while stationary",
+// not "does a real takeoff roll stay below 3 m/s", which would be a
+// separate, much less controlled experiment). With zero airspeed
+// throughout, SimPlane's own getForce()/getTorque() zero-airspeed guards
+// (sim_plane.hpp, `if (math::is_zero(effective_airspeed))`) make every
+// aerodynamic force/torque exactly zero, and on_ground()'s vertical-accel
+// clamp cancels gravity - so sim_plane.velocity_ef, sim_plane.gyro, and
+// sim_plane.dcm are all held at their initial identity/zero values for
+// the ENTIRE run by real (if degenerate) physics, not by the test poking
+// private state. This is genuine ground truth: true yaw stays exactly 0
+// throughout, and gps.sample().ground_speed_ms (fed from
+// sim_plane.velocity_ef, exactly like the biased-gyro tests above feed
+// it) stays exactly 0 too - unconditionally below kGpsSpeedMinMs, so
+// drift_correction_yaw()'s GPS-course fallback can never engage in EITHER
+// run below, isolating the compass as the only possible source of any
+// difference between them.
+//
+// The gyro bias is injected on the YAW axis only (not all three, unlike
+// the biased-gyro tests above) - matching the ticket's own "inject a
+// gyro yaw-rate bias" framing, and keeping this test a clean, single-axis
+// discriminator: with zero roll/pitch bias and a stationary airframe,
+// roll/pitch estimates have nothing to correct in either run, so any
+// pass/fail difference below is attributable to yaw alone.
+
+namespace {
+
+struct CompassRunResult {
+    float final_true_yaw_deg = 0.0f;
+    float final_est_yaw_deg = 0.0f;
+    float final_ground_speed_ms = 0.0f; // sanity-checked to confirm the low-speed premise, see below
+};
+
+CompassRunResult run_stationary_yaw_bias_closed_loop(bool with_compass, int num_ticks, float yaw_bias_rad_s) {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    ModeManual manual(plane);
+    plane.control_mode = &manual;
+
+    constexpr float kDt = 0.02f; // 50Hz
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+
+    StabilizeInputs in;
+    in.dt = kDt;
+    in.gps_use_enabled = true; // real default - see this section's own banner for why GPS can't correct here regardless
+
+    std::uint32_t now_ms = 0;
+    for (int i = 0; i < num_ticks; ++i) {
+        now_ms += 20;
+        in.now_ms = now_ms;
+        in.now_us = static_cast<std::uint64_t>(now_ms) * 1000ULL;
+
+        // Centered sticks, mid throttle - the actual PWM values don't
+        // drive sim_plane below (see this section's own banner), but keep
+        // RC short (throttle) failsafe from ever latching so control_mode
+        // stays ModeManual throughout, exactly like the CPP-031 slice 8
+        // failsafe note (mode.hpp's tick()) says every existing test
+        // relies on.
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+
+        const fwcpp::math::Vector3f bias(0.0f, 0.0f, yaw_bias_rad_s);
+        const fwcpp::math::Vector3f measured_gyro = sim_plane.gyro + bias;
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = measured_gyro;
+        gyro_sample.delta_angle = measured_gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        in.true_velocity_ned = sim_plane.velocity_ef; // true ground truth - see banner (stays zero the whole run)
+
+        if (with_compass) {
+            in.compass_healthy = true;
+            in.compass_field_bf = plane.compass.rotate_earth_field_to_body(sim_plane.dcm);
+        }
+        // else: leave compass_healthy at StabilizeInputs' own default
+        // (false) - plane.compass.sample() then stays default/unhealthy
+        // forever, exactly this port's pre-CPP-035 behavior (mode.hpp).
+
+        tick(plane, gyro_sample, in);
+
+        // Deliberately NOT feeding tick()'s computed servo outputs back
+        // into sim_plane - see this section's own banner for why zero
+        // control input is what keeps the ground truth genuinely
+        // stationary for this test.
+        sim_plane.update(0.0f, 0.0f, 0.0f, 0.0f, kDt);
+    }
+
+    CompassRunResult result;
+    float true_roll_rad = 0.0f;
+    float true_pitch_rad = 0.0f;
+    float true_yaw_rad = 0.0f;
+    sim_plane.dcm.to_euler(&true_roll_rad, &true_pitch_rad, &true_yaw_rad);
+    result.final_true_yaw_deg = fwcpp::math::degrees(true_yaw_rad);
+    result.final_est_yaw_deg = fwcpp::math::degrees(plane.ahrs.yaw);
+    result.final_ground_speed_ms = plane.gps.sample().ground_speed_ms;
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Closed loop, STATIONARY vehicle with a biased gyro: WITHOUT a compass, yaw drift is never corrected and "
+          "diverges sharply",
+          "[vehicle][integration][compass]") {
+    // 200 simulated seconds (10000 ticks @ 50Hz) with a 0.02 rad/s
+    // (~1.15 deg/s) constant yaw-axis gyro bias - uncorrected, pure
+    // integration of that bias alone accumulates 0.02 * 200 = 4 rad
+    // (~229 deg) of drift, exactly matching what this test observes
+    // (true yaw stays 0 throughout - see this section's own banner for
+    // why - so the estimate's own drift IS the divergence).
+    const CompassRunResult r = run_stationary_yaw_bias_closed_loop(false, 10000, 0.02f);
+
+    INFO("true yaw (deg) = " << r.final_true_yaw_deg << ", ESTIMATED yaw (deg) = " << r.final_est_yaw_deg
+                              << ", final ground speed (m/s) = " << r.final_ground_speed_ms);
+
+    // Confirms the test's own low-speed premise: GPS ground speed never
+    // came anywhere close to kGpsSpeedMinMs (3 m/s), so use_compass()'s
+    // GPS-course fallback genuinely could not have corrected yaw here
+    // even if it were reachable.
+    REQUIRE(r.final_ground_speed_ms < fwcpp::ahrs::kGpsSpeedMinMs);
+
+    const float yaw_error_deg = std::fabs(fwcpp::math::wrap_180(r.final_est_yaw_deg - r.final_true_yaw_deg));
+    // Conservative floor well below the ~229deg raw-integration estimate,
+    // leaving headroom for compiler/FP variance while still being an
+    // unmistakable divergence, not noise - see the biased-gyro test pair
+    // above (CPP-031 slice 3) for the same margin-choice precedent.
+    REQUIRE(yaw_error_deg > 100.0f);
+}
+
+TEST_CASE("Closed loop, STATIONARY vehicle with the SAME biased gyro: WITH a real compass wired in, yaw drift IS "
+          "corrected even though GPS course never becomes usable",
+          "[vehicle][integration][compass]") {
+    const CompassRunResult r = run_stationary_yaw_bias_closed_loop(true, 10000, 0.02f);
+
+    INFO("true yaw (deg) = " << r.final_true_yaw_deg << ", ESTIMATED yaw (deg) = " << r.final_est_yaw_deg
+                              << ", final ground speed (m/s) = " << r.final_ground_speed_ms);
+
+    REQUIRE(r.final_ground_speed_ms < fwcpp::ahrs::kGpsSpeedMinMs); // same low-speed premise as the "without" test above
+
+    const float yaw_error_deg = std::fabs(fwcpp::math::wrap_180(r.final_est_yaw_deg - r.final_true_yaw_deg));
+    // Real number from this test's own verification run: yaw_error_deg
+    // measured ~0.00006deg (essentially exact - the compass has no noise
+    // model, see compass.hpp's own EXCLUDED note, so there is nothing left
+    // for drift_correction_yaw() to fail to cancel once it engages every
+    // tick). The 15deg margin below is deliberately generous rather than
+    // tight to that number - it stays far below the "without a compass"
+    // test's >100deg divergence just above, so this genuinely
+    // discriminates rather than passing vacuously, without being so tight
+    // that unrelated FP/compiler variance could ever flake it.
+    REQUIRE(yaw_error_deg < 15.0f);
 }
 
 // ---------------------------------------------------------------------
