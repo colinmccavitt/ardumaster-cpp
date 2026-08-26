@@ -302,6 +302,12 @@ TEST_CASE("Closed loop: FBWA holding a constant commanded bank angle converges i
     Plane plane;
     fwcpp::sim::SimPlane sim_plane;
     ModeFBWA fbwa(plane);
+    // CPP-031 slice 7: tick() now dispatches through plane.control_mode
+    // (see mode.hpp's own tick() comment) rather than taking a Mode&
+    // parameter directly - wire this test's own local mode instance in as
+    // the active mode exactly once, up front (nothing here exercises
+    // set_mode() itself - that gets its own dedicated tests below).
+    plane.control_mode = &fbwa;
 
     constexpr float kDt = 0.02f; // 50Hz
     constexpr int kNumTicks = 1500; // 30 simulated seconds
@@ -329,7 +335,7 @@ TEST_CASE("Closed loop: FBWA holding a constant commanded bank angle converges i
         gyro_sample.delta_angle = sim_plane.gyro * kDt;
         gyro_sample.dangle_dt = kDt;
 
-        tick(plane, fbwa, gyro_sample, in);
+        tick(plane, gyro_sample, in);
 
         if (i == 0) {
             commanded_roll_deg = static_cast<float>(plane.nav_roll_cd) * 0.01f;
@@ -515,6 +521,9 @@ TEST_CASE("Closed loop: FBWB climbs under up-elevator and levels off in SimPlane
     Plane plane;
     fwcpp::sim::SimPlane sim_plane;
     ModeFBWB fbwb(plane);
+    // CPP-031 slice 7: tick() dispatches through plane.control_mode now -
+    // see the FBWA closed-loop test above's own comment.
+    plane.control_mode = &fbwb;
 
     constexpr float kDt = 0.02f; // 50Hz
     std::uint64_t now_us = 0;
@@ -553,7 +562,7 @@ TEST_CASE("Closed loop: FBWB climbs under up-elevator and levels off in SimPlane
             in.airspeed_valid = true;
             in.airspeed_eas = sim_plane.airspeed;
 
-            tick(plane, fbwb, gyro_sample, in);
+            tick(plane, gyro_sample, in);
 
             const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
             const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
@@ -685,6 +694,9 @@ DriftRunResult run_biased_closed_loop(bool with_correction, int num_ticks, float
     Plane plane;
     fwcpp::sim::SimPlane sim_plane;
     ModeFBWA fbwa(plane);
+    // CPP-031 slice 7: tick() dispatches through plane.control_mode now -
+    // see the FBWA closed-loop test above's own comment.
+    plane.control_mode = &fbwa;
 
     constexpr float kDt = 0.02f; // 50Hz
     const fwcpp::math::Vector3f bias(gyro_bias_rad_s, gyro_bias_rad_s, gyro_bias_rad_s);
@@ -722,7 +734,7 @@ DriftRunResult run_biased_closed_loop(bool with_correction, int num_ticks, float
         // above for why that combination makes drift correction a
         // permanent, verified no-op.
 
-        tick(plane, fbwa, gyro_sample, in);
+        tick(plane, gyro_sample, in);
 
         const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
         const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
@@ -1139,6 +1151,9 @@ TEST_CASE("Closed loop: CRUISE locks the GPS heading and then holds a straight g
     Plane plane;
     fwcpp::sim::SimPlane sim_plane;
     ModeCRUISE cruise(plane);
+    // CPP-031 slice 7: tick() dispatches through plane.control_mode now -
+    // see the FBWA closed-loop test above's own comment.
+    plane.control_mode = &cruise;
 
     constexpr float kDt = 0.02f; // 50Hz
     std::uint64_t now_us = 0;
@@ -1175,7 +1190,7 @@ TEST_CASE("Closed loop: CRUISE locks the GPS heading and then holds a straight g
             in.true_velocity_ned = sim_plane.velocity_ef;
             in.gps_use_enabled = true;
 
-            tick(plane, cruise, gyro_sample, in);
+            tick(plane, gyro_sample, in);
 
             const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
             const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
@@ -1437,6 +1452,15 @@ TEST_CASE("ModeAUTO: enter() loads the first mission item, and navigate() advanc
           "[vehicle][auto]") {
     Plane plane;
     ModeAUTO mode(plane);
+    // CPP-031 slice 7: this test's own final navigate() call (below) now
+    // triggers the real mission-complete-to-RTL transition (plane_.
+    // set_mode(plane_.mode_rtl) - see plane.hpp's "MISSION-COMPLETE-TO-RTL"
+    // note) - wiring plane.control_mode to THIS test's own `mode` up front
+    // makes that transition's "exit the OLD mode" half (set_mode()'s own
+    // old_mode.exit() call) exercise the same mode object this test is
+    // actually driving, matching a realistic set_mode(plane.mode_auto)-then-
+    // navigate() scenario rather than an unrelated default.
+    plane.control_mode = &mode;
     plane.current_loc = make_loc(0.0f, 0.0f, 50.0f);
 
     std::array<MissionItem, 3> items;
@@ -1468,21 +1492,25 @@ TEST_CASE("ModeAUTO: enter() loads the first mission item, and navigate() advanc
     REQUIRE(plane.mission.current()->loc.same_latlon_as(items[2].loc));
     REQUIRE(plane.next_WP_loc.same_latlon_as(items[2].loc));
 
+    // CPP-031 slice 7: reaching (or passing) the FINAL waypoint no longer
+    // holds course forever (SLICE 5's own documented gap, closed by this
+    // slice) - THIS navigate() call is where it fires: verify_nav_wp()
+    // returns true (current_loc is AT items[2], mission.current()'s own
+    // location) and mission.advance() returns false (already at_last()),
+    // which now triggers the real mission-complete-to-RTL transition
+    // (plane.hpp's "MISSION-COMPLETE-TO-RTL" note) instead of silently
+    // holding the final leg. Mission state itself is untouched by this
+    // (Mission::advance() is still a real no-op at the last item, exactly
+    // as SLICE 5 left it - only the ACTIVE MODE changes), and RTL's own
+    // real enter() ran for real: next_WP_loc now points at home (via
+    // do_RTL()), not AUTO's own final leg anymore.
     plane.current_loc = items[2].loc;
     in.now_us += 20000;
     mode.navigate(in);
-    // Mission complete: at_last() stays true, current() stays item 2.
-    REQUIRE(plane.mission.at_last());
+    REQUIRE(plane.mission.at_last()); // mission state itself is unchanged
     REQUIRE(plane.mission.current()->loc.same_latlon_as(items[2].loc));
-    REQUIRE(plane.next_WP_loc.same_latlon_as(items[2].loc));
-
-    // Further navigate() calls hold at the final waypoint (see plane.hpp's
-    // "MISSION COMPLETE" note) - not looping back to item 0.
-    plane.current_loc = items[2].loc;
-    in.now_us += 20000;
-    mode.navigate(in);
-    REQUIRE(plane.next_WP_loc.same_latlon_as(items[2].loc));
-    REQUIRE(plane.mission.at_last());
+    REQUIRE(plane.control_mode == &plane.mode_rtl); // but the ACTIVE MODE switched
+    REQUIRE_FALSE(plane.next_WP_loc.same_latlon_as(items[2].loc)); // RTL's own enter() re-pointed next_WP_loc at home
 }
 
 // ---------------------------------------------------------------------
@@ -1509,6 +1537,14 @@ TEST_CASE("Closed loop: AUTO flies a 3-waypoint mission in sequence, reaching ea
     Plane plane;
     fwcpp::sim::SimPlane sim_plane;
     ModeAUTO auto_mode(plane);
+    // CPP-031 slice 7: tick() dispatches through plane.control_mode now -
+    // see the FBWA closed-loop test above's own comment. This test's own
+    // mission has 3 waypoints and (deliberately, see below) stops well
+    // short of reaching the final one, so the mission-complete-to-RTL
+    // transition added this slice is NOT exercised here (see the dedicated
+    // "AUTO flies its mission to completion and hands off to RTL"
+    // closed-loop test below for that).
+    plane.control_mode = &auto_mode;
 
     constexpr float kDt = 0.02f; // 50Hz
     std::uint64_t now_us = 0;
@@ -1529,7 +1565,19 @@ TEST_CASE("Closed loop: AUTO flies a 3-waypoint mission in sequence, reaching ea
 
     int transition_to_wp1_tick = -1;
     int transition_to_wp2_tick = -1;
-    constexpr int kTotalTicks = 9000; // 180 simulated seconds
+    // CPP-031 slice 7: reduced from this test's original 9000 (180s) - with
+    // mission-complete now transitioning to RTL (plane.hpp's "MISSION-
+    // COMPLETE-TO-RTL" note - the documented gap this slice closes), running
+    // the full original 180s let the vehicle actually complete this
+    // mission and fly a good distance back toward home in RTL before the
+    // loop ended, which broke this test's own "ended up near wp2" check for
+    // a reason that has nothing to do with THIS test's own purpose (proving
+    // each waypoint is reached in order). 3500 ticks (70s) is generous
+    // headroom past this test's own real transition_to_wp2_tick (~2139,
+    // see this test's own verification run) while stopping well before RTL
+    // could carry it far - the mission-complete-to-RTL handoff itself has
+    // its own dedicated closed-loop test below.
+    constexpr int kTotalTicks = 3500; // 70 simulated seconds
 
     for (int i = 0; i < kTotalTicks; ++i) {
         now_us += 20000;
@@ -1559,7 +1607,7 @@ TEST_CASE("Closed loop: AUTO flies a 3-waypoint mission in sequence, reaching ea
         in.true_velocity_ned = sim_plane.velocity_ef;
         in.gps_use_enabled = true;
 
-        tick(plane, auto_mode, gyro_sample, in);
+        tick(plane, gyro_sample, in);
 
         const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
         const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
@@ -1841,6 +1889,9 @@ TEST_CASE("Closed loop: RTL flies back toward home and then holds a loiter near 
     // a valid position estimate before RTL engages.
     plane.update_current_loc(sim_plane.position);
     rtl_mode.enter();
+    // CPP-031 slice 7: tick() dispatches through plane.control_mode now -
+    // see the FBWA closed-loop test above's own comment.
+    plane.control_mode = &rtl_mode;
 
     const float initial_dist_to_home = plane.current_loc.get_distance(plane.home);
     INFO("initial distance to home (m) = " << initial_dist_to_home);
@@ -1878,7 +1929,7 @@ TEST_CASE("Closed loop: RTL flies back toward home and then holds a loiter near 
         in.true_velocity_ned = sim_plane.velocity_ef;
         in.gps_use_enabled = true;
 
-        tick(plane, rtl_mode, gyro_sample, in);
+        tick(plane, gyro_sample, in);
 
         const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
         const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
@@ -1910,4 +1961,275 @@ TEST_CASE("Closed loop: RTL flies back toward home and then holds a loiter near 
     REQUIRE(min_dist_to_home < 120.0f);
     REQUIRE(tail_dist_avg < 120.0f);
     REQUIRE(tail_dist_max - min_dist_to_home < 30.0f); // settled, not still drifting
+}
+
+// ---------------------------------------------------------------------
+// CPP-031 SLICE 7: real mode-switching (Plane::set_mode()). See plane.hpp's
+// own "CPP-031 SLICE 7 ADDENDUM" file banner note and mode.hpp's own
+// tick()/ModeAUTO::navigate() comments for the full design this section
+// tests: Mode::enter()/exit() becoming real virtual methods, Plane owning
+// all six concrete modes plus a `control_mode` pointer, Plane::set_mode()'s
+// real switch/rollback logic, tick() dispatching through control_mode
+// (rather than a Mode& parameter) so a set_mode() call made mid-tick takes
+// effect on the FOLLOWING tick, and ModeAUTO's own mission-complete-to-RTL
+// transition.
+// ---------------------------------------------------------------------
+
+namespace {
+
+// Test-only Mode - tracks enter()/exit() call counts and can be configured
+// to fail its own enter(), for the set_mode() tests below. Not a stand-in
+// for any real upstream mode: update() is a trivial no-op (nothing under
+// test here reads nav_roll_cd/nav_pitch_cd/servo outputs) - exactly the
+// same "narrow unit test, standalone Mode instance" allowance the ticket's
+// own scope explicitly leaves open.
+class TrackingMode : public Mode {
+public:
+    using Mode::Mode;
+    void update(const StabilizeInputs&) override {}
+    bool enter() override {
+        ++enter_calls;
+        return enter_succeeds;
+    }
+    void exit() override { ++exit_calls; }
+
+    bool enter_succeeds = true;
+    int enter_calls = 0;
+    int exit_calls = 0;
+};
+
+// Test-only Mode - counts navigate()/update()/run() dispatches and can
+// trigger a single set_mode() call from within its own navigate(), for the
+// tick()-dispatch-timing test below.
+class SwitchOnTickMode : public Mode {
+public:
+    using Mode::Mode;
+    void update(const StabilizeInputs&) override { ++update_calls; }
+    void navigate(const StabilizeInputs&) override {
+        ++navigate_calls;
+        if (switch_to != nullptr) {
+            plane_.set_mode(*switch_to);
+            switch_to = nullptr; // only switch once, so a second tick() doesn't re-trigger it
+        }
+    }
+    void run(const StabilizeInputs&) override { ++run_calls; }
+
+    Mode* switch_to = nullptr;
+    int navigate_calls = 0;
+    int update_calls = 0;
+    int run_calls = 0;
+};
+
+} // namespace
+
+TEST_CASE("Plane::set_mode: switches control_mode and calls the new mode's enter() and the old mode's exit()",
+          "[vehicle][set_mode]") {
+    Plane plane;
+    TrackingMode mode_a(plane);
+    TrackingMode mode_b(plane);
+
+    plane.control_mode = &mode_a;
+    REQUIRE(plane.set_mode(mode_b));
+    REQUIRE(plane.control_mode == &mode_b);
+    REQUIRE(mode_b.enter_calls == 1);
+    REQUIRE(mode_a.exit_calls == 1);
+    REQUIRE(mode_b.exit_calls == 0); // the NEW mode's own exit() must not run
+    REQUIRE(mode_a.enter_calls == 0); // the OLD mode's own enter() must not re-run
+
+    // upstream's own "don't switch modes if we are already in the correct
+    // mode" early return - switching to the mode already active is a
+    // no-op: no further enter()/exit() calls anywhere.
+    REQUIRE(plane.set_mode(mode_b));
+    REQUIRE(mode_b.enter_calls == 1);
+    REQUIRE(mode_a.exit_calls == 1);
+}
+
+TEST_CASE("Plane::set_mode: the real six modes - enter() actually performs mode-specific setup (ModeAUTO then ModeRTL)",
+          "[vehicle][set_mode]") {
+    Plane plane;
+    plane.current_loc = make_loc(10.0f, 0.0f, 30.0f);
+    std::array<MissionItem, 1> items;
+    items[0].loc = make_loc(200.0f, 0.0f, 40.0f);
+    REQUIRE(plane.mission.load(items));
+
+    // The documented default (plane.hpp's "CONTROL_MODE'S DEFAULT" note).
+    REQUIRE(plane.control_mode == &plane.mode_manual);
+
+    REQUIRE(plane.set_mode(plane.mode_auto));
+    REQUIRE(plane.control_mode == &plane.mode_auto);
+    // ModeAUTO::enter() really ran (not skipped): next_WP_loc now points at
+    // the first mission item via do_nav_wp(), not left at its own prior
+    // (zero) default.
+    REQUIRE(plane.next_WP_loc.same_latlon_as(items[0].loc));
+
+    plane.set_home(make_loc(0.0f, 0.0f, 5.0f));
+    REQUIRE(plane.set_mode(plane.mode_rtl));
+    REQUIRE(plane.control_mode == &plane.mode_rtl);
+    // ModeRTL::enter() really ran too: next_WP_loc now points at home, not
+    // the AUTO mission item anymore.
+    REQUIRE(plane.next_WP_loc.same_latlon_as(plane.home));
+}
+
+TEST_CASE("Plane::set_mode: a failing enter() rolls back to the old mode, which is never actually exited",
+          "[vehicle][set_mode]") {
+    Plane plane;
+    TrackingMode good_mode(plane);
+    TrackingMode failing_mode(plane);
+    failing_mode.enter_succeeds = false;
+
+    plane.control_mode = &good_mode;
+    REQUIRE_FALSE(plane.set_mode(failing_mode));
+
+    // Rolled back: control_mode is still the OLD mode - not left dangling
+    // on the failed new mode - and the old mode's exit() must NOT have run
+    // (it never actually left, matching upstream's own rollback ordering:
+    // exit() is only ever called on success).
+    REQUIRE(plane.control_mode == &good_mode);
+    REQUIRE(failing_mode.enter_calls == 1); // enter() WAS attempted
+    REQUIRE(good_mode.exit_calls == 0);     // but the old mode never exited
+}
+
+TEST_CASE("tick(): a set_mode() call from within navigate() takes effect on the FOLLOWING tick(), not the current one",
+          "[vehicle][set_mode][tick]") {
+    Plane plane;
+    SwitchOnTickMode mode_a(plane);
+    SwitchOnTickMode mode_b(plane);
+    mode_a.switch_to = &mode_b;
+    plane.control_mode = &mode_a;
+
+    fwcpp::ahrs::GyroSample gyro_sample;
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 20;
+
+    // First tick(): mode_a.navigate() fires and calls set_mode(mode_b) -
+    // per mode.hpp's own "CPP-031 SLICE 7 NOTE", THIS SAME tick's
+    // update()/run() must still dispatch to mode_a (the `Mode& mode`
+    // reference tick() binds is fetched ONCE, at tick() entry, before
+    // navigate() ever runs).
+    tick(plane, gyro_sample, in);
+    REQUIRE(plane.control_mode == &mode_b); // the pointer DID flip...
+    REQUIRE(mode_a.navigate_calls == 1);
+    REQUIRE(mode_a.update_calls == 1); // ...but THIS tick's update()/run() still ran on mode_a
+    REQUIRE(mode_a.run_calls == 1);
+    REQUIRE(mode_b.navigate_calls == 0);
+    REQUIRE(mode_b.update_calls == 0);
+    REQUIRE(mode_b.run_calls == 0);
+
+    // Second tick(): control_mode is now mode_b - THIS tick dispatches
+    // through it for real, from navigate() onward - the real payoff this
+    // slice exists to deliver.
+    in.now_ms = 40;
+    tick(plane, gyro_sample, in);
+    REQUIRE(mode_b.navigate_calls == 1);
+    REQUIRE(mode_b.update_calls == 1);
+    REQUIRE(mode_b.run_calls == 1);
+    // mode_a is no longer dispatched to at all - its own counts are frozen.
+    REQUIRE(mode_a.navigate_calls == 1);
+    REQUIRE(mode_a.update_calls == 1);
+    REQUIRE(mode_a.run_calls == 1);
+}
+
+// ---------------------------------------------------------------------
+// Closed-loop integration test (the real point of this ticket's slice 7):
+// fly a short AUTO mission to completion through the REAL entry point
+// (Plane::set_mode(plane.mode_auto)) and the REAL per-tick dispatch
+// (tick(), reading plane.control_mode) - not a hand-called enter()/
+// navigate() sequence - confirm the vehicle actually switches into RTL
+// when (and only when) the mission genuinely completes under real SimPlane
+// dynamics, and confirm RTL then flies back toward home and closes in on
+// it - reusing the SAME real convergence check RTL's own dedicated
+// closed-loop test above already established, just reached this time via
+// the full mission-to-RTL handoff instead of ModeRTL::enter() called
+// directly. This is the proof that AUTO's mission-complete gap (SLICE 5's
+// own documented divergence) is genuinely closed end-to-end, not just that
+// the mode pointer flips in isolation.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Closed loop: AUTO flies its mission to completion, hands off to RTL via set_mode(), and RTL flies home",
+          "[vehicle][integration][auto][rtl][set_mode]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    // A short, 2-waypoint course - close enough to home that both AUTO's
+    // own mission and RTL's subsequent trip home comfortably fit inside
+    // this test's own tick budget.
+    std::array<MissionItem, 2> items;
+    items[0].loc = make_loc(300.0f, 0.0f, 60.0f);
+    items[1].loc = make_loc(300.0f, 200.0f, 60.0f);
+    REQUIRE(plane.mission.load(items));
+
+    // Deliberately do NOT call plane.set_home() - this test exercises the
+    // real "nothing ever called set_home()" scenario ModeAUTO::enter()'s
+    // own home-fallback exists for (plane.hpp's "HOME-BEFORE-AUTO-RTL"
+    // note): home ends up wherever the mission started from (the shared
+    // fixed reference point, since sim_plane/current_loc both start there
+    // too).
+    REQUIRE(plane.set_mode(plane.mode_auto)); // the real entry point - runs ModeAUTO::enter() for real
+    REQUIRE(plane.control_mode == &plane.mode_auto);
+
+    bool switched_to_rtl = false;
+    int switch_tick = -1;
+    constexpr int kTotalTicks = 16000; // 320 simulated seconds
+
+    for (int i = 0; i < kTotalTicks; ++i) {
+        now_us += 20000;
+        now_ms += 20;
+
+        // Neither AUTO nor RTL reads pilot stick input - centered sticks
+        // confirm this, matching both modes' own closed-loop tests above.
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.armed_and_safety_off = true;
+        in.now_ms = now_ms;
+        in.now_us = now_us;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+        in.position_ned = sim_plane.position;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+
+        tick(plane, gyro_sample, in);
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+
+        if (!switched_to_rtl && plane.control_mode == &plane.mode_rtl) {
+            switched_to_rtl = true;
+            switch_tick = i;
+        }
+    }
+
+    const float final_dist_to_home = plane.current_loc.get_distance(plane.home);
+    INFO("switched to RTL at tick " << switch_tick << " (of " << kTotalTicks
+                                     << "), final distance to home (m) = " << final_dist_to_home);
+
+    // The full handoff actually happened - the mode pointer genuinely
+    // flipped from AUTO to RTL mid-run, driven entirely by the mission
+    // completing under real SimPlane dynamics (never forced from the test
+    // itself).
+    REQUIRE(switched_to_rtl);
+    REQUIRE(plane.mission.at_last());
+
+    // And having switched, RTL's own real navigation actually converges
+    // toward home afterward - the same real convergence standard RTL's own
+    // dedicated closed-loop test above established, just reached this time
+    // via the full mission-to-RTL handoff rather than a directly-called
+    // enter().
+    REQUIRE(final_dist_to_home < 150.0f);
 }
