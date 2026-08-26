@@ -435,6 +435,144 @@
 // immaterial to their effect and does not change any of this slice's own
 // convergence tests' outcomes.
 
+// =====================================================================
+// CPP-031 SLICE 4 ADDENDUM: ModeCRUISE (mode.hpp, same module - see its own
+// class banner for the mode-level design). Upstream (Plane-4.7.0, read
+// directly): ArduPlane/mode_cruise.cpp (in full) + its ModeCruise class
+// decl (mode.h); ArduPlane/Attitude.cpp's calc_nav_roll() (~line 652,
+// trivial); ArduPlane/mode.cpp's Mode::navigate() default and Plane.cpp's
+// scheduler_tasks[]/navigation.cpp's Plane::navigate() (the real caller -
+// see mode.hpp's own "CPP-031 SLICE 4 ADDENDUM" note for the full tick()-
+// ordering investigation); AP_L1_Control (ap-nav, already fully ported and
+// unit-tested by CPP-017, unused until now); Location (ap-common, CPP-011,
+// likewise unused until now); ArduPlane/defines.h's GPS_GND_CRS_MIN_SPD.
+//
+// CURRENT_LOC - THE DESIGN QUESTION THIS SLICE HAD TO ANSWER: this port has
+// no GPS-derived position estimate anywhere (ap-gps/gps.hpp's own file
+// banner: GpsSample deliberately carries NO lat/lon/position field at all -
+// nothing needed one before this slice). L1Control needs a real Location
+// for its current position, and Location's own arithmetic (get_distance_NE,
+// get_bearing_to, offset/offset_bearing) is all flat-tangent-plane, working
+// in NORTH/EAST METERS relative to SOME fixed reference point - it never
+// actually needs that reference to be a real GPS lat/lon coordinate, only a
+// fixed, consistent one. Following Location::offset()'s own doc comment
+// (accurate to ~1mm at 100m) and this port's now-repeated "explicit input,
+// no invented sensor" precedent (current_altitude_m/true_velocity_ned,
+// CPP-031 slices 2/3):
+//   - StabilizeInputs::position_ned (NEW, below) - the vehicle's true NED
+//     position (north/east meters) relative to ITS OWN fixed start point -
+//     matches SimPlane's own `position` field exactly (ap-sim/sim_plane.hpp:
+//     NED, {0,0,0} at construction). A real caller derives this from
+//     whatever position source exists (SimPlane's own position in this
+//     slice's closed-loop test) - same treatment current_altitude_m already
+//     received from `-position.z`.
+//   - Plane::current_loc (NEW) - a Location computed FRESH EVERY TICK
+//     (update_current_loc(), called from tick() below) as `Location{} `
+//     (lat=lng=alt=0, i.e. a fixed, arbitrary reference point - "0N,0E,
+//     0msl", never read as a real geodetic coordinate anywhere in this
+//     port) THEN `.offset(position_ned.x, position_ned.y)`. NO separate
+//     `home_loc` member was added to hold that reference: since it never
+//     changes and is never touched by anything other than this one
+//     function, a fresh default-constructed Location() each call is
+//     exactly as correct and one field simpler than storing a
+//     never-mutated copy of the same constant - documented here as the
+//     judgment call the ticket asked for, not a memory-churn oversight
+//     (Location has no dynamic allocation, ADR-0012, this is a handful of
+//     int32_t writes).
+//   - current_loc.alt is deliberately left at 0 (Location::offset() only
+//     ever touches lat/lng) - EVERY consumer this slice has (L1Control's
+//     get_distance_NE/get_bearing_to/get_distance, all called on
+//     current_loc/prev_WP_loc/next_WP_loc below) is a purely horizontal
+//     calculation that never reads Location::alt. Setting it from
+//     current_altitude_m would be easy but purposeless - see this port's
+//     "no invented values nothing reads" stance (matches
+//     smoothed_airspeed's own "nothing in this slice's scope writes it"
+//     note, just inverted: here nothing in this slice's scope READS the
+//     value, so nothing writes it either).
+//   - Since this reference point is FIXED and consistent from tick to tick
+//     (never re-anchored), Location's flat-earth approximation error never
+//     accumulates or resets - it only depends on distance from the
+//     reference, exactly matching offset()'s own "~1mm at 100m" real
+//     accuracy characteristic for the sub-few-km distances this slice's
+//     CRUISE (1km look-ahead) and its tests ever reach.
+//
+// NAV_CONTROLLER (L1Control): a `nav::L1Control nav_controller` member,
+// constructed with `nav::L1Control::Gains{}` - CHECKED, NOT RE-DERIVED:
+// l1_control.hpp's own Gains struct already carries upstream's real
+// NAVL1_PERIOD/NAVL1_DAMPING/NAVL1_XTRACK_I/NAVL1_LIM_BANK defaults
+// (25.0f/0.75f/0.02f/0.0f - see its own inline citations, ported by
+// CPP-017), so `Gains{}` IS the correct default-tuned controller, nothing
+// to re-derive here. No declaration-order constraint applies (unlike
+// aparm/the four controllers - see the pre-existing "DECLARATION-ORDER
+// CONSTRAINT" note above): L1Control's constructor reads only the Gains
+// struct passed to it, not any other Plane member.
+//
+// calc_nav_roll() TAKES StabilizeInputs, UNLIKE UPSTREAM'S ZERO-ARG
+// VERSION - a necessary, minor signature divergence, not a behavior
+// change: upstream's `nav_controller->nav_roll_cd()` reaches into a stored
+// `AP_AHRS&` internally; this port's `L1Control::nav_roll_cd(const
+// L1Inputs&)` needs an explicit L1Inputs (ADR-0012, same as every other
+// AP_AHRS-reaching call in this port) - see build_l1_inputs() below, which
+// calc_nav_roll() calls to build it from the SAME per-tick inputs every
+// other stabilize_*()/build_tecs_inputs() function already takes.
+//
+// build_l1_inputs() - factored out (same "one caller-visible snapshot per
+// tick" precedent as build_tecs_inputs() above) because BOTH calc_nav_roll()
+// (called from ModeCRUISE::update(), for nav_roll_cd()) and ModeCRUISE::
+// navigate() (for update_waypoint()) need an L1Inputs built from the exact
+// same AHRS/GPS/current_loc snapshot - upstream achieves this implicitly by
+// both reaching into the same live _ahrs/_gps singletons; this port makes
+// the snapshot explicit and shared instead of duplicating field-by-field
+// construction twice.
+//   - location_valid = true UNCONDITIONALLY - upstream's `_ahrs.
+//     get_location()` can fail (no absolute-position estimate available);
+//     this port's current_loc is ALWAYS a real, freshly-computed value from
+//     a caller-supplied position_ned (see above), the same "trust the
+//     caller's explicit input, no separate validity flag" treatment
+//     current_altitude_m/true_velocity_ned already received - there is no
+//     failure mode to model without inventing one, so this is the honest
+//     answer for an input that is always populated when supplied, exactly
+//     like every other explicit-input field in this struct.
+//   - groundspeed_vector = gps.sample().velocity_ned.xy() - upstream's
+//     `_ahrs.groundspeed_vector()` is itself EKF/GPS-derived; reusing this
+//     port's own Gps module (already wired into AhrsDcm's drift correction,
+//     CPP-031 slice 3) for the SAME purpose here is the direct, faithful
+//     equivalent, not an approximation - both ultimately trace to the same
+//     ground-truth NED velocity a caller supplies via StabilizeInputs::
+//     true_velocity_ned.
+//   - yaw_sensor_cd = rad_to_cd(ahrs.yaw), unwrapped (may be outside
+//     [-18000,18000]) - safe because L1Control's only two internal readers
+//     (prevent_indecision(), get_yaw_sensor()) both immediately wrap it via
+//     wrap_180_cd()/wrap_180_cd(18000 + ...) before using it (l1_control.hpp)
+//     - matches roll_sensor_cd()/pitch_sensor_cd()'s own existing "convert
+//     on demand, no caching" precedent immediately above.
+//   - target_airspeed = 0.0f - upstream's `_tecs->get_target_airspeed()` is
+//     read ONLY by L1Control::loiter_radius() (l1_control.hpp) - NOT by
+//     update_waypoint(), the only L1Control entry point this slice's
+//     ModeCRUISE ever calls (no loiter in this slice's scope). A real,
+//     traced-not-assumed dead value for this slice, not a shortcut.
+//
+// PREV_WP_LOC/NEXT_WP_LOC ADDED TO Plane, NOT ModeCRUISE - matches upstream
+// exactly (both are real Plane.h members there) - see mode.hpp's
+// ModeCRUISE class banner "STATE OWNERSHIP" note for why this placement
+// matters for a future AUTO mode.
+//
+// EXCLUDED (documented, not silently dropped) - see mode.hpp's ModeCRUISE
+// class banner for the mode-level exclusions (scripting, soaring,
+// mission/AUTO coupling, rudder_only aliasing); the one Plane-level
+// exclusion is:
+//   - Plane::navigate()'s OWN housekeeping (navigation.cpp: check_home_alt_
+//     change(), waypoint distance/bearing bookkeeping for GCS reporting/
+//     mission logic, the `next_WP_loc.lat==0 && lng==0` / `!have_position`
+//     early-return guards) - none of it is needed to reach `control_mode->
+//     navigate()` faithfully for THIS slice's single mode (no home/mission/
+//     GCS subsystem exists to have alt-changed or report distance-to-
+//     waypoint to), and `have_position`/next_WP_loc-zero-check's only
+//     purpose is skipping navigate() when there's nothing to navigate to -
+//     moot here since mode.navigate(in) is called unconditionally and
+//     ModeCRUISE::navigate() itself already only acts once locked_heading_
+//     is true.
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -446,7 +584,9 @@
 #include <fwcpp/fw_control/yaw_controller.hpp>
 #include <fwcpp/gps/gps.hpp>
 #include <fwcpp/hal/hal_context.hpp>
+#include <fwcpp/location.hpp>
 #include <fwcpp/math/scalar.hpp>
+#include <fwcpp/nav/l1_control.hpp>
 #include <fwcpp/rc/rc_channels.hpp>
 #include <fwcpp/srv/srv_channels.hpp>
 #include <fwcpp/tecs/tecs.hpp>
@@ -542,6 +682,17 @@ struct StabilizeInputs {
     ahrs::AccelSample accel_sample;   // upstream: get_delta_velocity()/_ins.get_accel() - fed to ahrs.accumulate_accel() every tick
     math::Vector3f wind_estimate;     // upstream: _wind - no wind-estimation subsystem, see file banner
     bool gps_use_enabled = true;      // upstream: AHRS_GPS_USE's real default (GPSUse::Enable) - see file banner
+
+    // --- CPP-031 slice 4 addition - see file banner addendum's
+    // "CURRENT_LOC" note ---
+    math::Vector3f position_ned; // upstream: nothing this simple (no GPS/EKF position estimate in this port) -
+                                  // true NED position (north/east meters) relative to the vehicle's OWN fixed
+                                  // start point, matching SimPlane's own `position` convention. Default zero
+                                  // vector: with position_ned always (0,0,0), current_loc stays pinned to the
+                                  // fixed reference point every tick - harmless for MANUAL/FBWA/FBWB (nothing
+                                  // reads current_loc), and a caller not populating this simply never gets a
+                                  // usable CRUISE heading-lock geometry (prev_WP_loc/next_WP_loc/current_loc all
+                                  // coincide), not a silent wrong answer.
 };
 
 namespace detail {
@@ -595,6 +746,12 @@ public:
     fw_control::YawController yaw_controller;
     tecs::Tecs tecs;
 
+    // CPP-031 slice 4 (see file banner addendum) - Gains{} already carries
+    // upstream's real NAVL1_* defaults (l1_control.hpp, CPP-017). No
+    // declaration-order constraint (unlike the four controllers above):
+    // L1Control's constructor reads only the Gains passed to it.
+    nav::L1Control nav_controller{nav::L1Control::Gains{}};
+
     // --- navigation/attitude-demand state - upstream: Plane.h members ---
     std::int32_t nav_roll_cd = 0;     // upstream: Plane::nav_roll_cd, set by the active mode
     std::int32_t nav_pitch_cd = 0;    // upstream: Plane::nav_pitch_cd, set by the active mode
@@ -607,6 +764,20 @@ public:
                                        // since nothing in this slice's scope writes it (apply_load_factor_roll_limits()
                                        // only reads it).
     float surface_speed_scaler = 1.0f; // upstream: Plane::surface_speed_scaler - low-pass-filtered scaler, see get_speed_scaler()
+
+    // CPP-031 slice 4 (see file banner addendum's "CURRENT_LOC" note) -
+    // recomputed fresh every tick by update_current_loc() below from
+    // StabilizeInputs::position_ned. Default-constructed Location() (all
+    // zero) until the first tick.
+    Location current_loc;
+
+    // upstream: Plane::prev_WP_loc/next_WP_loc (Plane.h) - see file
+    // banner's "PREV_WP_LOC/NEXT_WP_LOC" note and mode.hpp's ModeCRUISE
+    // class banner "STATE OWNERSHIP" note for why these live on Plane, not
+    // ModeCRUISE. Written only by ModeCRUISE::navigate() (mode.hpp) once a
+    // heading is locked; default-constructed (zero) otherwise.
+    Location prev_WP_loc;
+    Location next_WP_loc;
 
     // See file banner's "GROUND_MODE / REVERSED_THROTTLE" note.
     bool ground_mode = false;
@@ -856,6 +1027,52 @@ public:
         const std::int32_t lf_roll_limit_cd = static_cast<std::int32_t>(lf_roll_limit_deg * 100.0f);
         nav_roll_cd = math::constrain_value(nav_roll_cd, -lf_roll_limit_cd, lf_roll_limit_cd);
         roll_limit_cd = std::min(roll_limit_cd, lf_roll_limit_cd);
+    }
+
+    // =====================================================================
+    // CPP-031 SLICE 4 (ModeCRUISE) - see file banner addendum for the full
+    // design rationale (current_loc/nav_controller, calc_nav_roll()'s
+    // StabilizeInputs parameter, build_l1_inputs()'s factoring).
+    // =====================================================================
+
+    // upstream: nothing this simple exists - see file banner's
+    // "CURRENT_LOC" note. Called once per tick from tick() (mode.hpp),
+    // unconditionally (cheap, and no pre-existing mode reads current_loc).
+    void update_current_loc(const math::Vector3f& position_ned) {
+        current_loc = Location();
+        current_loc.offset(position_ned.x, position_ned.y);
+    }
+
+    // Everything L1Control needs from this Plane's own AHRS/GPS/current_loc
+    // for one update - see file banner's "build_l1_inputs()" note for why
+    // this is factored out and shared between calc_nav_roll() and
+    // ModeCRUISE::navigate() (mode.hpp).
+    [[nodiscard]] nav::L1Inputs build_l1_inputs(const StabilizeInputs& in) const {
+        nav::L1Inputs l1_in;
+        l1_in.current_loc = current_loc;
+        l1_in.location_valid = true; // see file banner's "build_l1_inputs()" note
+        l1_in.groundspeed_vector = gps.sample().velocity_ned.xy();
+        l1_in.yaw_rad = ahrs.yaw;
+        l1_in.yaw_sensor_cd = static_cast<std::int32_t>(math::rad_to_cd(ahrs.yaw));
+        l1_in.pitch_rad = ahrs.pitch;
+        l1_in.eas2tas = in.eas2tas;
+        l1_in.target_airspeed = 0.0f; // not read by update_waypoint() - see file banner
+        l1_in.now_us = static_cast<std::uint32_t>(in.now_us);
+        l1_in.now_ms = in.now_ms;
+        return l1_in;
+    }
+
+    // upstream: Plane::calc_nav_roll() (Attitude.cpp): "nav_roll_cd =
+    // constrain(nav_controller->nav_roll_cd(), -roll_limit_cd,
+    // roll_limit_cd); update_load_factor();" - takes an explicit
+    // StabilizeInputs, unlike upstream's zero-arg version - see file
+    // banner's own note for why (ADR-0012, no singleton AP_AHRS to reach
+    // into for L1Inputs).
+    void calc_nav_roll(const StabilizeInputs& in) {
+        const nav::L1Inputs l1_in = build_l1_inputs(in);
+        const std::int32_t commanded_roll = nav_controller.nav_roll_cd(l1_in);
+        nav_roll_cd = math::constrain_value(commanded_roll, -roll_limit_cd, roll_limit_cd);
+        update_load_factor();
     }
 
     // upstream: Plane::adjust_nav_pitch_throttle() (Attitude.cpp).

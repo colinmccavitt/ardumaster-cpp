@@ -25,26 +25,112 @@
 // Mode::Number/name()/name4()/is_vtol_mode()/is_guided_mode()/
 // does_auto_navigation()/does_auto_throttle()/mode_allows_autotuning()/
 // allows_throttle_nudging()/use_throttle_limits()/use_battery_
-// compensation()/navigate()/update_target_altitude()/pre_arm_checks()/
-// enter()/exit() are NOT PORTED - mode-IDENTIFICATION and mode-SWITCHING
-// machinery, not stabilization logic, out of scope for a fixed two-mode
-// slice with no runtime mode-change support. Each depends on a subsystem
-// this port hasn't built (fence/mission/camera/ADSB/arming/battery/
-// TECS-driven navigation) or on modes this slice doesn't implement.
+// compensation()/update_target_altitude()/pre_arm_checks()/enter()/exit()
+// are NOT PORTED - mode-IDENTIFICATION and mode-SWITCHING machinery, not
+// stabilization logic, out of scope for a fixed two-mode slice with no
+// runtime mode-change support. Each depends on a subsystem this port
+// hasn't built (fence/mission/camera/ADSB/arming/battery/TECS-driven
+// navigation) or on modes this slice doesn't implement. navigate() WAS in
+// this list through CPP-031 slice 3 (no mode needed it yet) - CPP-031
+// slice 4 (ModeCRUISE, below) is the first mode that does, so it is now
+// ported as a default-no-op virtual hook on Mode itself - see Mode::
+// navigate()'s own comment below for why the base class needed a change
+// rather than adding this only to ModeCRUISE.
 //
 // Mode::run()'s StickMixing switch (stabilize_stick_mixing_fbw/direct) is
 // skipped entirely - see plane.hpp's banner. Every mode in this slice
 // behaves as upstream's StickMixing::NONE case (the real default,
 // STICK_MIXING param default 0).
+//
+// =====================================================================
+// CPP-031 SLICE 4 ADDENDUM (ModeCRUISE): see ModeCRUISE's own class banner
+// (below) for its full design rationale, and plane.hpp's own file banner
+// addendum for current_loc/nav_controller's design. This note covers only
+// the ONE shared-infrastructure change this slice makes: tick()'s own
+// sequencing.
+//
+// WHERE navigate() RUNS, RELATIVE TO update()/run() - INVESTIGATED, NOT
+// ASSUMED, per the ticket's own instruction. Read upstream directly
+// (ArduPlane/Plane.cpp's scheduler_tasks[] table, ArduPlane/navigation.cpp's
+// Plane::navigate()) rather than guessing from mode.h's `virtual void
+// navigate()` declaration alone:
+//   - Plane::navigate() (navigation.cpp) is Mode::navigate()'s REAL caller
+//     upstream - NOT Mode::run()/Attitude.cpp's stabilize(). It does its own
+//     housekeeping (check_home_alt_change(), waypoint distance/bearing
+//     bookkeeping) THEN calls `control_mode->navigate();` (the Mode-level
+//     hook) near the end of its own body.
+//   - Plane::navigate() is registered as `SCHED_TASK(navigate, 10, 150,
+//     36)` - a SEPARATE, independently-10Hz-rate-limited scheduled task,
+//     NOT a FAST_TASK. By contrast, `FAST_TASK(ahrs_update)`,
+//     `FAST_TASK(update_control_mode)` (Mode::update()'s real caller), and
+//     `FAST_TASK(stabilize)` (Mode::run()'s real caller) all run on EVERY
+//     loop iteration (typically 50-400Hz, whatever SCHED_LOOP_RATE is
+//     configured to) - unconditionally, before ANY of the slower
+//     SCHED_TASK-rate-limited tasks (read_radio, the two GPS tasks,
+//     navigate, ...) even get a chance to run within that same iteration's
+//     remaining time budget. So on an iteration where navigate() actually
+//     fires, it runs STRICTLY AFTER that same iteration's update_control_
+//     mode()/stabilize() calls - meaning any Mode::navigate() side effect
+//     (locking a heading, moving next_WP_loc, calling nav_controller->
+//     update_waypoint()) is only visible to the FOLLOWING iteration's
+//     calc_nav_roll()/nav_controller->nav_roll_cd() read, not the current
+//     one. Two real facts, confirmed by reading the scheduler table and
+//     navigation.cpp directly: (1) navigate() runs at 10Hz, far slower than
+//     stabilize()'s fast-loop rate; (2) even within an iteration where it
+//     does fire, it runs AFTER, not before, that iteration's stabilize().
+//
+// THIS PORT'S CHOICE: mode.navigate(in) is called ONCE PER TICK, BEFORE
+// mode.update()/mode.run() (see tick() below) - i.e. ALWAYS FRESH, not
+// stale by up to one whole navigate-task-period the way upstream's real
+// timing is. This is a deliberate, DOCUMENTED divergence from upstream's
+// literal timing, for three reasons, not an oversight:
+//   1. PRECEDENT: this port's tick() (CPP-031 slice 1's own "SHAPE CHOICE"
+//      banner note, "a single fixed sequence suffices") already made the
+//      exact same call for update_speed_scaler() (calc_airspeed_errors()'s
+//      real upstream task is also a separate 10Hz SCHED_TASK) - called
+//      every tick, using the real per-tick dt, rather than resurrecting an
+//      artificial 10Hz task boundary this port has no scheduler to express.
+//      This slice's choice for navigate() is the same call, for the same
+//      reason, made once already for the sibling function nearest it in
+//      the scheduler table.
+//   2. SAFETY: L1Control::update_waypoint() already self-clamps its own
+//      internal dt to <=0.1s (l1_control.hpp) regardless of how often it's
+//      called, and its crosstrack-integrator reset (`dt > 1.0f`) only helps
+//      guard against a large gap, not a small one - calling it every 20-
+//      50ms tick instead of every 100ms is strictly WITHIN its own designed
+//      operating range, not a novel or riskier calling pattern.
+//   3. NO COLD-START GAP: placing navigate() BEFORE update()/run() in the
+//      SAME tick means the very first tick after the heading actually locks
+//      already has a real, freshly-computed next_WP_loc/nav_controller
+//      state for that same tick's calc_nav_roll() to read - avoiding an
+//      extra one-tick "stale/uninitialized waypoint" special case that
+//      placing it after update()/run() (mimicking upstream's literal
+//      one-iteration lag) would otherwise introduce for no benefit, since
+//      this port has no scheduler-driven reason to prefer the lag.
+// This ordering can only make CRUISE's guidance MORE current than upstream,
+// never less - a fresher world model is never a correctness regression for
+// a low-bandwidth trim/guidance loop like this one, and no existing
+// MANUAL/FBWA/FBWB test observes navigate() at all (its default is a no-op
+// on every mode but ModeCRUISE), so this change to the SHARED tick()
+// sequence is verified not to alter any of their behavior - see
+// vehicle_test.cpp's own unchanged-tests confirmation.
 
+#include <cmath>
 #include <cstdint>
 
 #include <fwcpp/ahrs/ahrs_dcm.hpp>
 #include <fwcpp/math/scalar.hpp>
+#include <fwcpp/nav/l1_control.hpp>
 #include <fwcpp/srv/srv_channels.hpp>
 #include <fwcpp/vehicle/plane.hpp>
 
 namespace fwcpp::vehicle {
+
+// upstream: ArduPlane/defines.h's GPS_GND_CRS_MIN_SPD (5, m/s) - "used to
+// set when initial_direction.heading is captured, deciding to heading lock
+// in cruise mode" (upstream's own comment, verified directly against
+// defines.h line 13, not assumed).
+inline constexpr float kGpsGndCrsMinSpd = 5.0f;
 
 class Mode {
 public:
@@ -56,6 +142,19 @@ public:
     // upstream: Mode::update() (pure virtual) - convert pilot/mode input
     // into nav_roll_cd/nav_pitch_cd targets and/or direct servo output.
     virtual void update(const StabilizeInputs& in) = 0;
+
+    // upstream: Mode::navigate() (mode.h) - "virtual void navigate() {
+    // return; }" - a default NO-OP hook, overridden only by navigation
+    // modes (ModeCruise/ModeAuto/ModeLoiter/etc - mode.h). MANUAL/FBWA/
+    // FBWB never override this (none of them do any waypoint/heading-lock
+    // bookkeeping), so the base no-op is their entire behavior here,
+    // exactly matching upstream. See tick()'s own comment below (CPP-031
+    // "slice 4" note) for WHERE this is called from and why, added to the
+    // Mode base for the first time in this slice (ModeCRUISE, mode.hpp
+    // below) - a change to shared, already-tested infrastructure, so its
+    // rationale is documented here rather than only at the one new call
+    // site.
+    virtual void navigate(const StabilizeInputs&) {}
 
     // upstream: Mode::run() (mode.cpp) minus the StickMixing switch (see
     // file banner) - stabilize all three axes. ModeFBWA overrides this to
@@ -231,6 +330,161 @@ public:
     // instead of via a ported boolean flag.
 };
 
+// upstream: ModeCruise (mode.h) + mode_cruise.cpp, read in full (CPP-031
+// "slice 4") - the first mode in this port to do real GPS-based
+// navigation. In CRUISE, aileron/rudder sticks directly command roll
+// (exactly like FBWA) UNTIL the pilot centers both sticks and holds still
+// for 0.5 seconds, at which point the current GPS ground course is
+// "locked" as a heading to hold and L1Control takes over roll guidance,
+// flying a straight line along that locked heading (a virtual waypoint
+// projected 1km ahead). FBWB's elevator/altitude/airspeed logic
+// (update_fbwb_speed_height()) is reused UNCHANGED - CRUISE only adds the
+// heading-lock/navigation layer on top, matching upstream's own
+// update()'s final unconditional `plane.update_fbwb_speed_height();` call.
+//
+// STATE OWNERSHIP - matches upstream EXACTLY, not collapsed for
+// convenience: locked_heading_/lock_timer_ms_/locked_heading_cd_ are
+// ModeCruise's OWN members upstream (mode.h's ModeCruise class) - this
+// mode's private navigation-lock state, never read outside it. prev_WP_loc/
+// next_WP_loc, by contrast, are real Plane members upstream (Plane.h) -
+// this port adds them to Plane (plane.hpp) for the same reason: they are
+// exactly the two fields a future AUTO mode would also need to read/write
+// (mission leg endpoints), so keeping them where upstream keeps them (not
+// folding them into ModeCRUISE-private state) is what makes that future
+// reuse possible without moving anything. See plane.hpp's file banner
+// addendum for current_loc/nav_controller's own design rationale.
+//
+// _enter() IS NOT PORTED/CALLED AUTOMATICALLY - same exclusion ModeFBWB's
+// own class banner already documents (this slice has no mode-switching
+// machinery). Upstream's real _enter() body: `locked_heading = false;
+// lock_timer_ms = 0; plane.set_target_altitude_current();` (the
+// HAL_SOARING_ENABLED init_cruising() call is excluded - no soaring
+// subsystem, same as ModeFBWB's). The first two assignments are already
+// this class's own default member initializers below (a freshly-
+// constructed ModeCRUISE starts unlocked with no timer running, with no
+// extra call needed) - the ONLY action a caller must take explicitly
+// before the first tick()/update(), exactly matching ModeFBWB's own
+// precedent, is `plane.set_target_altitude_current(current_altitude_cm)`.
+//
+// EXCLUDED (documented, not silently dropped):
+//   - AP_SCRIPTING_ENABLED's nav_scripting_active() checks (update()'s
+//     stick-lock-input guard AND navigate()'s early return) - no scripting
+//     subsystem in this port.
+//   - HAL_SOARING_ENABLED's soaring_controller.init_cruising() (_enter())
+//     - no soaring subsystem, same exclusion as ModeFBWB's.
+//   - Any mission/AUTO-mode coupling - get_target_heading_cd() (ported
+//     below, trivial) is used upstream by AUTO-mode-adjacent code for
+//     logging/reporting only; nothing in this port's scope consumes it.
+//   - aparm.rudder_only channel aliasing - same exclusion plane.hpp's
+//     banner already documents for an unconfigured vehicle (rudder_only
+//     defaults false, so channel_roll is never aliased to the yaw
+//     channel).
+//
+// GENUINE UPSTREAM QUIRK, REPRODUCED FAITHFULLY, NOT FIXED (per this
+// port's "port fixes bugs in the port, not upstream" rule) - discovered
+// while writing this slice's own unit tests: lock_timer_ms_ == 0 doubles
+// as BOTH "the timer is not running" (the sentinel every gating check
+// above tests against) AND a legitimately-reachable real timestamp
+// (in.now_ms == 0). Upstream has the IDENTICAL collision against
+// AP_HAL::millis() (mode.h's own `uint32_t lock_timer_ms;`, mode_cruise.cpp's
+// `lock_timer_ms == 0` checks) - immaterial in practice there because
+// millis() is only ever 0 in the first millisecond after boot, long before
+// a pilot could switch into CRUISE. This port's own vehicle_test.cpp had to
+// deliberately start its unit tests' StabilizeInputs::now_ms at a realistic
+// nonzero value for the same reason (see vehicle_test.cpp's own "TIMER
+// SENTINEL" comment) - noted here as a real, traced-not-invented upstream
+// characteristic worth flagging, not a defect introduced by this port.
+class ModeCRUISE : public Mode {
+public:
+    using Mode::Mode;
+
+    // upstream: ModeCruise::update() (mode_cruise.cpp). "Heading becomes
+    // unlocked on any aileron or rudder input" - control_in (dead-zone-
+    // applied, matching upstream's own get_control_in()) rather than
+    // norm_input(), exactly as upstream reads it here.
+    void update(const StabilizeInputs& in) override {
+        if (plane_.channel_roll()->control_in != 0 || plane_.rudder_input() != 0) {
+            locked_heading_ = false;
+            lock_timer_ms_ = 0;
+        }
+
+        if (!locked_heading_) {
+            plane_.nav_roll_cd =
+                static_cast<std::int32_t>(plane_.channel_roll()->norm_input() * static_cast<float>(plane_.roll_limit_cd));
+            plane_.update_load_factor();
+        } else {
+            plane_.calc_nav_roll(in);
+        }
+        plane_.update_fbwb_speed_height(in);
+    }
+
+    // upstream: ModeCruise::navigate() (mode_cruise.cpp) - the real
+    // heading-lock state machine, read VERY carefully (per the ticket's own
+    // instruction). See tick()'s own comment (below) for WHEN this runs
+    // relative to update()/run() in this port.
+    //
+    // `plane.gps.ground_course_cd()` upstream is `ground_course() * 100`
+    // (AP_GPS.h, a plain float-degrees-to-centidegrees scale) - this port's
+    // GpsSample only carries ground_course_deg (float degrees, ap-gps's own
+    // scope - see gps.hpp's file banner), so ground_course_cd is computed
+    // the same way inline below rather than needing a new GpsSample field.
+    //
+    // `plane.gps.status() >= AP_GPS::GPS_OK_FIX_2D` collapses to
+    // `gps_sample.has_fix` - traced directly against GpsSample's own field
+    // doc (ahrs_dcm.hpp): has_fix is defined as `status() > AP_GPS::NO_FIX`,
+    // and AP_GPS's real status enum has NO_GPS=0 < NO_FIX=1 < GPS_OK_FIX_2D=2
+    // < GPS_OK_FIX_3D=3 - so `status() > NO_FIX` (has_fix) and `status() >=
+    // GPS_OK_FIX_2D` are the SAME condition (both mean status >= 2), not an
+    // approximation of it.
+    void navigate(const StabilizeInputs& in) override {
+        const ahrs::GpsSample& gps_sample = plane_.gps.sample();
+        const std::int32_t ground_course_cd = static_cast<std::int32_t>(gps_sample.ground_course_deg * 100.0f);
+        const bool moving_forwards = std::fabs(math::wrap_PI(
+            math::cd_to_rad(static_cast<float>(ground_course_cd)) - plane_.ahrs.yaw)) < static_cast<float>(M_PI_2);
+
+        if (!locked_heading_ && plane_.channel_roll()->control_in == 0 && plane_.rudder_input() == 0 && gps_sample.has_fix &&
+            gps_sample.ground_speed_ms >= kGpsGndCrsMinSpd && moving_forwards && lock_timer_ms_ == 0) {
+            // user wants to lock the heading - start the timer.
+            lock_timer_ms_ = in.now_ms;
+        }
+        if (lock_timer_ms_ != 0 && (in.now_ms - lock_timer_ms_) > 500U) {
+            // lock the heading after 0.5 seconds of zero heading input from
+            // the pilot.
+            locked_heading_ = true;
+            lock_timer_ms_ = 0;
+            locked_heading_cd_ = ground_course_cd;
+            plane_.prev_WP_loc = plane_.current_loc;
+        }
+        if (locked_heading_) {
+            plane_.next_WP_loc = plane_.prev_WP_loc;
+            // always look 1km ahead.
+            plane_.next_WP_loc.offset_bearing(static_cast<float>(locked_heading_cd_) * 0.01f,
+                                               plane_.prev_WP_loc.get_distance(plane_.current_loc) + 1000.0f);
+            const nav::L1Inputs l1_in = plane_.build_l1_inputs(in);
+            plane_.nav_controller.update_waypoint(plane_.prev_WP_loc, plane_.next_WP_loc, l1_in);
+        }
+    }
+
+    // upstream: ModeCruise::get_target_heading_cd() (mode_cruise.cpp) -
+    // trivial accessor, ported for completeness though nothing in this
+    // port's scope consumes it (see class banner's EXCLUDED note).
+    [[nodiscard]] bool get_target_heading_cd(std::int32_t& target_heading) const {
+        target_heading = locked_heading_cd_;
+        return locked_heading_;
+    }
+
+    // upstream: ModeCruise has NO run() override at all - same "auto-
+    // throttle mode relies entirely on base Mode::run()" shape as ModeFBWB
+    // (see its own banner) - does_auto_throttle() is true for CRUISE too.
+
+private:
+    // upstream: ModeCruise's own private members (mode.h) - see class
+    // banner's "STATE OWNERSHIP" note.
+    bool locked_heading_ = false;
+    std::uint32_t lock_timer_ms_ = 0;
+    std::int32_t locked_heading_cd_ = 0;
+};
+
 // upstream: the real scheduler task-table sequence (AHRS update ->
 // update_control_mode/navigate -> Plane::stabilize() -> Plane::
 // set_servos()/output), inferred from Mode::run()'s own body plus
@@ -267,6 +521,17 @@ public:
 // with NO drift correction at all, despite CPP-028 slices 2/3 having fully
 // ported and unit-tested drift_correction_yaw()/drift_correction_accel().
 // Steps 2 and 3b below are what were missing.
+//
+// CPP-031 SLICE 4 NOTE: adds step 5b (plane.update_current_loc()) and the
+// mode.navigate(in) call in step 6, both new shared infrastructure this
+// slice's ModeCRUISE needs. See plane.hpp's file banner addendum for
+// current_loc's own design rationale, and this file's own "CPP-031 SLICE 4
+// ADDENDUM" note (above Mode's class definition) for the navigate()-vs-
+// update()/run() ordering decision and its upstream justification. Neither
+// change alters MANUAL/FBWA/FBWB's behavior: update_current_loc() only
+// writes plane.current_loc (a field no pre-existing mode reads), and
+// navigate() is a no-op on every mode but ModeCRUISE (Mode's own base
+// implementation).
 inline void tick(Plane& plane, Mode& mode, const ahrs::GyroSample& gyro_sample, const StabilizeInputs& in) {
     // 1. pull RC input (upstream: AP_Vehicle's read_radio() scheduled task)
     plane.rc_channels.read_input(plane.hal.rc_input);
@@ -315,11 +580,24 @@ inline void tick(Plane& plane, Mode& mode, const ahrs::GyroSample& gyro_sample, 
     //    update_speed_scaler()'s own doc comment)
     plane.update_speed_scaler(in.airspeed_valid, in.airspeed_eas, in.armed_and_safety_off, in.dt);
 
-    // 6. mode update + stabilize (upstream: Plane::stabilize())
+    // 5b. current position as a Location (upstream: nothing this simple -
+    //     see plane.hpp's file banner addendum). Always called, every mode:
+    //     cheap, and no pre-existing mode reads plane.current_loc, so this
+    //     cannot change MANUAL/FBWA/FBWB's behavior.
+    plane.update_current_loc(in.position_ned);
+
+    // 6. navigate + mode update + stabilize (upstream: Plane::navigate() ->
+    //    control_mode->navigate(), then Plane::stabilize()). See this
+    //    file's own "CPP-031 SLICE 4 ADDENDUM" note (above) for why
+    //    mode.navigate(in) is called HERE - before update()/run(), not
+    //    after - despite upstream's real navigate() being a separate,
+    //    slower-rate task that (when it does fire) runs AFTER that same
+    //    iteration's stabilize().
     if (in.now_ms - plane.last_stabilize_ms > 2000U) {
         mode.reset_controllers();
     }
     plane.last_stabilize_ms = in.now_ms;
+    mode.navigate(in);
     mode.update(in);
     mode.run(in);
 
