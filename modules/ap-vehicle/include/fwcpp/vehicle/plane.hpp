@@ -4251,18 +4251,21 @@ public:
             // emergency_landing-overrides-to-FBWA branch is dropped (no
             // emergency-landing subsystem, file banner).
             apply_fs_action_short();
-        } else if (control_mode == &mode_auto) {
+        } else if (control_mode == &mode_auto || control_mode == &mode_loiter) {
             // upstream's AUTO/AUTOLAND/AVOID_ADSB/GUIDED/LOITER/THERMAL
-            // case group - AUTO is the only one of those six this port
-            // has. failsafe_in_landing_sequence() is dropped (no
+            // case group - AUTO and LOITER are the two of those six this
+            // port has (LOITER added CPP-031 slice 10; this classification
+            // was flagged as a real gap in that slice's own commit and is
+            // closed here). failsafe_in_landing_sequence() is dropped (no
             // landing-sequence subsystem - always false, i.e. never skip,
             // per the ticket's own instruction), so upstream's real `if
             // (g.fs_action_short != FS_ACTION_SHORT_BESTGUESS)` gate is
-            // reproduced unguarded by anything else - AUTO is NOT one of
-            // the "never take short failsafe action" modes (that group is
-            // CIRCLE/TAKEOFF/RTL/quadplane-LAND-modes/INITIALISING only);
-            // it gets the SAME FBWA/FBWB/circle action as the group above,
-            // just additionally gated on fs_action_short != BESTGUESS.
+            // reproduced unguarded by anything else - neither AUTO nor
+            // LOITER is one of the "never take short failsafe action"
+            // modes (that group is CIRCLE/TAKEOFF/RTL/quadplane-LAND-
+            // modes/INITIALISING only); both get the SAME FBWA/FBWB/circle
+            // action as the group above, just additionally gated on
+            // fs_action_short != BESTGUESS.
             if (aparm.fs_action_short != FsActionShort::BestGuess) {
                 apply_fs_action_short();
             }
@@ -4271,22 +4274,11 @@ public:
         // RTL/(quadplane QLAND/QRTL/LOITER_ALT_QLAND)/INITIALISING case:
         // "these modes never take any short failsafe action and
         // continue" - a real, traced no-op (RTL is already the safe,
-        // autonomous, no-pilot-needed response), not a gap.
-        //
-        // CPP-031 SLICE 10 - NOT YET EXHAUSTIVE, A REAL NAMED GAP: this
-        // `else` implicitly assumes "not manual-group, not AUTO" means
-        // RTL - true when this function was written (only six modes
-        // existed), but `mode_loiter` is now also a real, settable-via-
-        // set_mode() Plane member and would silently fall in here too,
-        // getting RTL's "never act" treatment instead of upstream's real
-        // AUTO-like action (upstream groups LOITER with AUTO/GUIDED, not
-        // CIRCLE/RTL - see file banner's "CPP-031 SLICE 10 ADDENDUM",
-        // "RC-FAILSAFE CLASSIFICATION" note for the full trace). No
-        // shipped code path can reach this today - nothing wires a
-        // failsafe/aux-switch/mission-command target into mode_loiter yet
-        // - but it is a real, reachable-in-principle gap now, not merely
-        // hypothetical, flagged here rather than left for a future reader
-        // to rediscover.
+        // autonomous, no-pilot-needed response), not a gap. This `else`
+        // is now exhaustive over all seven of this port's modes (MANUAL/
+        // FBWA/FBWB/CRUISE in the first branch, AUTO/LOITER in the second,
+        // RTL falling through here) - the LOITER gap CPP-031 slice 10
+        // flagged is closed.
     }
 
     // upstream: Plane::rc_failsafe_short_off_event() (events.cpp ~line

@@ -2962,6 +2962,33 @@ TEST_CASE("Plane::rc_failsafe_short_on_event: AUTO applies fs_action_short only 
     REQUIRE(plane.failsafe.short_failsafe_active);
 }
 
+TEST_CASE("Plane::rc_failsafe_short_on_event: LOITER is classified with AUTO's group, not RTL's "
+          "never-act group (closes the gap CPP-031 slice 10 flagged)",
+          "[vehicle][failsafe][loiter]") {
+    Plane plane;
+    REQUIRE(plane.set_mode(plane.mode_loiter));
+    REQUIRE(plane.control_mode == &plane.mode_loiter);
+
+    SECTION("BestGuess (the real default) takes NO action for LOITER, same as AUTO") {
+        REQUIRE(plane.aparm.fs_action_short == FsActionShort::BestGuess);
+        plane.rc_failsafe_short_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_loiter); // unchanged
+    }
+    SECTION("Fbwb switches away from LOITER") {
+        plane.aparm.fs_action_short = FsActionShort::Fbwb;
+        plane.rc_failsafe_short_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_fbwb);
+    }
+    SECTION("Circle (substituted with RTL) switches away from LOITER") {
+        plane.aparm.fs_action_short = FsActionShort::Circle;
+        plane.rc_failsafe_short_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_rtl);
+    }
+
+    REQUIRE(plane.failsafe_saved_mode == &plane.mode_loiter);
+    REQUIRE(plane.failsafe.short_failsafe_active);
+}
+
 TEST_CASE("Plane::rc_failsafe_short_on_event: RTL never takes any short-failsafe action and continues",
           "[vehicle][failsafe][rtl]") {
     Plane plane;
