@@ -198,6 +198,7 @@
 // on the base" shape (see their banners) - does_auto_throttle() is true
 // for AUTO too, expressed structurally the same way.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -655,6 +656,124 @@ public:
     // (only the MAV_CMD_NAV_ALTITUDE_WAIT special case does, excluded -
     // see class banner) - relies entirely on base Mode::run(), same "auto-
     // throttle mode relies on the base" shape as ModeFBWB/ModeCRUISE.
+};
+
+// upstream: ModeRTL (mode.h) + mode_rtl.cpp (169 lines, read in full) -
+// CPP-031 "slice 6". Navigates back to a fixed `home` point and loiters
+// there - the FIRST mode in this port to use L1Control's loiter support
+// (update_loiter()/reached_loiter_target()/loiter_radius(), ported by
+// CPP-017 but never called by anything until now) and the first to need
+// a persistent `home` concept - see plane.hpp's file banner addendum for
+// the full design rationale (home/set_home(), why current_loc.alt is now
+// real data, do_RTL()'s rally/terrain/alt-slope exclusions, update_
+// loiter()'s single-mode-check simplification, the LoiterState/RtlState
+// structs, and every new tunable's real upstream default).
+//
+// STATE OWNERSHIP - matches AUTO's own precedent exactly (mode.hpp's
+// ModeAUTO class banner): ModeRTL itself holds NO private state at all.
+// `home`/`loiter`/`rtl` all live on Plane (plane.hpp, matching upstream's
+// own Plane.h placement) - `loiter` in particular is exactly the state a
+// FUTURE mode (e.g. LOITER, GUIDED) would also need to read/write, the
+// same "keep it where a future reuse would find it" reasoning CRUISE's
+// own prev_WP_loc/next_WP_loc placement already established.
+//
+// _ENTER() - NOT AUTOMATICALLY CALLED, same "no mode-switching machinery
+// yet" exclusion every prior mode's own banner documents. Upstream's real
+// _enter() body (after every HAL_QUADPLANE_ENABLED branch, excluded - no
+// quadplane in this port) is exactly `plane.prev_WP_loc = plane.
+// current_loc; plane.do_RTL(plane.get_RTL_altitude_cm()); plane.rtl.
+// done_climb = false;` - reproduced directly below as enter(). A CALLER
+// MUST CALL plane.set_home(...) AT LEAST ONCE, THEN this method ONCE,
+// before the first tick()/update() while ModeRTL is active - matching
+// ModeFBWB/ModeCRUISE/ModeAUTO's own explicit-setup precedent. Unlike
+// ModeAUTO::enter() (which takes no StabilizeInputs - it only touches
+// current_loc/mission), this needed no StabilizeInputs parameter either:
+// get_RTL_altitude_cm() kept its own real upstream zero-arg signature
+// (see plane.hpp's own note) precisely because current_loc.alt is now
+// live data, not a dead field needing an explicit substitute.
+//
+// UPDATE() - the in-scope subset (see file banner "ModeRTL" note in
+// plane.hpp for what CLIMB_BEFORE_TURN exclusion means exactly): the
+// three calc_nav_*() calls (all pre-existing, from FBWB/CRUISE/AUTO),
+// then the REAL RTL_CLIMB_MIN "climb before turning" feature - a genuine,
+// small, non-stub port, not a simplification of it. CLIMB_BEFORE_TURN's
+// own FlightOptions bitmask branch (`plane.flight_option_enabled(...)`)
+// is excluded - no such bitmask subsystem exists in this port (same
+// exclusion this port has documented everywhere a FlightOptions check
+// appears, e.g. plane.hpp's apply_load_factor_roll_limits()) - so this
+// always reaches upstream's own `else if (plane.g2.rtl_climb_min > 0)`
+// branch, which is the real, default-relevant path anyway (RTL_CLIMB_MIN
+// default is 0 - see plane.hpp - so the whole clamp is a documented no-op
+// for an unconfigured vehicle, exactly matching upstream).
+//
+// NAVIGATE() - the in-scope subset: `uint16_t radius = abs(g.rtl_radius);
+// if (radius > 0) loiter.direction = ...; plane.update_loiter(radius);`,
+// reproduced directly. EXCLUDED ENTIRELY (per the ticket, no partial
+// dispatch stub): the HAL_QUADPLANE_ENABLED VTOL-approach-landing branch
+// and switch_QRTL() (no quadplane in this port); the whole `!plane.
+// auto_state.checked_for_autoland` autoland/mission-jump block
+// (RTL_IMMEDIATE_DO_LAND_START/RTL_THEN_DO_LAND_START/DO_RETURN_PATH_
+// START, jump_to_landing_sequence()/jump_to_closest_mission_leg()) - no
+// landing subsystem, and this port's own Mission (SLICE 5) has no jump/
+// leg-resume machinery to support it even partially.
+class ModeRTL : public Mode {
+public:
+    using Mode::Mode;
+
+    // upstream: ModeRTL::_enter() - see class banner. NOT AUTOMATICALLY
+    // CALLED - a caller MUST call plane.set_home(...) first, then this
+    // method, before the first tick()/update() while ModeRTL is active.
+    void enter() {
+        plane_.prev_WP_loc = plane_.current_loc;
+        plane_.do_RTL(plane_.get_RTL_altitude_cm());
+        plane_.rtl.done_climb = false;
+    }
+
+    // upstream: ModeRTL::update() - see class banner for the
+    // CLIMB_BEFORE_TURN exclusion.
+    void update(const StabilizeInputs& in) override {
+        plane_.calc_nav_roll(in);
+        plane_.calc_nav_pitch();
+        plane_.calc_throttle();
+
+        if (plane_.aparm.rtl_climb_min <= 0.0f) {
+            return;
+        }
+
+        // when RTL first starts, limit bank angle to LEVEL_ROLL_LIMIT
+        // until we have climbed by RTL_CLIMB_MIN meters.
+        const bool alt_threshold_reached =
+            static_cast<float>(plane_.current_loc.alt - plane_.prev_WP_loc.alt) * 0.01f > plane_.aparm.rtl_climb_min;
+
+        if (!plane_.rtl.done_climb && alt_threshold_reached) {
+            plane_.prev_WP_loc = plane_.current_loc;
+            // setup_alt_slope() - deferred, see plane.hpp's own note;
+            // nothing left to do in this port's flat-altitude model.
+            plane_.rtl.done_climb = true;
+        }
+        if (!plane_.rtl.done_climb) {
+            // Constrain the roll limit as a failsafe, that way if
+            // something goes wrong the plane will eventually turn back
+            // and go to RTL instead of going perfectly straight. This
+            // also leaves some leeway for fighting wind.
+            plane_.roll_limit_cd = std::min(plane_.roll_limit_cd, static_cast<std::int32_t>(plane_.aparm.level_roll_limit_deg * 100.0f));
+            plane_.nav_roll_cd = math::constrain_value(plane_.nav_roll_cd, -plane_.roll_limit_cd, plane_.roll_limit_cd);
+        }
+    }
+
+    // upstream: ModeRTL::navigate() - see class banner for the
+    // autoland/mission-jump exclusion.
+    void navigate(const StabilizeInputs& in) override {
+        const std::uint16_t radius = static_cast<std::uint16_t>(std::fabs(plane_.aparm.rtl_radius));
+        if (radius > 0) {
+            plane_.loiter.direction = (plane_.aparm.rtl_radius < 0.0f) ? -1 : 1;
+        }
+        plane_.update_loiter(radius, in);
+    }
+
+    // upstream: ModeRTL has NO run() override at all - relies entirely on
+    // base Mode::run(), same "auto-throttle mode relies on the base"
+    // shape as ModeFBWB/ModeCRUISE/ModeAUTO.
 };
 
 // upstream: the real scheduler task-table sequence (AHRS update ->

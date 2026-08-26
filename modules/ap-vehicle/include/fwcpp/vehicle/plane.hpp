@@ -737,6 +737,184 @@
 //     HAL_SOARING_ENABLED's init_cruising() (both in ModeAuto::_enter()) -
 //     no watchdog-persistence or soaring subsystem in this port.
 
+// =====================================================================
+// CPP-031 SLICE 6 ADDENDUM: ModeRTL (mode.hpp, same module - see its own
+// class banner for the mode-level design). Upstream (Plane-4.7.0, read
+// directly, in full per the ticket): ArduPlane/mode_rtl.cpp (169 lines,
+// full) - ModeRTL::_enter()/update()/navigate(); ArduPlane/commands_logic.
+// cpp's Plane::do_RTL (~line 337, full) and Plane::calc_best_rally_or_
+// home_location (immediately below it, full, including its #else branch);
+// ArduPlane/altitude.cpp's Plane::get_RTL_altitude_cm (~line 99, trivial);
+// ArduPlane/navigation.cpp's Plane::update_loiter/update_loiter_update_nav
+// (~lines 321-395, both in full).
+//
+// THE FIRST MODE TO USE L1Control's LOITER SUPPORT AND THE FIRST TO NEED
+// A PERSISTENT "HOME": CPP-017 ported update_loiter()/reached_loiter_
+// target()/loiter_radius() into L1Control (l1_control.hpp) in an earlier
+// slice, but nothing in this vehicle skeleton ever called them until now
+// - CRUISE/AUTO only ever call update_waypoint(). Likewise, this vehicle
+// has never had a "fixed origin the aircraft can navigate back to"
+// concept before - current_loc/prev_WP_loc/next_WP_loc are all either
+// recomputed fresh every tick (current_loc) or set transiently by
+// whatever mode/mission leg is active (prev_WP_loc/next_WP_loc) - see
+// SLICE 4's own "CURRENT_LOC" note. `home` (below) is the first Plane
+// member that is meant to be set ONCE and never move again.
+//
+// `home` / `set_home()` - DESIGN: a plain Location field, default-
+// constructed (zero - lat=lng=alt=0, the SAME fixed reference point every
+// other Location in this vehicle is ultimately anchored to, per SLICE 4's
+// own "CURRENT_LOC" note), settable ONLY via the explicit set_home()
+// method below - matching this port's now-established "explicit setup,
+// no automatic magic" pattern (ModeFBWB/ModeCRUISE/ModeAUTO's own enter()
+// methods each requiring one specific setup call before the first tick).
+// Upstream's real Plane::home is set automatically by a GPS-lock/arming
+// home-setting subsystem this port doesn't have (no AP_AHRS::
+// set_home()-equivalent, no "home is set" state machine) - so, exactly
+// like ModeFBWB's set_target_altitude_current() requirement, A CALLER
+// MUST CALL plane.set_home(...) AT LEAST ONCE before entering ModeRTL for
+// the first time; there is no default that would be meaningful (a plane
+// whose home was silently left at the shared origin Location() would
+// often be correct by coincidence in this port's own tests - the origin
+// IS the usual launch point - but that coincidence is not a substitute
+// for a real caller making the choice explicitly, matching the ticket's
+// own instruction).
+//
+// CURRENT_LOC.ALT - A REAL GAP THIS SLICE CLOSES, NOT JUST WORKS AROUND:
+// SLICE 4's own "CURRENT_LOC" note left current_loc.alt PERMANENTLY at 0,
+// reasoning that "every consumer this slice has... is a purely horizontal
+// calculation that never reads Location::alt." Verified directly (not
+// re-assumed) against location.hpp for THIS slice: get_distance()/
+// get_distance_NE()/past_interval_finish_line()/line_path_proportion()
+// are ALL purely horizontal (dlat/dlng only, confirmed by reading their
+// bodies) - so that reasoning still holds for every PRE-EXISTING
+// consumer. But get_RTL_altitude_cm() (below) and ModeRTL::update()'s
+// RTL_CLIMB_MIN check (mode.hpp) are the FIRST real consumers of
+// current_loc's VERTICAL component in this vehicle's history - reading
+// current_loc.alt as upstream's own get_RTL_altitude_cm() literally does
+// would silently always return 0 (a real "current altitude" value is the
+// entire POINT of that branch - "maintain current altitude" RTL - not a
+// harmless simplification), and the RTL_CLIMB_MIN check would NEVER see
+// alt_threshold_reached become true, permanently wedging the climb-limit
+// clamp on. Rather than inventing a workaround local to RTL (e.g. a new
+// StabilizeInputs field duplicating information the vehicle already
+// receives), update_current_loc() (below) is extended to ALSO populate
+// current_loc.alt from the SAME position_ned already supplied every tick
+// - position_ned.z is NED-down, so altitude above the vehicle's own fixed
+// start point is -position_ned.z, exactly the relationship every closed-
+// loop test already maintains between position_ned and StabilizeInputs::
+// current_altitude_m (e.g. `in.position_ned = sim_plane.position; in.
+// current_altitude_m = -sim_plane.position.z;`). This is a genuinely
+// SAFE, NON-BREAKING extension of already-tested shared infrastructure:
+// since every pre-existing consumer (traced above) never reads
+// Location::alt at all, none of CRUISE's or AUTO's existing tests can
+// observe this change - verified by running them unchanged (see
+// vehicle_test.cpp's own confirmation), not merely argued.
+//
+// GET_RTL_ALTITUDE_CM() - kept at upstream's own real zero-arg signature
+// (unlike calc_nav_roll()'s necessary StabilizeInputs-taking divergence,
+// SLICE 4's own note) precisely BECAUSE current_loc.alt is now real data,
+// not a dead field needing an explicit substitute parameter.
+//
+// DO_RTL() - EXCLUDED (per the ticket, and verified by reading the #else
+// branch directly): calc_best_rally_or_home_location()'s HAL_RALLY_
+// ENABLED branch - no rally-point subsystem in this port, and upstream's
+// OWN #else branch (no rally points configured) is EXACTLY `Location{
+// home.lat, home.lng, rtl_home_alt_amsl_cm, ABSOLUTE}` - i.e. rally
+// points collapse to `home` directly even for a real, unmodified upstream
+// build with HAL_RALLY_ENABLED off, not a port-specific approximation.
+// fix_terrain_WP()/setup_terrain_target_alt() - no terrain subsystem
+// (same exclusion throughout this port). set_target_altitude_location()/
+// setup_alt_slope() - both replaced by the SAME flat `target_altitude_cm
+// = next_WP_loc.alt` assignment set_next_WP() already established (SLICE
+// 2's own "ALTITUDE SLOPE - DEFERRED" note) - there is no second altitude
+// mechanism to invent here.
+//
+// SETUP_TURN_ANGLE() REUSE - VERIFIED, NOT ASSUMED, PER THE TICKET'S OWN
+// INSTRUCTION: do_RTL() calls the EXISTING setup_turn_angle() (SLICE 5)
+// unmodified. Traced through both real scenarios: (1) no mission loaded
+// (this slice's own tests) - mission.peek_next() returns nullptr
+// (Mission::peek_next(), plane.hpp above: `current_index_+1 < count_`,
+// false when count_==0) - so next_turn_angle correctly falls to the real
+// 90-degree "no next leg" fallback (SLICE 5's own "SURPRISING UPSTREAM
+// FINDING"), exactly matching upstream's real single-leg RTL behavior.
+// (2) a mission WAS loaded and mid-flight when RTL is entered - THIS
+// PORT'S `mission` object is Plane-level state (SLICE 5's own "STATE
+// OWNERSHIP" note) that persists across mode changes exactly like
+// upstream's own AP_Mission does (a mission's current-command index is
+// not reset just because the active flight mode changed) - so
+// setup_turn_angle() would genuinely look ahead to the OLD mission's next
+// waypoint, exactly reproducing upstream's real (if slightly surprising)
+// behavior rather than a port-specific quirk. Not exercised by this
+// slice's own tests (which never load a mission before testing RTL), but
+// traced and documented rather than assumed away.
+//
+// UPDATE_LOITER()/UPDATE_LOITER_UPDATE_NAV() - the ONE real behavioral
+// simplification in this slice, PER THE TICKET'S OWN INSTRUCTION:
+// upstream's update_loiter_update_nav() gates its "navigate to the loiter
+// point like a waypoint" branch on `(loiter.start_time_ms == 0 &&
+// (control_mode == &mode_auto || control_mode == &mode_guided) &&
+// auto_state.crosstrack && ...)`. ModeRTL is the ONLY caller of
+// update_loiter() anywhere in this port's scope (no ModeGUIDED/ModeLOITER
+// exist yet), so the multi-mode check collapses to JUST `crosstrack` -
+// this port's own `crosstrack` field (SLICE 5), which do_RTL() always
+// resets to false on entry (matching upstream's own auto_state.crosstrack
+// meaning for a freshly-started leg) and update_loiter_update_nav() never
+// itself sets true - so in practice, for THIS slice, the crosstrack-
+// waypoint-nav branch never actually fires (crosstrack stays false for
+// the entire time ModeRTL is active), and update_loiter() goes straight
+// to nav_controller.update_loiter() every call - a real, honest
+// consequence of RTL always flying a single, non-crosstracked leg to
+// home, not a bug. The HAL_QUADPLANE_ENABLED branch (the "switching to
+// QRTL" direct-waypoint-nav condition) is dropped entirely - no
+// quadplane. update_loiter()'s own `auto_state.wp_proportion > 1`
+// alternate "reached" condition is also dropped - wp_proportion is an
+// AUTO-mission-only concept never ported to this Plane (SLICE 5's own
+// Mission exclusion list has no such field), and RTL has no mission leg
+// to compute a proportion along; loiter.start_time_ms's OWN "reached
+// via reached_loiter_target()" latch (kept, see below) is the real
+// condition this slice's one caller can ever satisfy anyway.
+//
+// LOITER STATE - THIS PORT'S OWN SMALLER EQUIVALENT of upstream's
+// Plane::loiter (Plane.h), carrying ONLY the three fields update_loiter()/
+// do_RTL()/ModeRTL::navigate() actually read or write in this slice's
+// scope: direction, start_time_ms, radius. Upstream's remaining fields
+// (old_target_bearing_cd/total_cd/sum_cd/reached_target_alt/unable_to_
+// achieve_target_alt/start_lap_alt_cm/next_sum_lap_cd/time_max_ms) all
+// belong to LOITER_TURNS/LOITER_TIME/LOITER_TO_ALT mission commands -
+// none exist in MissionItem's vocabulary (SLICE 5's own exclusion list),
+// so there is nothing in this port that could ever read or write them -
+// a different real constraint than upstream's, not a shrunken copy of a
+// struct this port doesn't fully use (same "own smaller equivalent"
+// precedent as MissionItem/Mission themselves, SLICE 5's own note).
+//
+// RTL STATE - `rtl.done_climb` is ALREADY EXACTLY upstream's real struct
+// (`struct { bool done_climb; } rtl;`, Plane.h) - no reduction needed,
+// ported directly.
+//
+// NEW FixedWingTunables FIELDS - every default cited against Parameters.
+// cpp/config.h directly, not invented: loiter_radius (WP_LOITER_RAD /
+// aparm.loiter_radius, default LOITER_RADIUS_DEFAULT=60, config.h, m),
+// rtl_altitude (RTL_ALTITUDE / g.RTL_altitude, default ALT_HOLD_HOME=100,
+// config.h, m), rtl_radius (RTL_RADIUS / g.rtl_radius, default 0,
+// Parameters.cpp, m), rtl_climb_min (RTL_CLIMB_MIN / g2.rtl_climb_min,
+// default 0, Parameters.cpp, m). level_roll_limit_deg (LEVEL_ROLL_LIMIT,
+// default 5) ALREADY EXISTED (SLICE 1) - reused directly by ModeRTL::
+// update()'s climb-before-turn clamp (mode.hpp), no new field needed.
+//
+// EXCLUDED (documented, not silently dropped) - ModeRTL's own class
+// banner (mode.hpp) covers the mode-level exclusions (every
+// HAL_QUADPLANE_ENABLED branch in _enter()/navigate(), CLIMB_BEFORE_TURN's
+// FlightOptions bitmask branch, the entire RTL_IMMEDIATE_DO_LAND_START/
+// RTL_THEN_DO_LAND_START/DO_RETURN_PATH_START autoland-mission-jump
+// machinery, GCS messaging); the Plane-level exclusions are:
+//   - Rally points (calc_best_rally_or_home_location's HAL_RALLY_ENABLED
+//     branch) - see "DO_RTL()" note above.
+//   - Terrain-relative altitude (fix_terrain_WP, setup_terrain_target_alt)
+//     - no terrain subsystem, same exclusion throughout this port.
+//   - update_loiter_update_nav()'s HAL_QUADPLANE_ENABLED branch and
+//     update_loiter()'s `auto_state.wp_proportion > 1` term - see
+//     "UPDATE_LOITER()" note above.
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -790,6 +968,12 @@ inline constexpr std::uint8_t kServoElevator = 1;
 inline constexpr std::uint8_t kServoThrottle = 2;
 inline constexpr std::uint8_t kServoRudder = 3;
 
+// upstream: ArduPlane/config.h's LOITER_RADIUS_DEFAULT (60, meters) -
+// Plane::update_loiter()'s own "radius<=1 -> use the general loiter
+// radius" fallback, itself only reached when BOTH the passed-in radius
+// AND aparm.loiter_radius are <=1 - see update_loiter() below.
+inline constexpr float kLoiterRadiusDefault = 60.0f;
+
 // Every AP_Param-backed tunable MANUAL/FBWA's real code paths (as scoped
 // by the ticket) actually read, as a plain aggregate defaulted to
 // upstream's real GSCALAR/ASCALAR/config.h value - same established
@@ -826,6 +1010,12 @@ struct FixedWingTunables {
     // --- CPP-031 slice 5 (ModeAUTO) additions - see file banner addendum ---
     float waypoint_radius = 90.0f; // WP_RADIUS / g.waypoint_radius, upstream default WP_RADIUS_DEFAULT (config.h), m
     float airspeed_cruise = 12.0f; // AIRSPEED_CRUISE / aparm.airspeed_cruise, upstream default AIRSPEED_CRUISE (config.h), m/s
+
+    // --- CPP-031 slice 6 (ModeRTL) additions - see file banner addendum ---
+    float loiter_radius = 60.0f; // WP_LOITER_RAD / aparm.loiter_radius, upstream default LOITER_RADIUS_DEFAULT (config.h), m
+    float rtl_altitude = 100.0f; // RTL_ALTITUDE / g.RTL_altitude, upstream default ALT_HOLD_HOME (config.h), m
+    float rtl_radius = 0.0f;     // RTL_RADIUS / g.rtl_radius, upstream default 0 (Parameters.cpp), m
+    float rtl_climb_min = 0.0f;  // RTL_CLIMB_MIN / g2.rtl_climb_min, upstream default 0 (Parameters.cpp), m
 };
 
 // Explicit per-tick sensor/environment inputs stabilize_roll()/
@@ -1050,6 +1240,38 @@ public:
     bool next_wp_crosstrack = false;
     bool crosstrack = false;
     float next_turn_angle = 90.0f;
+
+    // CPP-031 slice 6 (ModeRTL, see file banner addendum's "home /
+    // set_home()" note) - upstream: Plane::home, normally set by a GPS-
+    // lock/arming home-setting subsystem this port doesn't have. Default-
+    // constructed (zero - the shared fixed reference point, see SLICE 4's
+    // own "CURRENT_LOC" note) until a caller calls set_home() explicitly -
+    // REQUIRED at least once before ModeRTL is first entered.
+    Location home;
+
+    // upstream: Plane::home is set via a real GPS-lock/arming subsystem
+    // this port doesn't have (see file banner) - this is the explicit
+    // substitute, matching this port's "explicit setup, no automatic
+    // magic" pattern.
+    void set_home(const Location& loc) { home = loc; }
+
+    // CPP-031 slice 6 (ModeRTL, see file banner addendum's "LOITER STATE"
+    // note) - upstream: Plane::loiter (Plane.h), reduced to exactly the
+    // three fields this slice's update_loiter()/do_RTL()/ModeRTL::
+    // navigate() read or write.
+    struct LoiterState {
+        std::int8_t direction = 1;       // upstream: loiter.direction - 1 clockwise, -1 counter-clockwise
+        std::uint32_t start_time_ms = 0; // upstream: loiter.start_time_ms - 0 means "not yet reached the loiter point"
+        float radius = 0.0f;             // upstream: loiter.radius - current value of loiter radius in metres used by the controller
+    };
+    LoiterState loiter;
+
+    // upstream: Plane::rtl (Plane.h) - `struct { bool done_climb; } rtl;`,
+    // already exactly this one field, ported directly.
+    struct RtlState {
+        bool done_climb = false;
+    };
+    RtlState rtl;
 
     // See file banner's "GROUND_MODE / REVERSED_THROTTLE" note.
     bool ground_mode = false;
@@ -1313,6 +1535,21 @@ public:
     void update_current_loc(const math::Vector3f& position_ned) {
         current_loc = Location();
         current_loc.offset(position_ned.x, position_ned.y);
+        // CPP-031 slice 6 (ModeRTL) extension - see file banner addendum's
+        // "CURRENT_LOC.ALT" note: current_loc.alt was left permanently at
+        // 0 through SLICE 4/5 because nothing in this vehicle's history
+        // read it (get_distance/get_distance_NE/past_interval_finish_line
+        // are all purely horizontal, verified directly against
+        // location.hpp). RTL's get_RTL_altitude_cm()/RTL_CLIMB_MIN check
+        // are the first real consumers of current_loc's vertical
+        // component, so it is now populated too - position_ned.z is
+        // NED-down, so altitude above the vehicle's own fixed start point
+        // is -position_ned.z, the SAME relationship every closed-loop
+        // test already maintains between position_ned and StabilizeInputs
+        // ::current_altitude_m. Safe and non-breaking: no pre-existing
+        // consumer of current_loc ever reads Location::alt (traced
+        // above), so this cannot change CRUISE's or AUTO's behavior.
+        current_loc.set_alt_m(-position_ned.z, Location::AltFrame::ABSOLUTE);
     }
 
     // Everything L1Control needs from this Plane's own AHRS/GPS/current_loc
@@ -1794,6 +2031,106 @@ public:
 
         tecs.update_pitch_throttle(relative_target_altitude_cm(), eas_dem_cm, in.current_altitude_m, aerodynamic_load_factor,
                                     tecs_in);
+    }
+
+    // =====================================================================
+    // CPP-031 SLICE 6 (ModeRTL) - see file banner addendum for the full
+    // design rationale (home/set_home(), current_loc.alt now being real
+    // data, do_RTL()'s rally/terrain/alt-slope exclusions, update_loiter()
+    // 's single-mode-check simplification, the LoiterState/RtlState
+    // structs).
+    // =====================================================================
+
+    // upstream: Plane::get_RTL_altitude_cm() (altitude.cpp, ~line 99),
+    // read in full - a direct, faithful port at upstream's own real
+    // zero-arg signature (current_loc.alt is now real data, not a dead
+    // field needing an explicit substitute parameter - see file banner).
+    [[nodiscard]] std::int32_t get_RTL_altitude_cm() const {
+        if (aparm.rtl_altitude < 0.0f) {
+            return current_loc.alt;
+        }
+        return static_cast<std::int32_t>(aparm.rtl_altitude * 100.0f) + home.alt;
+    }
+
+    // upstream: Plane::do_RTL() (commands_logic.cpp), read in full - the
+    // in-scope subset (see file banner's "DO_RTL()" note for the rally/
+    // terrain/alt-slope exclusions).
+    void do_RTL(std::int32_t rtl_altitude_amsl_cm) {
+        next_wp_crosstrack = false;
+        crosstrack = false;
+        prev_WP_loc = current_loc;
+
+        // upstream: calc_best_rally_or_home_location() - collapses to its
+        // own real #else (no-rally-points) branch, `Location{home.lat,
+        // home.lng, rtl_home_alt_amsl_cm, ABSOLUTE}` - see file banner.
+        next_WP_loc = Location(home.lat, home.lng, rtl_altitude_amsl_cm, Location::AltFrame::ABSOLUTE);
+
+        // fix_terrain_WP()/setup_terrain_target_alt()/set_target_altitude_
+        // location() - all terrain-relative/altitude-slope machinery this
+        // port doesn't have; the flat equivalent set_next_WP() already
+        // established (SLICE 2's own "ALTITUDE SLOPE" note) is reproduced
+        // directly here instead.
+        target_altitude_cm = next_WP_loc.alt;
+
+        if (aparm.loiter_radius < 0.0f) {
+            loiter.direction = -1;
+        } else {
+            loiter.direction = 1;
+        }
+
+        // setup_alt_slope() - deferred, see SLICE 2's note; nothing left
+        // to do here (target_altitude_cm was just set above).
+        setup_turn_angle();
+    }
+
+    // upstream: Plane::update_loiter_update_nav() (navigation.cpp,
+    // "method intended to be used by update_loiter"), read in full - see
+    // file banner's "UPDATE_LOITER()" note for the multi-mode-check ->
+    // `crosstrack` simplification and the HAL_QUADPLANE_ENABLED exclusion.
+    void update_loiter_update_nav(std::uint16_t radius, const StabilizeInputs& in) {
+        const nav::L1Inputs l1_in = build_l1_inputs(in);
+        if (loiter.start_time_ms == 0 && crosstrack
+            && current_loc.get_distance(next_WP_loc) > 3.0f * nav_controller.loiter_radius(static_cast<float>(radius), l1_in)) {
+            // never reached the loiter point yet, and crosstracking a
+            // real leg toward it (moot in this slice's own tests -
+            // do_RTL() always resets crosstrack=false - but reproduced
+            // faithfully for a future caller that DOES crosstrack into
+            // RTL) - navigate to it like a normal waypoint.
+            nav_controller.update_waypoint(prev_WP_loc, next_WP_loc, l1_in);
+            return;
+        }
+        nav_controller.update_loiter(next_WP_loc, static_cast<float>(radius), loiter.direction, l1_in);
+    }
+
+    // upstream: Plane::update_loiter() (navigation.cpp), read in full.
+    // `auto_state.wp_proportion > 1`'s alternate "reached" condition is
+    // dropped - see file banner's "UPDATE_LOITER()" note (no such field
+    // in this port, and RTL has no mission leg to compute a proportion
+    // along). GCS/quadplane-guided-mode branches on the "just reached"
+    // edge are dropped too - no GCS/quadplane subsystem.
+    void update_loiter(std::uint16_t radius, const StabilizeInputs& in) {
+        if (radius <= 1) {
+            // if radius is <=1 then use the general loiter radius. if
+            // it's small, use the real upstream default.
+            radius = (std::fabs(aparm.loiter_radius) <= 1.0f) ? static_cast<std::uint16_t>(kLoiterRadiusDefault)
+                                                                : static_cast<std::uint16_t>(std::fabs(aparm.loiter_radius));
+            if (next_WP_loc.loiter_ccw == 1) {
+                loiter.direction = -1;
+            } else {
+                loiter.direction = (aparm.loiter_radius < 0.0f) ? -1 : 1;
+            }
+        }
+
+        // the radius actually being used by the controller is required by
+        // other functions.
+        loiter.radius = static_cast<float>(radius);
+
+        update_loiter_update_nav(radius, in);
+
+        if (loiter.start_time_ms == 0 && nav_controller.reached_loiter_target()) {
+            // we've reached the target, start the timer.
+            loiter.start_time_ms = in.now_ms;
+        }
     }
 
 private:

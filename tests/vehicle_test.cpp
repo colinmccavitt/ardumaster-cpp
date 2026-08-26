@@ -6,6 +6,7 @@
 // TEST-ONLY dependency (see tests/CMakeLists.txt) used only by the final
 // closed-loop integration test below - ap-vehicle itself never links it.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -1591,4 +1592,322 @@ TEST_CASE("Closed loop: AUTO flies a 3-waypoint mission in sequence, reaching ea
     // And it actually ended up near the final waypoint - ground truth, not
     // just "the index advanced somehow".
     REQUIRE(final_dist_to_wp2 < 150.0f);
+}
+
+// ---------------------------------------------------------------------
+// CPP-031 SLICE 6: ModeRTL - navigates back to a fixed `home` point and
+// loiters there. The FIRST mode to actually use L1Control's loiter
+// support and the first to need a persistent `home` concept - see
+// plane.hpp's own file banner addendum and mode.hpp's ModeRTL class
+// banner for the full design rationale and exclusion list (rally points,
+// terrain, autoland/mission-jump, CLIMB_BEFORE_TURN's FlightOptions
+// branch - all excluded; RTL_CLIMB_MIN's own climb-before-turn feature IS
+// a real, ported feature, not a stub).
+// ---------------------------------------------------------------------
+
+TEST_CASE("Plane::do_RTL: sets next_WP_loc to home at the right altitude and disables crosstrack", "[vehicle][rtl]") {
+    Plane plane;
+    plane.current_loc = make_loc(500.0f, 300.0f, 40.0f); // already flying, away from home
+    plane.set_home(make_loc(0.0f, 0.0f, 10.0f));          // home 10m up from the shared origin
+
+    // Dirty the crosstrack state first, so do_RTL()'s own reset is proven,
+    // not coincidentally already false.
+    plane.next_wp_crosstrack = true;
+    plane.crosstrack = true;
+
+    plane.do_RTL(plane.get_RTL_altitude_cm());
+
+    REQUIRE_FALSE(plane.next_wp_crosstrack);
+    REQUIRE_FALSE(plane.crosstrack);
+    REQUIRE(plane.prev_WP_loc.same_latlon_as(plane.current_loc));
+    REQUIRE(plane.next_WP_loc.same_latlon_as(plane.home));
+    // Real upstream default RTL_ALTITUDE (100m) + home.alt (10m) = 110m.
+    REQUIRE(plane.next_WP_loc.alt == 11000);
+    REQUIRE(plane.target_altitude_cm == plane.next_WP_loc.alt);
+}
+
+TEST_CASE("Plane::get_RTL_altitude_cm: negative RTL_altitude holds current altitude, positive uses home.alt + RTL_altitude",
+          "[vehicle][rtl]") {
+    Plane plane;
+    plane.set_home(make_loc(0.0f, 0.0f, 20.0f)); // home at 20m
+
+    // Positive branch - the real upstream default (100m): home.alt + RTL_altitude.
+    plane.aparm.rtl_altitude = 100.0f;
+    REQUIRE(plane.get_RTL_altitude_cm() == 20 * 100 + 100 * 100);
+
+    // Negative branch - "maintain current altitude": reads current_loc.alt,
+    // which this slice now populates with real data (see plane.hpp's own
+    // "CURRENT_LOC.ALT" note) - set directly here, white-box, matching this
+    // suite's own established pattern for exercising current_loc without
+    // running a full tick().
+    plane.aparm.rtl_altitude = -1.0f;
+    plane.current_loc.set_alt_m(75.0f, fwcpp::Location::AltFrame::ABSOLUTE);
+    REQUIRE(plane.get_RTL_altitude_cm() == 7500);
+}
+
+TEST_CASE("ModeRTL::update: RTL_CLIMB_MIN clamps the roll limit until the climb threshold is reached, then releases it",
+          "[vehicle][rtl]") {
+    Plane plane;
+    ModeRTL rtl_mode(plane);
+    plane.aparm.rtl_climb_min = 20.0f; // climb 20m before turning
+    plane.set_home(make_loc(0.0f, 0.0f, 0.0f));
+    plane.current_loc = make_loc(500.0f, 500.0f, 0.0f); // well off to the side of home - a real turn demand
+    rtl_mode.enter();                                    // prev_WP_loc = current_loc (alt 0); do_RTL(...); done_climb = false
+
+    StabilizeInputs in;
+    in.eas2tas = 1.0f;
+    in.now_ms = 1000;
+    in.now_us = 1000000;
+    // A real groundspeed reading, so build_l1_inputs()'s groundspeed_
+    // vector isn't zero - matches every other test's "GPS wiring" note.
+    in.true_velocity_ned = fwcpp::math::Vector3f(12.0f, 0.0f, 0.0f);
+    plane.gps.update(in.true_velocity_ned, in.now_ms);
+
+    // Still at the starting altitude - below the 20m climb threshold.
+    // navigate() is called (matching tick()'s own real per-tick ordering,
+    // mode.hpp's "CPP-031 SLICE 4 ADDENDUM" note - navigate() runs BEFORE
+    // update()/run()) so nav_controller actually has a fresh lateral-
+    // acceleration demand for calc_nav_roll() (called from update()) to
+    // read - without it, nav_controller.nav_roll_cd() would just read
+    // back a stale/default zero demand from before this mode ever
+    // navigated. update_flight_limits() is likewise normally called by
+    // tick() every loop before mode.update(); called explicitly here
+    // since this test drives ModeRTL's methods directly, rather than
+    // letting roll_limit_cd monotonically shrink call-over-call.
+    plane.update_flight_limits();
+    rtl_mode.navigate(in);
+    rtl_mode.update(in);
+    const std::int32_t roll_limit_before = plane.roll_limit_cd;
+    const std::int32_t nav_roll_before = plane.nav_roll_cd;
+    INFO("roll_limit_cd = " << roll_limit_before << ", nav_roll_cd = " << nav_roll_before);
+    REQUIRE_FALSE(plane.rtl.done_climb);
+    REQUIRE(roll_limit_before == static_cast<std::int32_t>(plane.aparm.level_roll_limit_deg * 100.0f));
+    REQUIRE(std::abs(nav_roll_before) <= roll_limit_before);
+
+    // Climb past the 20m threshold.
+    plane.current_loc.set_alt_m(25.0f, fwcpp::Location::AltFrame::ABSOLUTE);
+    plane.update_flight_limits();
+    rtl_mode.navigate(in);
+    rtl_mode.update(in);
+    const std::int32_t roll_limit_after = plane.roll_limit_cd;
+    const std::int32_t nav_roll_after = plane.nav_roll_cd;
+    INFO("roll_limit_cd = " << roll_limit_after << ", nav_roll_cd = " << nav_roll_after);
+    REQUIRE(plane.rtl.done_climb);
+    // Released: the RTL-specific LEVEL_ROLL_LIMIT clamp is gone - what's
+    // left is only the (larger) load-factor limiter's own clamp, so both
+    // the limit itself and the actual commanded roll are measurably freer
+    // than the pre-climb case.
+    REQUIRE(roll_limit_after > roll_limit_before);
+    REQUIRE(std::abs(nav_roll_after) > std::abs(nav_roll_before));
+}
+
+TEST_CASE("Plane::update_loiter_update_nav: far-and-crosstracking dispatches like a waypoint; otherwise loiters directly",
+          "[vehicle][rtl]") {
+    Plane plane;
+    constexpr std::uint16_t radius = 50;
+
+    StabilizeInputs in;
+    in.eas2tas = 1.0f;
+    in.now_us = 1000000;
+    in.now_ms = 1000;
+    in.true_velocity_ned = fwcpp::math::Vector3f(12.0f, 0.0f, 0.0f); // flying north at 12 m/s
+    plane.gps.update(in.true_velocity_ned, in.now_ms);               // seed a real GPS fix (gps.hpp's own 200ms rate limit)
+
+    // The loiter center (RTL's home) sits 1000m north - well past
+    // 3*radius (150m, with loiter_bank_limit's real default of 0 making
+    // L1Control::loiter_radius() an identity passthrough - see
+    // l1_control.hpp).
+    plane.next_WP_loc = make_loc(1000.0f, 0.0f, 0.0f);
+
+    // Each SECTION below distinguishes which nav_controller function
+    // actually ran via crosstrack_error() - update_waypoint()'s meaning
+    // (perpendicular offset from the prev->next line) and update_loiter()'s
+    // meaning (distance from the loiter circle) are different formulas
+    // that give clearly different, exactly-computable numbers for the
+    // SAME geometry, rather than needing to inspect private L1Control
+    // state.
+    SECTION("far + crosstrack: dispatches like a normal waypoint, not a loiter") {
+        plane.crosstrack = true;
+        // Exactly on the prev->next line (due north): a waypoint-nav
+        // crosstrack error here is 0m; a loiter's own crosstrack_error()
+        // (distance from the circle) would instead read (500-50)=450m for
+        // this same geometry.
+        plane.prev_WP_loc = make_loc(0.0f, 0.0f, 0.0f);
+        plane.current_loc = make_loc(500.0f, 0.0f, 0.0f);
+
+        plane.update_loiter_update_nav(radius, in);
+        INFO("crosstrack_error (m) = " << plane.nav_controller.crosstrack_error());
+        REQUIRE(std::fabs(plane.nav_controller.crosstrack_error()) < 2.0f);
+    }
+
+    SECTION("far but NOT crosstracking: this port's single-caller-simplified gate falls through to a direct loiter") {
+        plane.crosstrack = false;
+        plane.prev_WP_loc = make_loc(0.0f, 0.0f, 0.0f);
+        plane.current_loc = make_loc(500.0f, 0.0f, 0.0f); // same geometry as above
+
+        plane.update_loiter_update_nav(radius, in);
+        INFO("crosstrack_error (m) = " << plane.nav_controller.crosstrack_error());
+        // update_loiter()'s own crosstrack_error is (distance-to-center -
+        // radius): 500m out gives (500-50)=450m - NOT ~0m, proving the
+        // waypoint branch did NOT run even though crosstrack alone was the
+        // only thing that changed.
+        REQUIRE(plane.nav_controller.crosstrack_error() == Catch::Approx(450.0f).margin(2.0f));
+    }
+
+    SECTION("near (distance <= 3*radius): loiters directly even with crosstrack set") {
+        plane.crosstrack = true; // would satisfy the crosstrack half of the gate on its own
+        plane.prev_WP_loc = make_loc(0.0f, 0.0f, 0.0f);
+        plane.current_loc = make_loc(1000.0f, 50.0f, 0.0f); // 50m east of the loiter center - inside 3*radius (150m)
+
+        plane.update_loiter_update_nav(radius, in);
+        INFO("crosstrack_error (m) = " << plane.nav_controller.crosstrack_error());
+        // Loiter dispatch: distance-to-center (50m) - radius (50m) = 0m. A
+        // mistaken waypoint dispatch (prev=(0,0)->next=(1000,0), a due-
+        // north line) would instead show a perpendicular offset of -50m
+        // for this same current_loc - clearly distinguishable from 0m.
+        REQUIRE(std::fabs(plane.nav_controller.crosstrack_error()) < 15.0f);
+    }
+}
+
+TEST_CASE("Plane::update_loiter: loiter.start_time_ms latches once reached_loiter_target() becomes true, and only once",
+          "[vehicle][rtl]") {
+    Plane plane;
+    plane.next_WP_loc = make_loc(0.0f, 0.0f, 0.0f); // loiter center at the shared origin
+    plane.crosstrack = false;                        // do_RTL's own real default - forces the direct-loiter branch
+
+    StabilizeInputs in;
+    in.eas2tas = 1.0f;
+    in.now_ms = 1000;
+    in.now_us = 1000000;
+    in.true_velocity_ned = fwcpp::math::Vector3f(0.0f, 12.0f, 0.0f); // flying east - tangential to a circle centered at the origin
+    plane.gps.update(in.true_velocity_ned, in.now_ms);
+
+    // Positioned exactly ON the loiter circle (50m north of center) -
+    // L1Control::update_loiter()'s own capture-vs-circle law only ever
+    // prefers the capture law when OUTSIDE the circle (xtrack_err_circ >
+    // 0); sitting exactly on it deterministically latches wp_circle_ true
+    // via the circle law, regardless of approach direction.
+    plane.current_loc = make_loc(50.0f, 0.0f, 0.0f);
+
+    REQUIRE(plane.loiter.start_time_ms == 0);
+    plane.update_loiter(50, in);
+    INFO("reached_loiter_target = " << plane.nav_controller.reached_loiter_target());
+    REQUIRE(plane.nav_controller.reached_loiter_target());
+    REQUIRE(plane.loiter.start_time_ms == in.now_ms);
+
+    // A further call at a LATER time must NOT re-latch start_time_ms -
+    // matches upstream's own "starts once" semantics (loiter.start_time_ms
+    // == 0 is the ONLY condition that lets it be set at all).
+    in.now_ms = 5000;
+    in.now_us = 5000000;
+    plane.update_loiter(50, in);
+    REQUIRE(plane.loiter.start_time_ms == 1000);
+}
+
+// ---------------------------------------------------------------------
+// Closed-loop integration test (the real point of this ticket's slice 6):
+// drive a genuine Plane + ModeRTL against SimPlane's ground-truth flight
+// dynamics, starting well away from home, and confirm SimPlane's TRUE
+// distance to home (ground truth, not any estimate) actually shrinks
+// substantially and then settles into a steady loiter near home -
+// matching this port's now-established "prove the loop actually closes"
+// standard (FBWA/FBWB/CRUISE/AUTO closed-loop tests above).
+// ---------------------------------------------------------------------
+
+TEST_CASE("Closed loop: RTL flies back toward home and then holds a loiter near it in SimPlane's ground truth",
+          "[vehicle][integration][rtl]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    ModeRTL rtl_mode(plane);
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    // Start 600m EAST of home, at 70m altitude, in level trimmed flight
+    // heading due north. SimPlane's dcm defaults to identity (level, nose
+    // north - see sim_plane.hpp's own constructor) - exactly consistent
+    // with the initial velocity below, so there is no initial attitude/
+    // velocity mismatch transient to settle before RTL's own convergence
+    // can fairly be judged.
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 600.0f, -70.0f);
+    sim_plane.velocity_ef = fwcpp::math::Vector3f(15.0f, 0.0f, 0.0f);
+    sim_plane.airspeed = 15.0f;
+
+    plane.set_home(fwcpp::Location()); // home at the shared fixed reference point, alt 0
+    // ModeRTL's real _enter() behavior (do_RTL()) needs a real current_loc
+    // to compute next_WP_loc/prev_WP_loc from - seed it from SimPlane's own
+    // true starting state, matching how a real vehicle would already have
+    // a valid position estimate before RTL engages.
+    plane.update_current_loc(sim_plane.position);
+    rtl_mode.enter();
+
+    const float initial_dist_to_home = plane.current_loc.get_distance(plane.home);
+    INFO("initial distance to home (m) = " << initial_dist_to_home);
+    REQUIRE(initial_dist_to_home > 500.0f);
+
+    float min_dist_to_home = initial_dist_to_home;
+    constexpr int kTotalTicks = 15000; // 300 simulated seconds
+    constexpr int kTailTicks = 2000;   // last 40 simulated seconds - steady-state loiter window
+    float tail_dist_sum = 0.0f;
+    float tail_dist_max = 0.0f;
+
+    for (int i = 0; i < kTotalTicks; ++i) {
+        now_us += 20000;
+        now_ms += 20;
+
+        // RTL reads no pilot stick input at all - centered sticks confirm
+        // this, they are never read (same convention AUTO's own closed-
+        // loop test already established).
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.armed_and_safety_off = true;
+        in.now_ms = now_ms;
+        in.now_us = now_us;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+        in.position_ned = sim_plane.position;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+
+        tick(plane, rtl_mode, gyro_sample, in);
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+
+        const float dist_to_home = plane.current_loc.get_distance(plane.home);
+        min_dist_to_home = std::min(min_dist_to_home, dist_to_home);
+        if (i >= kTotalTicks - kTailTicks) {
+            tail_dist_sum += dist_to_home;
+            tail_dist_max = std::max(tail_dist_max, dist_to_home);
+        }
+    }
+
+    const float tail_dist_avg = tail_dist_sum / static_cast<float>(kTailTicks);
+    INFO("initial distance (m) = " << initial_dist_to_home << ", min distance reached (m) = " << min_dist_to_home
+                                    << ", final-window avg distance (m) = " << tail_dist_avg
+                                    << ", final-window max distance (m) = " << tail_dist_max);
+
+    // Real convergence (see this test's own verification run): distance
+    // shrinks from 600m to ~73.8m and then holds there, with the whole
+    // 40-second tail window spanning barely 0.03m (73.76 to 73.79m) - a
+    // near-perfect circular orbit just outside the real, effective
+    // WP_LOITER_RAD default (60m - plane.hpp's kLoiterRadiusDefault),
+    // consistent with L1Control's own loiter-radius geometry at this
+    // airspeed. Generous margins below still meaningfully assert real
+    // convergence to a steady loiter near home, not just "didn't crash".
+    REQUIRE(min_dist_to_home < 120.0f);
+    REQUIRE(tail_dist_avg < 120.0f);
+    REQUIRE(tail_dist_max - min_dist_to_home < 30.0f); // settled, not still drifting
 }
