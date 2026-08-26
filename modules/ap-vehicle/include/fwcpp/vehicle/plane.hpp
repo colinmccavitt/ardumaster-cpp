@@ -1905,6 +1905,146 @@
 // slice's own scope (a standalone mode that loiters wherever it was
 // entered), and none of this slice's own code depends on any of them.
 
+// =====================================================================
+// CPP-031 SLICE 11 ADDENDUM: the real RC mode-switch channel - a
+// designated RC channel's PWM discretized into one of 6 positions
+// (fwcpp::rc::RcChannel::read_6pos_switch()/debounce_completed(),
+// ap-rc-channel module, see that module's own file banners), dispatched
+// through Plane::flight_modes into a real set_mode() call. Closes the
+// standing gap named by SLICE 7/8/10's own file banners: "set_mode() is
+// programmatic-only" - this is the first PILOT-facing way to change
+// modes in this port. Upstream (Plane-4.7.0, read directly, in full where
+// the ticket asked): ArduPlane/control_modes.cpp's RC_Channels_Plane::
+// read_mode_switch() (~line 106) and RC_Channel_Plane::mode_switch_
+// changed() (~line 115), both read in full; libraries/RC_Channel/
+// RC_Channel.cpp's read_6pos_switch()/debounce_completed()/read_mode_
+// switch() (all read in full, ap-rc-channel module); libraries/RC_Channel/
+// RC_Channels.cpp's read_mode_switch()/flight_mode_channel() (read in
+// full, ap-rc-channel module); ArduPlane/config.h's FLIGHT_MODE_CHANNEL/
+// FLIGHT_MODE_1..6 stock defaults (grepped directly); ArduPlane/
+// Parameters.cpp's FLTMODE_CH/FLTMODE1..6 GSCALAR declarations (grepped
+// directly, confirming they resolve to those same config.h macros).
+//
+// WHERE THE SPLIT LIVES: RcChannel gained the raw per-channel PWM
+// discretization/debounce primitives (read_6pos_switch()/
+// debounce_completed()); RcChannels gained the channel-resolution +
+// orchestration (flight_mode_channel_number/flight_mode_channel()/
+// read_mode_switch(), returning std::optional<std::int8_t> rather than
+// dispatching through a virtual callback - see rc_channels.hpp's own file
+// banner for the full rationale); Plane (here) owns the actual mode
+// TABLE (flight_modes) and the handler that turns a position into a real
+// set_mode() call (mode_switch_changed(), below) - the same three-layer
+// split upstream draws (RC_Channel -> RC_Channels -> vehicle-specific
+// RC_Channel_Plane/RC_Channels_Plane), just without a subclass hierarchy
+// to hang the vehicle-specific half off of (ADR-0012 - see rc_channels.hpp
+// again).
+//
+// FLIGHT_MODE_CHANNEL'S REAL DEFAULT IS 8, NOT 5 - CONFIRMED BY READING
+// config.h DIRECTLY, PER THE TICKET'S OWN INSTRUCTION NOT TO ASSUME: the
+// "channel 5" convention many pilots associate with mode switching is
+// RC_Channel's own bare-library example default (examples/RC_Channel/
+// RC_Channel.cpp:40's `return 5;`), not ArduPlane's real vehicle default.
+// ArduPlane/config.h:43 hardcodes `FLIGHT_MODE_CHANNEL 8` (guarded to only
+// ever be 5, 6, 7, or 8 - config.h:45's #error) - this port's
+// RcChannels::flight_mode_channel_number therefore defaults to 8
+// (rc_channels.hpp), reproducing ArduPlane's real stock configuration, not
+// the library example's.
+//
+// FLIGHT_MODES[] DEFAULT MAPPING - EVERY ONE OF UPSTREAM'S SIX REAL STOCK
+// DEFAULTS MAPS DIRECTLY, NO SUBSTITUTION NEEDED: ArduPlane/config.h's
+// real FLIGHT_MODE_1..6 defaults are RTL, RTL, FLY_BY_WIRE_A,
+// FLY_BY_WIRE_A, MANUAL, MANUAL (confirmed by reading config.h directly,
+// not the commonly-assumed MANUAL/CIRCLE/FBWA/... spread) - unlike the RC-
+// failsafe slice's own CIRCLE/BESTGUESS substitution, NONE of these six
+// stock defaults land on a mode this port lacks (no CIRCLE/STABILIZE/
+// TRAINING/ACRO/AUTOTUNE anywhere in the real default table), so
+// flight_modes below is a direct, unsubstituted port of upstream's own
+// out-of-the-box configuration:
+//   position 0 (FLTMODE1) -> RTL
+//   position 1 (FLTMODE2) -> RTL
+//   position 2 (FLTMODE3) -> FBWA
+//   position 3 (FLTMODE4) -> FBWA
+//   position 4 (FLTMODE5) -> MANUAL
+//   position 5 (FLTMODE6) -> MANUAL
+// FLTMODE1..6 themselves are NOT reproduced as separate AP_Int8-equivalent
+// fields (unlike flight_mode_channel_number, which stayed a plain field on
+// RcChannels): the ticket's own scope item 3 asks for `flight_modes` as a
+// `std::array<Mode*, 6>` directly, matching this port's existing
+// established "no Mode::Number enum, no number-indexed lookup" precedent
+// (commit 6db7924/CPP-031 slice 7) - failsafe_saved_mode/apply_fs_
+// action_short() (SLICE 8) already established the same direct-Mode*
+// pattern this array reuses.
+//
+// MODE_SWITCH_CHANGED()'S BOUNDS-CHECK DIVERGENCE - a real, narrow,
+// disclosed difference, NOT a silent "fix": see mode_switch_changed()'s
+// own doc comment (Plane class body, below) for why this port's guard is
+// `>= flight_modes.size()` rather than upstream's literal `>
+// plane.num_flight_modes` - behavior-identical for every input that can
+// actually reach this method (RcChannel::read_6pos_switch() only ever
+// produces 0..5), required only because std::array::operator[] (unlike
+// upstream's plain C array sitting among other Plane members) has no
+// memory-safety margin for an out-of-range index.
+//
+// MODEREASON::RC_COMMAND - DROPPED, SAME AS EVERY OTHER ModeReason VALUE
+// SINCE SLICE 7: mode_switch_changed() calls set_mode() with the default
+// from_failsafe=false - exactly like every other deliberate (non-
+// failsafe) caller. This is not a new decision; it is SLICE 7's own
+// standing "ModeReason has no consumer in this port's scope" call,
+// reproduced here rather than re-litigated - see set_mode()'s own doc
+// comment ("SET_MODE()" note) for the original rationale. Verified as a
+// REAL, LIVE interaction (not merely "should be fine by construction"),
+// per this ticket's own explicit request: a dedicated test
+// (vehicle_test.cpp) drives the failsafe machinery into mode_set_by_
+// failsafe=true, then dispatches a mode-switch-channel change, and
+// confirms mode_set_by_failsafe flips back to false and the subsequent
+// rc_failsafe_short_off_event() does NOT clobber the pilot's new
+// deliberate choice - the exact interaction SLICE 8's own restoration
+// design was built to get right for ANY future deliberate set_mode()
+// caller, now exercised by a second, independent one.
+//
+// TICK() WIRING - GATED THE SAME WAY UPSTREAM GATES IT: RC_Channels_
+// Plane::read_mode_switch()'s own override adds exactly one guard on top
+// of the RC_Channels base class - `if (millis() - plane.failsafe.last_
+// valid_rc_ms > 100) return;` ("only use signals that are less than 0.1s
+// old") - reusing failsafe.last_valid_rc_ms, already maintained every
+// tick by update_throttle_failsafe() (SLICE 8). Reproduced literally in
+// mode.hpp's tick(), placed immediately after step 1b (the RC failsafe
+// check that maintains last_valid_rc_ms) - see mode.hpp's own comment on
+// the new step for why that ordering is required (last_valid_rc_ms must
+// already reflect THIS tick's frame before the freshness check reads it).
+//
+// EXCLUDED (documented, not silently dropped):
+//   - Aux-function switches (2/3-position RC_Channel::AUX_FUNC option
+//     switches - flaps, camera triggers, relays, etc.) - a separate,
+//     larger subsystem already deferred since CPP-027 (rc_channels.hpp's
+//     own long-standing exclusion list); this slice is the dedicated
+//     flight-mode channel only, a real, distinct upstream concept
+//     (RC_Channels::flight_mode_channel() vs. RC_Channels::
+//     find_channel_for_option()) with its own separate storage
+//     (switch_state, per-channel) and its own separate configuration
+//     param (FLTMODE_CH vs. each channel's own RCx_OPTION).
+//   - flight_mode_channel_conflicts_with_rc_option() - no aux-function
+//     subsystem exists for the configured mode-switch channel to conflict
+//     with (rc_channels.hpp's own note).
+//   - GCS/logging notification of a mode change made via the switch
+//     (AP_Notify::events.user_mode_change/user_mode_change_failed,
+//     gcs().send_text() calls throughout upstream's mode_switch_changed()/
+//     set_mode()) - no such subsystem, the same exclusion SLICE 7's own
+//     set_mode() already established for every OTHER mode-change path.
+//   - Any FLIGHT_MODE_1..6 default that would have landed on a mode this
+//     port lacks - moot for THIS port's actual defaults (see the mapping
+//     above: none of the six real stock values need a substitute), but
+//     named per the ticket's own instruction in case a future slice
+//     changes these defaults to something requiring one - the established
+//     precedent to follow is CIRCLE->RTL (SLICE 8's apply_fs_action_
+//     short()).
+//
+// See RcChannels::read_mode_switch()/flight_mode_channel() (rc_channels.hpp)
+// and RcChannel::read_6pos_switch()/debounce_completed() (rc_channel.hpp)
+// for the channel-level mechanics, and mode_switch_changed()/flight_modes
+// (Plane class body, below) plus mode.hpp's own new tick() step for the
+// vehicle-level dispatch.
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -3996,6 +4136,25 @@ public:
     // here would skip all of that).
     Mode* control_mode = &mode_manual;
 
+    // CPP-031 SLICE 11 - upstream: Plane::flight_modes[6] (Plane.h), an
+    // array of six AP_Int8 params (FLTMODE1..6), each holding a
+    // Mode::Number a user configures via their GCS. This port has no
+    // Mode::Number enum and no number-indexed mode lookup at all (commit
+    // 6db7924/CPP-031 slice 7's own deliberate simplification, reaffirmed
+    // by every slice since) - so this is a std::array<Mode*, 6> of direct
+    // pointers into the six real mode members just above, exactly the
+    // same "direct Mode*, no enum indirection" pattern failsafe_saved_mode
+    // (below) already established. Default values: see file banner's
+    // "FLIGHT_MODES[] DEFAULT MAPPING" note for the full trace against
+    // ArduPlane/config.h's real FLIGHT_MODE_1..6 stock defaults (RTL, RTL,
+    // FBWA, FBWA, MANUAL, MANUAL - no substitution needed, unlike the
+    // RC-failsafe slice's CIRCLE->RTL case). Declared after all six mode
+    // members and control_mode for the same readability-only reason
+    // control_mode's own comment gives - taking a member's address never
+    // requires it to be constructed yet, so declaration order has no
+    // correctness bearing here either.
+    std::array<Mode*, 6> flight_modes{&mode_rtl, &mode_rtl, &mode_fbwa, &mode_fbwa, &mode_manual, &mode_manual};
+
     // CPP-031 slice 8 (RC short failsafe) - see this file's own "CPP-031
     // SLICE 8 ADDENDUM" for the full design. FailsafeState is this port's
     // reduced equivalent of upstream's Plane::failsafe struct (Plane.h) -
@@ -4074,6 +4233,44 @@ public:
         // upstream: "exit previous mode".
         old_mode.exit();
         return true;
+    }
+
+    // upstream: RC_Channel_Plane::mode_switch_changed(modeswitch_pos_t
+    // new_pos) (control_modes.cpp ~line 115, read in full) - see file
+    // banner's "CPP-031 SLICE 11 ADDENDUM" for the full design. The sole
+    // caller is mode.hpp's tick(), fed by plane.rc_channels.
+    // read_mode_switch()'s returned position.
+    //
+    // MODEREASON::RC_COMMAND DROPPED: set_mode() is called with the
+    // default from_failsafe=false - the same "deliberate, not failsafe-
+    // owned" path every other non-failsafe caller uses. See file banner
+    // for why this correctly clears a stale mode_set_by_failsafe left
+    // over from an active RC-short-failsafe, verified by a dedicated test
+    // (vehicle_test.cpp).
+    //
+    // BOUNDS CHECK DIVERGENCE (real, disclosed, behavior-identical for
+    // every reachable input - see file banner's own note for the full
+    // explanation): upstream's literal guard is `new_pos < 0 ||
+    // (uint8_t)new_pos > plane.num_flight_modes` (num_flight_modes == 6),
+    // which only rejects new_pos >= 7 - one past the truly out-of-range
+    // value for a 6-element, 0-indexed array. This never actually matters
+    // upstream because new_pos only ever arrives from RC_Channel::
+    // read_6pos_switch(), whose six fixed breakpoints can only produce
+    // 0..5. flight_modes here is a std::array (ADR-0012 - see file
+    // banner's "NO Mode::Number ENUM" precedent) whose operator[] is not
+    // bounds-checked, unlike upstream's plain C array member (an
+    // out-of-range read there would land in adjacent Plane state rather
+    // than being undefined behavior) - so this port tightens the
+    // comparison to `>= flight_modes.size()` to stay memory-safe.
+    // Behavior-identical for the only inputs that can ever reach this
+    // method today.
+    void mode_switch_changed(std::int8_t new_pos) {
+        if (new_pos < 0 || static_cast<std::size_t>(new_pos) >= flight_modes.size()) {
+            // should not have been called
+            return;
+        }
+
+        set_mode(*flight_modes[static_cast<std::size_t>(new_pos)]);
     }
 
     // upstream: Plane::rc_throttle_value_ok() (radio.cpp ~line 333). See

@@ -48,10 +48,10 @@
 //   - Aux function dispatch (RC_Channel::AUX_FUNC, find_channel_for_option,
 //     init_aux_all/read_aux_all, duplicate_options_exist, convert_options).
 //     A large separate subsystem (RC-channel-to-auxiliary-switch-function
-//     mapping) with its own scope, not part of this slice.
-//   - Mode switch handling (reset_mode_switch/read_mode_switch/
-//     flight_mode_channel/flight_mode_channel_number). Needs the
-//     vehicle's flight-mode subsystem, which doesn't exist in this port.
+//     mapping) with its own scope, not part of this slice. Still out of
+//     scope as of CPP-031 slice 11 below - see that slice's own note for
+//     exactly where the boundary between "flight-mode channel" and
+//     "aux-function channel" is drawn.
 //   - RSSI / link quality (get_receiver_rssi/get_receiver_link_quality).
 //     Hardware-telemetry-adjacent; no receiver-link modeling exists here.
 //   - The Option enum / option_is_enabled bitmask (CRSF/FPORT/arming-check
@@ -72,10 +72,54 @@
 //     All thin wrappers around subsystems (AP_RCMapper, AP_Scripting,
 //     AP_Param-backed options) this port hasn't ported; trivial to add
 //     once a real caller needs one, not designed in speculatively now.
+//
+// CPP-031 SLICE 11: added flight_mode_channel_number/flight_mode_channel()/
+// read_mode_switch() - upstream: RC_Channels::flight_mode_channel()
+// (RC_Channel.cpp ~line 211, read in full) and RC_Channels::
+// read_mode_switch() (~line 232, read in full). flight_mode_channel_number
+// is upstream's FLTMODE_CH (ArduPlane/Parameters.cpp), an AP_Param-backed
+// int - not wired to AP_Param yet (see rc_channel.hpp's own precedent for
+// radio_min/max/trim), so it's a plain field here, 1-indexed exactly like
+// upstream's own convention (channel 1 is index 0 - flight_mode_channel()
+// below subtracts 1, matching upstream's `rc_channel(num-1)`). Default 8:
+// ArduPlane's real FLIGHT_MODE_CHANNEL stock default (ArduPlane/config.h,
+// grepped directly, NOT assumed to be channel 5 - RC_Channel's own
+// standalone example (examples/RC_Channel/RC_Channel.cpp:40) hardcodes 5,
+// but that is a bare-library example, not ArduPlane's real vehicle
+// default).
+//
+// READ_MODE_SWITCH() COLLAPSES THREE UPSTREAM METHODS INTO ONE, PER THE
+// TICKET'S OWN INSTRUCTION TO DESIGN THE CLEANEST NO-EXCEPTIONS SHAPE:
+// upstream splits this across RC_Channels::read_mode_switch() (has_valid_
+// input() guard + flight_mode_channel() lookup) calling RC_Channel::
+// read_mode_switch() (calls read_6pos_switch(), and on success alone,
+// dispatches to a virtual mode_switch_changed(modeswitch_pos_t) - a
+// per-vehicle override, ArduPlane's RC_Channel_Plane::mode_switch_changed(),
+// control_modes.cpp). This port has no RC_Channel subclass hierarchy (no
+// singleton/virtual-dispatch machinery at all - ADR-0012, this file's own
+// "NO SINGLETON" note above) for a vehicle to hook a virtual method into,
+// so instead of inventing one just to carry a single callback, this method
+// returns `std::optional<std::int8_t>` - nullopt for "no actionable change
+// this call" (no valid input yet, no channel configured, invalid PWM, or
+// debounce not yet complete - all four of upstream's own "don't call
+// mode_switch_changed()" cases collapse to the same nullopt here), or the
+// new debounced position (0..5) when a real, actionable change occurred.
+// The caller (fwcpp::vehicle::Plane::mode_switch_changed(), plane.hpp) is
+// the one that knows how to turn a position into an actual set_mode() call
+// - exactly upstream's own separation of concerns (RC_Channels doesn't
+// know about modes either), just expressed as a return value instead of a
+// virtual callback.
+//
+// flight_mode_channel_conflicts_with_rc_option() is NOT ported - it exists
+// purely to warn about a channel double-booked between the mode switch and
+// an aux function, and this port has no aux-function subsystem to conflict
+// with (this file's own long-standing exclusion, above) - nothing for this
+// method to meaningfully check.
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <optional>
 
 #include <fwcpp/hal/rc_input.hpp>
 #include <fwcpp/rc/rc_channel.hpp>
@@ -185,6 +229,45 @@ public:
     // file banner).
     [[nodiscard]] std::uint8_t get_valid_channel_count(const hal::RcInput& rc_input) const {
         return std::min<std::uint8_t>(kNumRcChannels, rc_input.num_channels());
+    }
+
+    // upstream: FLTMODE_CH (ArduPlane/Parameters.cpp) via RC_Channels_Plane::
+    // flight_mode_channel_number() (RC_Channel_Plane.cpp:15) - see file
+    // banner's "CPP-031 SLICE 11" note for the default-8-not-5 finding.
+    // 1-indexed; 0 (or any value outside 1..kNumRcChannels) means "no mode
+    // switch channel configured", matching upstream's own `num <= 0`/
+    // `num >= NUM_RC_CHANNELS` guards in flight_mode_channel() below.
+    std::int8_t flight_mode_channel_number = 8;
+
+    // upstream: RC_Channels::flight_mode_channel() (RC_Channel.cpp ~line
+    // 211, read in full).
+    [[nodiscard]] RcChannel* flight_mode_channel() {
+        if (flight_mode_channel_number <= 0 || flight_mode_channel_number > static_cast<std::int8_t>(kNumRcChannels)) {
+            return nullptr;
+        }
+        return channel(static_cast<std::uint8_t>(flight_mode_channel_number - 1));
+    }
+
+    // upstream: RC_Channels::read_mode_switch() (RC_Channel.cpp ~line 232)
+    // + RC_Channel::read_mode_switch()/read_6pos_switch() (RC_Channel.cpp),
+    // collapsed - see file banner's "CPP-031 SLICE 11" note for why this
+    // returns std::optional<std::int8_t> instead of dispatching through a
+    // virtual mode_switch_changed(). now_ms is an explicit parameter
+    // (ADR-0012) forwarded straight to RcChannel::read_6pos_switch().
+    [[nodiscard]] std::optional<std::int8_t> read_mode_switch(std::uint32_t now_ms) {
+        if (!has_valid_input()) {
+            // exit immediately when no RC input - upstream's own guard.
+            return std::nullopt;
+        }
+        RcChannel* c = flight_mode_channel();
+        if (c == nullptr) {
+            return std::nullopt;
+        }
+        std::int8_t position = 0;
+        if (!c->read_6pos_switch(position, now_ms)) {
+            return std::nullopt;
+        }
+        return position;
     }
 
 private:

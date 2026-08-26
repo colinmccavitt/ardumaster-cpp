@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/hal/rc_input.hpp>
@@ -167,4 +168,96 @@ TEST_CASE("get_valid_channel_count is the min of kNumRcChannels and RcInput::num
     // fwcpp::hal::RcInput::num_channels() is fixed at kNumRcChannels (32),
     // which is larger than fwcpp::rc::kNumRcChannels (16).
     REQUIRE(rc.get_valid_channel_count(rc_input) == kNumRcChannels);
+}
+
+// ---------------------------------------------------------------------
+// CPP-031 SLICE 11: flight_mode_channel_number/flight_mode_channel()/
+// read_mode_switch() - see rc_channels.hpp's own file banner for the
+// full design (why this returns std::optional<std::int8_t> rather than
+// dispatching through a virtual callback).
+// ---------------------------------------------------------------------
+
+TEST_CASE("flight_mode_channel_number defaults to 8 (ArduPlane's real FLIGHT_MODE_CHANNEL stock default), "
+          "1-indexed, resolving to channel(7)",
+          "[rc_channels][mode_switch]") {
+    RcChannels rc;
+    REQUIRE(rc.flight_mode_channel_number == 8);
+    REQUIRE(rc.flight_mode_channel() == rc.channel(7));
+}
+
+TEST_CASE("flight_mode_channel returns nullptr when unconfigured (<=0) or out of range", "[rc_channels][mode_switch]") {
+    RcChannels rc;
+
+    rc.flight_mode_channel_number = 0;
+    REQUIRE(rc.flight_mode_channel() == nullptr);
+
+    rc.flight_mode_channel_number = -1;
+    REQUIRE(rc.flight_mode_channel() == nullptr);
+
+    rc.flight_mode_channel_number = static_cast<std::int8_t>(kNumRcChannels) + 1; // one past the last valid channel
+    REQUIRE(rc.flight_mode_channel() == nullptr);
+
+    rc.flight_mode_channel_number = static_cast<std::int8_t>(kNumRcChannels); // the last valid channel (1-indexed)
+    REQUIRE(rc.flight_mode_channel() == rc.channel(kNumRcChannels - 1));
+}
+
+TEST_CASE("read_mode_switch returns nullopt before any RC input has ever been seen", "[rc_channels][mode_switch]") {
+    RcChannels rc;
+    REQUIRE_FALSE(rc.read_mode_switch(0).has_value());
+}
+
+TEST_CASE("read_mode_switch returns nullopt when no mode-switch channel is configured", "[rc_channels][mode_switch]") {
+    RcChannels rc;
+    fwcpp::hal::RcInput rc_input;
+    rc_input.set_channel(7, 1500);
+    REQUIRE(rc.read_input(rc_input));
+
+    rc.flight_mode_channel_number = 0; // disabled, matching upstream's own "0 = disabled" convention
+    REQUIRE_FALSE(rc.read_mode_switch(1000).has_value());
+}
+
+TEST_CASE("read_mode_switch dispatches to the configured channel and requires the full debounce window before "
+          "returning a position",
+          "[rc_channels][mode_switch]") {
+    RcChannels rc;
+    fwcpp::hal::RcInput rc_input;
+    rc_input.set_channel(7, 1500); // the default FLTMODE_CH=8 (1-indexed) -> index 7; PWM 1500 -> position 3
+    REQUIRE(rc.read_input(rc_input));
+
+    REQUIRE_FALSE(rc.read_mode_switch(0).has_value());   // first observation - debounce not complete
+    REQUIRE_FALSE(rc.read_mode_switch(100).has_value()); // still within the 200ms window
+    const std::optional<std::int8_t> pos = rc.read_mode_switch(200);
+    REQUIRE(pos.has_value());
+    REQUIRE(*pos == 3);
+
+    // Once settled, re-reading the SAME position is "no new change" -
+    // matches RcChannel::debounce_completed()'s own event (not level)
+    // semantics.
+    REQUIRE_FALSE(rc.read_mode_switch(1000).has_value());
+}
+
+TEST_CASE("read_mode_switch returns nullopt for an out-of-range (error) PWM on the mode-switch channel",
+          "[rc_channels][mode_switch]") {
+    RcChannels rc;
+    fwcpp::hal::RcInput rc_input;
+    rc_input.set_channel(7, 700); // below RC_MIN_LIMIT_PWM (800) - a receiver/wiring error, not a real position
+    REQUIRE(rc.read_input(rc_input));
+
+    REQUIRE_FALSE(rc.read_mode_switch(0).has_value());
+    REQUIRE_FALSE(rc.read_mode_switch(10000).has_value()); // no amount of elapsed time makes an invalid PWM valid
+}
+
+TEST_CASE("read_mode_switch honors a remapped mode-switch channel number, not always index 7",
+          "[rc_channels][mode_switch]") {
+    RcChannels rc;
+    fwcpp::hal::RcInput rc_input;
+    rc.flight_mode_channel_number = 6; // 1-indexed -> index 5
+    rc_input.set_channel(5, 1231);     // position 1
+    rc_input.set_channel(7, 1231);     // the DEFAULT channel - must NOT be read once remapped
+    REQUIRE(rc.read_input(rc_input));
+
+    REQUIRE_FALSE(rc.read_mode_switch(0).has_value());
+    const std::optional<std::int8_t> pos = rc.read_mode_switch(200);
+    REQUIRE(pos.has_value());
+    REQUIRE(*pos == 1);
 }

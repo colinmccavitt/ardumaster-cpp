@@ -35,6 +35,23 @@ void set_sticks(Plane& plane, std::uint16_t roll_pwm, std::uint16_t pitch_pwm, s
     plane.rc_channels.read_input(plane.hal.rc_input);
 }
 
+// CPP-031 SLICE 11: the RC input index a fresh Plane's mode-switch channel
+// resolves to - RcChannels::flight_mode_channel_number defaults to 8
+// (1-indexed, plane.hpp's own "CPP-031 SLICE 11 ADDENDUM"), so index 7.
+// Deliberately a SEPARATE constant from kChannelRoll/Pitch/Throttle/Rudder
+// (indices 0-3) - the mode-switch channel is a distinct physical channel,
+// never one of the four primary control channels.
+constexpr std::uint8_t kChannelFlightModeSwitch = 7;
+
+// Sets the mode-switch channel's PWM and pulls it in, in addition to
+// whatever the four primary sticks are doing - a caller still calls
+// set_sticks() itself (or drives plane.hal.rc_input directly) for those;
+// this only exists so mode-switch-focused tests below don't need to
+// re-state "index 7" at every call site.
+void set_mode_switch_pwm(Plane& plane, std::uint16_t pwm) {
+    plane.hal.rc_input.set_channel(kChannelFlightModeSwitch, pwm);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------
@@ -2619,6 +2636,174 @@ TEST_CASE("tick(): a set_mode() call from within navigate() takes effect on the 
 }
 
 // ---------------------------------------------------------------------
+// CPP-031 SLICE 11: the real RC mode-switch channel - see plane.hpp's own
+// "CPP-031 SLICE 11 ADDENDUM" file banner for the full design. Channel-
+// level discretization/debounce (RcChannel::read_6pos_switch()/
+// debounce_completed()) and dispatch-resolution (RcChannels::
+// read_mode_switch()/flight_mode_channel()) are covered by rc_channel_
+// test.cpp/rc_channels_test.cpp (ap-rc-channel module) - these tests cover
+// only the vehicle-level consumer: Plane::flight_modes/mode_switch_
+// changed(), and tick()'s own wiring.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Plane::flight_modes defaults to ArduPlane's real stock FLTMODE1..6 mapping - RTL,RTL,FBWA,FBWA,MANUAL,"
+          "MANUAL, no substitution needed",
+          "[vehicle][mode_switch]") {
+    Plane plane;
+    REQUIRE(plane.flight_modes.size() == 6);
+    REQUIRE(plane.flight_modes[0] == &plane.mode_rtl);    // FLTMODE1
+    REQUIRE(plane.flight_modes[1] == &plane.mode_rtl);    // FLTMODE2
+    REQUIRE(plane.flight_modes[2] == &plane.mode_fbwa);   // FLTMODE3
+    REQUIRE(plane.flight_modes[3] == &plane.mode_fbwa);   // FLTMODE4
+    REQUIRE(plane.flight_modes[4] == &plane.mode_manual); // FLTMODE5
+    REQUIRE(plane.flight_modes[5] == &plane.mode_manual); // FLTMODE6
+}
+
+TEST_CASE("Plane::mode_switch_changed calls set_mode() with flight_modes[new_pos] for real positions",
+          "[vehicle][mode_switch]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    std::array<MissionItem, 1> items;
+    items[0].loc = make_loc(50.0f, 0.0f, 30.0f);
+    REQUIRE(plane.mission.load(items));
+
+    plane.mode_switch_changed(2); // position 2 -> FBWA
+    REQUIRE(plane.control_mode == &plane.mode_fbwa);
+
+    plane.mode_switch_changed(0); // position 0 -> RTL
+    REQUIRE(plane.control_mode == &plane.mode_rtl);
+
+    plane.mode_switch_changed(4); // position 4 -> MANUAL
+    REQUIRE(plane.control_mode == &plane.mode_manual);
+
+    plane.mode_switch_changed(1); // position 1 -> RTL (same target as position 0, different slot)
+    REQUIRE(plane.control_mode == &plane.mode_rtl);
+}
+
+TEST_CASE("Plane::mode_switch_changed ignores an out-of-range position, leaving control_mode untouched",
+          "[vehicle][mode_switch]") {
+    Plane plane;
+    REQUIRE(plane.control_mode == &plane.mode_manual); // the documented default
+
+    plane.mode_switch_changed(-1);
+    REQUIRE(plane.control_mode == &plane.mode_manual);
+
+    // Real, disclosed divergence from upstream's own loose `> num_flight_
+    // modes` (== 6) bounds check - see plane.hpp's own doc comment on
+    // mode_switch_changed() for why this port's guard is `>=
+    // flight_modes.size()` instead (memory safety for std::array, no
+    // behavior difference for any input RcChannel::read_6pos_switch() can
+    // actually produce). Both 6 and 100 must be rejected here.
+    plane.mode_switch_changed(6);
+    REQUIRE(plane.control_mode == &plane.mode_manual);
+
+    plane.mode_switch_changed(100);
+    REQUIRE(plane.control_mode == &plane.mode_manual);
+}
+
+TEST_CASE("Plane::mode_switch_changed correctly clears a stale mode_set_by_failsafe - the same interaction every "
+          "other deliberate set_mode() caller gets",
+          "[vehicle][mode_switch][failsafe]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+
+    REQUIRE(plane.set_mode(plane.mode_fbwa));
+    plane.rc_failsafe_short_on_event(); // default fs_action_short (BestGuess) -> RTL, mode_set_by_failsafe = true
+    REQUIRE(plane.control_mode == &plane.mode_rtl);
+    REQUIRE(plane.mode_set_by_failsafe);
+
+    // The pilot flips the real mode-switch channel WHILE the failsafe
+    // window is still open - exactly the scenario rc_failsafe_short_off_
+    // event()'s own restoration design (CPP-031 slice 8) exists to handle
+    // correctly for ANY deliberate set_mode() caller, now exercised by a
+    // second, independent one (the first being a plain plane.set_mode()
+    // call, already covered by the slice 8 test above).
+    plane.mode_switch_changed(2); // position 2 -> FBWA
+    REQUIRE(plane.control_mode == &plane.mode_fbwa);
+    REQUIRE_FALSE(plane.mode_set_by_failsafe);
+
+    // Recovery must NOT clobber the pilot's own deliberate choice.
+    plane.rc_failsafe_short_off_event();
+    REQUIRE(plane.control_mode == &plane.mode_fbwa);
+    REQUIRE_FALSE(plane.failsafe.short_failsafe_active);
+}
+
+TEST_CASE("tick(): a stable mode-switch channel PWM, fed every tick, drives a real set_mode() call exactly once "
+          "debounced - not before",
+          "[vehicle][mode_switch][tick]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    std::uint32_t now_ms = 0;
+    fwcpp::ahrs::GyroSample gyro_sample;
+    StabilizeInputs in;
+    in.dt = 0.02f;
+
+    bool switched = false;
+    int switch_tick = -1;
+    for (int i = 0; i < 20; ++i) {
+        now_ms += 20;
+        in.now_ms = now_ms;
+        set_mode_switch_pwm(plane, 900); // position 0 -> RTL
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+        tick(plane, gyro_sample, in);
+        if (!switched && plane.control_mode == &plane.mode_rtl) {
+            switched = true;
+            switch_tick = i;
+        }
+    }
+
+    REQUIRE(switched);
+    // now_ms starts at 20 (first tick), establishing the debounce edge;
+    // the switch is real once now_ms - 20 >= 200, i.e. now_ms == 220,
+    // which is loop iteration i == 10 (0-indexed) - an exact, deterministic
+    // prediction (pure integer millisecond arithmetic, no floating-point
+    // jitter involved), not just "eventually".
+    REQUIRE(switch_tick == 10);
+    REQUIRE(plane.control_mode != &plane.mode_manual);
+}
+
+TEST_CASE("tick(): the mode-switch channel is ignored once the last valid RC frame goes stale (>100ms old), even "
+          "though the channel's own PWM has been stable the whole time",
+          "[vehicle][mode_switch][failsafe]") {
+    Plane plane;
+    std::uint32_t now_ms = 0;
+    fwcpp::ahrs::GyroSample gyro_sample;
+    StabilizeInputs in;
+    in.dt = 0.02f;
+
+    // Seed has_valid_input()==true and a real last_valid_rc_ms with one
+    // genuine RC frame.
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    now_ms = 20;
+    in.now_ms = now_ms;
+    tick(plane, gyro_sample, in);
+    REQUIRE(plane.failsafe.last_valid_rc_ms == 20);
+
+    // From here on, pin the mode-switch channel's own radio_in directly
+    // (bypassing RcInput/read_input() entirely) rather than feeding any
+    // more real frames - this is the real, in-scope distinction under
+    // test: a channel whose PWM has been rock-stable is NOT the same
+    // thing as a healthy RC LINK. last_valid_rc_ms must freeze (no new
+    // frames ever arrive again), while the channel's own debounce clock
+    // (driven purely by now_ms) keeps advancing underneath it.
+    plane.rc_channels.channel(kChannelFlightModeSwitch)->radio_in = 1500; // would debounce to FBWA (position 3)
+
+    const std::uint32_t frozen_last_valid_rc_ms = plane.failsafe.last_valid_rc_ms;
+    for (int i = 0; i < 20; ++i) {
+        now_ms += 20;
+        in.now_ms = now_ms;
+        tick(plane, gyro_sample, in); // no set_sticks()/read_input() call - no new frame ever arrives
+    }
+
+    REQUIRE(plane.failsafe.last_valid_rc_ms == frozen_last_valid_rc_ms); // confirms the link genuinely went stale
+    // 400ms (20 ticks) of a rock-stable position-3 PWM is easily more than
+    // the 200ms debounce window would need - yet control_mode never moved,
+    // because the 100ms freshness guard cut off read_mode_switch() calls
+    // well before the local debounce clock could finish.
+    REQUIRE(plane.control_mode == &plane.mode_manual);
+}
+
+// ---------------------------------------------------------------------
 // Closed-loop integration test (the real point of this ticket's slice 7):
 // fly a short AUTO mission to completion through the REAL entry point
 // (Plane::set_mode(plane.mode_auto)) and the REAL per-tick dispatch
@@ -3676,4 +3861,216 @@ TEST_CASE("Closed loop: a disarmed vehicle's servo outputs stay safety-zeroed at
     // run, rather than the vehicle starting pre-armed, does not
     // meaningfully change the convergence budget.
     REQUIRE(true_roll_deg == Catch::Approx(commanded_roll_deg).margin(3.0f));
+}
+
+// ---------------------------------------------------------------------
+// CPP-031 SLICE 11: closed-loop, genuinely PILOT-DRIVEN mode switching -
+// the real point of this slice. Every other closed-loop test in this file
+// drives mode transitions programmatically (a direct set_mode() call, or
+// AUTO's own internal mission-complete trigger); this is the first one
+// where the mode change itself flows end-to-end through the real RC
+// mode-switch channel - PWM on plane.hal.rc_input -> RcChannels::
+// read_input()/read_mode_switch() -> Plane::mode_switch_changed() ->
+// set_mode() - exactly the pipeline a real pilot's transmitter would
+// drive, with tick() as the only caller (no test-only shortcut anywhere
+// in this loop). Two real transitions, each requiring the full 200ms
+// debounce window to actually take effect: MANUAL (the default) -> FBWA
+// (stick-commanded bank, reusing the dedicated FBWA closed-loop test's
+// own proven convergence check) -> RTL (reusing RTL's own dedicated
+// closed-loop test's real navigate-home-then-loiter convergence check).
+// ---------------------------------------------------------------------
+
+TEST_CASE("Closed loop: the real RC mode-switch channel drives MANUAL -> FBWA -> RTL end to end, and the vehicle "
+          "flies sensibly in each mode under SimPlane's ground truth",
+          "[vehicle][integration][mode_switch]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint32_t now_ms = 0;
+
+    // Same starting geometry as the dedicated RTL closed-loop test above:
+    // 600m east of home, 70m up, in level trimmed flight heading north -
+    // consistent with SimPlane's default identity dcm, so there is no
+    // initial attitude/velocity mismatch transient to settle before
+    // either phase's own convergence can fairly be judged.
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 600.0f, -70.0f);
+    sim_plane.velocity_ef = fwcpp::math::Vector3f(15.0f, 0.0f, 0.0f);
+    sim_plane.airspeed = 15.0f;
+
+    plane.set_home(fwcpp::Location()); // home at the shared fixed reference point, alt 0
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+
+    REQUIRE(plane.control_mode == &plane.mode_manual); // the documented default - not yet switched at all
+
+    // ---- Phase 1: mode-switch channel at position 3 (PWM 1500) -> FBWA,
+    // with the SAME fixed right-roll-plus-throttle stick command the
+    // dedicated FBWA closed-loop test above uses. ----
+    bool switched_to_fbwa = false;
+    int fbwa_switch_tick = -1;
+    float commanded_roll_deg = 0.0f;
+    constexpr int kPhase1Ticks = 1500; // 30 simulated seconds - same budget as the dedicated FBWA test
+
+    for (int i = 0; i < kPhase1Ticks; ++i) {
+        now_ms += 20;
+
+        set_mode_switch_pwm(plane, 1500); // position 3 -> FBWA
+        set_sticks(plane, 1650, 1500, 1700, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.now_ms = now_ms;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+        in.position_ned = sim_plane.position;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+
+        tick(plane, gyro_sample, in);
+
+        if (!switched_to_fbwa && plane.control_mode == &plane.mode_fbwa) {
+            switched_to_fbwa = true;
+            fbwa_switch_tick = i;
+        }
+        if (switched_to_fbwa && i == fbwa_switch_tick + 1) {
+            // CPP-031 SLICE 7's own tick() dispatch note applies here too:
+            // `Mode& mode` is bound at tick() ENTRY, before step 1c's
+            // mode-switch dispatch runs - so the tick where plane.
+            // control_mode first flips to &mode_fbwa still finishes THAT
+            // tick's update()/run() against the OLD mode (MANUAL), whose
+            // own nav_roll_cd is set from the AHRS's CURRENT attitude, not
+            // a demand (ModeManual::update()'s own comment, mode.hpp) -
+            // reading nav_roll_cd right at fbwa_switch_tick would
+            // therefore capture stale/wrong data. The FOLLOWING tick is
+            // the first one FBWA's own update() actually runs for real.
+            commanded_roll_deg = static_cast<float>(plane.nav_roll_cd) * 0.01f;
+        }
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+    }
+
+    INFO("FBWA switch happened at tick " << fbwa_switch_tick << " (of " << kPhase1Ticks << ")");
+    REQUIRE(switched_to_fbwa);
+    // The debounce window is 200ms (10 ticks at 20ms) - the real switch
+    // must not be instantaneous, but also must not be unreasonably late.
+    REQUIRE(fbwa_switch_tick >= 9);
+    REQUIRE(fbwa_switch_tick <= 15);
+
+    float true_roll = 0.0f;
+    float true_pitch = 0.0f;
+    float true_yaw = 0.0f;
+    sim_plane.dcm.to_euler(&true_roll, &true_pitch, &true_yaw);
+    const float true_roll_deg = fwcpp::math::degrees(true_roll);
+    INFO("commanded roll (deg) = " << commanded_roll_deg << ", true roll (deg) = " << true_roll_deg);
+    REQUIRE(commanded_roll_deg > 0.0f);
+    // Same real convergence standard as the dedicated FBWA closed-loop
+    // test above - the mode having been engaged via the RC switch rather
+    // than a direct plane.control_mode assignment does not change the
+    // underlying control law at all.
+    REQUIRE(true_roll_deg == Catch::Approx(commanded_roll_deg).margin(3.0f));
+
+    const float dist_to_home_at_switch = plane.current_loc.get_distance(plane.home);
+    INFO("distance to home when phase 2 begins (m) = " << dist_to_home_at_switch);
+
+    // ---- Phase 2: mode-switch channel at position 0 (PWM 900) -> RTL.
+    // RTL reads no pilot stick input at all - centered sticks confirm
+    // this, matching RTL's own dedicated closed-loop test above. ----
+    bool switched_to_rtl = false;
+    int rtl_switch_tick = -1;
+    float min_dist_to_home = dist_to_home_at_switch;
+    constexpr int kPhase2Ticks = 15000; // 300 simulated seconds - same budget as the dedicated RTL test
+    constexpr int kTailTicks = 2000;    // last 40 simulated seconds - steady-state loiter window
+    float tail_dist_sum = 0.0f;
+    float tail_dist_max = 0.0f;
+
+    for (int i = 0; i < kPhase2Ticks; ++i) {
+        now_ms += 20;
+
+        set_mode_switch_pwm(plane, 900); // position 0 -> RTL
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.now_ms = now_ms;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+        in.position_ned = sim_plane.position;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+
+        tick(plane, gyro_sample, in);
+
+        if (!switched_to_rtl && plane.control_mode == &plane.mode_rtl) {
+            switched_to_rtl = true;
+            rtl_switch_tick = i;
+        }
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+
+        const float dist_to_home = plane.current_loc.get_distance(plane.home);
+        min_dist_to_home = std::min(min_dist_to_home, dist_to_home);
+        if (i >= kPhase2Ticks - kTailTicks) {
+            tail_dist_sum += dist_to_home;
+            tail_dist_max = std::max(tail_dist_max, dist_to_home);
+        }
+    }
+
+    const float final_dist_to_home = plane.current_loc.get_distance(plane.home);
+    const float tail_dist_avg = tail_dist_sum / static_cast<float>(kTailTicks);
+    INFO("RTL switch happened at tick " << rtl_switch_tick << " (of " << kPhase2Ticks
+                                         << "), distance at switch (m) = " << dist_to_home_at_switch
+                                         << ", min distance reached (m) = " << min_dist_to_home
+                                         << ", final distance (m) = " << final_dist_to_home
+                                         << ", final-window avg distance (m) = " << tail_dist_avg
+                                         << ", final-window max distance (m) = " << tail_dist_max);
+
+    REQUIRE(switched_to_rtl);
+    REQUIRE(rtl_switch_tick >= 9);
+    REQUIRE(rtl_switch_tick <= 15);
+
+    // RTL's own real navigation genuinely closes the distance to home,
+    // wherever FBWA's own banked turn happened to leave the vehicle, and
+    // settles into a STABLE loiter rather than merely passing near home in
+    // transit - the same real convergence standard the dedicated RTL
+    // closed-loop test above established (shrink, then hold), just
+    // reached this time via a genuine pilot-driven mode-switch-channel
+    // sequence rather than a direct enter() call or a mission completing
+    // on its own.
+    //
+    // Real observed numbers from this test's own verification run: a
+    // sustained ~16.85deg FBWA turn for 30s (rather than flying a straight
+    // line) leaves the vehicle circling roughly 1.19km from home by the
+    // time the switch to RTL completes - about 2x the dedicated RTL test's
+    // own controlled 600m start - so RTL settles into a proportionally
+    // larger, but still perfectly stable, ~222m loiter (confirmed by
+    // running this same scenario with a 500s instead of 300s RTL budget:
+    // the final distance was bit-for-bit identical, i.e. already fully
+    // settled well before 300s, not still trending). Margins below are
+    // generous relative to that real number while still meaningfully
+    // asserting genuine convergence to a steady orbit, not just "didn't
+    // crash" or "happened to pass close to home once".
+    REQUIRE(min_dist_to_home < dist_to_home_at_switch);
+    REQUIRE(tail_dist_avg < 260.0f);
+    REQUIRE(tail_dist_max - min_dist_to_home < 30.0f); // settled, not still drifting
 }

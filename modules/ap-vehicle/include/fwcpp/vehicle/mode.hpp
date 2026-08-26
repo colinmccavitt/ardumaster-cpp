@@ -29,6 +29,8 @@
 // starting the FOLLOWING tick() call, not the one still in progress - see
 // that comment for why and how this is verified).
 
+#include <optional>
+
 #include <fwcpp/vehicle/plane.hpp>
 
 namespace fwcpp::vehicle {
@@ -453,6 +455,19 @@ inline void ModeLOITER::navigate(const StabilizeInputs& in) {
 // set_sticks()-driven throttle PWM stays comfortably above
 // THR_FS_VALUE's default threshold (950) every tick it runs) - verified
 // directly by running every pre-existing test unchanged (vehicle_test.cpp).
+//
+// CPP-031 SLICE 11 NOTE: adds step 1c (the RC mode-switch channel dispatch)
+// - see plane.hpp's own "CPP-031 SLICE 11 ADDENDUM" file banner for the
+// full design. Placed immediately after step 1b, not before it: the
+// freshness guard this step reproduces (upstream's RC_Channels_Plane::
+// read_mode_switch() override, control_modes.cpp) reads plane.failsafe.
+// last_valid_rc_ms, which step 1b's update_throttle_failsafe() call is
+// what actually refreshes every tick - reading it any earlier in this
+// function would see the PREVIOUS tick's value, off by one tick's worth of
+// staleness. Matches upstream's own real scheduler ordering too: read_
+// mode_switch() (Plane.cpp's scheduler_tasks[], gated inside AP_Vehicle's
+// update_mode() task) always runs after read_radio()/control_failsafe()
+// have already updated last_valid_rc_ms for the current frame.
 inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const StabilizeInputs& in) {
     Mode& mode = *plane.control_mode; // see this function's own "CPP-031 SLICE 7 NOTE" above
 
@@ -474,6 +489,21 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     //     separate task-table entry.
     plane.update_throttle_failsafe(in.now_ms);
     plane.check_short_rc_failsafe();
+
+    // 1c. RC mode-switch channel dispatch - CPP-031 slice 11, see this
+    //     function's own "CPP-031 SLICE 11 NOTE" and plane.hpp's "CPP-031
+    //     SLICE 11 ADDENDUM" file banner for the full design. Upstream:
+    //     RC_Channels_Plane::read_mode_switch()'s own guard (control_
+    //     modes.cpp) - "only use signals that are less than 0.1s old" -
+    //     reproduced literally before ever calling into RcChannels::
+    //     read_mode_switch() (which layers its own has_valid_input()
+    //     check on top, ap-rc-channel module).
+    if (in.now_ms - plane.failsafe.last_valid_rc_ms <= 100U) {
+        const std::optional<std::int8_t> new_pos = plane.rc_channels.read_mode_switch(in.now_ms);
+        if (new_pos.has_value()) {
+            plane.mode_switch_changed(*new_pos);
+        }
+    }
 
     // 2. GPS update (upstream: AP_GPS::update(), a separate, earlier
     //    scheduled task feeding the AHRS update that follows it - see

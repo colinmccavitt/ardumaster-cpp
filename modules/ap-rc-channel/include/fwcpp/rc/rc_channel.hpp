@@ -35,6 +35,36 @@
 // has_override()/has_had_rc_receiver() gate hoisted to the caller: by
 // the time a caller has a PWM value in hand to pass in, upstream would
 // already have decided to update, so update() always returns true here.
+//
+// CPP-031 SLICE 11: added the 6-position mode-switch discretization +
+// debounce state machine - upstream: RC_Channel.h's `switch_state`
+// (private, RC_Channels/RC_Channel's own "auxiliary switches" section)
+// plus RC_Channel.cpp's read_6pos_switch() (~line 596) and
+// debounce_completed() (~line 636), both read in full. This is
+// deliberately the RAW per-channel primitive only - the orchestration
+// that ties it to an actual mode change (upstream's RC_Channel::
+// read_mode_switch()/mode_switch_changed(), and RC_Channels::
+// read_mode_switch()/flight_mode_channel()) lives one level up, in
+// RcChannels::read_mode_switch() (rc_channels.hpp, same module) - see
+// that file's own banner for why the split is drawn there instead of
+// here (this port has no vehicle-specific RC_Channel subclass to hang a
+// virtual mode_switch_changed() off of, so the dispatch step moved to
+// the one class that DOES already know which channel is the mode
+// switch).
+//
+// now_ms IS AN EXPLICIT PARAMETER (ADR-0012, matching every other
+// now_ms-taking method in this port) rather than upstream's own
+// AP_HAL::millis() singleton read inside debounce_completed().
+//
+// NOT PORTED HERE (documented, not silently dropped - see rc_channels.hpp's
+// own banner for the full exclusion list this slice inherits from CPP-027):
+// RC_Channel::reset_mode_switch() (RC_Channel.cpp) - resets switch_state to
+// {-1,-1} and immediately re-reads the mode switch. Upstream's own callers
+// are AUX_FUNC-triggered (a "re-read the mode switch now" aux function) and
+// RC_Channels::init() - both aux-function-dispatch-adjacent machinery this
+// port has never built (CPP-027's own exclusion list). A future aux-
+// function slice that needs to force a re-read can add this trivially: reset
+// switch_state's two fields to -1.
 
 #include <cstdint>
 
@@ -86,6 +116,88 @@ public:
         control_in = static_cast<std::int16_t>(
             type_in == ControlType::kRange ? pwm_to_range() : pwm_to_angle());
         return true;
+    }
+
+    // upstream: RC_Channel.h's `switch_state` struct (private section,
+    // "support for auxiliary switches"). -1 in either position field
+    // means "no position established yet" - matches upstream's own
+    // int8_t default-initialization-to-invalid convention (a real 6-
+    // position switch only ever reports 0..5).
+    struct SwitchState {
+        std::int8_t current_position = -1;
+        std::int8_t debounce_position = -1;
+        std::uint32_t last_edge_time_ms = 0;
+    };
+    SwitchState switch_state;
+
+    // upstream: RC_Channel::RC_MIN_LIMIT_PWM / RC_MAX_LIMIT_PWM
+    // (RC_Channel.h:465,467) - a pulsewidth at or outside these bounds is
+    // treated as a receiver/wiring error, not a real switch position.
+    static constexpr std::uint16_t kRcMinLimitPwm = 800;
+    static constexpr std::uint16_t kRcMaxLimitPwm = 2200;
+
+    // upstream: SWITCH_DEBOUNCE_TIME_MS (RC_Channel.cpp:64).
+    static constexpr std::uint32_t kSwitchDebounceTimeMs = 200;
+
+    // upstream: RC_Channel::read_6pos_switch(int8_t& position)
+    // (RC_Channel.cpp ~line 596, read in full). Discretizes the current
+    // radio_in into one of 6 fixed PWM-breakpoint positions, then runs it
+    // through debounce_completed() below - returns false for either an
+    // out-of-range (error) pulsewidth OR a position that hasn't been
+    // stable for kSwitchDebounceTimeMs yet, exactly like upstream (both
+    // cases mean "no real, actionable position change to report").
+    bool read_6pos_switch(std::int8_t& position, std::uint32_t now_ms) {
+        const std::uint16_t pulsewidth = static_cast<std::uint16_t>(radio_in);
+        if (pulsewidth <= kRcMinLimitPwm || pulsewidth >= kRcMaxLimitPwm) {
+            return false; // this is an error condition
+        }
+
+        if (pulsewidth < 1231) {
+            position = 0;
+        } else if (pulsewidth < 1361) {
+            position = 1;
+        } else if (pulsewidth < 1491) {
+            position = 2;
+        } else if (pulsewidth < 1621) {
+            position = 3;
+        } else if (pulsewidth < 1750) {
+            position = 4;
+        } else {
+            position = 5;
+        }
+
+        return debounce_completed(position, now_ms);
+    }
+
+    // upstream: RC_Channel::debounce_completed(int8_t position)
+    // (RC_Channel.cpp ~line 636, read in full) - a REAL debounce state
+    // machine, not a simple "N ticks past a threshold" counter: a newly-
+    // observed position resets a separate edge timer (debounce_position/
+    // last_edge_time_ms) every time it CHANGES, so a position that
+    // wobbles back and forth within the debounce window never latches -
+    // only a position that has held steady for the FULL
+    // kSwitchDebounceTimeMs since its own last change is promoted to
+    // current_position and reported as a real, actionable change (return
+    // true). Ported field-for-field, condition-for-condition.
+    bool debounce_completed(std::int8_t position, std::uint32_t now_ms) {
+        // switch change not detected
+        if (switch_state.current_position == position) {
+            // reset debouncing
+            switch_state.debounce_position = position;
+        } else {
+            // switch change detected
+            // position not established yet
+            if (switch_state.debounce_position != position) {
+                switch_state.debounce_position = position;
+                switch_state.last_edge_time_ms = now_ms;
+            } else if (now_ms - switch_state.last_edge_time_ms >= kSwitchDebounceTimeMs) {
+                // position established; debounce completed
+                switch_state.current_position = position;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Angle (centidegrees) from radio_in, using an explicit dead_zone and
