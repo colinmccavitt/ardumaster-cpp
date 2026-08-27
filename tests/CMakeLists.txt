@@ -75,8 +75,22 @@ target_link_libraries(ac_pid_test PRIVATE ap-pid Catch2::Catch2WithMain)
 catch_discover_tests(ac_pid_test)
 
 add_executable(l1_control_test l1_control_test.cpp)
-target_link_libraries(l1_control_test PRIVATE ap-nav Catch2::Catch2WithMain)
+# CPP-048: l1_control.hpp now also includes fwcpp/param/* headers (the
+# new top-level AP_Param Info[] table for L1Control::Gains) - ap-nav's
+# own CMakeLists.txt does not link ap-param (out of this ticket's touch
+# scope: only l1_control.hpp, its own new test file, and this file are
+# allowed), so ap-param is linked directly here instead, for this
+# pre-existing test target to keep resolving those headers.
+target_link_libraries(l1_control_test PRIVATE ap-nav ap-param Catch2::Catch2WithMain)
 catch_discover_tests(l1_control_test)
+
+# CPP-048: storage/persistence integration test for L1Control::Gains's
+# real top-level AP_Param Info[] table - no ap-sim needed (not a
+# closed-loop test, see the ticket's own "NOT a SimPlane closed-loop
+# test" instruction, matching CPP-043's own plane_aparm_param_test).
+add_executable(l1_control_param_test l1_control_param_test.cpp)
+target_link_libraries(l1_control_param_test PRIVATE ap-nav ap-param Catch2::Catch2WithMain)
+catch_discover_tests(l1_control_param_test)
 
 add_executable(notch_filter_test notch_filter_test.cpp)
 target_link_libraries(notch_filter_test PRIVATE ap-filter Catch2::Catch2WithMain)

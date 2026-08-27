@@ -47,14 +47,27 @@
 // in this slice are already explicitly float-suffixed upstream - nothing
 // here needed the compiled-.cpp treatment scalar.cpp's wrap_* family or
 // Location::get_bearing needed.
+//
+// CPP-048 ADDENDUM (bottom of this file, after the L1Control class): a
+// real top-level AP_Param Info[] table for L1Control::Gains, phase 2e of
+// the AP_Param vehicle-integration effort CPP-043 started. See that
+// addendum's own banner for the full design rationale, upstream
+// citations, and a pre-existing port bug it found (NOT fixed here) in
+// this file's own Gains::l1_period default.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 
 #include <fwcpp/location.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector2.hpp>
+#include <fwcpp/param/group_info.hpp> // param::Info (CPP-048)
+#include <fwcpp/param/native_value.hpp> // set_native_value/native_cast_to_float (CPP-048)
+#include <fwcpp/param/param.hpp> // param::VarType, ParamHeader, set_key (CPP-048)
+#include <fwcpp/param/persistence.hpp> // type_size/load_raw/save_raw/should_skip_save (CPP-048)
+#include <fwcpp/param/storage.hpp> // StorageAccess (CPP-048)
 
 namespace fwcpp::nav {
 
@@ -456,5 +469,216 @@ private:
 
     bool reverse_ = false;
 };
+
+// =====================================================================
+// CPP-048 ADDENDUM: real top-level AP_Param Info[] table for
+// L1Control::Gains (NAVL1_ prefix), phase 2e of the AP_Param vehicle-
+// integration effort CPP-043 started (phase 1: Plane::aparm). See
+// CPP-043's own commit message and plane.hpp's "CPP-043 ADDENDUM" for
+// the pattern this follows: a real Info[]-building free function, a
+// native-value read/write bridge, and load/save free functions reusing
+// should_skip_save/load_raw/save_raw/scan/type_size/get_base (CPP-022)
+// unchanged.
+//
+// REAL UPSTREAM SOURCE (libraries/AP_L1_Control/AP_L1_Control.cpp, read
+// in full): var_info[] has exactly FOUR AP_GROUPINFO entries, and ALL
+// FOUR are genuinely backed 1:1 by this port's Gains struct (unlike
+// CPP-043's aparm, where only 13 of ~50 FixedWingTunables fields turned
+// out to be real) - there are no internal-only tuning constants in
+// Gains to exclude here:
+//   AP_GROUPINFO("PERIOD",    0, AP_L1_Control, _L1_period,        17)
+//   AP_GROUPINFO("DAMPING",   1, AP_L1_Control, _L1_damping,     0.75f)
+//   AP_GROUPINFO("XTRACK_I",  2, AP_L1_Control, _L1_xtrack_i_gain, 0.02)
+//   AP_GROUPINFO("LIM_BANK",  3, AP_L1_Control, _loiter_bank_limit, 0.0f)
+// -> Gains::l1_period / l1_damping / l1_xtrack_i_gain / loiter_bank_limit.
+// All four are upstream AP_Float, matching this port's own plain
+// `float` fields exactly - unlike aparm's seven Int8/Int16-narrowed
+// fields (CPP-043 finding #3), there is NO on-storage width divergence
+// to register here.
+//
+// REAL GROUP REGISTRATION, VERIFIED (not assumed): ArduPlane/
+// Parameters.cpp:868 registers the whole object as a real GOBJECT:
+//   GOBJECT(L1_controller,         "NAVL1_",   AP_L1_Control),
+// - a genuine two-level upstream structure (a vehicle-level Info entry
+// of type Group named "NAVL1_", pointing at AP_L1_Control's own
+// var_info[] GroupInfo table above with per-field idx 0-3), UNLIKE
+// aparm's flat, individually-top-level-keyed fields (CPP-043 finding
+// #1). That said, per this ticket's own scope, there is still no real
+// Plane-wide vehicle table to root a nested GROUP Info entry in - wiring
+// Plane-level GOBJECT-style tables across CPP-044 through CPP-049 is
+// explicitly a LATER, separate integration ticket (this ticket's own
+// "Explicitly out of scope", and this file may not touch plane.hpp to
+// build one). l1_param_info() below therefore builds a FLAT top-level
+// table - matching CPP-043's aparm_param_info() shape exactly, as this
+// ticket's own text requires - with each entry's name PRE-CONCATENATED
+// to its real full upstream name ("NAVL1_PERIOD", not bare "PERIOD") so
+// a name lookup against this table alone still resolves the same
+// string a real GCS would send.
+//
+// REGISTERED DIVERGENCE (structural, not byte-width like CPP-043's): a
+// real upstream save of these four fields stores them keyed under
+// k_param_L1_controller with a NONZERO group_element (idx 0-3 encoded
+// via group_id, see group_info.hpp), not as four independently-
+// top-level-keyed scalars with group_element=0. This table's own
+// load/save round-trip below uses its OWN newly-allocated top-level
+// keys (L1ParamKey) with group_element=0 throughout: internally
+// self-consistent and correctly round-trips through this port's own
+// storage, but NOT byte-compatible with what a real upstream vehicle
+// would produce for "NAVL1_*". A later integration ticket that builds a
+// real Plane-wide GOBJECT table can replace this flat shape with a true
+// nested GroupInfo-based one without changing anything this ticket's
+// own round-trip test observes about VALUES.
+//
+// A SEPARATE, PRE-EXISTING PORT BUG FOUND HERE, DELIBERATELY NOT FIXED
+// BY THIS TICKET: Gains::l1_period's own in-class default above is
+// 25.0f, and that value is independently re-asserted by plane.hpp's
+// "CPP-043 ADDENDUM" comment as "upstream's real NAVL1_PERIOD ...
+// default" ("CHECKED, NOT RE-DERIVED"). Reading the REAL AP_GROUPINFO
+// line above directly shows the raw default is 17, not 25.
+// AP_L1_Control::set_default_period() (AP_L1_Control.h:59-61) is the
+// only mechanism that could legitimately override that raw default -
+// grepping the ENTIRE pinned plane-4.7.0 tree for a caller of it found
+// none; it is declared but never invoked anywhere in this tag, so 17 is
+// genuinely ArduPlane's live shipped default. (ArduPlane/
+// ReleaseNotes.txt:5234's own "NAVL1_PERIOD from 20 to 17" entry
+// independently confirms 17, not 25 or 20, is this version's default.)
+// l1_param_info()'s own def_value for PERIOD below is the CORRECT
+// 17.0f, sourced from real upstream directly, per this ticket's own
+// requirement that Info-table defaults come from upstream (matching
+// CPP-043's "AP_Param table is the authoritative source" precedent) -
+// deliberately NOT reconciled with Gains' own (wrong) 25.0f in-class
+// default: retrofitting that would ripple into tests/vehicle_test.cpp's
+// already-tuned, numerically-sensitive crosstrack_error()/nav_roll_cd()
+// assertions (l1_period scales l1_dist_ directly in update_waypoint/
+// update_loiter/update_heading_hold above) - a file this ticket is
+// explicitly barred from touching, and a change disproportionate to
+// this ticket's own acceptance criteria (same disproportionality
+// reasoning as CPP-043 finding #3's declined width retrofit). Registered
+// here, not silently fixed nor silently ignored, per this port's "fix
+// bugs in the port, register every divergence" standard - left for a
+// future, appropriately-scoped ticket that can touch plane.hpp and
+// tests/vehicle_test.cpp together.
+//
+// PLAIN NATIVE FIELDS, NOT ParamValue<T>: Gains' four fields are plain
+// `float` (this file's own pre-existing banner above: "AP_Float
+// REPLACED WITH PLAIN float ... no AP_Param in this port yet"), so this
+// addendum reuses native_value.hpp's memcpy-based set_native_value/
+// native_cast_to_float (CPP-043), NOT CPP-022 slice 6/7's set_value/
+// cast_to_float (valid only when an actual ParamFloat/ParamInt8 object
+// lives at the target address) - same reasoning as native_value.hpp's
+// own banner and CPP-043 finding #4.
+//
+// This ticket's own top-level key allocation for L1's four real fields
+// - independent of both upstream's real k_param_* enum (an EEPROM-
+// migration-ordering detail, ADR-0013) and every other phase-2e
+// module's own independent per-module enum (CPP-044 through CPP-049 -
+// no shared vehicle-wide key space exists yet, matching CPP-043's own
+// "no full vehicle-wide key space yet" starting point; a later
+// integration ticket reconciles all of them into one real table).
+enum class L1ParamKey : std::uint16_t {
+    kPeriod = 1,
+    kDamping = 2,
+    kXtrackIGain = 3,
+    kLoiterBankLimit = 4,
+};
+
+// Builds a fresh top-level param::Info[] table (4 real scalar entries +
+// a VarType::None sentinel, matching every other table in this port's
+// AP_Param module) addressing `gains`'s fields DIRECTLY (info.ptr =
+// &gains.field). Built per-call rather than a shared `static` table -
+// same reasoning as aparm_param_info (CPP-043): this port allows more
+// than one live Gains object (this ticket's own round-trip test
+// constructs two), so there is no single fixed address to bake in at
+// compile time.
+[[nodiscard]] inline std::array<param::Info, 5> l1_param_info(L1Control::Gains& gains) {
+    using param::Info;
+    using param::VarType;
+    auto entry = [](const char* name, const void* ptr, float def_value, L1ParamKey key, VarType type) {
+        Info info{};
+        info.name = name;
+        info.ptr = ptr;
+        info.def_value = def_value;
+        info.flags = 0;
+        info.key = static_cast<std::uint16_t>(key);
+        info.type = static_cast<std::uint8_t>(type);
+        return info;
+    };
+    return {{
+        entry("NAVL1_PERIOD", &gains.l1_period, 17.0f, L1ParamKey::kPeriod, VarType::Float),
+        entry("NAVL1_DAMPING", &gains.l1_damping, 0.75f, L1ParamKey::kDamping, VarType::Float),
+        entry("NAVL1_XTRACK_I", &gains.l1_xtrack_i_gain, 0.02f, L1ParamKey::kXtrackIGain, VarType::Float),
+        entry("NAVL1_LIM_BANK", &gains.loiter_bank_limit, 0.0f, L1ParamKey::kLoiterBankLimit, VarType::Float),
+        Info{}, // sentinel: type == VarType::None (0) via zero-init, matching every other table in this module
+    }};
+}
+
+// Applies every entry's own AP_Param-table default (the REAL upstream
+// values found above - notably 17.0f for PERIOD, not Gains' own
+// in-class 25.0f) directly into `gains`'s live fields. Explicit, not
+// implicit - matches CPP-043's apply_aparm_defaults (not called from
+// any constructor; L1Control's own constructor still reads whatever
+// Gains it's handed, unchanged by this addendum).
+inline void apply_l1_defaults(L1Control::Gains& gains) {
+    const std::array<param::Info, 5> table = l1_param_info(gains);
+    for (const param::Info& info : table) {
+        if (info.type == static_cast<std::uint8_t>(param::VarType::None)) {
+            break;
+        }
+        param::set_native_value(static_cast<param::VarType>(info.type), const_cast<void*>(info.ptr), info.def_value);
+    }
+}
+
+// Port of AP_Param::load()'s real not-found-then-default behavior
+// (AP_Param.cpp ~line 1310, read in full - same citation as CPP-043),
+// specialized to this ticket's own flat top-level table (group_element
+// always 0 - see this addendum's "REGISTERED DIVERGENCE" note above).
+// Reuses load_raw (CPP-022 slice 5, unchanged: a plain memcpy, safe to
+// target a Gains field's live address) and set_native_value (CPP-043)
+// for the not-found/default case.
+inline void load_l1_parameters(const storage::StorageAccess& storage, L1Control::Gains& gains) {
+    const std::array<param::Info, 5> table = l1_param_info(gains);
+    for (const param::Info& info : table) {
+        if (info.type == static_cast<std::uint8_t>(param::VarType::None)) {
+            break;
+        }
+        const auto type = static_cast<param::VarType>(info.type);
+        param::ParamHeader phdr{};
+        phdr.type = info.type;
+        param::set_key(phdr, info.key);
+        phdr.group_element = 0;
+        void* field_ptr = const_cast<void*>(info.ptr);
+        if (!param::load_raw(storage, phdr, field_ptr, param::type_size(type))) {
+            param::set_native_value(type, field_ptr, info.def_value);
+        }
+    }
+}
+
+// Port of AP_Param::save_sync's default-skip-then-write path
+// (AP_Param.cpp ~line 1138, read in full - same citation as CPP-043),
+// specialized the same way load_l1_parameters is above. Reuses
+// should_skip_save (CPP-022 slice 7, persistence.hpp) COMPLETELY
+// UNCHANGED - pure float arithmetic with no pointer casting, so it
+// applies here exactly as it does to the ParamValue<T>-based case this
+// port already had it working for. `force_save` matches upstream's own
+// save_sync(force_save, ...) parameter.
+inline void save_l1_parameters(storage::StorageAccess& storage, L1Control::Gains& gains, bool force_save = false) {
+    const std::array<param::Info, 5> table = l1_param_info(gains);
+    for (const param::Info& info : table) {
+        if (info.type == static_cast<std::uint8_t>(param::VarType::None)) {
+            break;
+        }
+        const auto type = static_cast<param::VarType>(info.type);
+        const void* field_ptr = info.ptr;
+        const float current = param::native_cast_to_float(type, field_ptr);
+        if (param::should_skip_save(type, current, info.def_value, force_save)) {
+            continue;
+        }
+        param::ParamHeader phdr{};
+        phdr.type = info.type;
+        param::set_key(phdr, info.key);
+        phdr.group_element = 0;
+        (void)param::save_raw(storage, phdr, field_ptr, param::type_size(type));
+    }
+}
 
 } // namespace fwcpp::nav
