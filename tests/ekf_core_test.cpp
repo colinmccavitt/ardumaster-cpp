@@ -232,3 +232,80 @@ TEST_CASE("covariance_prediction: active-state diagonal grows monotonically and 
     // 50 steps of pure process-noise injection with nothing to reduce it.
     REQUIRE(ekf.P[10][10] > ftype(0.0));
 }
+
+// CPP-065 phase 11: this is the direct proof the ticket's own acceptance
+// criterion asks for - with the respective inhibit flag cleared,
+// covariance_prediction() now genuinely grows P[16][16] (earth magfield)
+// and P[22][22] (wind velocity North) tick-over-tick, where the test
+// immediately above this one shows they stay PINNED AT EXACTLY ZERO under
+// default (inhibited) settings. Pure prediction, no fusion, mirroring the
+// existing test's own "nothing to reduce it" setup - process noise is the
+// only thing that can move these diagonals here.
+TEST_CASE("covariance_prediction: with inhibit_mag_states/inhibit_wind_states cleared, P[16][16] and "
+          "P[22][22] now genuinely grow tick-over-tick (process noise accumulating), where they previously "
+          "stayed frozen",
+          "[ekf_core]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    const ftype dt_ekf_avg = ftype(0.012);
+    ekf.inhibit_mag_states = false;
+    ekf.inhibit_wind_states = false;
+    ekf.covariance_init(dt_ekf_avg);
+
+    // covariance_init() sets these to real upstream values BEFORE any
+    // predict() call: P[16][16] = sq(mag_noise) (nonzero seed - upstream's
+    // real earth-field init value), P[22][22] = 0.0 (upstream's real wind
+    // init value - verified directly, AP_NavEKF3_core.cpp ~line 610-611,
+    // and already reproduced by this port's own covariance_init()).
+    const ftype p16_after_init = ekf.P[16][16];
+    const ftype p22_after_init = ekf.P[22][22];
+    REQUIRE(static_cast<double>(p16_after_init) == Catch::Approx(0.05 * 0.05));
+    REQUIRE(static_cast<double>(p22_after_init) == Catch::Approx(0.0));
+
+    GyroSample gyro;
+    gyro.delta_angle_dt = dt_ekf_avg;
+    AccelSample accel;
+    accel.delta_velocity = Vector3F(ftype(0), ftype(0), -kGravity * dt_ekf_avg);
+    accel.delta_velocity_dt = dt_ekf_avg;
+
+    ftype prev_p16 = ekf.P[16][16];
+    ftype prev_p22 = ekf.P[22][22];
+    bool p16_grew_at_least_once = false;
+    bool p22_grew_at_least_once = false;
+
+    const int steps = 200;
+    for (int i = 0; i < steps; ++i) {
+        ekf.covariance_prediction(gyro, accel, dt_ekf_avg);
+
+        // Monotonic non-decreasing - process noise only ever adds, and
+        // constrain_variances()'s clamp floor is 0.0, so nothing here can
+        // push these diagonals down.
+        REQUIRE(ekf.P[16][16] >= prev_p16 - static_cast<ftype>(1e-12));
+        REQUIRE(ekf.P[22][22] >= prev_p22 - static_cast<ftype>(1e-12));
+        if (ekf.P[16][16] > prev_p16) p16_grew_at_least_once = true;
+        if (ekf.P[22][22] > prev_p22) p22_grew_at_least_once = true;
+        prev_p16 = ekf.P[16][16];
+        prev_p22 = ekf.P[22][22];
+
+        // Bounded by ConstrainVariances' own real ranges (see
+        // constrain_variances()'s CPP-065 banner): [0, 0.01] for mag,
+        // [0, WIND_VEL_VARIANCE_MAX=400] for wind.
+        REQUIRE(ekf.P[16][16] <= ftype(0.01));
+        REQUIRE(ekf.P[22][22] <= ftype(400.0));
+        REQUIRE(std::isfinite(static_cast<double>(ekf.P[16][16])));
+        REQUIRE(std::isfinite(static_cast<double>(ekf.P[22][22])));
+    }
+
+    // THE CENTRAL FINDING: both diagonals moved - not frozen at their
+    // covariance_init() values the way they would be (and still are, see
+    // the test above) at this port's real default (inhibited) settings.
+    REQUIRE(p16_grew_at_least_once);
+    REQUIRE(p22_grew_at_least_once);
+    REQUIRE(ekf.P[16][16] > p16_after_init);
+    REQUIRE(ekf.P[22][22] > p22_after_init);
+
+    // P[22][22] started at exactly 0.0 (unlike P[16][16]'s nonzero seed) -
+    // confirm it is now strictly positive, the sharpest possible
+    // statement that wind process noise is real and active.
+    REQUIRE(ekf.P[22][22] > ftype(0.0));
+}

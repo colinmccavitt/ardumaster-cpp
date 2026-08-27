@@ -219,6 +219,16 @@
 // inhibit_mag_states at runtime must also wire it into those two
 // functions's currently-hardcoded branches.
 //
+// CPP-065 UPDATE (phase 11): this gap is now CLOSED - covariance_prediction()
+// and constrain_variances() are wired to read inhibit_mag_states/
+// inhibit_wind_states at runtime (see those two functions' own "CPP-065
+// phase 11" banners in ekf_core.cpp). inhibit_del_ang_bias_states/
+// inhibit_del_vel_bias_states remain NOT wired into covariance_prediction()'s
+// column-10..15 handling (that loop still runs unconditionally, matching
+// phase 1's original hardcoded behavior) - a real, narrower remaining gap,
+// out of CPP-065's scope, harmless today since neither flag is ever set true
+// anywhere in this port.
+//
 // NOT PORTED FROM FuseVelPosNED() (named per the ticket's own acceptance
 // criterion - each is a real upstream mechanism, verified present in the
 // ~694-1181 read, deliberately left out of fuse_direct_state_observation
@@ -1583,6 +1593,103 @@
 //     value is this port's only fault signal, same treatment.
 // ============================================================================
 
+// ============================================================================
+// CPP-065, PHASE 11 (this ticket): real mag/wind covariance growth and
+// runtime-aware constrain_variances(). Fixes, together (fixing only one is
+// provably insufficient, per CPP-064's own analysis), the root cause CPP-064
+// (phase 10) diagnosed for "state.wind_vel never moves" and CPP-059 (phase
+// 5) diagnosed for "earth-field learning capped at one call": (1)
+// constrain_variances() unconditionally zeroed the mag/wind covariance
+// block (states 16-23) every call regardless of the runtime
+// inhibit_mag_states/inhibit_wind_states flags, and (2)
+// covariance_prediction() never populated those states' own cross-terms or
+// gave them any process noise in the first place.
+//
+// WHAT THIS PHASE BUILDS:
+//   - covariance_prediction()'s dense Jacobian block extended to columns
+//     16-23, VERBATIM-TRANSCRIBED from upstream (see that function's own
+//     banner for the verification account) and gated by state_index_lim()
+//     exactly as upstream gates by stateIndexLim - CPP-056's existing
+//     function, reused directly, not reinvented.
+//   - The general process-noise loop's bound changed from a hardcoded 15
+//     to state_index_lim(), and the real magEarthVar/magBodyVar/windVelVar
+//     formulas (see covariance_prediction()'s own banner) now populate
+//     process_noise_variance[6..13] when the corresponding inhibit flag is
+//     clear.
+//   - A real, persistent hgt_rate member (see its own field comment) -
+//     upstream's real hgtRate is a 10-second-time-constant EMA filter of
+//     down-velocity, NOT a raw state.velocity.z alias; verified directly
+//     before deciding to port it as a real filtered member rather than
+//     approximating it away.
+//   - constrain_variances()'s mag (16-21) and wind (22-23) blocks replaced
+//     with upstream's real per-state-group if/else structure (clamp when
+//     active, zero when inhibited) instead of the old phase-1 unconditional
+//     zeroing.
+//   - Four new noise-parameter fields (mag_earth_process_noise,
+//     mag_body_process_noise, wind_vel_process_noise,
+//     wind_var_hgt_rate_scale) and one new constant (kWindVelVarianceMax) -
+//     see their own comments for the real upstream defaults/provenance.
+//
+// VERIFICATION STANDARD FOR THIS PHASE: given this touches
+// covariance_prediction()'s dense PS0..PS222 Jacobian block - deliberately
+// left untouched by every phase since CPP-052 (phase 1) specifically
+// because it is numerically-sensitive, machine-derived algebra - this
+// phase's own commit message documents substantially more spot-checks
+// than this port's usual 2-4, including a full whitespace-normalized
+// programmatic diff of the extended block against the real upstream text
+// (not just eyeballing a handful of lines) before it was ever inserted.
+//
+// TICKET PREMISE CHECK: every real formula/constant/line-range this
+// ticket's own text asserted (the PS-coefficient reuse for columns 16-23,
+// the stateIndexLim>15/>21 nesting, MAGE_P_NSE_DEFAULT=1.0E-03,
+// MAGB_P_NSE_DEFAULT=1.0E-04, WIND_P_NSE_DEFAULT=0.1,
+// _wndVarHgtRateScale default 1.0f, WIND_VEL_VARIANCE_MAX=400.0, the real
+// ConstrainVariances() if/else structure) was verified directly against
+// the pinned Plane-4.7.0 source and confirmed accurate - no correction to
+// the ticket's own premise was needed this round, unlike some prior
+// phases. The one genuinely open question the ticket posed (hgtRate's
+// real source) was investigated directly and resolved: it is a real,
+// separate, persistent filtered member, not an alias - see hgt_rate's own
+// field comment.
+//
+// EXPLICITLY OUT OF SCOPE (each with its real upstream trigger, matching
+// this port's established disclosure convention):
+//   - `needMagBodyVarReset`/`needEarthBodyVarReset`-triggered P-block
+//     resets and the `FuseDeclination(radians(20.0f))` call the latter
+//     makes - ties to yaw-realignment machinery, already excluded since
+//     phases 5/6 (see covariance_prediction()'s own banner for exactly
+//     where this was skipped).
+//   - `treatWindStatesAsTruth`/`isDragFusionDeadReckoning`/
+//     `windStateIsObservable` - already-established exclusion (phase 2,
+//     reconfirmed phases 9/10); this port always takes upstream's real
+//     "normal" (non-treat-as-truth) branch, both in the process-noise
+//     computation and in constrain_variances()'s wind clamp.
+//   - `tasDataDelayed.allowFusion`-gated 10x wind-noise scaling for a
+//     failed airspeed sensor - no airspeed-sensor-health state modeled
+//     (already-established phase-9 exclusion pattern).
+//   - `dvelBiasAxisInhibit[]`-gated covariance reset inside
+//     CovariancePrediction() itself (distinct from ConstrainVariances()'s
+//     own accel-bias handling) - already a named phase-1/2 gap
+//     (this port's inhibit_del_vel_bias_states is all-or-nothing across
+//     x/y/z, with no per-axis ground-alignment inhibiting to ever trigger
+//     the real upstream branch) - freshly named at its exact insertion
+//     point in covariance_prediction() since this is the first phase to
+//     touch that region of the function.
+//   - inhibit_del_ang_bias_states/inhibit_del_vel_bias_states are still
+//     NOT wired into covariance_prediction()'s column-10..15 handling
+//     (that loop runs unconditionally, matching phase 1's original
+//     behavior) - a real, narrower remaining gap, out of this ticket's
+//     scope, harmless today since neither flag is ever set true anywhere
+//     in this port (see the "CPP-056, PHASE 2" banner's own updated note).
+//
+// REAL RESULT (see this ticket's commit message for the full numbers):
+// with inhibit_mag_states/inhibit_wind_states cleared, P[16][16]/P[22][22]
+// now genuinely grow tick-over-tick instead of staying frozen, and
+// CPP-059's/CPP-064's own closed-loop tests were re-run and their new,
+// honestly-reported numbers are in the commit message - whatever was
+// actually found, not assumed.
+// ============================================================================
+
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -1731,6 +1838,22 @@ public:
     // collapsed" reset.
     std::uint32_t vert_vel_var_clip_counter = 0;
 
+    // CPP-065 phase 11. upstream: hgtRate (member, AP_NavEKF3_core.cpp:266
+    // zero-init), the filtered height-rate quantity CovariancePrediction()
+    // itself maintains and consumes for wind-state process noise scaling
+    // (~line 1038-1040, real comment: "use filtered height rate to increase
+    // wind process noise when climbing or descending. Filter height rate
+    // using a 10 second time constant filter"; real formula: alpha =
+    // 0.1*dt; hgtRate = hgtRate*(1-alpha) - stateStruct.velocity.z*alpha).
+    // VERIFIED DIRECTLY this is NOT a raw alias for state.velocity.z (down-
+    // velocity) - it is a real, persistent, exponentially-filtered member
+    // updated once per covariance_prediction() call, in NED down-velocity
+    // units (m/s). Ported as a real member (not approximated as an
+    // instantaneous velocity read) since the filter itself is simple,
+    // well-specified, and directly affects the new windVelVar formula
+    // below.
+    ftype hgt_rate = 0;  // upstream: hgtRate
+
     // CPP-056 phase 2: real inhibitDelAngBiasStates/inhibitDelVelBiasStates/
     // inhibitMagStates/inhibitWindStates fields (AP_NavEKF3_core.h members,
     // set by AP_NavEKF3_Control.cpp - out of scope). Defaults reproduce
@@ -1784,6 +1907,31 @@ public:
     ftype baro_alt_noise = static_cast<ftype>(3.0f);         // ALT_M_NSE_DEFAULT
     ftype mag_noise = static_cast<ftype>(0.05f);             // MAG_M_NSE_DEFAULT (init value only - see banner simplification 1)
     ftype acc_bias_lim = static_cast<ftype>(1.0f);           // AP_GROUPINFO("ACC_BIAS_LIM", ..., 1.0f)
+
+    // CPP-065 phase 11. upstream: AP_NavEKF3.cpp APM_BUILD_ArduPlane
+    // #elif block (verified directly, lines ~71/97/71 depending on the
+    // pinned tag's exact line numbering - real value confirmed identical
+    // across builds): MAGE_P_NSE_DEFAULT = 1.0E-03f, MAGB_P_NSE_DEFAULT =
+    // 1.0E-04f. These back AP_NavEKF3.h's _magEarthProcessNoise/
+    // _magBodyProcessNoise (AP_GROUPINFO "MAGE_P_NSE"/"MAGB_P_NSE") - REAL,
+    // DISTINCT parameters from mag_noise/MAG_M_NSE above (that one seeds
+    // covariance_init()'s P[16..21] diagonal and R_MAG in mag fusion; these
+    // two instead drive covariance_prediction()'s per-tick mag process
+    // noise) - verified NOT to be the same upstream field before adding
+    // these as new, separate members.
+    ftype mag_earth_process_noise = static_cast<ftype>(1.0e-03f);  // MAGE_P_NSE_DEFAULT
+    ftype mag_body_process_noise = static_cast<ftype>(1.0e-04f);   // MAGB_P_NSE_DEFAULT
+
+    // CPP-065 phase 11. upstream: AP_NavEKF3.cpp APM_BUILD_ArduPlane
+    // #elif block, WIND_P_NSE_DEFAULT = 0.1 (verified directly - NOT the
+    // Copter-only 0.2 value that appears in a different #if branch of the
+    // same file); backs AP_NavEKF3.h's _windVelProcessNoise (AP_GROUPINFO
+    // "WIND_P_NSE"). wind_var_hgt_rate_scale below backs
+    // _wndVarHgtRateScale (AP_GROUPINFO "WIND_PSCALE", a literal 1.0f
+    // argument, NOT vehicle-dependent - verified directly, same value in
+    // every APM_BUILD_TYPE).
+    ftype wind_vel_process_noise = static_cast<ftype>(0.1f);        // WIND_P_NSE_DEFAULT
+    ftype wind_var_hgt_rate_scale = static_cast<ftype>(1.0f);       // AP_GROUPINFO("WIND_PSCALE", ..., 1.0f)
 
     // CPP-057 phase 3: real VEL_I_GATE_DEFAULT/POS_I_GATE_DEFAULT gate
     // parameters (AP_NavEKF3.cpp _gpsVelInnovGate/_gpsPosInnovGate,

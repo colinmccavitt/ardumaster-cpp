@@ -34,17 +34,24 @@
 //
 // One genuine simplification vs. the unrolled upstream source: upstream
 // unrolls the row-0..9-vs-column-10..23 correlation update as separate
-// blocks per column (mag/wind columns 16..23 included) because its
-// codegen tool doesn't parametrize over column index. This port instead
-// runs a small loop over columns 10..15 (verified algebraically, using
-// P's symmetry, to be IDENTICAL to each of upstream's unrolled column-10
-// through column-15 blocks - not a new formula) and skips columns 16..23
-// altogether: those states are permanently "inhibited" in this phase (no
-// mag/wind fusion exists - see ekf_core.hpp's simplification 1), and
-// upstream's own ConstrainVariances() zeros their entire row/column every
-// single cycle when inhibited - so computing their correlation growth
-// here would be work upstream itself immediately discards under these
-// conditions.
+// blocks per column because its codegen tool doesn't parametrize over
+// column index. This port instead runs a small loop over columns 10..15
+// (verified algebraically, using P's symmetry, to be IDENTICAL to each
+// of upstream's unrolled column-10 through column-15 blocks - not a new
+// formula).
+//
+// CPP-065 UPDATE (phase 11): columns 16..23 (mag/wind) are NO LONGER
+// skipped - they are now transcribed VERBATIM (not via the column-10..15
+// loop's generalized-and-verified approach) directly below that loop,
+// gated by state_index_lim() exactly as upstream gates them by
+// stateIndexLim, since covariance_prediction() and constrain_variances()
+// are now wired to the real runtime inhibit_mag_states/inhibit_wind_states
+// flags (see this ticket's own banner in covariance_prediction() and in
+// constrain_variances()) rather than treating those states as permanently
+// inhibited. At this port's real default settings (both flags true),
+// state_index_lim() stays 15 and none of that new code executes - so the
+// prior phases' "permanently inhibited" behavior is exactly preserved by
+// default.
 //
 // LITERAL PRECISION NOTE: this port writes every literal in the
 // transcribed formulas as an explicit `ftype(...)` (e.g. `ftype(0.25)`),
@@ -121,6 +128,12 @@ constexpr ftype kBaroFusionTimeoutS = static_cast<ftype>(10.0);  // hgtRetryTime
 // kGpsFusionTimeoutS etc. above - a file-local constant, not a public
 // field.
 constexpr ftype kMagVarRateScale = static_cast<ftype>(0.005f);  // magVarRateScale
+
+// CPP-065 phase 11. upstream: AP_NavEKF3_core.h:109 - #define
+// WIND_VEL_VARIANCE_MAX 400.0f, verified directly. Used by
+// ConstrainVariances()'s real per-state-group wind-variance clamp (see
+// constrain_variances() below).
+constexpr ftype kWindVelVarianceMax = static_cast<ftype>(400.0);  // WIND_VEL_VARIANCE_MAX
 
 [[nodiscard]] ftype clamp(ftype v, ftype lo, ftype hi) {
     return fwcpp::math::constrain_value(v, lo, hi);
@@ -297,10 +310,32 @@ void EkfCore::covariance_prediction(const GyroSample& gyro, const AccelSample& a
     const ftype dt = clamp(ftype(0.5) * (gyro.delta_angle_dt + accel.delta_velocity_dt), ftype(0.5) * dt_ekf_avg,
                             ftype(2.0) * dt_ekf_avg);
 
+    // CPP-065 phase 11. upstream: AP_NavEKF3_core.cpp ~line 1038-1040 -
+    // "use filtered height rate to increase wind process noise when
+    // climbing or descending. Filter height rate using a 10 second time
+    // constant filter": `alpha = 0.1f*dt; hgtRate = hgtRate*(1.0f-alpha) -
+    // stateStruct.velocity.z*alpha`. Runs unconditionally, on every call
+    // (including the covariance_init() reset call, matching upstream's own
+    // CovarianceInit() -> CovariancePrediction(&rotVarVec) call, verified
+    // directly at AP_NavEKF3_core.cpp ~line 582 - the quatCovResetOnly
+    // special-casing below only narrows the daxVar/dayVar/dazVar branch,
+    // not this filter). See ekf_core.hpp's hgt_rate member comment for why
+    // this is a real persistent filtered quantity, not a raw
+    // state.velocity.z alias.
+    {
+        const ftype alpha = ftype(0.1) * dt;
+        hgt_rate = hgt_rate * (ftype(1) - alpha) - state.velocity.z * alpha;
+    }
+
     // processNoiseVariance[0..5] map to state indices 10..15 (gyro bias,
     // accel bias) - always active in this phase (simplification 2).
-    // Indices 6..13 (mag/wind, state 16..23) are always 0 - permanently
-    // inhibited (simplification 1).
+    // Indices 6..13 (mag/wind, state 16..23) - CPP-065 phase 11: now
+    // populated (magEarthVar/magBodyVar/windVelVar) whenever the
+    // corresponding runtime inhibit flag is clear, matching upstream's
+    // real AP_NavEKF3_core.cpp ~line 1087-1115 exactly (see the two `if`
+    // blocks below). At this port's real defaults (inhibit_mag_states=
+    // true, inhibit_wind_states=true) both stay exactly 0, same as before
+    // this ticket - a behavior-preserving change at default settings.
     std::array<ftype, 14> process_noise_variance{};
     {
         const ftype d_ang_bias_var = sq(sq(dt) * clamp(gyro_bias_process_noise, ftype(0), ftype(1)));
@@ -309,6 +344,53 @@ void EkfCore::covariance_prediction(const GyroSample& gyro, const AccelSample& a
     {
         const ftype d_vel_bias_var = sq(sq(dt) * clamp(accel_bias_process_noise, ftype(0), ftype(1)));
         for (int i = 3; i <= 5; ++i) process_noise_variance[static_cast<std::size_t>(i)] = d_vel_bias_var;
+    }
+
+    // CPP-065 phase 11. upstream: AP_NavEKF3_core.cpp ~line 1087-1092:
+    // `if (!inhibitMagStates) { magEarthVar = sq(dt*constrain_ftype(
+    // _magEarthProcessNoise,0,1)); magBodyVar = sq(dt*constrain_ftype(
+    // _magBodyProcessNoise,0,1)); for(i=6;i<=8;i++) processNoiseVariance[i]
+    // = magEarthVar; for(i=9;i<=11;i++) processNoiseVariance[i] =
+    // magBodyVar; }`. Verified directly, transcribed exactly.
+    //
+    // EXCLUDED (real upstream mechanisms immediately preceding this block
+    // in the real source, deliberately not ported - matching this port's
+    // established exclusion pattern for the same machinery elsewhere):
+    //   - `lastInhibitMagStates`-edge-triggered `needMagBodyVarReset`/
+    //     `needEarthBodyVarReset` and the `zeroCols`/`zeroRows`/
+    //     `FuseDeclination(radians(20.0f))` reset they trigger - ties to
+    //     yaw-realignment machinery, already excluded since phases 5/6
+    //     (ekf_core.hpp's "CPP-059, PHASE 5" banner).
+    if (!inhibit_mag_states) {
+        const ftype mag_earth_var = sq(dt * clamp(mag_earth_process_noise, ftype(0), ftype(1)));
+        const ftype mag_body_var = sq(dt * clamp(mag_body_process_noise, ftype(0), ftype(1)));
+        for (int i = 6; i <= 8; ++i) process_noise_variance[static_cast<std::size_t>(i)] = mag_earth_var;
+        for (int i = 9; i <= 11; ++i) process_noise_variance[static_cast<std::size_t>(i)] = mag_body_var;
+    }
+
+    // CPP-065 phase 11. upstream: AP_NavEKF3_core.cpp ~line 1094-1116:
+    // `if (!inhibitWindStates) { ... if (newTreatWindStatesAsTruth) {...}
+    // else { ... windVelVar = sq(dt*constrain_ftype(_windVelProcessNoise,
+    // 0,1)*(1+constrain_ftype(_wndVarHgtRateScale,0,1)*fabsF(hgtRate)));
+    // if (!tasDataDelayed.allowFusion) { windVelVar *= 10.0f; } for(i=12;
+    // i<=13;i++) processNoiseVariance[i] = windVelVar; } }`. Verified
+    // directly, transcribed exactly for the real, active branch.
+    //
+    // EXCLUDED (real upstream mechanisms, deliberately not ported):
+    //   - `treatWindStatesAsTruth`/`isDragFusionDeadReckoning`/
+    //     `windStateIsObservable` - already-established exclusion (phase
+    //     2, reconfirmed phase 9/10) - no such fields exist in this port
+    //     (no optical-flow/const-position-hold subsystem that would ever
+    //     set them); this port always takes the real "else" (normal)
+    //     branch below.
+    //   - `tasDataDelayed.allowFusion`-gated 10x wind-noise scaling for a
+    //     failed airspeed sensor - no airspeed-sensor-health state
+    //     modeled (already-established phase-9 exclusion pattern).
+    if (!inhibit_wind_states) {
+        const ftype wind_vel_var =
+            sq(dt * clamp(wind_vel_process_noise, ftype(0), ftype(1)) *
+               (ftype(1) + clamp(wind_var_hgt_rate_scale, ftype(0), ftype(1)) * std::abs(hgt_rate)));
+        for (int i = 12; i <= 13; ++i) process_noise_variance[static_cast<std::size_t>(i)] = wind_vel_var;
     }
 
     const ftype dvx = accel.delta_velocity.x;
@@ -695,19 +777,216 @@ void EkfCore::covariance_prediction(const GyroSample& gyro, const AccelSample& a
         }
     }
 
-    // Add process noise to the gyro/accel-bias diagonal (states 10..15).
-    // Mag/wind (16..23) get none - permanently inhibited, see hpp banner.
-    for (int i = 10; i <= 15; ++i) {
+    // upstream's own real stateIndexLim, reused directly as this port's
+    // established gate (CPP-056's state_index_lim()) rather than a new one.
+    const int lim = state_index_lim();
+
+    // CPP-065 phase 11: the mag/wind (16..23) extension of the dense
+    // Jacobian block above. VERBATIM-TRANSCRIBED from upstream
+    // AP_NavEKF3_core.cpp ~line 1571-1739 (`if (stateIndexLim > 15) { ...
+    // if (stateIndexLim > 21) { ... } }`), reusing the EXACT SAME
+    // PS-coefficient variables already verbatim-transcribed above for the
+    // 0-15 block (verified directly, spot-checked far more than this
+    // port's usual 2-4 checks given this touches the previously-untouched
+    // dense block - see this ticket's commit message for the full
+    // verification account) - no new PS-coefficients needed, only extended
+    // column ranges. Gated by `lim` exactly as upstream gates by
+    // stateIndexLim, with the 22-23 block correctly nested inside the >15
+    // block, matching upstream's real nesting. At this port's real
+    // defaults (inhibit_mag_states=true, inhibit_wind_states=true,
+    // state_index_lim()==15), `lim > 15` is false and NONE of this new
+    // code executes - a behavior-preserving change at default settings.
+    if (lim > 15) {
+        nextP[0][16] = -PS11 * P[1][16] - PS12 * P[2][16] - PS13 * P[3][16] + PS6 * P[10][16] + PS7 * P[11][16] + PS9 * P[12][16] + P[0][16];
+        nextP[1][16] = PS11 * P[0][16] - PS12 * P[3][16] + PS13 * P[2][16] - PS34 * P[10][16] - PS7 * P[12][16] + PS9 * P[11][16] + P[1][16];
+        nextP[2][16] = PS11 * P[3][16] + PS12 * P[0][16] - PS13 * P[1][16] - PS34 * P[11][16] + PS6 * P[12][16] - PS9 * P[10][16] + P[2][16];
+        nextP[3][16] = -PS11 * P[2][16] + PS12 * P[1][16] + PS13 * P[0][16] - PS34 * P[12][16] - PS6 * P[11][16] + PS7 * P[10][16] + P[3][16];
+        nextP[4][16] = -PS171 * P[15][16] + PS172 * P[14][16] + PS173 * P[1][16] + PS174 * P[0][16] + PS175 * P[2][16] - PS176 * P[3][16] + PS43 * P[13][16] + P[4][16];
+        nextP[5][16] = PS190 * P[15][16] - PS193 * P[13][16] + PS201 * P[2][16] - PS202 * P[0][16] + PS203 * P[3][16] - PS204 * P[1][16] + PS75 * P[14][16] + P[5][16];
+        nextP[6][16] = -PS197 * P[14][16] + PS199 * P[13][16] - PS214 * P[2][16] + PS215 * P[3][16] + PS216 * P[0][16] + PS217 * P[1][16] + PS87 * P[15][16] + P[6][16];
+        nextP[7][16] = P[4][16] * dt + P[7][16];
+        nextP[8][16] = P[5][16] * dt + P[8][16];
+        nextP[9][16] = P[6][16] * dt + P[9][16];
+        nextP[10][16] = P[10][16];
+        nextP[11][16] = P[11][16];
+        nextP[12][16] = P[12][16];
+        nextP[13][16] = P[13][16];
+        nextP[14][16] = P[14][16];
+        nextP[15][16] = P[15][16];
+        nextP[16][16] = P[16][16];
+        nextP[0][17] = -PS11 * P[1][17] - PS12 * P[2][17] - PS13 * P[3][17] + PS6 * P[10][17] + PS7 * P[11][17] + PS9 * P[12][17] + P[0][17];
+        nextP[1][17] = PS11 * P[0][17] - PS12 * P[3][17] + PS13 * P[2][17] - PS34 * P[10][17] - PS7 * P[12][17] + PS9 * P[11][17] + P[1][17];
+        nextP[2][17] = PS11 * P[3][17] + PS12 * P[0][17] - PS13 * P[1][17] - PS34 * P[11][17] + PS6 * P[12][17] - PS9 * P[10][17] + P[2][17];
+        nextP[3][17] = -PS11 * P[2][17] + PS12 * P[1][17] + PS13 * P[0][17] - PS34 * P[12][17] - PS6 * P[11][17] + PS7 * P[10][17] + P[3][17];
+        nextP[4][17] = -PS171 * P[15][17] + PS172 * P[14][17] + PS173 * P[1][17] + PS174 * P[0][17] + PS175 * P[2][17] - PS176 * P[3][17] + PS43 * P[13][17] + P[4][17];
+        nextP[5][17] = PS190 * P[15][17] - PS193 * P[13][17] + PS201 * P[2][17] - PS202 * P[0][17] + PS203 * P[3][17] - PS204 * P[1][17] + PS75 * P[14][17] + P[5][17];
+        nextP[6][17] = -PS197 * P[14][17] + PS199 * P[13][17] - PS214 * P[2][17] + PS215 * P[3][17] + PS216 * P[0][17] + PS217 * P[1][17] + PS87 * P[15][17] + P[6][17];
+        nextP[7][17] = P[4][17] * dt + P[7][17];
+        nextP[8][17] = P[5][17] * dt + P[8][17];
+        nextP[9][17] = P[6][17] * dt + P[9][17];
+        nextP[10][17] = P[10][17];
+        nextP[11][17] = P[11][17];
+        nextP[12][17] = P[12][17];
+        nextP[13][17] = P[13][17];
+        nextP[14][17] = P[14][17];
+        nextP[15][17] = P[15][17];
+        nextP[16][17] = P[16][17];
+        nextP[17][17] = P[17][17];
+        nextP[0][18] = -PS11 * P[1][18] - PS12 * P[2][18] - PS13 * P[3][18] + PS6 * P[10][18] + PS7 * P[11][18] + PS9 * P[12][18] + P[0][18];
+        nextP[1][18] = PS11 * P[0][18] - PS12 * P[3][18] + PS13 * P[2][18] - PS34 * P[10][18] - PS7 * P[12][18] + PS9 * P[11][18] + P[1][18];
+        nextP[2][18] = PS11 * P[3][18] + PS12 * P[0][18] - PS13 * P[1][18] - PS34 * P[11][18] + PS6 * P[12][18] - PS9 * P[10][18] + P[2][18];
+        nextP[3][18] = -PS11 * P[2][18] + PS12 * P[1][18] + PS13 * P[0][18] - PS34 * P[12][18] - PS6 * P[11][18] + PS7 * P[10][18] + P[3][18];
+        nextP[4][18] = -PS171 * P[15][18] + PS172 * P[14][18] + PS173 * P[1][18] + PS174 * P[0][18] + PS175 * P[2][18] - PS176 * P[3][18] + PS43 * P[13][18] + P[4][18];
+        nextP[5][18] = PS190 * P[15][18] - PS193 * P[13][18] + PS201 * P[2][18] - PS202 * P[0][18] + PS203 * P[3][18] - PS204 * P[1][18] + PS75 * P[14][18] + P[5][18];
+        nextP[6][18] = -PS197 * P[14][18] + PS199 * P[13][18] - PS214 * P[2][18] + PS215 * P[3][18] + PS216 * P[0][18] + PS217 * P[1][18] + PS87 * P[15][18] + P[6][18];
+        nextP[7][18] = P[4][18] * dt + P[7][18];
+        nextP[8][18] = P[5][18] * dt + P[8][18];
+        nextP[9][18] = P[6][18] * dt + P[9][18];
+        nextP[10][18] = P[10][18];
+        nextP[11][18] = P[11][18];
+        nextP[12][18] = P[12][18];
+        nextP[13][18] = P[13][18];
+        nextP[14][18] = P[14][18];
+        nextP[15][18] = P[15][18];
+        nextP[16][18] = P[16][18];
+        nextP[17][18] = P[17][18];
+        nextP[18][18] = P[18][18];
+        nextP[0][19] = -PS11 * P[1][19] - PS12 * P[2][19] - PS13 * P[3][19] + PS6 * P[10][19] + PS7 * P[11][19] + PS9 * P[12][19] + P[0][19];
+        nextP[1][19] = PS11 * P[0][19] - PS12 * P[3][19] + PS13 * P[2][19] - PS34 * P[10][19] - PS7 * P[12][19] + PS9 * P[11][19] + P[1][19];
+        nextP[2][19] = PS11 * P[3][19] + PS12 * P[0][19] - PS13 * P[1][19] - PS34 * P[11][19] + PS6 * P[12][19] - PS9 * P[10][19] + P[2][19];
+        nextP[3][19] = -PS11 * P[2][19] + PS12 * P[1][19] + PS13 * P[0][19] - PS34 * P[12][19] - PS6 * P[11][19] + PS7 * P[10][19] + P[3][19];
+        nextP[4][19] = -PS171 * P[15][19] + PS172 * P[14][19] + PS173 * P[1][19] + PS174 * P[0][19] + PS175 * P[2][19] - PS176 * P[3][19] + PS43 * P[13][19] + P[4][19];
+        nextP[5][19] = PS190 * P[15][19] - PS193 * P[13][19] + PS201 * P[2][19] - PS202 * P[0][19] + PS203 * P[3][19] - PS204 * P[1][19] + PS75 * P[14][19] + P[5][19];
+        nextP[6][19] = -PS197 * P[14][19] + PS199 * P[13][19] - PS214 * P[2][19] + PS215 * P[3][19] + PS216 * P[0][19] + PS217 * P[1][19] + PS87 * P[15][19] + P[6][19];
+        nextP[7][19] = P[4][19] * dt + P[7][19];
+        nextP[8][19] = P[5][19] * dt + P[8][19];
+        nextP[9][19] = P[6][19] * dt + P[9][19];
+        nextP[10][19] = P[10][19];
+        nextP[11][19] = P[11][19];
+        nextP[12][19] = P[12][19];
+        nextP[13][19] = P[13][19];
+        nextP[14][19] = P[14][19];
+        nextP[15][19] = P[15][19];
+        nextP[16][19] = P[16][19];
+        nextP[17][19] = P[17][19];
+        nextP[18][19] = P[18][19];
+        nextP[19][19] = P[19][19];
+        nextP[0][20] = -PS11 * P[1][20] - PS12 * P[2][20] - PS13 * P[3][20] + PS6 * P[10][20] + PS7 * P[11][20] + PS9 * P[12][20] + P[0][20];
+        nextP[1][20] = PS11 * P[0][20] - PS12 * P[3][20] + PS13 * P[2][20] - PS34 * P[10][20] - PS7 * P[12][20] + PS9 * P[11][20] + P[1][20];
+        nextP[2][20] = PS11 * P[3][20] + PS12 * P[0][20] - PS13 * P[1][20] - PS34 * P[11][20] + PS6 * P[12][20] - PS9 * P[10][20] + P[2][20];
+        nextP[3][20] = -PS11 * P[2][20] + PS12 * P[1][20] + PS13 * P[0][20] - PS34 * P[12][20] - PS6 * P[11][20] + PS7 * P[10][20] + P[3][20];
+        nextP[4][20] = -PS171 * P[15][20] + PS172 * P[14][20] + PS173 * P[1][20] + PS174 * P[0][20] + PS175 * P[2][20] - PS176 * P[3][20] + PS43 * P[13][20] + P[4][20];
+        nextP[5][20] = PS190 * P[15][20] - PS193 * P[13][20] + PS201 * P[2][20] - PS202 * P[0][20] + PS203 * P[3][20] - PS204 * P[1][20] + PS75 * P[14][20] + P[5][20];
+        nextP[6][20] = -PS197 * P[14][20] + PS199 * P[13][20] - PS214 * P[2][20] + PS215 * P[3][20] + PS216 * P[0][20] + PS217 * P[1][20] + PS87 * P[15][20] + P[6][20];
+        nextP[7][20] = P[4][20] * dt + P[7][20];
+        nextP[8][20] = P[5][20] * dt + P[8][20];
+        nextP[9][20] = P[6][20] * dt + P[9][20];
+        nextP[10][20] = P[10][20];
+        nextP[11][20] = P[11][20];
+        nextP[12][20] = P[12][20];
+        nextP[13][20] = P[13][20];
+        nextP[14][20] = P[14][20];
+        nextP[15][20] = P[15][20];
+        nextP[16][20] = P[16][20];
+        nextP[17][20] = P[17][20];
+        nextP[18][20] = P[18][20];
+        nextP[19][20] = P[19][20];
+        nextP[20][20] = P[20][20];
+        nextP[0][21] = -PS11 * P[1][21] - PS12 * P[2][21] - PS13 * P[3][21] + PS6 * P[10][21] + PS7 * P[11][21] + PS9 * P[12][21] + P[0][21];
+        nextP[1][21] = PS11 * P[0][21] - PS12 * P[3][21] + PS13 * P[2][21] - PS34 * P[10][21] - PS7 * P[12][21] + PS9 * P[11][21] + P[1][21];
+        nextP[2][21] = PS11 * P[3][21] + PS12 * P[0][21] - PS13 * P[1][21] - PS34 * P[11][21] + PS6 * P[12][21] - PS9 * P[10][21] + P[2][21];
+        nextP[3][21] = -PS11 * P[2][21] + PS12 * P[1][21] + PS13 * P[0][21] - PS34 * P[12][21] - PS6 * P[11][21] + PS7 * P[10][21] + P[3][21];
+        nextP[4][21] = -PS171 * P[15][21] + PS172 * P[14][21] + PS173 * P[1][21] + PS174 * P[0][21] + PS175 * P[2][21] - PS176 * P[3][21] + PS43 * P[13][21] + P[4][21];
+        nextP[5][21] = PS190 * P[15][21] - PS193 * P[13][21] + PS201 * P[2][21] - PS202 * P[0][21] + PS203 * P[3][21] - PS204 * P[1][21] + PS75 * P[14][21] + P[5][21];
+        nextP[6][21] = -PS197 * P[14][21] + PS199 * P[13][21] - PS214 * P[2][21] + PS215 * P[3][21] + PS216 * P[0][21] + PS217 * P[1][21] + PS87 * P[15][21] + P[6][21];
+        nextP[7][21] = P[4][21] * dt + P[7][21];
+        nextP[8][21] = P[5][21] * dt + P[8][21];
+        nextP[9][21] = P[6][21] * dt + P[9][21];
+        nextP[10][21] = P[10][21];
+        nextP[11][21] = P[11][21];
+        nextP[12][21] = P[12][21];
+        nextP[13][21] = P[13][21];
+        nextP[14][21] = P[14][21];
+        nextP[15][21] = P[15][21];
+        nextP[16][21] = P[16][21];
+        nextP[17][21] = P[17][21];
+        nextP[18][21] = P[18][21];
+        nextP[19][21] = P[19][21];
+        nextP[20][21] = P[20][21];
+        nextP[21][21] = P[21][21];
+
+        if (lim > 21) {
+            nextP[0][22] = -PS11 * P[1][22] - PS12 * P[2][22] - PS13 * P[3][22] + PS6 * P[10][22] + PS7 * P[11][22] + PS9 * P[12][22] + P[0][22];
+            nextP[1][22] = PS11 * P[0][22] - PS12 * P[3][22] + PS13 * P[2][22] - PS34 * P[10][22] - PS7 * P[12][22] + PS9 * P[11][22] + P[1][22];
+            nextP[2][22] = PS11 * P[3][22] + PS12 * P[0][22] - PS13 * P[1][22] - PS34 * P[11][22] + PS6 * P[12][22] - PS9 * P[10][22] + P[2][22];
+            nextP[3][22] = -PS11 * P[2][22] + PS12 * P[1][22] + PS13 * P[0][22] - PS34 * P[12][22] - PS6 * P[11][22] + PS7 * P[10][22] + P[3][22];
+            nextP[4][22] = -PS171 * P[15][22] + PS172 * P[14][22] + PS173 * P[1][22] + PS174 * P[0][22] + PS175 * P[2][22] - PS176 * P[3][22] + PS43 * P[13][22] + P[4][22];
+            nextP[5][22] = PS190 * P[15][22] - PS193 * P[13][22] + PS201 * P[2][22] - PS202 * P[0][22] + PS203 * P[3][22] - PS204 * P[1][22] + PS75 * P[14][22] + P[5][22];
+            nextP[6][22] = -PS197 * P[14][22] + PS199 * P[13][22] - PS214 * P[2][22] + PS215 * P[3][22] + PS216 * P[0][22] + PS217 * P[1][22] + PS87 * P[15][22] + P[6][22];
+            nextP[7][22] = P[4][22] * dt + P[7][22];
+            nextP[8][22] = P[5][22] * dt + P[8][22];
+            nextP[9][22] = P[6][22] * dt + P[9][22];
+            nextP[10][22] = P[10][22];
+            nextP[11][22] = P[11][22];
+            nextP[12][22] = P[12][22];
+            nextP[13][22] = P[13][22];
+            nextP[14][22] = P[14][22];
+            nextP[15][22] = P[15][22];
+            nextP[16][22] = P[16][22];
+            nextP[17][22] = P[17][22];
+            nextP[18][22] = P[18][22];
+            nextP[19][22] = P[19][22];
+            nextP[20][22] = P[20][22];
+            nextP[21][22] = P[21][22];
+            nextP[22][22] = P[22][22];
+            nextP[0][23] = -PS11 * P[1][23] - PS12 * P[2][23] - PS13 * P[3][23] + PS6 * P[10][23] + PS7 * P[11][23] + PS9 * P[12][23] + P[0][23];
+            nextP[1][23] = PS11 * P[0][23] - PS12 * P[3][23] + PS13 * P[2][23] - PS34 * P[10][23] - PS7 * P[12][23] + PS9 * P[11][23] + P[1][23];
+            nextP[2][23] = PS11 * P[3][23] + PS12 * P[0][23] - PS13 * P[1][23] - PS34 * P[11][23] + PS6 * P[12][23] - PS9 * P[10][23] + P[2][23];
+            nextP[3][23] = -PS11 * P[2][23] + PS12 * P[1][23] + PS13 * P[0][23] - PS34 * P[12][23] - PS6 * P[11][23] + PS7 * P[10][23] + P[3][23];
+            nextP[4][23] = -PS171 * P[15][23] + PS172 * P[14][23] + PS173 * P[1][23] + PS174 * P[0][23] + PS175 * P[2][23] - PS176 * P[3][23] + PS43 * P[13][23] + P[4][23];
+            nextP[5][23] = PS190 * P[15][23] - PS193 * P[13][23] + PS201 * P[2][23] - PS202 * P[0][23] + PS203 * P[3][23] - PS204 * P[1][23] + PS75 * P[14][23] + P[5][23];
+            nextP[6][23] = -PS197 * P[14][23] + PS199 * P[13][23] - PS214 * P[2][23] + PS215 * P[3][23] + PS216 * P[0][23] + PS217 * P[1][23] + PS87 * P[15][23] + P[6][23];
+            nextP[7][23] = P[4][23] * dt + P[7][23];
+            nextP[8][23] = P[5][23] * dt + P[8][23];
+            nextP[9][23] = P[6][23] * dt + P[9][23];
+            nextP[10][23] = P[10][23];
+            nextP[11][23] = P[11][23];
+            nextP[12][23] = P[12][23];
+            nextP[13][23] = P[13][23];
+            nextP[14][23] = P[14][23];
+            nextP[15][23] = P[15][23];
+            nextP[16][23] = P[16][23];
+            nextP[17][23] = P[17][23];
+            nextP[18][23] = P[18][23];
+            nextP[19][23] = P[19][23];
+            nextP[20][23] = P[20][23];
+            nextP[21][23] = P[21][23];
+            nextP[22][23] = P[22][23];
+            nextP[23][23] = P[23][23];
+        }
+    }
+
+    // Add process noise to the gyro/accel-bias diagonal (states 10..15)
+    // and, per CPP-065 phase 11, the mag/wind diagonal (states 16..23)
+    // when active. upstream: AP_NavEKF3_core.cpp ~line 1744-1748: `if
+    // (stateIndexLim > 9) { for (i=10;i<=stateIndexLim;i++) nextP[i][i] +=
+    // processNoiseVariance[i-10]; } }` - transcribed as a single bound
+    // change (15 -> lim) rather than adding the `stateIndexLim > 9` outer
+    // gate, since lim is never below 9 in this port and the loop already
+    // naturally does nothing when lim==9 (10 <= 9 is false).
+    for (int i = 10; i <= lim; ++i) {
         nextP[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] =
             nextP[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] +
             process_noise_variance[static_cast<std::size_t>(i - 10)];
     }
 
     // Position-variance-collapse guard (upstream: "if the total position
-    // variance exceeds 1e4 (100m), then stop covariance growth").
+    // variance exceeds 1e4 (100m), then stop covariance growth"). CPP-065
+    // phase 11: inner loop bound extended from the hardcoded 15 to `lim`,
+    // matching upstream's own `for (j=0;j<=stateIndexLim;j++)`.
     if ((P[7][7] + P[8][8]) > ftype(1e4)) {
         for (int i = 7; i <= 8; ++i) {
-            for (int j = 0; j <= 15; ++j) {
+            for (int j = 0; j <= lim; ++j) {
                 nextP[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] =
                     P[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)];
                 nextP[static_cast<std::size_t>(j)][static_cast<std::size_t>(i)] =
@@ -716,11 +995,28 @@ void EkfCore::covariance_prediction(const GyroSample& gyro, const AccelSample& a
         }
     }
 
-    // Symmetric copy-back, states 0..15 (16..23 handled by the inhibited-
-    // state zeroing in constrain_variances() below, matching upstream's
-    // own zeroRows/zeroCols behavior for those states in this
-    // configuration - see hpp banner simplification 1).
-    for (int row = 0; row <= 15; ++row) {
+    // Symmetric copy-back. CPP-065 phase 11: bound extended from the
+    // hardcoded 15 to `lim`, matching upstream's own `for (row=0;
+    // row<=stateIndexLim;row++)` - states 16..23 are now genuinely
+    // populated by the block above when active, instead of being left for
+    // constrain_variances() to zero every call.
+    //
+    // EXCLUDED (a real, separate upstream mechanism immediately following
+    // this loop in the real source, AP_NavEKF3_core.cpp ~line 1793-1802:
+    // `if (!inhibitDelVelBiasStates) { for (index=0;index<3;index++) { if
+    // (dvelBiasAxisInhibit[index]) { zeroRows/zeroCols(P, stateIndex,
+    // stateIndex); P[stateIndex][stateIndex] = dvelBiasAxisVarPrev[index];
+    // } } }` - a per-axis delta-velocity-bias covariance reset tied to
+    // `dvelBiasAxisInhibit[]`/ground-alignment axis inhibiting, distinct
+    // from ConstrainVariances()'s own accel-bias handling. Already a named
+    // phase-1/2 gap (ekf_core.hpp: "dvelBiasAxisInhibit[]... already a
+    // named phase-1 gap" / "this phase's inhibit_del_vel_bias_states gate
+    // is all-or-nothing across x/y/z") - this port has no per-axis
+    // inhibiting to trigger it, so it is correctly absent rather than
+    // approximated. Named freshly here since this is the first phase to
+    // touch this exact region of covariance_prediction() since that gap
+    // was originally disclosed.
+    for (int row = 0; row <= lim; ++row) {
         const auto r = static_cast<std::size_t>(row);
         P[r][r] = nextP[r][r];
         for (int col = 0; col < row; ++col) {
@@ -736,9 +1032,12 @@ void EkfCore::covariance_prediction(const GyroSample& gyro, const AccelSample& a
 }
 
 // upstream: NavEKF3_core::ConstrainVariances(), AP_NavEKF3_core.cpp ~line
-// 1877. See hpp banner simplification 1 (mag/wind permanently inhibited ->
-// zeroed) and simplification 2 (bias states never inhibited, no per-axis
-// ground-alignment gate).
+// 1877. See hpp banner simplification 2 (bias states never inhibited, no
+// per-axis ground-alignment gate). CPP-065 phase 11: the mag/wind
+// (16..21 / 22..23) blocks below now match upstream's real, runtime-
+// gated if/else structure (per this port's covariance_prediction() and
+// hpp banners) instead of the old phase-1 unconditional-zeroing
+// simplification.
 void EkfCore::constrain_variances(ftype dt_ekf_avg) {
     for (int i = 0; i <= 3; ++i) P[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] =
         clamp(P[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)], ftype(0.0), ftype(1.0));
@@ -790,11 +1089,49 @@ void EkfCore::constrain_variances(ftype dt_ekf_avg) {
         }
     }
 
-    // Mag (16..21) and wind (22..23) - permanently inhibited in this
-    // phase (simplification 1): zeroed every cycle, matching upstream's
-    // own inhibited-state branch exactly.
-    zero_rows_cols(P, 16, 21);
-    zero_rows_cols(P, 22, 23);
+    // CPP-065 phase 11. upstream: AP_NavEKF3_core.cpp ~line 1974-1985:
+    // `if (!inhibitMagStates) { for(i=16;i<=18;i++) P[i][i] =
+    // constrain_ftype(P[i][i],0.0f,0.01f); for(i=19;i<=21;i++) P[i][i] =
+    // constrain_ftype(P[i][i],0.0f,0.01f); } else { zeroCols(P,16,21);
+    // zeroRows(P,16,21); }` - verified directly, transcribed exactly.
+    // Replaces this port's old unconditional zeroing (a phase-1
+    // simplification that is no longer accurate now that
+    // covariance_prediction() genuinely populates these states when
+    // active - see that function's own CPP-065 banner). At this port's
+    // real default (inhibit_mag_states=true) this always takes the
+    // `else` branch, i.e. exactly the old unconditional-zeroing behavior
+    // - a behavior-preserving change at default settings.
+    if (!inhibit_mag_states) {
+        for (int i = 16; i <= 18; ++i)
+            P[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] =
+                clamp(P[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)], ftype(0.0), ftype(0.01));  // earth magnetic field
+        for (int i = 19; i <= 21; ++i)
+            P[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] =
+                clamp(P[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)], ftype(0.0), ftype(0.01));  // body magnetic field
+    } else {
+        zero_rows_cols(P, 16, 21);
+    }
+
+    // CPP-065 phase 11. upstream: AP_NavEKF3_core.cpp ~line 1987-1995:
+    // `if (!inhibitWindStates) { if (treatWindStatesAsTruth) {
+    // P[23][23]=P[22][22]=0.0f; } else { for(i=22;i<=23;i++) P[i][i] =
+    // constrain_ftype(P[i][i],0.0f,WIND_VEL_VARIANCE_MAX); } } else {
+    // zeroCols(P,22,23); zeroRows(P,22,23); }` - verified directly.
+    // `treatWindStatesAsTruth` is the already-established exclusion
+    // (phase 2, reconfirmed phase 9/10 - no such field exists in this
+    // port, see covariance_prediction()'s own process-noise banner
+    // above), so this always takes the `clamp` path when wind states are
+    // active - the ticket's own specified simplification. At this port's
+    // real default (inhibit_wind_states=true) this always takes the
+    // `else` branch, i.e. exactly the old unconditional-zeroing behavior
+    // - a behavior-preserving change at default settings.
+    if (!inhibit_wind_states) {
+        for (int i = 22; i <= 23; ++i)
+            P[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] =
+                clamp(P[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)], ftype(0.0), kWindVelVarianceMax);
+    } else {
+        zero_rows_cols(P, 22, 23);
+    }
 }
 
 // ============================================================================

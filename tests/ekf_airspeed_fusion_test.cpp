@@ -140,28 +140,26 @@ TEST_CASE("fuse_airspeed: at default settings, an inconsistent reading corrects 
     REQUIRE(velocity_moved);
 }
 
-TEST_CASE("fuse_airspeed: with inhibit_wind_states cleared, one fusion call measurably moves wind_vel - "
-          "but a real, disclosed gap caps it at one call's worth",
+TEST_CASE("fuse_airspeed: with inhibit_wind_states cleared, wind_vel learning is no longer capped at one "
+          "call - CPP-065 phase 11 fixed the constrain_variances() gap this test used to document",
           "[ekf_core][airspeed_fusion]") {
-    // REAL FINDING, following the exact precedent CPP-059's own mag-fusion
-    // test already established for earth_magfield (see ekf_mag_fusion_test.cpp's
-    // test 3 and its own comment): constrain_variances() unconditionally
-    // zeros P's wind rows/cols 22-23 EVERY call regardless of
-    // inhibit_wind_states's actual value (ekf_core.cpp's own constrain_
-    // variances(), "Mag (16..21) and wind (22..23) - permanently inhibited
-    // in this phase... zeroed every cycle"). fuse_airspeed() calls
-    // constrain_variances() unconditionally at its own end (banner "THE
-    // REAL, THREE-WAY OUTCOME SHAPE") - so even with inhibit_wind_states
-    // cleared, P[22..23]'s diagonal is wiped back to exactly 0 at the end of
-    // the SAME call that just used it. Net effect: clearing
-    // inhibit_wind_states unlocks exactly ONE call's worth of wind learning
-    // (using covariance_init()'s fresh nonzero P[22][22]/P[23][23]
-    // diagonal, upstream's own real init value of 0 notwithstanding - see
-    // note below) - a second call's Kalman gain for wind is provably ~0.
-    // This is the SAME already-understood, already-disclosed limitation the
-    // ticket itself names ("Already-understood limitation... not something
-    // to freshly investigate"), verified empirically here rather than
-    // merely assumed.
+    // HISTORY: this test used to document a real, disclosed gap (CPP-063
+    // phase 9, following CPP-059's own mag-fusion precedent):
+    // constrain_variances() unconditionally zeroed P's wind rows/cols 22-23
+    // EVERY call regardless of inhibit_wind_states's actual value, wiping
+    // out the engineered P[22][4] cross-correlation below at the end of the
+    // SAME call that just used it - so clearing inhibit_wind_states only
+    // ever unlocked ONE call's worth of wind learning (a second call's
+    // Kalman gain for wind was provably ~0).
+    //
+    // CPP-065 phase 11 fixed this directly: constrain_variances() now
+    // clamps (rather than zeros) P[22..23]'s diagonal to [0,
+    // WIND_VEL_VARIANCE_MAX] whenever inhibit_wind_states is clear, leaving
+    // cross-terms like this fixture's engineered P[22][4] untouched instead
+    // of wiping the whole 22-23 row/column - re-verified empirically below:
+    // the second call now moves wind_vel.x by a real, material amount
+    // (~0.087 vs. the first call's ~0.047, continuing in the same
+    // direction), and it keeps moving over further calls.
     //
     // NOTE on P[22][22]/P[23][23]'s real upstream covariance_init() value:
     // upstream sets these to exactly 0.0 (AP_NavEKF3_core.cpp ~line
@@ -217,10 +215,48 @@ TEST_CASE("fuse_airspeed: with inhibit_wind_states cleared, one fusion call meas
     // other wind cross-term) have been zeroed by constrain_variances() by
     // now, so a second call's Kalman gain for wind is provably 0 - feeding
     // the SAME reading again must leave wind_vel completely unchanged.
+    // CPP-065 UPDATE: the old assertion here ("a second call's Kalman
+    // gain for wind is provably 0") is now FALSE - empirically re-measured
+    // after this ticket's fix (constrain_variances() no longer
+    // unconditionally zeros P[22..23] AND all their cross-terms when
+    // inhibit_wind_states is clear - it now only clamps the diagonal to
+    // [0, WIND_VEL_VARIANCE_MAX]). The engineered P[22][4] cross-
+    // correlation this fixture relies on is NO LONGER wiped out at the end
+    // of the first call, so wind_vel.x keeps moving on every subsequent
+    // call: 0.0474 (call 1) -> 0.0874 (call 2) -> 0.1216 (call 3) -> 0.1511
+    // (call 4) -> ... -> 0.2793 by call 11 (empirically probed directly),
+    // a real, sustained (not one-call-capped) correction. Note P[22][22]
+    // itself (the diagonal) stays pinned at exactly 0.0 throughout this
+    // specific fixture - expected, since this fixture never calls
+    // covariance_prediction() between fuse_airspeed() calls (no fresh wind
+    // process noise is ever injected) and the diagonal starts at
+    // upstream's real 0.0 init value with nothing here to grow it; what
+    // survives and keeps driving Kfusion[22] is the engineered P[22][4]/
+    // P[4][22] cross-term, which the old unconditional zeroing used to
+    // destroy after one call and which the real per-group clamp/zero
+    // structure now correctly leaves alone.
     const Vector2F wind_after_one = ekf.state.wind_vel;
     REQUIRE(ekf.fuse_airspeed(tas_reading, ftype(0.01)));
-    REQUIRE(ekf.state.wind_vel.x == wind_after_one.x);
-    REQUIRE(ekf.state.wind_vel.y == wind_after_one.y);
+    const double wind_n_after_two = static_cast<double>(ekf.state.wind_vel.x);
+
+    // THE CENTRAL FINDING: the second call is no longer a no-op - it
+    // moves wind_vel.x by a real, material amount, continuing in the same
+    // direction as the first call (not merely nonzero noise).
+    REQUIRE(wind_n_after_two > static_cast<double>(wind_after_one.x) + 0.01);
+    REQUIRE(ekf.state.wind_vel.y == ftype(0));  // still no P[23][*] coupling engineered
+
+    // Continued movement over several more calls - real, sustained
+    // learning rather than a flatline at the second call's value either.
+    double wind_x = wind_n_after_two;
+    for (int i = 0; i < 5; ++i) {
+        REQUIRE(ekf.fuse_airspeed(tas_reading, ftype(0.01)));
+        const double new_wind_x = static_cast<double>(ekf.state.wind_vel.x);
+        REQUIRE(new_wind_x > wind_x);
+        wind_x = new_wind_x;
+    }
+    // After 7 total calls, wind_vel.x is well past double the one-call
+    // result this port used to be stuck at (empirically ~0.219 vs. ~0.047).
+    REQUIRE(wind_x > wind_n_after_one * 2.0);
 }
 
 TEST_CASE("fuse_airspeed: a badly-conditioned entry resets the covariance matrix and aborts",

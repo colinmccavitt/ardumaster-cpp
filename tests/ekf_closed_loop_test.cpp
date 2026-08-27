@@ -789,6 +789,17 @@ TEST_CASE("EkfCore's fused pipeline measurably outperforms pure dead-reckoning p
 // port - point 2 above) so that a nonzero P[22][22]/cross-term diagonal
 // actually has something to grow from between fusion calls once (a) stops
 // erasing it. Neither is attempted in this ticket.
+//
+// CPP-065 UPDATE: this is exactly what CPP-065 (phase 11) built - both (a)
+// and (b) above, together (per this ticket's own analysis, fixing only one
+// is provably insufficient). The TEST_CASE below was re-run after that fix
+// and its assertions rewritten to match the new, real, empirically-measured
+// result: wind_vel now converges to within ~0.03% of the true wind's
+// magnitude by the end of this same 120s run (see the TEST_CASE's own
+// comment for the full sampled trajectory) - a substantially better outcome
+// than "moves once, then plateaus" would have been, not merely a partial
+// fix. This historical banner is left intact above as an accurate record
+// of what CPP-064 actually found and why, at the time it was written.
 // ============================================================================
 
 namespace {
@@ -1011,9 +1022,8 @@ WindClosedLoopResult run_wind_closed_loop() {
 
 } // namespace
 
-TEST_CASE("CPP-064 phase 10: closed-loop wind-state estimation, with inhibit_wind_states cleared and a real "
-          "nonzero SimPlane wind, NEVER moves state.wind_vel away from zero over a full 120s flight - a sharper, "
-          "empirically-confirmed version of the already-disclosed constrain_variances() capping gap",
+TEST_CASE("CPP-064/CPP-065: closed-loop wind-state estimation, re-run after CPP-065's fix, now genuinely "
+          "converges state.wind_vel toward SimPlane's true wind over a 120s flight",
           "[ekf_core][integration][wind]") {
     const WindClosedLoopResult r = run_wind_closed_loop();
 
@@ -1048,21 +1058,39 @@ TEST_CASE("CPP-064 phase 10: closed-loop wind-state estimation, with inhibit_win
     // otherwise). This is checked BOTH via the explicit sample checkpoints
     // (answering the ticket's own "trajectory over time" requirement) AND
     // via the independent, blunt per-tick change detector.
-    REQUIRE_FALSE(r.wind_vel_ever_changed);
-    REQUIRE(r.wind_n_after_first_call == 0.0);
-    REQUIRE(r.wind_e_after_first_call == 0.0);
-    for (const auto& s : r.samples) {
-        REQUIRE(s.wind_n_est == 0.0);
-        REQUIRE(s.wind_e_est == 0.0);
-        // Error therefore sits at exactly the true wind's own magnitude,
-        // constant across every checkpoint - the "flatline at the WORST
-        // possible value from tick 1 onward" pattern, not "converges" and
-        // not even "moves once then plateaus at a partially-corrected
-        // value" - see this test's own banner for the real numbers this
-        // run measured and the ticket's commit message for the full
-        // discussion.
-        REQUIRE(s.wind_err_mag == Catch::Approx(r.true_wind_mag).margin(1e-9));
-    }
+    // THE CENTRAL FINDING, RE-MEASURED AFTER CPP-065's FIX (empirically,
+    // not assumed - see this ticket's commit message for the full
+    // trajectory): wind_vel is NO LONGER frozen at zero - it now
+    // genuinely, and substantially, converges toward the true (0, -6) m/s
+    // wind over the run:
+    //   t=10s:  wind_est=(-0.071,  0.001), error = 6.001 m/s (~= true magnitude, not yet converged)
+    //   t=30s:  wind_est=(-0.496,  0.003), error = 6.023 m/s (still essentially unconverged - a transient)
+    //   t=60s:  wind_est=(-0.380, -5.491), error = 0.635 m/s (major convergence between 30s and 60s)
+    //   t=90s:  wind_est=(-0.039, -5.946), error = 0.066 m/s
+    //   t=120s: wind_est=(-0.001, -6.001), error = 0.0016 m/s (essentially exact)
+    // This is a genuinely different, and much more positive, answer than
+    // CPP-064's own "never moves at all" finding - the fix (real mag/wind
+    // process noise in covariance_prediction() plus the real per-group
+    // clamp in constrain_variances(), see ekf_core.cpp's own "CPP-065
+    // phase 11" banners) closes the gap CPP-064 diagnosed, and in this
+    // scenario wind estimation does not merely "move a little" - it
+    // converges to within ~0.03% of the true wind's magnitude by the end
+    // of a realistic 120s flight.
+    REQUIRE(r.wind_vel_ever_changed);
+    const bool first_call_moved_wind = (r.wind_n_after_first_call != 0.0) || (r.wind_e_after_first_call != 0.0);
+    REQUIRE(first_call_moved_wind);
+
+    // Convergence over time - loose bounds (not the exact probed decimals
+    // above, to stay robust to minor floating-point/platform differences)
+    // that would nonetheless have been FALSE before this ticket (every
+    // sample was pinned at exactly the true wind's magnitude, 6.0 m/s).
+    REQUIRE(r.samples[2].wind_err_mag < 2.0);   // t=60s:  was 6.0 before this ticket
+    REQUIRE(r.samples[3].wind_err_mag < 0.5);   // t=90s:  was 6.0 before this ticket
+    REQUIRE(r.samples[4].wind_err_mag < 0.1);   // t=120s: was 6.0 before this ticket
+
+    // The final sample is measurably better than the first - genuine
+    // convergence over the run, not noise wobbling around a fixed offset.
+    REQUIRE(r.samples[4].wind_err_mag < r.samples[0].wind_err_mag / 10.0);
 
     // Sanity: the REST of the pipeline (GPS/mag/baro fusion, unaffected by
     // inhibit_wind_states) is still behaving completely normally under a

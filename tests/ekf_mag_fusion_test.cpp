@@ -186,29 +186,31 @@ TEST_CASE("fuse_magnetometer: at default settings, an inconsistent reading corre
     REQUIRE(ekf.state.quat.is_unit_length());
 }
 
-TEST_CASE("fuse_magnetometer: with inhibit_mag_states cleared, one fusion call measurably corrects "
-          "earth_magfield toward the true field - but a real, disclosed gap caps it at one call's worth",
+TEST_CASE("fuse_magnetometer: with inhibit_mag_states cleared, earth_magfield learning is no longer capped "
+          "at one call - CPP-065 phase 11 fixed the constrain_variances() gap this test used to document",
           "[ekf_core][mag_fusion]") {
-    // REAL FINDING, confirmed by this test (not merely theorized from the
-    // ekf_core.hpp phase-2 banner's own "CORRECTION" note): constrain_
-    // variances() unconditionally zeros P's mag/wind rows/cols 16-23
-    // EVERY call regardless of inhibit_mag_states's actual value (it is
-    // hardcoded, not wired to read the flag - see ekf_core.hpp's
-    // "CPP-056, PHASE 2" banner, "future phase... must also wire it into
-    // those two functions's currently-hardcoded branches"). fuse_
-    // magnetometer() calls constrain_variances() as part of its own
-    // shared per-axis covariance-update step (matching upstream's real
-    // ForceSymmetry()/ConstrainVariances() calls) - so even with inhibit_
-    // mag_states cleared, P[16..21]'s diagonal is wiped back to exactly 0
-    // at the end of the SAME call that just used it, before the state
-    // correction is even applied to a following call. The net effect:
-    // clearing inhibit_mag_states unlocks exactly ONE call's worth of
-    // earth-field learning (using covariance_init()'s fresh nonzero
-    // P[16][16] diagonal) - a second call's Kalman gain for those states
-    // is provably ~0 (P[i][16..21] is 0 for every i by then). This is a
-    // real, disclosed consequence of the already-named phase-1/2 gap,
-    // not a bug in this phase - documented here as this ticket's own
-    // "say so clearly" finding, verified empirically, not assumed.
+    // HISTORY / CPP-065 UPDATE: this test used to document a real,
+    // disclosed gap (CPP-059 phase 5): constrain_variances() unconditionally
+    // zeroed P's mag/wind rows/cols 16-23 EVERY call regardless of
+    // inhibit_mag_states's actual value, so clearing inhibit_mag_states
+    // only ever unlocked ONE call's worth of earth-field learning (a
+    // second call's Kalman gain for those states was provably ~0). CPP-065
+    // phase 11 fixed this directly: constrain_variances() now clamps
+    // (rather than zeros) P[16..21]'s diagonal to [0, 0.01] whenever
+    // inhibit_mag_states is clear (see ekf_core.cpp's own "CPP-065 phase
+    // 11" banner in constrain_variances()) - re-verified empirically here,
+    // not assumed: the second call now moves earth_magfield by a REAL,
+    // material amount (~20% of the first call's movement, not the old
+    // provably-negligible ~0), and learning continues with diminishing
+    // returns over further calls (expected Kalman behavior - see the
+    // in-test comments below for the exact measured trajectory). Note this
+    // fixture never calls covariance_prediction() between fuse_magnetometer()
+    // calls, so P[16..18] only ever shrinks here (no fresh process noise
+    // between calls) - a real closed-loop run (interleaving
+    // covariance_prediction(), which now DOES add mag process noise per
+    // CPP-065) can behave differently; this test is specifically isolating
+    // the constrain_variances() fix, not re-measuring the full closed-loop
+    // picture (see ekf_closed_loop_test.cpp for that).
     EkfCore ekf;
     ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
     ekf.inhibit_mag_states = false;  // unlock mag-field learning for this test
@@ -243,12 +245,54 @@ TEST_CASE("fuse_magnetometer: with inhibit_mag_states cleared, one fusion call m
     // Confirm the disclosed gap directly: by now P[16..21]'s diagonal has
     // been zeroed by constrain_variances(), so a second call moves
     // earth_magfield by a provably negligible amount versus the first.
+    // CPP-065 UPDATE: the old assertion here ("second_call_movement <
+    // first_call_movement * 0.05") is now FALSE - empirically re-measured
+    // after this ticket's fix (constrain_variances() no longer
+    // unconditionally zeros P[16..21] when inhibit_mag_states is clear):
+    // second-call movement is ~0.0166 vs. first-call's ~0.0833 (about 20%,
+    // not <5%) - a real, measurable SECOND call, not a negligible one.
+    // Learning continues over many more calls too (verified directly by
+    // probing 10 further calls: error goes 0.1667 -> 0.1501 -> 0.1429 ->
+    // 0.1389 -> ... -> 0.1305 by call 11, converging with diminishing
+    // returns - expected Kalman behavior since no covariance_prediction()
+    // runs between these back-to-back fuse_magnetometer() calls in this
+    // fixture, so P[16..18]'s diagonal only ever shrinks here, it never
+    // gets fresh process noise to grow from again; a real closed-loop run
+    // interleaving covariance_prediction() would behave differently - see
+    // the CPP-064-derived closed-loop test in ekf_closed_loop_test.cpp for
+    // that scenario). This test now asserts the real, sustained-learning
+    // shape: call 2 must move earth_magfield by a MATERIAL fraction of
+    // call 1's movement (not the old near-zero cap), and repeated calls
+    // must keep reducing the error, converging toward (not fully
+    // reaching, in just a few calls) the true field.
     const Vector3F earth_after_one = ekf.state.earth_magfield;
     REQUIRE(ekf.fuse_magnetometer(mag, make_gyro(ftype(0.01)), ftype(0.01)));
+    const double err_after_two = static_cast<double>((true_field - ekf.state.earth_magfield).length());
     const double second_call_movement =
         static_cast<double>((ekf.state.earth_magfield - earth_after_one).length());
     const double first_call_movement = initial_err - err_after_one;
-    REQUIRE(second_call_movement < first_call_movement * 0.05);
+
+    // THE CENTRAL FINDING: the second call is no longer capped to a
+    // provably negligible movement - it moves earth_magfield by a real,
+    // material fraction (empirically ~20%) of the first call's movement.
+    REQUIRE(second_call_movement > first_call_movement * 0.05);
+    REQUIRE(err_after_two < err_after_one);
+
+    // Continued learning over several more calls (diminishing returns,
+    // per the derivation above, but genuinely still converging - not
+    // flatlined at err_after_two the way it would have flatlined at
+    // err_after_one before this ticket).
+    double err = err_after_two;
+    for (int i = 0; i < 5; ++i) {
+        REQUIRE(ekf.fuse_magnetometer(mag, make_gyro(ftype(0.01)), ftype(0.01)));
+        const double new_err = static_cast<double>((true_field - ekf.state.earth_magfield).length());
+        REQUIRE(new_err < err);
+        err = new_err;
+    }
+    // After 7 total calls, error is notably smaller than the ONE-call
+    // result this port used to be stuck at (empirically ~0.133 vs.
+    // ~0.167) - real, sustained progress, not a one-shot correction.
+    REQUIRE(err < err_after_one * 0.85);
 }
 
 TEST_CASE("fuse_magnetometer: a badly-conditioned axis resets the covariance matrix and aborts",
