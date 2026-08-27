@@ -987,13 +987,68 @@ ftype EkfCore::gps_horiz_pos_obs_variance() const {
     return sq(clamp(gps_horiz_pos_noise, ftype(0.1), ftype(10.0))) + sq(pos_err);
 }
 
+// CPP-057 phase 3. upstream: velTestRatio, AP_NavEKF3_PosVelFusion.cpp
+// ~line 875-901 - `velTestRatio = innovVelSumSq / (varVelSum *
+// sq(MAX(0.01*_gpsVelInnovGate, 1.0)))`, summed over N/E/D (this port's
+// imax==2 case unconditionally - see ekf_core.hpp's "CPP-057, PHASE 3"
+// banner for why that's the real AID_ABSOLUTE-equivalent behavior here,
+// not an approximation). R_OBS_DATA_CHECKS[0..2] == R_OBS[0..2] for this
+// port exactly (see banner's "CORRECTION TO NOTHING" note) - reuses
+// gps_horiz_vel_obs_variance()/gps_vert_vel_obs_variance() directly
+// rather than a second, duplicate formula.
+ftype EkfCore::gps_vel_test_ratio(const GpsSample& gps) const {
+    const ftype r_obs_horiz = gps_horiz_vel_obs_variance();
+    const ftype r_obs_vert = gps_vert_vel_obs_variance();
+
+    const ftype innov_n = state.velocity.x - gps.velocity_ned.x;
+    const ftype innov_e = state.velocity.y - gps.velocity_ned.y;
+    const ftype innov_d = state.velocity.z - gps.velocity_ned.z;
+    const ftype innov_sum_sq = sq(innov_n) + sq(innov_e) + sq(innov_d);
+
+    const ftype var_sum = (P[4][4] + r_obs_horiz) + (P[5][5] + r_obs_horiz) + (P[6][6] + r_obs_vert);
+    const ftype gate = std::max(ftype(0.01) * gps_vel_innov_gate_pct, ftype(1.0));
+
+    return innov_sum_sq / (var_sum * sq(gate));
+}
+
+// CPP-057 phase 3. upstream: posTestRatio, ~line 806-816 -
+// `posTestRatio = (sq(innovVelPos[3]) + sq(innovVelPos[4])) /
+// (sq(MAX(0.01*_gpsPosInnovGate, 1.0)) * (varInnovVelPos[3] +
+// varInnovVelPos[4]))`. R_OBS_DATA_CHECKS[3]/[4] == R_OBS[3]/[4]
+// unconditionally upstream (~line 774) - reuses
+// gps_horiz_pos_obs_variance() directly, no duplicate formula.
+ftype EkfCore::gps_pos_test_ratio(const GpsSample& gps) const {
+    const ftype r_obs = gps_horiz_pos_obs_variance();
+
+    const ftype innov_n = state.position.x - gps.position_ne.x;
+    const ftype innov_e = state.position.y - gps.position_ne.y;
+    const ftype innov_sum_sq = sq(innov_n) + sq(innov_e);
+
+    const ftype var_sum = (P[7][7] + r_obs) + (P[8][8] + r_obs);
+    const ftype gate = std::max(ftype(0.01) * gps_pos_innov_gate_pct, ftype(1.0));
+
+    return innov_sum_sq / (var_sum * sq(gate));
+}
+
 // upstream: FuseVelPosNED()'s obsIndex 0-2 path. Innovation formula
 // (~line 1011): `innovVelPos[obsIndex] = stateStruct.velocity[obsIndex] -
 // velPosObs[obsIndex];` - recomputed fresh before each axis's fusion
 // call so a correlated correction from an earlier axis in this same call
 // is reflected, exactly matching upstream's sequential-fusion loop
 // (state is not a snapshot taken once at the top of the loop).
+//
+// CPP-057 phase 3: gated by gps_vel_test_ratio(), computed ONCE here
+// using the state/P as they stand at entry - matching upstream, where
+// the test block (~line 875-901) runs once, before the separate per-axis
+// sequential fusion loop it gates (~line 1005-1014). Failing the gate
+// (ratio >= 1.0) skips the WHOLE velocity vector for this cycle: no axis
+// is fused, P/state are left completely untouched, matching upstream's
+// own `else { fuseVelData = false; }` (~line 928).
 int EkfCore::fuse_gps_velocity(const GpsSample& gps, ftype dt_ekf_avg) {
+    if (gps_vel_test_ratio(gps) >= ftype(1.0)) {
+        return 0;
+    }
+
     int n_fused = 0;
     const ftype r_obs_horiz = gps_horiz_vel_obs_variance();
     const ftype r_obs_vert = gps_vert_vel_obs_variance();
@@ -1013,7 +1068,17 @@ int EkfCore::fuse_gps_velocity(const GpsSample& gps, ftype dt_ekf_avg) {
 // upstream: FuseVelPosNED()'s obsIndex 3-4 path. Innovation formula
 // (~line 1016): `innovVelPos[obsIndex] = stateStruct.position[obsIndex-3]
 // - velPosObs[obsIndex];`.
+//
+// CPP-057 phase 3: gated by gps_pos_test_ratio(), computed ONCE here
+// using the state/P as they stand at entry, same reasoning as
+// fuse_gps_velocity() above. Failing the gate (ratio >= 1.0) skips both
+// position axes for this cycle, P/state left completely untouched,
+// matching upstream's own `else { fusePosData = false; }` (~line 859).
 int EkfCore::fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg) {
+    if (gps_pos_test_ratio(gps) >= ftype(1.0)) {
+        return 0;
+    }
+
     int n_fused = 0;
     const ftype r_obs = gps_horiz_pos_obs_variance();
 

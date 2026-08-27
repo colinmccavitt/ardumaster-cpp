@@ -293,6 +293,124 @@
 // fwcpp::ekf::GpsSample below rather than extending or wrapping
 // ahrs::GpsSample - a genuinely different explicit input, not a
 // duplicate of an existing one.
+//
+// ============================================================================
+// CPP-057, PHASE 3 (this ticket): innovation-consistency gating for GPS
+// velocity/position fusion. Everything above this point is phase 1
+// (CPP-052) plus phase 2 (CPP-056), unmodified. Read FuseVelPosNED()'s
+// innovation-gating block in full (AP_NavEKF3_PosVelFusion.cpp ~line
+// 792-932) before extending anything below - it was read in full for
+// this phase, not skimmed from the ticket's own summary of it.
+// ============================================================================
+//
+// THE GAP THIS PHASE CLOSES: phase 2's own banner above named it
+// explicitly - fuse_gps_velocity()/fuse_gps_position() fuse every GPS
+// sample unconditionally, with no way to reject a bad/glitching fix
+// beyond fuse_direct_state_observation()'s negative-variance guard (which
+// only catches a numerically-corrupting update, not a merely-wrong one).
+// This phase adds the real upstream normalized-innovation ("test ratio")
+// check that decides upstream's own fusePosData/fuseVelData booleans, and
+// wires it in as a pre-check that skips the ENTIRE velocity or position
+// vector (all axes) for one cycle when it fails - upstream's own
+// `else { fusePosData = false; }` / `else { fuseVelData = false; }`
+// branches (~line 859, ~line 928).
+//
+// WHAT THIS PHASE BUILDS:
+//   - gps_vel_test_ratio() / gps_pos_test_ratio(): the real velTestRatio/
+//     posTestRatio formulas (~line 875-901 velocity, ~line 806-816
+//     position), public (like the existing gps_*_obs_variance()
+//     functions) so tests can verify the exact formula independently.
+//   - Wiring into fuse_gps_velocity()/fuse_gps_position(): each now
+//     computes its test ratio ONCE, using the state/P at function entry
+//     (matching upstream: the test block runs once, before the separate
+//     per-axis sequential fusion loop it gates), and returns 0 (no axes
+//     fused, state/P completely untouched) if the ratio is >= 1.0,
+//     otherwise proceeds exactly as phase 2 already did.
+//   - gps_vel_innov_gate_pct / gps_pos_innov_gate_pct: new public fields,
+//     defaulted to the real upstream VEL_I_GATE_DEFAULT/POS_I_GATE_DEFAULT
+//     = 500 (AP_NavEKF3.cpp, verified byte-identical across every
+//     APM_BUILD_TYPE #elif block including ArduPlane's own, ~line 34-39,
+//     60-65, 86-91, 112-117) - same "AP_Param not wired in yet" treatment
+//     as this file's other noise/limit parameters.
+//
+// CORRECTION TO NOTHING - THE CPP-057 TICKET'S OWN FORMULAS CHECKED OUT:
+// unlike CPP-056 (which found the ticket wrong about phase 1 already
+// having inhibit* fields), this ticket's posTestRatio/velTestRatio
+// formulas and its VEL_I_GATE_DEFAULT/POS_I_GATE_DEFAULT/
+// GLITCH_RADIUS_DEFAULT = 500/500/25 were verified line-by-line against
+// the real ~line 792-932 block and AP_NavEKF3.cpp's real parameter
+// defaults and matched exactly - no corrections needed this round. One
+// worthwhile independent finding beyond what the ticket already stated:
+// R_OBS_DATA_CHECKS[0..2] (the variance used for velTestRatio) is NOT
+// always textually identical to R_OBS[0..2] (the variance used for the
+// Kalman gain) in upstream's general code - upstream deliberately
+// recomputes R_OBS_DATA_CHECKS[0..2] from the "no reported accuracy"
+// formula unconditionally (~line 762, its own comment: "we don't want
+// the acceptance radius to increase with reported GPS accuracy"), even
+// on the branch where R_OBS[0..2] itself used the `gpsSpdAccuracy > 0.0f`
+// reported-accuracy formula instead. That distinction is moot for THIS
+// port specifically, because phase 2 never implemented the
+// `gpsSpdAccuracy > 0.0f` branch at all (a named phase-2 exclusion, see
+// above) - this port's R_OBS[0..2] is ALWAYS the "no reported accuracy"
+// formula, so it is legitimately, exactly equal to R_OBS_DATA_CHECKS[0..2]
+// here, not merely approximated as such. gps_vel_test_ratio() therefore
+// reuses gps_horiz_vel_obs_variance()/gps_vert_vel_obs_variance() directly
+// rather than duplicating the formula under a second name. Position's
+// R_OBS_DATA_CHECKS[3]/[4] are unconditionally copied from R_OBS[3]/[4]
+// with no such distinction (~line 774: `for (i=3;i<=5;i++)
+// R_OBS_DATA_CHECKS[i] = R_OBS[i];`), so gps_pos_test_ratio() reusing
+// gps_horiz_pos_obs_variance() is exact for the same reason without even
+// needing the "no accuracy branch" argument.
+//
+// NOT MODELED / EXPLICITLY EXCLUDED FROM THIS PHASE (each is a real
+// upstream mechanism, verified present in the ~792-932 read, named here
+// with its real upstream trigger per the ticket's own acceptance
+// criterion):
+//   - The `_gpsGlitchRadiusMax <= 0` "soft accept" branch (~line 819-826
+//     position, ~line 907-914 velocity): inflate varInnov by the failing
+//     test ratio itself so the test ratio becomes exactly 1.0 and the
+//     sample is fused anyway with widened variance, instead of being
+//     rejected outright. Verified dead code for the real default
+//     configuration: GLITCH_RADIUS_DEFAULT = 25 (positive) across every
+//     APM_BUILD_TYPE block, and this port has no EK3_GLITCH_RAD parameter
+//     to ever set it non-positive. A future parameterization phase that
+//     wires up real AP_Param storage for this field would need to add
+//     this branch to stay faithful once the parameter becomes
+//     user-settable.
+//   - `PV_AidingMode == AID_NONE`'s unconditional posCheckPassed = true
+//     (~line 816: `if (posTestRatio < 1.0f || (PV_AidingMode ==
+//     AID_NONE))`) - this port has no aiding-mode state machine
+//     (AID_NONE/AID_RELATIVE/AID_ABSOLUTE, AP_NavEKF3_Control.cpp) at
+//     all; phase 2's fusion already runs unconditionally in the real
+//     AID_ABSOLUTE-equivalent regime (actual GPS being fused), so this
+//     bypass simply does not apply. Named here again as the real gap a
+//     future health/mode phase must resolve.
+//   - `posTimeout`/`velTimeout`/`badIMUdata`-driven force-fuse-anyway
+//     (`if (posCheckPassed || posTimeout || badIMUdata)`, ~line 836; `if
+//     (velCheckPassed || velTimeout || badIMUdata)`, ~line 917) and the
+//     `ResetVelocity()`/`ResetPosition()` reset-on-timeout sequence that
+//     follows (including the covariance zeroRows/zeroCols/re-seed-to
+//     -glitch-radius steps, ~line 838-857). None of `lastVelPassTime_ms`/
+//     `lastGpsPosPassTime_ms` wall-clock bookkeeping or a real
+//     ResetVelocity()/ResetPosition() re-initialization path exist in
+//     this port. Real, named consequence: a sustained GPS outage in this
+//     port, after this ticket, simply stops updating state/covariance
+//     from GPS entirely (safe - the filter degrades to pure INS dead
+//     reckoning - but not self-recovering the way upstream's real
+//     reset-after-timeout behavior is). This is the real next gap for a
+//     future phase, not silently absorbed into today's behavior.
+//   - `gpsNoiseScaler`/satellite-count-based R_OBS scaling and
+//     `sources.useVelXYSource`/`getPosXYSource` source-selection branches
+//     - already a named phase-2 exclusion (no satellite-count/source-
+//     selection modeling in this port); carried forward unchanged since
+//     the gate formulas consume the same R_OBS this port already
+//     computes.
+//   - Height/baro's `hgtTestRatio` gating (`obsIndex==5`, ~line 934-957)
+//     - no baro fusion exists yet, a named exclusion carried over from
+//     CPP-056.
+//   - The GPS-vertical-velocity-vs-baro aliasing cross-check that sets
+//     `badIMUdata` (~line 777-799) - depends on independent baro height
+//     fusion, out of scope for the same reason as height gating above.
 
 #include <array>
 #include <cmath>
@@ -455,6 +573,16 @@ public:
     ftype mag_noise = static_cast<ftype>(0.05f);             // MAG_M_NSE_DEFAULT (init value only - see banner simplification 1)
     ftype acc_bias_lim = static_cast<ftype>(1.0f);           // AP_GROUPINFO("ACC_BIAS_LIM", ..., 1.0f)
 
+    // CPP-057 phase 3: real VEL_I_GATE_DEFAULT/POS_I_GATE_DEFAULT gate
+    // parameters (AP_NavEKF3.cpp _gpsVelInnovGate/_gpsPosInnovGate,
+    // AP_Int16 "Percentage number of standard deviations" - hence the
+    // _pct suffix), verified identical (500/500) across every
+    // APM_BUILD_TYPE #elif block including ArduPlane's own (~line 34-39,
+    // 60-65, 86-91, 112-117). Same "AP_Param not wired in yet" treatment
+    // as this file's other noise/limit parameters above.
+    ftype gps_vel_innov_gate_pct = static_cast<ftype>(500);  // VEL_I_GATE_DEFAULT
+    ftype gps_pos_innov_gate_pct = static_cast<ftype>(500);  // POS_I_GATE_DEFAULT
+
     // upstream: NavEKF3_core::InitialGyroBiasUncertainty(),
     // AP_NavEKF3_GyroBias.cpp - a fixed 2.5 deg/sec, not vehicle-specific
     // despite its own doc comment claiming otherwise (read directly:
@@ -510,6 +638,19 @@ public:
     // consistency gating).
     bool fuse_direct_state_observation(int state_index, ftype innovation, ftype obs_variance, ftype dt_ekf_avg);
 
+    // CPP-057 phase 3. upstream: velTestRatio/posTestRatio, the real
+    // innovation-consistency test-ratio formulas FuseVelPosNED() uses to
+    // decide fuseVelData/fusePosData (AP_NavEKF3_PosVelFusion.cpp ~line
+    // 875-901 velocity, ~line 806-816 position) - see this file's
+    // "CPP-057, PHASE 3" banner for the full formula derivation and what
+    // is/isn't reproduced. Public (like gps_*_obs_variance()) so tests
+    // can verify the exact formula independently. Pass if the returned
+    // ratio is < 1.0 (upstream: `if (velTestRatio < 1.0)` / `if
+    // (posTestRatio < 1.0f || ...)`, the AID_NONE disjunct of which does
+    // not apply here - see banner).
+    [[nodiscard]] ftype gps_vel_test_ratio(const GpsSample& gps) const;
+    [[nodiscard]] ftype gps_pos_test_ratio(const GpsSample& gps) const;
+
     // CPP-056 phase 2. upstream: FuseVelPosNED()'s obsIndex 0-2 path
     // (innovation ~line 1011-1014; R_OBS "no reported accuracy" branch
     // ~line 741-742) - fuses the 3 GPS velocity axes sequentially against
@@ -521,12 +662,24 @@ public:
     // whose healthyFusion guard passed - phase 1/this phase has no
     // faultStatus.bad_nvel/bad_evel/bad_dvel bookkeeping to report this
     // through instead.
+    //
+    // CPP-057 phase 3 ADDENDUM: now gated by gps_vel_test_ratio() BEFORE
+    // any axis is fused - if the combined test ratio is >= 1.0, this
+    // returns 0 immediately and P/state are left completely untouched
+    // (upstream: `else { fuseVelData = false; }`, ~line 928). The
+    // per-axis sequential-fusion behavior described above is otherwise
+    // unchanged and only runs at all once the gate has passed.
     int fuse_gps_velocity(const GpsSample& gps, ftype dt_ekf_avg);
 
     // CPP-056 phase 2. upstream: FuseVelPosNED()'s obsIndex 3-4 path
     // (innovation ~line 1016; R_OBS "no reported accuracy" branch ~line
     // 750-756). Fuses the 2 GPS horizontal position axes sequentially
     // against `gps.position_ne`. Returns the number of axes (0-2) fused.
+    //
+    // CPP-057 phase 3 ADDENDUM: now gated by gps_pos_test_ratio() BEFORE
+    // any axis is fused - if the combined test ratio is >= 1.0, this
+    // returns 0 immediately and P/state are left completely untouched
+    // (upstream: `else { fusePosData = false; }`, ~line 859).
     int fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg);
 
     // CPP-056 phase 2. upstream: FuseVelPosNED()'s R_OBS[0]/[1]/[2] "no
