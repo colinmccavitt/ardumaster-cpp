@@ -4405,3 +4405,456 @@ TEST_CASE("Closed loop: ground steering on the ground tracks a commanded rudder 
     // steering partway through via the altitude gate.
     REQUIRE(sim_plane.on_ground());
 }
+
+// ---------------------------------------------------------------------
+// CPP-031 SLICE 12: ModeTAKEOFF - real takeoff behavior (takeoff_calc_
+// roll()/pitch()/throttle(), the shared core, plus the standalone mode
+// itself). See plane.hpp's own "CPP-031 SLICE 12 ADDENDUM" file banner
+// for the full upstream-vs-port design rationale and every exclusion.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Plane::takeoff_calc_roll: altitude-scaled roll-limit interpolation across the three TKOFF_LVL_ALT regimes",
+          "[vehicle][takeoff]") {
+    Plane plane;
+    plane.aparm.level_roll_limit_deg = 5.0f; // real upstream default
+    plane.aparm.roll_limit_deg = 45.0f;      // real upstream default
+    plane.update_flight_limits();            // sets roll_limit_cd = 4500
+    // Keeps calc_nav_roll()'s own internal update_load_factor() call from
+    // separately shrinking roll_limit_cd out from under this test (its
+    // real default-state behavior: with smoothed_airspeed == 0, max_load_
+    // factor is always <= 1.0, which unconditionally clamps roll_limit_cd
+    // to 25deg regardless of aparm.roll_limit_deg - confirmed by reading
+    // apply_load_factor_roll_limits(), plane.hpp). A cruise-ish airspeed
+    // keeps max_load_factor comfortably above the ~1.4 aerodynamic_load_
+    // factor a 45deg bank demands, leaving roll_limit_cd at its
+    // configured 45deg for this test's own "full flight envelope" case.
+    plane.smoothed_airspeed = 20.0f;
+    plane.steer_state.hold_course_cd = 0; // != -1, so takeoff_calc_roll() doesn't take its wings-level early return
+    plane.mode_takeoff.level_alt = 10.0f;
+    plane.mode_takeoff.target_alt = 50.0f;
+    plane.takeoff_state.takeoff_start_alt_m = 100.0f;
+
+    // A large crosstrack error - current_loc is 500m EAST of a due-NORTH
+    // line from prev_WP_loc to next_WP_loc (same geometry the "ModeCRUISE:
+    // once locked, nav_roll_cd comes from L1Control's real guidance" test
+    // above uses) - drives L1's raw commanded roll well past even the
+    // widest cap this test exercises (45deg), so takeoff_calc_roll()'s own
+    // altitude-scaled clamp is what actually determines the final nav_
+    // roll_cd in every case below, not L1's own unsaturated demand. East
+    // of a north-bound line, L1 demands a LEFT (negative) correction.
+    plane.prev_WP_loc = fwcpp::Location();
+    plane.next_WP_loc = fwcpp::Location();
+    plane.next_WP_loc.offset(1000.0f, 0.0f); // 1000m north
+    plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 500.0f, 0.0f)); // 500m east of the line
+    plane.ahrs.yaw = 0.0f;                                               // facing north
+
+    // build_l1_inputs() reads groundspeed from plane.gps.sample() (real
+    // GPS wiring, not a raw velocity field) - a never-primed (zero) GPS
+    // sample would produce a near-zero commanded roll regardless of how
+    // large the crosstrack error is, defeating this test's own saturation
+    // premise. A high ground speed - see this test's own verification run
+    // below for why 50 m/s, not just "any nonzero value", is needed:
+    // L1's own nu (bearing) term saturates at +-90deg well before this
+    // (500m is already enough crosstrack error for that), but the
+    // resulting lateral acceleration demand (and therefore commanded
+    // bank) still scales linearly with groundspeed even once nu itself is
+    // saturated - so a low groundspeed genuinely caps the maximum roll
+    // this geometry can ever produce, independent of crosstrack distance.
+    set_gps_sample(plane, 0.0f, 50.0f, true);
+
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 1000;
+    plane.nav_controller.update_waypoint(plane.prev_WP_loc, plane.next_WP_loc, plane.build_l1_inputs(in));
+
+    auto run = [&](float current_altitude_m) -> std::int32_t {
+        in.current_altitude_m = current_altitude_m;
+        plane.takeoff_calc_roll(in);
+        return plane.nav_roll_cd;
+    };
+
+    const std::int32_t below = run(105.0f); // start + 5m, below lim1 (level_alt=10m)
+    INFO("below level_alt: nav_roll_cd = " << below);
+    REQUIRE(below == -500); // LEVEL_ROLL_LIMIT (5deg), unscaled
+
+    const std::int32_t mid = run(120.0f); // start + 20m, exactly halfway between lim1(10) and lim2(30)
+    INFO("between level_alt and 3x level_alt: nav_roll_cd = " << mid);
+    REQUIRE(static_cast<float>(mid) == Catch::Approx(-2500.0f).margin(5.0f)); // halfway between 500 and 4500
+
+    const std::int32_t above = run(140.0f); // start + 40m, above lim2 (level_alt*3=30m)
+    INFO("above 3x level_alt: nav_roll_cd = " << above);
+    REQUIRE(above == -4500); // full ROLL_LIMIT_DEG envelope
+}
+
+TEST_CASE("Plane::takeoff_calc_pitch: pre-rotation fixed ground pitch, then a ramp toward the climb angle as ground "
+          "speed approaches AIRSPEED_CRUISE",
+          "[vehicle][takeoff]") {
+    Plane plane;
+    // Real upstream default is 0 (rotate-speed gating disabled) - raised
+    // here specifically to exercise the pre-rotation branch, matching the
+    // ticket's own instruction to cover it; see plane.hpp file banner's
+    // own note on why the closed-loop test below instead uses the real
+    // TKOFF_ROTATE_SPD=0 default.
+    plane.aparm.takeoff_rotate_speed = 15.0f;
+    plane.aparm.airspeed_cruise = 12.0f;
+    plane.mode_takeoff.ground_pitch = 5.0f;
+    plane.takeoff_state.takeoff_pitch_cd = 1500; // TKOFF_LVL_PITCH (15deg) * 100
+
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 1000;
+
+    plane.takeoff_state.highest_airspeed = 5.0f; // below TKOFF_ROTATE_SPD (15)
+    plane.takeoff_calc_pitch(in);
+    REQUIRE(plane.nav_pitch_cd == 500); // TKOFF_GND_PITCH (5deg) * 100
+    REQUIRE_FALSE(plane.takeoff_state.rotation_complete);
+
+    plane.takeoff_state.highest_airspeed = 20.0f; // at/above TKOFF_ROTATE_SPD
+    set_gps_sample(plane, 0.0f, 6.0f, true);      // half of AIRSPEED_CRUISE (12)
+    plane.takeoff_calc_pitch(in);
+    // ratio = 6/12 = 0.5 -> 0.5 * 1500 = 750cd, comfortably above the 5deg
+    // (500cd) floor so the floor itself isn't what this assertion proves.
+    REQUIRE(plane.nav_pitch_cd == 750);
+    REQUIRE_FALSE(plane.takeoff_state.rotation_complete);
+
+    set_gps_sample(plane, 0.0f, 3.0f, true); // a very low ground speed - the ramp's own 5deg floor
+    plane.takeoff_calc_pitch(in);
+    REQUIRE(plane.nav_pitch_cd == 500); // kMinPitchCd (5deg), not the smaller raw ratio*1500=375
+    REQUIRE_FALSE(plane.takeoff_state.rotation_complete);
+
+    // Ground speed reaches AIRSPEED_CRUISE - rotation completes and the
+    // function falls through to the post-rotation path (covered by its
+    // own dedicated test below).
+    set_gps_sample(plane, 0.0f, 12.5f, true);
+    plane.takeoff_calc_pitch(in);
+    REQUIRE(plane.takeoff_state.rotation_complete);
+}
+
+TEST_CASE("Plane::takeoff_calc_pitch: post-rotation pitch is TECS-constrained, floored at the takeoff pitch minimum "
+          "when an airspeed sensor is present",
+          "[vehicle][takeoff]") {
+    Plane plane;
+    plane.takeoff_state.rotation_complete = true; // isolate the post-rotation path directly
+    plane.takeoff_state.takeoff_pitch_cd = 1000;  // 10deg minimum climb pitch
+
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 1000;
+    in.airspeed_valid = true;
+    in.airspeed_eas = 15.0f;
+
+    // Drive Tecs toward a demand BELOW the takeoff pitch minimum - a
+    // target altitude far below current, which Tecs's own energy law
+    // would otherwise want to descend for.
+    const auto tecs_in = plane.build_tecs_inputs(in);
+    plane.tecs.update_50hz(tecs_in);
+    plane.tecs.update_pitch_throttle(/*hgt_dem_cm=*/-10000, /*eas_dem_cm=*/1500, in.current_altitude_m, 1.0f, tecs_in);
+    REQUIRE(plane.tecs.get_pitch_demand() < 1000); // precondition: Tecs really did want a lower pitch
+
+    plane.takeoff_calc_pitch(in);
+    REQUIRE(plane.nav_pitch_cd == 1000); // clamped up to the takeoff pitch minimum, not left at Tecs's own lower demand
+}
+
+TEST_CASE("Plane::takeoff_calc_pitch: without an airspeed sensor, pitch is pinned exactly at the takeoff pitch "
+          "target for the whole post-rotation climb (this port's own real, disclosed simplification of upstream's "
+          "TKOFF_PLIM_SEC level-off ramp - see plane.hpp file banner)",
+          "[vehicle][takeoff]") {
+    Plane plane;
+    plane.takeoff_state.rotation_complete = true;
+    plane.takeoff_state.takeoff_pitch_cd = 1500;
+
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 1000;
+    in.airspeed_valid = false;
+
+    plane.takeoff_calc_pitch(in);
+    REQUIRE(plane.nav_pitch_cd == 1500);
+}
+
+TEST_CASE("Plane::takeoff_calc_pitch: stall_prevention reduces pitch demand by cos^2(roll error) - roll-priority-"
+          "over-pitch for hand-launch recovery",
+          "[vehicle][takeoff]") {
+    Plane plane;
+    plane.takeoff_state.rotation_complete = true;
+    plane.takeoff_state.takeoff_pitch_cd = 1000;
+    plane.aparm.stall_prevention = true;
+
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 1000;
+    in.airspeed_valid = false; // isolate the reduction: nav_pitch_cd starts pinned at takeoff_pitch_cd (1000)
+
+    plane.nav_roll_cd = 6000; // 60deg commanded roll
+    plane.ahrs.roll = 0.0f;   // actual roll still level -> 60deg roll ERROR
+
+    plane.takeoff_calc_pitch(in);
+    // reduction = cos^2(60deg) = 0.25 -> 1000 * 0.25 = 250
+    REQUIRE(static_cast<float>(plane.nav_pitch_cd) == Catch::Approx(250.0f).margin(2.0f));
+
+    SECTION("disabling stall_prevention leaves pitch unreduced") {
+        Plane plane2;
+        plane2.takeoff_state.rotation_complete = true;
+        plane2.takeoff_state.takeoff_pitch_cd = 1000;
+        plane2.aparm.stall_prevention = false;
+        plane2.nav_roll_cd = 6000;
+        plane2.ahrs.roll = 0.0f;
+        StabilizeInputs in2;
+        in2.airspeed_valid = false;
+        plane2.takeoff_calc_pitch(in2);
+        REQUIRE(plane2.nav_pitch_cd == 1000);
+    }
+}
+
+TEST_CASE("Plane::takeoff_calc_throttle: computes throttle_lim_max/min from TKOFF_THR_MAX (falling back to THR_MAX) "
+          "and pins them equal, then asserts them onto Tecs",
+          "[vehicle][takeoff]") {
+    Plane plane;
+    SECTION("TKOFF_THR_MAX unset (0) - falls back to THR_MAX") {
+        plane.aparm.throttle_max = 100.0f;
+        plane.aparm.takeoff_throttle_max = 0.0f;
+        plane.takeoff_calc_throttle();
+        REQUIRE(plane.takeoff_state.throttle_lim_max == 100);
+        // Pinned equal - see plane.hpp file banner's "TKOFF_OPTIONS/
+        // THROTTLE_RANGE" note for why this port's own takeoff_calc_
+        // throttle() never produces an asymmetric min/max.
+        REQUIRE(plane.takeoff_state.throttle_lim_min == 100);
+    }
+    SECTION("TKOFF_THR_MAX set - overrides THR_MAX") {
+        plane.aparm.throttle_max = 100.0f;
+        plane.aparm.takeoff_throttle_max = 65.0f;
+        plane.takeoff_calc_throttle();
+        REQUIRE(plane.takeoff_state.throttle_lim_max == 65);
+        REQUIRE(plane.takeoff_state.throttle_lim_min == 65);
+    }
+    SECTION("the computed limit actually reaches Tecs - a subsequent update_pitch_throttle() cannot exceed it") {
+        plane.aparm.takeoff_throttle_max = 50.0f;
+        plane.takeoff_calc_throttle();
+
+        StabilizeInputs in;
+        in.dt = 0.02f;
+        in.now_ms = 1000;
+        const auto tecs_in = plane.build_tecs_inputs(in);
+        plane.tecs.update_50hz(tecs_in);
+        // A large positive altitude error - Tecs's own energy law would
+        // otherwise demand full (100%) throttle to climb hard.
+        plane.tecs.update_pitch_throttle(/*hgt_dem_cm=*/100000, /*eas_dem_cm=*/1500, in.current_altitude_m, 1.0f, tecs_in);
+        REQUIRE(plane.tecs.get_throttle_demand() <= 50.0f + 0.01f); // pinned at TKOFF_THR_MAX, not Tecs's own unclamped want
+    }
+}
+
+TEST_CASE("ModeTAKEOFF::enter() initializes takeoff state and seeds a climb-target waypoint directly above the "
+          "entry point",
+          "[vehicle][takeoff]") {
+    Plane plane;
+    ModeTAKEOFF takeoff(plane);
+    // Stale state from a hypothetical prior takeoff - enter() must reset
+    // it (see plane.hpp file banner's "HIGHEST_AIRSPEED" note: this port's
+    // own, self-contained substitute for upstream's per-mode-change reset).
+    plane.takeoff_state.highest_airspeed = 30.0f;
+    plane.takeoff_state.rotation_complete = true;
+    plane.steer_state.hold_course_cd = 1234;
+    plane.update_current_loc(fwcpp::math::Vector3f(10.0f, 20.0f, -5.0f)); // 5m up
+
+    REQUIRE(takeoff.enter());
+
+    REQUIRE(plane.takeoff_state.highest_airspeed == 0.0f);
+    REQUIRE_FALSE(plane.takeoff_state.rotation_complete);
+    REQUIRE(plane.steer_state.hold_course_cd == -1);
+    REQUIRE(plane.next_WP_loc.get_distance(plane.current_loc) < 0.01f); // directly above the entry point - same lat/lng
+    REQUIRE(static_cast<float>(plane.next_WP_loc.alt - plane.current_loc.alt) == Catch::Approx(takeoff.target_alt * 100.0f));
+    REQUIRE(plane.target_altitude_cm == plane.next_WP_loc.alt);
+}
+
+TEST_CASE("ModeTAKEOFF::update(): hold_course_cd locks once ground speed clears GPS_GND_CRS_MIN_SPD during the "
+          "roll, making stabilize_yaw() actually dispatch to calc_nav_yaw_course() instead of calc_nav_yaw_ground()",
+          "[vehicle][takeoff]") {
+    Plane plane;
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+    // See ground-steering test's own "GROUND_STEER_ALT's REAL DEFAULT IS
+    // 0" note - must be raised explicitly for ground steering to engage.
+    plane.aparm.ground_steer_alt = 5.0f;
+    ModeTAKEOFF takeoff(plane);
+    plane.control_mode = &takeoff;
+    REQUIRE(takeoff.enter());
+    REQUIRE(plane.steer_state.hold_course_cd == -1);
+
+    set_sticks(plane, 1500, 1500, 1500, 1500); // centered throughout - autonomous mode, no pilot input
+    plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f));
+
+    StabilizeInputs in = make_cruise_inputs(1000, 0.0f, 0.0f);
+
+    // Below the ground-speed lock threshold - hold_course_cd stays -1,
+    // and takeoff_calc_roll() (called from update()) holds wings level.
+    set_gps_sample(plane, 90.0f, 2.0f, true); // due east, 2 m/s < kGpsGndCrsMinSpd (5)
+    takeoff.navigate(in);
+    takeoff.update(in);
+    REQUIRE(plane.steer_state.hold_course_cd == -1);
+    REQUIRE(plane.nav_roll_cd == 0);
+
+    // Ground speed clears the lock threshold - hold_course_cd locks to
+    // the real GPS ground course (due east -> 9000 centidegrees).
+    set_gps_sample(plane, 90.0f, 8.0f, true);
+    takeoff.navigate(in);
+    takeoff.update(in);
+    REQUIRE(plane.steer_state.hold_course_cd != -1);
+    REQUIRE(static_cast<float>(plane.steer_state.hold_course_cd) == Catch::Approx(9000.0f).margin(1.0f));
+
+    // Witness technique - see this file's own "ground_steering engages
+    // only when the roll stick is centered..." test above: only calc_nav_
+    // yaw_ground() ever writes steer_state.last_steer_ms. It is still 0
+    // here; if it's STILL 0 after stabilize_yaw() below, calc_nav_yaw_
+    // ground() was never invoked - real, direct proof that the hold_
+    // course_cd != -1 dispatch branch (calc_nav_yaw_course()) fired
+    // instead, not merely an assumption that it must have.
+    REQUIRE(plane.steer_state.last_steer_ms == 0U);
+    plane.stabilize_yaw(in);
+    REQUIRE(plane.steer_state.last_steer_ms == 0U);
+
+    const float rudder_out = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder);
+    const float steering_out = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kSteering);
+    REQUIRE(steering_out == Catch::Approx(rudder_out)); // both channels get the same steering_output - see plane.hpp's "OUTPUT-CHANNEL SELECTION" note
+}
+
+TEST_CASE("ModeTAKEOFF::update(): switches from takeoff_calc_*() to the normal calc_nav_*()/loiter path once the "
+          "target altitude (minus a 2m margin) or target distance is reached",
+          "[vehicle][takeoff]") {
+    Plane plane;
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+    ModeTAKEOFF takeoff(plane);
+    plane.control_mode = &takeoff;
+    REQUIRE(takeoff.enter());
+    REQUIRE_FALSE(takeoff.climb_out_complete());
+
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f));
+
+    StabilizeInputs in = make_cruise_inputs(1000, 0.0f, 0.0f);
+    set_gps_sample(plane, 0.0f, 8.0f, true); // lock hold_course_cd on the first call
+    takeoff.navigate(in);
+    takeoff.update(in);
+    REQUIRE(plane.steer_state.hold_course_cd != -1);
+    REQUIRE_FALSE(takeoff.climb_out_complete());
+
+    // Jump the vehicle up to just below the target altitude (50m default)
+    // - still short of the real completion threshold (50m - 2m margin).
+    plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, -47.0f));
+    in.current_altitude_m = 47.0f;
+    in.position_ned = fwcpp::math::Vector3f(0.0f, 0.0f, -47.0f);
+    takeoff.navigate(in);
+    takeoff.update(in);
+    REQUIRE_FALSE(takeoff.climb_out_complete());
+
+    // Cross the completion threshold (50m - 2m = 48m).
+    plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, -49.0f));
+    in.current_altitude_m = 49.0f;
+    in.position_ned = fwcpp::math::Vector3f(0.0f, 0.0f, -49.0f);
+    takeoff.navigate(in);
+    takeoff.update(in);
+    REQUIRE(takeoff.climb_out_complete());
+}
+
+TEST_CASE("Closed loop: TAKEOFF accelerates down the runway under a real ground-steering hold, rotates, climbs, "
+          "and reaches close to its target altitude, in SimPlane's ground truth",
+          "[vehicle][integration][takeoff]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    // Start ON the ground - see sim_plane.hpp's own on_ground() doc
+    // comment and the ground-steering closed-loop test's own precedent.
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f);
+    ModeTAKEOFF takeoff(plane);
+    plane.control_mode = &takeoff;
+
+    // Ground steering must be explicitly enabled - see plane.hpp's
+    // "GROUND_STEER_ALT's REAL DEFAULT IS 0" note.
+    plane.aparm.ground_steer_alt = 5.0f;
+    // TKOFF_ROTATE_SPD stays at its real upstream default (0) - see
+    // plane.hpp file banner's "GET_TAKEOFF_PITCH_MIN_CD()"/pre-rotation
+    // notes: this is a REAL, upstream-supported configuration (skip the
+    // ground-taxi pitch stage entirely, target the climb pitch from the
+    // start), not a simplification invented for this test - the pre-
+    // rotation ramp itself is covered directly by the dedicated unit
+    // tests above.
+
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+    REQUIRE(takeoff.enter());
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    auto step = [&](int num_ticks) {
+        for (int i = 0; i < num_ticks; ++i) {
+            now_us += 20000;
+            now_ms += 20;
+
+            // Autonomous mode throughout - sticks stay centered (TAKEOFF
+            // drives roll/pitch/throttle itself).
+            set_sticks(plane, 1500, 1500, 1500, 1500);
+
+            fwcpp::ahrs::GyroSample gyro_sample;
+            gyro_sample.gyro = sim_plane.gyro;
+            gyro_sample.delta_angle = sim_plane.gyro * kDt;
+            gyro_sample.dangle_dt = kDt;
+
+            StabilizeInputs in;
+            in.dt = kDt;
+            in.now_ms = now_ms;
+            in.now_us = now_us;
+            in.position_ned = sim_plane.position;
+            in.current_altitude_m = -sim_plane.position.z;
+            in.true_velocity_ned = sim_plane.velocity_ef;
+            in.gps_use_enabled = true;
+            // Real airspeed sensor reading, same established treatment as
+            // every other closed-loop test in this file - see the FBWB
+            // closed-loop test's own comment above for why this is not a
+            // shortcut (this port has no airspeed-sensor subsystem, and a
+            // real closed-loop test feeds SimPlane's own ground-truth
+            // airspeed back in as the reading).
+            in.airspeed_valid = true;
+            in.airspeed_eas = sim_plane.airspeed;
+
+            tick(plane, gyro_sample, in);
+
+            const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+            const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+            const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+            const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+            sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+        }
+    };
+
+    // Phase 1: ground roll - confirm the vehicle actually accelerates
+    // under thrust and ground steering locks a heading to hold.
+    step(150); // 3 simulated seconds
+    const float speed_after_roll = sim_plane.velocity_ef.length();
+    INFO("after 3s ground roll: speed = " << speed_after_roll << ", altitude = " << -sim_plane.position.z
+                                            << ", hold_course_cd = " << plane.steer_state.hold_course_cd
+                                            << ", throttle_lim_max = " << plane.takeoff_state.throttle_lim_max);
+    REQUIRE(speed_after_roll > 5.0f);                     // real acceleration under a real (full) throttle command
+    REQUIRE(plane.steer_state.hold_course_cd != -1);      // ground steering actually locked a heading during the roll
+
+    // Phase 2: continue through rotation and climb-out.
+    step(2000); // up to 40 more simulated seconds
+    const float altitude_mid = -sim_plane.position.z;
+    INFO("after climb phase: altitude = " << altitude_mid << ", speed = " << sim_plane.velocity_ef.length()
+                                            << ", airspeed = " << sim_plane.airspeed
+                                            << ", climb_out_complete = " << takeoff.climb_out_complete());
+    REQUIRE_FALSE(sim_plane.on_ground()); // genuinely airborne, not still taxiing
+    REQUIRE(altitude_mid > 5.0f);         // real climb, not noise
+
+    // Phase 3: continue toward the target altitude (50m default) and
+    // hold - once climb_out_complete() is true, ModeTAKEOFF hands off to
+    // the normal calc_nav_*()/update_loiter() path, settling into a
+    // station-keeping loiter at target_alt, the same orbit-once-arrived
+    // behavior ModeRTL/ModeLOITER's own closed-loop tests establish.
+    step(2500); // up to 50 more simulated seconds
+    const float final_altitude = -sim_plane.position.z;
+    INFO("final: altitude = " << final_altitude << ", target = " << takeoff.target_alt
+                                << ", climb_out_complete = " << takeoff.climb_out_complete());
+    REQUIRE(takeoff.climb_out_complete());
+    REQUIRE(final_altitude == Catch::Approx(takeoff.target_alt).margin(15.0f));
+}

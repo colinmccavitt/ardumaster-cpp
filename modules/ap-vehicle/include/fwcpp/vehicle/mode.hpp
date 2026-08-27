@@ -377,6 +377,136 @@ inline void ModeLOITER::navigate(const StabilizeInputs& in) {
     plane_.update_loiter(0, in);
 }
 
+// ---------------------------------------------------------------------
+// ModeTAKEOFF - out-of-line bodies. Declarations + full judgment-call
+// documentation: plane.hpp (ModeTAKEOFF class banner and the "CPP-031
+// SLICE 12 ADDENDUM" file banner).
+// ---------------------------------------------------------------------
+
+inline bool ModeTAKEOFF::enter() {
+    takeoff_mode_setup_ = false;
+    climb_out_complete_ = false;
+    plane_.takeoff_state.highest_airspeed = 0.0f;
+    plane_.takeoff_state.rotation_complete = false;
+    plane_.steer_state.hold_course_cd = -1;
+
+    // upstream: Mode::enter()'s own unconditional `plane.steerController.
+    // reset_I();` - see plane.hpp's file banner "STEERCONTROLLER::RESET_I()
+    // ON MODE ENTRY" note for why this is ported on ModeTAKEOFF's own
+    // enter() rather than the shared Mode base class.
+    plane_.steer_controller.reset_I();
+
+    // See class banner's "ENTER()-SIDE next_WP_loc SEEDING" note - a
+    // vertical-only climb target directly above the entry point, seeded so
+    // the very first navigate() call (before update() has run even once -
+    // see mode.hpp's tick() ordering note) doesn't loiter around a stale/
+    // default Location. Superseded within one tick by update()'s own real
+    // horizontal-offset setup below.
+    start_loc_ = plane_.current_loc;
+    plane_.prev_WP_loc = plane_.current_loc;
+    plane_.next_WP_loc = plane_.current_loc;
+    plane_.next_WP_loc.alt += static_cast<std::int32_t>(target_alt * 100.0f);
+    plane_.target_altitude_cm = plane_.next_WP_loc.alt;
+
+    return true;
+}
+
+// upstream: ModeTakeoff::update() (mode_takeoff.cpp), read in full - see
+// class banner (plane.hpp) for every exclusion (home/position gating,
+// is_flying()-skip, fence auto-enable, check_takeoff_timeout()) and the
+// climb_out_complete_ substitution for `flight_stage == TAKEOFF`.
+inline void ModeTAKEOFF::update(const StabilizeInputs& in) {
+    const float alt = target_alt;
+    const float dist = target_dist;
+
+    if (!takeoff_mode_setup_) {
+        plane_.takeoff_state.takeoff_altitude_rel_cm = static_cast<std::int32_t>(alt * 100.0f);
+        plane_.takeoff_state.takeoff_pitch_cd = static_cast<std::int32_t>(level_pitch * 100.0f);
+        // upstream: auto_state.baro_takeoff_alt = barometer.get_altitude()
+        // - see plane.hpp file banner's "BAROMETRIC ALTITUDE SUBSTITUTION"
+        // note. Re-primed every tick until locked in below, same as
+        // everything else in this setup block - a stationary/slow-rolling
+        // vehicle's current_altitude_m barely moves before lock, so this
+        // converges to the same real "altitude at takeoff start" value
+        // upstream's own one-shot assignment captures.
+        plane_.takeoff_state.takeoff_start_alt_m = in.current_altitude_m;
+
+        // upstream: `ahrs.groundspeed_vector()`'s bearing/length - this
+        // port's own established GPS-ground-course/ground-speed substitute
+        // (matches calc_nav_yaw_ground()'s own use of the same gps.sample()
+        // fields, plane.hpp).
+        const ahrs::GpsSample& gps_sample = plane_.gps.sample();
+        const float direction = gps_sample.ground_course_deg;
+        const float groundspeed = gps_sample.ground_speed_ms;
+
+        start_loc_ = plane_.current_loc;
+        plane_.prev_WP_loc = plane_.current_loc;
+        plane_.next_WP_loc = plane_.current_loc;
+        plane_.next_WP_loc.alt += static_cast<std::int32_t>(alt * 100.0f); // upstream: offset_up_m(alt)
+        plane_.next_WP_loc.offset_bearing(direction, dist);
+        plane_.target_altitude_cm = plane_.next_WP_loc.alt;
+
+        // upstream: `!plane.throttle_suppressed && groundspeed >
+        // GPS_GND_CRS_MIN_SPD` - see class banner's "GROUND-SPEED LOCK"
+        // note for why `!throttle_suppressed` always evaluates true here.
+        if (groundspeed > kGpsGndCrsMinSpd) {
+            takeoff_mode_setup_ = true;
+            // Necessary to allow Plane::takeoff_calc_roll() to function -
+            // upstream's own comment, reproduced verbatim in intent.
+            plane_.steer_state.hold_course_cd = static_cast<std::int32_t>(math::wrap_360_cd(direction * 100.0f));
+        }
+    }
+
+    // We update the waypoint to follow once we're past TKOFF_LVL_ALT or we
+    // pass the target location, correcting any yaw estimation error using
+    // position bearing instead of GPS ground course - upstream's own
+    // "enter-once" fallback lock, gated on hold_course_cd still being -1
+    // (i.e. the ground-speed lock above never fired).
+    const std::int32_t altitude_cm = plane_.current_loc.alt - start_loc_.alt;
+    if (!climb_out_complete_ && plane_.steer_state.hold_course_cd == -1 &&
+        (static_cast<float>(altitude_cm) >= level_alt * 100.0f || start_loc_.get_distance(plane_.current_loc) >= dist)) {
+        const float direction = static_cast<float>(start_loc_.get_bearing_to(plane_.current_loc)) * 0.01f;
+        plane_.next_WP_loc = start_loc_;
+        plane_.next_WP_loc.offset_bearing(direction, dist);
+        plane_.next_WP_loc.alt = start_loc_.alt + static_cast<std::int32_t>(alt * 100.0f);
+        plane_.steer_state.hold_course_cd = static_cast<std::int32_t>(math::wrap_360_cd(direction * 100.0f));
+    }
+
+    // We finish the initial level takeoff if we climb past TKOFF_ALT (less
+    // a 2m margin, matching upstream) or we pass the target location.
+    if (!climb_out_complete_ &&
+        (altitude_cm >= static_cast<std::int32_t>(alt * 100.0f) - 200 || start_loc_.get_distance(plane_.current_loc) >= dist)) {
+        climb_out_complete_ = true;
+    }
+
+    // upstream: Plane::update_alt()'s mode-independent TECS drive - see
+    // plane.hpp's own CPP-034/ModeRTL "no mode-independent scheduled TECS
+    // task" precedent, applied here the same way LOITER/RTL/AUTO already
+    // do. Runs regardless of climb_out_complete_ - TAKEOFF is an auto-
+    // throttle mode throughout (does_auto_throttle() returns true
+    // unconditionally, plane.hpp), matching upstream's own real dispatch.
+    plane_.update_auto_speed_height(in);
+
+    if (!climb_out_complete_) {
+        // below TKOFF_ALT
+        plane_.takeoff_calc_roll(in);
+        plane_.takeoff_calc_pitch(in);
+        plane_.takeoff_calc_throttle();
+    } else {
+        plane_.calc_nav_roll(in);
+        plane_.calc_nav_pitch();
+        plane_.calc_throttle();
+    }
+}
+
+inline void ModeTAKEOFF::navigate(const StabilizeInputs& in) {
+    // Zero indicates to use WP_LOITER_RAD - see this method's own
+    // declaration comment (plane.hpp): called unconditionally, matching
+    // upstream's real, literal ModeTakeoff::navigate() exactly (no
+    // flight_stage branch there at all).
+    plane_.update_loiter(0, in);
+}
+
 // upstream: the real scheduler task-table sequence (AHRS update ->
 // update_control_mode/navigate -> Plane::stabilize() -> Plane::
 // set_servos()/output), inferred from Mode::run()'s own body plus

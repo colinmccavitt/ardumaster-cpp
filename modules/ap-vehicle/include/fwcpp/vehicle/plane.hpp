@@ -2221,6 +2221,236 @@
 // ported by this addendum - out of scope, see this ticket's own
 // exclusion list) for clean integrator behavior across a takeoff-to-
 // climb-out mode transition.
+//
+// =====================================================================
+// CPP-031 SLICE 12 ADDENDUM: ModeTAKEOFF - real takeoff behavior, shared
+// between takeoff_calc_roll()/takeoff_calc_pitch()/takeoff_calc_throttle()
+// (this file, below) and a standalone ModeTAKEOFF (mode.hpp class
+// declaration below the Mode hierarchy; out-of-line bodies: mode.hpp).
+// Upstream (Plane-4.7.0, read directly, in full per the ticket):
+// ArduPlane/takeoff.cpp (435 lines) and ArduPlane/mode_takeoff.cpp (206
+// lines), plus commands_logic.cpp's do_takeoff()/verify_takeoff() (the
+// AUTO-mode NAV_TAKEOFF entry point - see "MODETAKEOFF VS. NAV_TAKEOFF"
+// below for why only the standalone mode is built this slice).
+//
+// MODETAKEOFF VS. NAV_TAKEOFF - THE SCOPE DECISION: upstream has TWO real
+// entry points sharing the exact same takeoff_calc_*() core - the
+// standalone ModeTakeoff (mode_takeoff.cpp) and AUTO's NAV_TAKEOFF mission
+// command (commands_logic.cpp's do_takeoff()/verify_takeoff()). This slice
+// builds ONLY the standalone mode. Reasoning: CPP-031 slice 5's own ticket
+// (see plane.hpp's "MissionItem / Mission" note, and mode.hpp's ModeAUTO
+// class banner) deliberately scoped MissionItem as waypoint-only -
+// "TAKEOFF/LAND/LOITER*/RTL/jump/do-commands/splines/VTOL are all
+// excluded... not even as a recognized-but-unimplemented enum value."
+// Wiring NAV_TAKEOFF into ModeAUTO would mean giving MissionItem a command-
+// "type" tag it has never had, plus a real dispatch switch inside
+// ModeAUTO::navigate()/update() (today a single, untagged NAV_WAYPOINT
+// path) - a structural change to shared, already-tested AUTO machinery,
+// not an isolated addition. The standalone mode, by contrast, needs ZERO
+// changes to Mission/MissionItem/ModeAUTO: it is its own self-contained
+// Mode subclass, entered the same way ModeRTL/ModeLOITER already are
+// (`plane.set_mode(plane.mode_takeoff)`), and the shared takeoff_calc_*()
+// core (below) is written as plain Plane methods specifically so a FUTURE
+// slice that DOES extend MissionItem with a NAV_TAKEOFF command gets that
+// core for free - do_takeoff()/verify_takeoff() would become a thin
+// ModeAUTO-side wrapper calling the exact same functions this slice
+// builds, not a duplicate implementation. This is a real, working slice
+// of takeoff behavior, not half of one; NAV_TAKEOFF is explicitly future
+// work, not silently dropped - see this addendum's own final "WHAT'S
+// LEFT" note.
+//
+// BAROMETRIC ALTITUDE SUBSTITUTION - FOLLOWING ESTABLISHED PRECEDENT, NOT
+// A NEW SHORTCUT: takeoff_calc_roll()'s altitude-scaled roll-limit
+// interpolation and takeoff_calc_throttle()'s (excluded, see below)
+// below-TKOFF_LVL_ALT check both read `barometer.get_altitude()` upstream.
+// This port has no barometer - StabilizeInputs::current_altitude_m is
+// used instead, EXACTLY the same substitute this port's FBWB/AUTO/RTL/
+// LOITER slices already established for every other barometer/TECS-
+// altitude read (see this file's own "NO GPS/BARO" note above). auto_
+// state.baro_takeoff_alt (a one-time snapshot of barometer.get_altitude()
+// at takeoff start, upstream: commands_logic.cpp's do_takeoff()) becomes
+// TakeoffState::takeoff_start_alt_m below - a snapshot of current_altitude_m
+// instead, taken the same place (ModeTAKEOFF's own first-time setup, see
+// its own class banner in mode.hpp) do_takeoff() would take it upstream.
+//
+// AUTO_STATE/TAKEOFF_STATE - REDUCED TO WHAT THIS SLICE'S FUNCTIONS
+// ACTUALLY READ/WRITE, MATCHING EVERY PRIOR SLICE'S OWN PRECEDENT: upstream
+// splits takeoff-relevant state across TWO structs - `auto_state`
+// (AP_FixedWing::AutoState - highest_airspeed, rotation_complete,
+// takeoff_pitch_cd, takeoff_altitude_rel_cm, baro_takeoff_alt, PLUS many
+// unrelated fields this port has never needed) and `takeoff_state`
+// (throttle_lim_max/min, throttle_max_timer_ms, PLUS the launchTimerStarted/
+// accel_event_counter/last_tkoff_arm_time/start_time_ms/level_off_start_
+// time_ms family that exclusively belongs to auto_takeoff_check() - see
+// "AUTO_TAKEOFF_CHECK() - EXCLUDED" below). This port's own TakeoffState
+// (below) folds the real subset of BOTH into one struct (matching CPP-031
+// slice 5's own precedent of NOT introducing an umbrella `auto_state`-style
+// struct for AUTO's own next_wp_crosstrack/crosstrack/next_turn_angle,
+// which live as separate, ungrouped Plane fields instead) - no
+// launchTimerStarted-family field is added at all, since nothing in this
+// slice's scope reads or writes any of them.
+//
+// AUTO_TAKEOFF_CHECK() - EXCLUDED, A SEPARATE SUBSYSTEM THIS SLICE DOES NOT
+// NEED: takeoff.cpp's OWN first function (~90 lines) - an
+// arm-and-launch-detection state machine (hand-launch acceleration
+// threshold, GPS-speed-and-attitude gate, a 2.5s timeout) whose sole real
+// caller is servos.cpp's throttle-suppression logic (`if (auto_takeoff_
+// check()) throttle_suppressed = false;`), itself part of a whole
+// throttle-suppression subsystem this port has never built (see this
+// file's earlier "CPP-031 SLICE 9 ADDENDUM"'s own "THROTTLE_SUPPRESSED"
+// note: "a real field with only ONE real writer (disarm()) and no wired
+// consumer yet"). ModeTAKEOFF therefore never suppresses throttle at all -
+// `plane.throttle_suppressed` stays whatever disarm() last left it (false,
+// for an armed vehicle - does_auto_throttle() is irrelevant here since
+// disarm() is the only writer) - which is EXACTLY upstream's own
+// `!plane.throttle_suppressed` gate in ModeTakeoff::update()'s hold_
+// course_cd-locking check (mode.hpp's ModeTAKEOFF class banner, "GROUND-
+// SPEED LOCK" note) always evaluating true here: not a shortcut, the real,
+// traced value this port's own throttle_suppressed already has.
+//
+// GET_TAKEOFF_PITCH_MIN_CD() - SIMPLIFIED, DOCUMENTED, NOT PORTED IN FULL:
+// upstream's real function (takeoff.cpp ~line 312) is a SECOND, genuinely
+// non-trivial state machine layered on top of takeoff_calc_pitch()'s own -
+// once TKOFF_PLIM_SEC (real upstream default: 2 seconds, NOT 0 - verified
+// directly against Parameters.cpp, not assumed) is positive, it smoothly
+// ramps pitch_min_cd DOWN as the vehicle nears its target altitude, driven
+// by `auto_state.sink_rate` (a TECS-internal climb-rate reading this port's
+// Tecs has never exposed as a public accessor) and gated on `flight_stage
+// == TAKEOFF` (a concept this port has never built - see this file's own
+// repeated flight_stage exclusions, e.g. calc_speed_scaler()'s note above).
+// Porting it faithfully would mean adding BOTH a Tecs::get_sink_rate()-
+// style accessor AND a flight_stage field purely to support one early-
+// level-off refinement - a materially bigger addition than the ticket's
+// own scope for "the shared takeoff_calc_* core". This port's
+// takeoff_calc_pitch() (below) therefore uses `takeoff_state.takeoff_
+// pitch_cd` directly as pitch_min_cd for the ENTIRE post-rotation climb,
+// which is upstream's OWN real, documented behavior for a TKOFF_PLIM_SEC=0
+// configuration (a valid, real vehicle setup upstream itself supports,
+// just not upstream's documented default) - a disclosed behavior
+// simplification, not a stub: the closed-loop test below confirms a real
+// climb to target altitude still results, just without the last-few-
+// meters pitch taper upstream's default configuration would add.
+//
+// TAKEOFF_TAIL_HOLD() - EXCLUDED, A NICHE AIRFRAME-CONFIG FEATURE:
+// takeoff_calc_throttle()'s sibling `takeoff_tail_hold()` (takeoff.cpp
+// ~line 352) is real, but exclusively a taildragger (3-point/tailwheel
+// aircraft) concern - `g.takeoff_tdrag_elevator` defaults 0 (Parameters.cpp),
+// so upstream's own `if (g.takeoff_tdrag_elevator == 0) goto return_zero;`
+// means this is a documented NO-OP for any vehicle that hasn't explicitly
+// configured a taildragger elevator-hold percentage, i.e. the entire
+// tricycle-gear/nosewheel configuration this port's own ground-steering
+// slice already targets (AP_SteerController models NOSEWHEEL/TAILWHEEL
+// steering uniformly, but tail-hold-DOWN torque is a physically distinct,
+// taildragger-only need). stabilize_pitch()'s own existing exclusion note
+// ("takeoff_tail_hold() and the LANDING_FLARE branch are skipped") stays
+// accurate and unchanged by this slice - not closed, since the underlying
+// feature is out of scope, not merely unreachable.
+//
+// TKOFF_OPTIONS/THROTTLE_RANGE - EXCLUDED, COLLAPSING takeoff_calc_
+// throttle() TO ITS ONE REACHABLE BRANCH: upstream's real function first
+// computes throttle_lim_max/min (from TKOFF_THR_MAX/TKOFF_THR_MIN, falling
+// back to THR_MAX/TRIM_THROTTLE), optionally forces min=max for
+// TKOFF_THR_MAX_T seconds via a timer, THEN unconditionally forces min=max
+// AGAIN unless ALL THREE of (a) TKOFF_OPTIONS' THROTTLE_RANGE bit is set,
+// (b) an airspeed sensor is present, and (c) the vehicle is still above
+// TKOFF_LVL_ALT are true. This port has no TKOFF_OPTIONS/FlightOptions-
+// style bitmask subsystem AT ALL (same exclusion already established
+// throughout this file for every other bitmask-gated feature, e.g.
+// apply_load_factor_roll_limits()'s ENABLE_FULL_AERO_LF_ROLL_LIMITS note) -
+// condition (a) can NEVER be satisfied, not merely defaulted off, so the
+// three-way AND can never be true and the override ALWAYS fires. Porting
+// a timer whose entire observable effect is permanently subsumed by an
+// unconditional override would be dead code carrying a flag that can never
+// flip - this port's takeoff_calc_throttle() (below) instead collapses
+// directly to the one reachable outcome (throttle_lim_min = throttle_lim_
+// max = TKOFF_THR_MAX or THR_MAX), and TKOFF_THR_MIN/TKOFF_THR_MAX_T are
+// not added to FixedWingTunables at all (nothing would ever read them - see
+// this file's own "port only what this scope's functions actually read/
+// write" precedent). A future FlightOptions-bitmask slice would need to
+// re-introduce the timer/below-TKOFF_LVL_ALT distinction at that point.
+//
+// TECS THROTTLE/PITCH LIMIT TIMING - A FAITHFUL ONE-TICK LAG, NOT A
+// SHORTCUT: upstream's real apply_throttle_limits() (servos.cpp) - which
+// actually ENFORCES takeoff_state.throttle_lim_min/max onto the final
+// throttle output - runs from a SEPARATE function (set_throttle()) called
+// AFTER stabilize()/takeoff_calc_throttle() in the same scheduler
+// iteration, and its own comment says outright: "Let TECS know about the
+// updated throttle limits. These will be taken into account on the NEXT
+// iteration." This port has no separate apply_throttle_limits() (already
+// excluded in full - see this file's earlier "SURPRISING UPSTREAM FINDING
+// #3" note - ICEngine/battery-watt-limiter/quadplane branches, none of
+// which exist here), so takeoff_calc_throttle()/takeoff_calc_pitch() below
+// call tecs.set_throttle_min()/set_throttle_max()/set_pitch_min()/
+// set_pitch_max() directly - EXACTLY the mechanism SLICE 2's own
+// "SURPRISING UPSTREAM FINDING #3" already established for the reverse-
+// thrust floor. Because these are all "applicable for one control cycle
+// only" (tecs.hpp's own doc comments) and ModeTAKEOFF::update() (mode.hpp)
+// calls update_auto_speed_height() - which drives tecs.update_pitch_
+// throttle() - BEFORE calling takeoff_calc_roll()/pitch()/throttle(), the
+// limits computed THIS tick take effect on Tecs's internal state for the
+// NEXT tick's update_pitch_throttle() call - the SAME one-tick lag
+// upstream's own real, two-function flow has, just reproduced within one
+// mode's update() instead of two separate scheduler tasks.
+//
+// HIGHEST_AIRSPEED - TRACKED AT ITS REAL UPSTREAM UPDATE SITE, RELOCATED
+// ONE CALL-FRAME UP: upstream updates `auto_state.highest_airspeed` inside
+// calc_speed_scaler() itself (Attitude.cpp) - this port's calc_speed_
+// scaler() (above) is a `const` pure-computation helper other callers may
+// reuse without side effects, so the identical tracking (same inputs, same
+// `armed_and_safety_off`-gated condition) is hoisted into update_speed_
+// scaler() below instead - calc_speed_scaler()'s SOLE real per-tick caller
+// (tick(), mode.hpp, step 5) - which is behaviorally identical to upstream
+// (same cadence, same inputs), just relocated. Reset to 0 only by
+// ModeTAKEOFF::enter() (mode.hpp) - upstream resets it on EVERY mode
+// change (Mode::enter()'s own wrapper body, mode.cpp), a general reset
+// this port's own Mode::enter() base class has never ported (see this
+// file's Mode-hierarchy banner) since, before this slice, nothing ever
+// read highest_airspeed at all. TAKEOFF is this port's first and only
+// consumer, so its own enter() resetting it is the honest, minimal,
+// self-contained equivalent - not a silent narrowing of upstream's real
+// per-mode-change reset, since no OTHER mode in this port's scope reads
+// this field either way.
+//
+// STEERCONTROLLER::RESET_I() ON MODE ENTRY - THE GAP THE GROUND-STEERING
+// SLICE FLAGGED, NOW CLOSED FOR TAKEOFF: that slice's own file banner
+// ("WHAT A FUTURE TAKEOFF-MODE SLICE NEEDS", above) named this exact gap.
+// ModeTAKEOFF::enter() (mode.hpp) now calls `plane.steer_controller.
+// reset_I();`, matching upstream's real `Mode::enter()`'s unconditional
+// `plane.steerController.reset_I();` - ported here, specifically for
+// TAKEOFF's own entry, rather than added to the shared Mode base class
+// (which would affect every mode, not just the one that actually needs
+// it yet - matching this port's own "port only what this scope's
+// functions actually use" precedent).
+//
+// RC_FAILSAFE_SHORT_ON_EVENT() - NO CHANGE NEEDED, VERIFIED NOT ASSUMED:
+// that function's own comment (this file, below) already states TAKEOFF's
+// real upstream classification is the "never take short-failsafe action"
+// group (CIRCLE/TAKEOFF/RTL/quadplane-LAND-modes/INITIALISING) - exactly
+// the implicit `else`/no-op fallthrough this function already takes for
+// any control_mode not explicitly matched by either `if` branch. Adding
+// `mode_takeoff` (below) to Plane therefore needs NO corresponding change
+// there - confirmed by re-reading that function's own real upstream
+// classification directly, not left untested by omission.
+//
+// WHAT'S LEFT for a fuller takeoff implementation, all real and
+// deliberately out of this slice's scope (per the ticket's own
+// instruction, not silently dropped):
+//   - AUTO's NAV_TAKEOFF mission command - needs MissionItem extended
+//     with a command-type tag (see "MODETAKEOFF VS. NAV_TAKEOFF" above) -
+//     the shared takeoff_calc_*() core this slice builds is specifically
+//     structured so that work is thin wrapper code, not a re-implementation.
+//   - takeoff_tail_hold() - taildragger-only, see its own note above.
+//   - Fence auto-enable (ModeTakeoff's have_autoenabled_fences) - no fence
+//     subsystem anywhere in this port.
+//   - get_takeoff_pitch_min_cd()'s TKOFF_PLIM_SEC early-level-off ramp -
+//     needs a Tecs sink-rate accessor and a flight_stage concept, see its
+//     own note above.
+//   - check_takeoff_timeout()/check_takeoff_timeout_level_off() - both
+//     real upstream no-ops for this port's scope: g2.takeoff_timeout
+//     defaults 0 (Parameters.cpp, `AP_GROUPINFO("TKOFF_TIMEOUT", ...,
+//     takeoff_timeout, 0)`), and the level-off timeout only ever starts
+//     from the excluded get_takeoff_pitch_min_cd() ramp above - so neither
+//     function could ever fire for an unconfigured vehicle even if ported.
 
 #include <algorithm>
 #include <array>
@@ -2354,6 +2584,12 @@ struct FixedWingTunables {
     // addendum ---
     float ground_steer_alt = 0.0f;      // GROUND_STEER_ALT / g.ground_steer_alt, Parameters.cpp default 0, m
     std::int16_t ground_steer_dps = 90; // GROUND_STEER_DPS / g.ground_steer_dps, Parameters.cpp default 90, deg/s
+
+    // --- CPP-031 slice 12 (ModeTAKEOFF) additions - see file banner's
+    // "CPP-031 SLICE 12 ADDENDUM" ---
+    float takeoff_rotate_speed = 0.0f; // TKOFF_ROTATE_SPD / g.takeoff_rotate_speed, Parameters.cpp default 0, m/s
+    float throttle_max = 100.0f;       // THR_MAX / aparm.throttle_max, config.h THROTTLE_MAX default
+    float takeoff_throttle_max = 0.0f; // TKOFF_THR_MAX / aparm.takeoff_throttle_max, Parameters.cpp default 0 ("use THR_MAX")
 };
 
 // Explicit per-tick sensor/environment inputs stabilize_roll()/
@@ -3169,6 +3405,153 @@ public:
     [[nodiscard]] bool does_auto_throttle() const override { return true; }
 };
 
+// upstream: ModeTakeoff (mode.h) + mode_takeoff.cpp (206 lines, read in
+// full) - CPP-031 "slice 12". The standalone, GPS-based takeoff mode - see
+// plane.hpp's own "CPP-031 SLICE 12 ADDENDUM" file banner for the full
+// upstream-vs-port design rationale (why only the standalone mode is built,
+// not AUTO's NAV_TAKEOFF; the auto_takeoff_check()/get_takeoff_pitch_min_
+// cd()/takeoff_tail_hold()/TKOFF_OPTIONS exclusions; the barometric-
+// altitude substitution; TakeoffState's shape).
+//
+// TUNABLES - real AP_Param defaults, verified directly against mode_
+// takeoff.cpp's own var_info[] table (not assumed): target_alt=50 (TKOFF_
+// ALT, m), level_alt=10 (TKOFF_LVL_ALT, m), level_pitch=15 (TKOFF_LVL_
+// PITCH, deg - this is the TARGET CLIMB pitch fed to takeoff_state.
+// takeoff_pitch_cd, NOT the ground-roll pitch), target_dist=200 (TKOFF_
+// DIST, m), ground_pitch=5 (TKOFF_GND_PITCH, deg - the fixed ground-roll
+// pitch demand BEFORE rotation). All five are AP_Int16/AP_Int8/AP_Float
+// upstream; this port uses plain `float` uniformly for all of them,
+// matching this port's own established practice elsewhere of not
+// preserving AP_Param's exact underlying integer/float storage type (e.g.
+// aparm.level_roll_limit_deg, aparm.rtl_altitude).
+//
+// STATE OWNERSHIP - matches ModeCRUISE's own precedent: takeoff_mode_
+// setup_/climb_out_complete_/start_loc_ are THIS mode's own private
+// members (upstream: ModeTakeoff's own protected takeoff_mode_setup/
+// start_loc, PLUS this port's own climb_out_complete_ - a direct substitute
+// for testing `flight_stage == TAKEOFF`, a concept this port has never
+// built - see class banner below and the file banner's "GET_TAKEOFF_
+// PITCH_MIN_CD()" note for the same flight_stage exclusion elsewhere).
+// TakeoffState (Plane-level, below) holds the takeoff_calc_*() core's own
+// shared state (highest_airspeed, rotation_complete, takeoff_pitch_cd,
+// takeoff_altitude_rel_cm, takeoff_start_alt_m, throttle_lim_max/min) -
+// exactly the state a FUTURE NAV_TAKEOFF command would also need to
+// read/write, the same "keep shared state where a future reuse would find
+// it" reasoning ModeCRUISE's own prev_WP_loc/next_WP_loc placement
+// established (plane.hpp's Mode-hierarchy banner).
+//
+// FENCE AUTO-ENABLE - EXCLUDED: upstream's `have_autoenabled_fences` bool
+// plus its own `plane.fence.auto_enable_fence_after_takeoff()` call - no
+// fence subsystem anywhere in this port (ticket's own explicit exclusion).
+//
+// HOME/POSITION GATING - EXCLUDED, NOT MEANINGFULLY APPLICABLE: upstream's
+// real update() opens with `if (!(plane.current_loc.initialised() &&
+// AP::ahrs().home_is_set())) { ...zero throttle, level flight, return... }`
+// - a genuine "wait for a GPS lock and a home position" gate. This port's
+// current_loc/home model has no separate "not yet valid" state distinct
+// from "still at the zero-initialized default" (see plane.hpp's own
+// "CURRENT_LOC"/"home / set_home()" notes) - current_loc is always freshly
+// computed from StabilizeInputs::position_ned before ANY mode's update()
+// runs (mode.hpp's tick(), step 5b), so there is no real "waiting for a
+// fix" state this port could honestly gate on beyond what tick()'s own
+// sequencing already guarantees. Dropped, not approximated.
+//
+// IS_FLYING()-SKIP BRANCH - EXCLUDED: upstream's update() checks `plane.
+// is_flying() && (millis() - plane.started_flying_ms > 10000U) &&
+// groundspeed > 3` to skip straight to a loiter-only climb if TAKEOFF is
+// entered while already airborne - needs an is_flying() state-machine
+// subsystem this port has never built (same "no is_flying() concept"
+// exclusion plane.hpp's own "DISARM-WHILE-FLYING GAP" note already
+// established for Plane::disarm()). This mode therefore ALWAYS runs the
+// real, full ground-roll-to-climb sequence (upstream's own literal `else`
+// branch) - correct and safe for this port's actual real use case (a
+// vehicle starting a takeoff FROM the ground, this ticket's own closed-
+// loop scenario), just not a general-purpose "re-enter mid-flight" mode
+// substitute.
+//
+// GROUND-SPEED LOCK - see file banner's "AUTO_TAKEOFF_CHECK() - EXCLUDED"
+// note for why `!plane.throttle_suppressed` always evaluates true here.
+// The setup block below (mirroring upstream's own `if (!takeoff_mode_
+// setup)`) re-runs EVERY tick, continuously re-priming start_loc_/prev_
+// WP_loc/next_WP_loc/target_altitude_cm from the vehicle's current
+// position, UNTIL real GPS ground speed clears kGpsGndCrsMinSpd - at which
+// point it locks steer_state.hold_course_cd (making the already-real,
+// previously-unreachable calc_nav_yaw_course() dispatch in stabilize_yaw()
+// actually fire - see plane.hpp's own ground-steering "STEER_STATE" note)
+// and takeoff_mode_setup_ latches true, matching upstream's real one-time-
+// lock semantics exactly.
+//
+// ENTER()-SIDE next_WP_loc SEEDING - A SMALL, DELIBERATE ADDITION BEYOND
+// UPSTREAM'S LITERAL _enter(): upstream's real ModeTakeoff::_enter() body
+// is just `takeoff_mode_setup = false; have_autoenabled_fences = false;`.
+// This port's tick() (mode.hpp) calls `mode.navigate(in)` BEFORE `mode.
+// update(in)` every tick (see plane.hpp's own Mode-hierarchy "SLICE 4
+// ADDENDUM" ordering note) - meaning navigate()'s `update_loiter(0, in)`
+// call would run once against whatever next_WP_loc/prev_WP_loc happened to
+// be BEFORE update()'s own first-tick setup ever executes. ModeAUTO::
+// enter() (plane.hpp) already established the exact same fix for the
+// exact same reason (`plane.next_WP_loc = plane.prev_WP_loc = plane.
+// current_loc;`, "so the very first navigate() call... doesn't operate on
+// a stale/default Location") - ModeTAKEOFF::enter() (mode.hpp) reproduces
+// it here too, seeding a vertical-only (no bearing yet - real GPS ground
+// course isn't known until the vehicle is moving) climb target directly
+// above the entry point, superseded within one tick by update()'s own real
+// horizontal-offset setup once it runs.
+class ModeTAKEOFF : public Mode {
+public:
+    using Mode::Mode;
+
+    // upstream: ModeTakeoff::_enter() - see class banner. Body: mode.hpp.
+    bool enter() override;
+
+    // upstream: ModeTakeoff::update() - see class banner for every
+    // exclusion (home/position gating, is_flying()-skip, fence auto-
+    // enable) and the ground-speed-lock/climb-out-complete substitution
+    // for flight_stage. Body: mode.hpp.
+    void update(const StabilizeInputs& in) override;
+
+    // upstream: ModeTakeoff::navigate() - "Zero indicates to use WP_
+    // LOITER_RAD" (upstream's own comment) - identical to ModeLOITER's own
+    // navigate(), called UNCONDITIONALLY regardless of ground-roll-vs-
+    // climb-out phase, matching upstream's own literal, unconditional
+    // body exactly (traced, not assumed - upstream's real navigate() has
+    // no flight_stage branch at all). Body: mode.hpp.
+    void navigate(const StabilizeInputs& in) override;
+
+    // upstream: ModeTakeoff has NO run() override at all - relies entirely
+    // on base Mode::run(), same "auto-throttle mode relies on the base"
+    // shape as every other navigation mode in this port.
+    [[nodiscard]] bool does_auto_throttle() const override { return true; }
+
+    // Test-only observability accessor, matching ModeCRUISE's own get_
+    // target_heading_cd() precedent (plane.hpp) - "ported for completeness"
+    // even though no production code in this port's scope needs to read
+    // climb_out_complete_ from outside this class.
+    [[nodiscard]] bool climb_out_complete() const { return climb_out_complete_; }
+
+    // Real AP_Param defaults - see class banner's "TUNABLES" note.
+    float target_alt = 50.0f;
+    float level_alt = 10.0f;
+    float level_pitch = 15.0f;
+    float target_dist = 200.0f;
+    float ground_pitch = 5.0f;
+
+private:
+    bool takeoff_mode_setup_ = false;
+    Location start_loc_; // upstream: ModeTakeoff::start_loc
+
+    // This port's substitute for `flight_stage == TAKEOFF` vs. NORMAL -
+    // see class banner. false throughout the ground-roll/climb phase
+    // (takeoff_calc_roll()/pitch()/throttle() drive the vehicle); true
+    // once the vehicle has reached target_alt (minus a 2m margin,
+    // matching upstream) or target_dist, at which point update() switches
+    // to the normal calc_nav_roll()/calc_nav_pitch()/calc_throttle() path
+    // and navigate()'s update_loiter(0, in) call settles into a real
+    // station-keeping loiter around next_WP_loc - the exact same
+    // orbit-once-you-arrive behavior ModeRTL/ModeLOITER already establish.
+    bool climb_out_complete_ = false;
+};
+
 class Plane {
 public:
     // loop_rate_hz feeds HalContext's bundled Scheduler only - this
@@ -3375,14 +3758,36 @@ public:
     // GROUND STEERING ADDENDUM (see file banner) - upstream: Plane::
     // steer_state (Plane.h). See the banner's own "STEER_STATE" note for
     // why hold_course_cd is carried even though calc_nav_yaw_ground()
-    // itself never touches it.
+    // itself never touches it. CPP-031 SLICE 12: hold_course_cd is now
+    // REAL, WRITTEN state - ModeTAKEOFF (mode.hpp) is this port's first
+    // writer, closing the "never written in this port's scope" gap the
+    // ground-steering slice's own banner named.
     struct SteerState {
-        std::int32_t hold_course_cd = -1; // read by stabilize_yaw()'s dispatch; never written in this port's scope
+        std::int32_t hold_course_cd = -1; // read by stabilize_yaw()'s dispatch; written by ModeTAKEOFF (mode.hpp)
         bool locked_course = false;
         float locked_course_err = 0.0f; // radians - upstream stores this in radians too (Plane.cpp's wrap_PI() call)
         std::uint32_t last_steer_ms = 0;
     };
     SteerState steer_state;
+
+    // CPP-031 slice 12 (ModeTAKEOFF) - upstream: the takeoff-relevant
+    // subset of Plane::auto_state (AP_FixedWing::AutoState) PLUS Plane::
+    // takeoff_state's own throttle_lim_max/min - see plane.hpp's own
+    // "CPP-031 SLICE 12 ADDENDUM" file banner ("AUTO_STATE/TAKEOFF_STATE"
+    // note) for why these are folded into ONE struct here rather than
+    // upstream's two, and exactly which fields of each real upstream
+    // struct this omits (everything auto_takeoff_check()-only, and
+    // get_takeoff_pitch_min_cd()'s own excluded ramp state).
+    struct TakeoffState {
+        float highest_airspeed = 0.0f;             // upstream: auto_state.highest_airspeed, m/s
+        bool rotation_complete = false;             // upstream: auto_state.rotation_complete
+        std::int32_t takeoff_pitch_cd = 0;          // upstream: auto_state.takeoff_pitch_cd
+        std::int32_t takeoff_altitude_rel_cm = 0;   // upstream: auto_state.takeoff_altitude_rel_cm
+        float takeoff_start_alt_m = 0.0f;           // upstream: auto_state.baro_takeoff_alt - see file banner's "BAROMETRIC ALTITUDE SUBSTITUTION" note
+        std::int32_t throttle_lim_max = 0;          // upstream: takeoff_state.throttle_lim_max, percent
+        std::int32_t throttle_lim_min = 0;          // upstream: takeoff_state.throttle_lim_min, percent
+    };
+    TakeoffState takeoff_state;
 
     // See file banner's "GROUND_MODE / REVERSED_THROTTLE" note.
     bool ground_mode = false;
@@ -3474,6 +3879,18 @@ public:
         const float speed_scaler = calc_speed_scaler(airspeed_valid, airspeed_eas, armed_and_safety_off);
         constexpr float kCutoffHz = 2.0f;
         surface_speed_scaler += math::calc_lowpass_alpha_dt(dt, kCutoffHz) * (speed_scaler - surface_speed_scaler);
+
+        // CPP-031 slice 12 (ModeTAKEOFF) - upstream co-locates this same
+        // highest_airspeed update inside calc_speed_scaler() itself
+        // (Attitude.cpp) - hoisted here instead so calc_speed_scaler()
+        // stays a pure, side-effect-free helper - see plane.hpp's own
+        // "CPP-031 SLICE 12 ADDENDUM" file banner ("HIGHEST_AIRSPEED")
+        // note. Same inputs, same once-per-tick cadence (this function's
+        // sole real call site is tick(), mode.hpp) as upstream's real
+        // update site - behaviorally identical, just one call-frame up.
+        if (airspeed_valid && armed_and_safety_off && airspeed_eas > takeoff_state.highest_airspeed) {
+            takeoff_state.highest_airspeed = airspeed_eas;
+        }
     }
 
     // upstream: Plane::get_speed_scaler() (Plane.h, inline: `return
@@ -4417,6 +4834,155 @@ public:
     }
 
     // =====================================================================
+    // CPP-031 SLICE 12 (ModeTAKEOFF) - the shared takeoff_calc_*() core,
+    // read directly from ArduPlane/takeoff.cpp in full. See plane.hpp's
+    // own "CPP-031 SLICE 12 ADDENDUM" file banner for the full design
+    // rationale (scope decision, every exclusion, the barometric-altitude
+    // substitution, the one-tick TECS-limit lag).
+    // =====================================================================
+
+    // upstream: Plane::takeoff_calc_roll() (takeoff.cpp, ~line 149), read
+    // in full.
+    void takeoff_calc_roll(const StabilizeInputs& in) {
+        if (steer_state.hold_course_cd == -1) {
+            // we don't yet have a heading to hold - just level the wings
+            // until we get up enough speed to get a GPS heading.
+            nav_roll_cd = 0;
+            return;
+        }
+
+        calc_nav_roll(in);
+
+        // during takeoff use the level flight roll limit to prevent large
+        // wing strike. Slowly allow for more roll as we get higher above
+        // the takeoff altitude.
+        std::int32_t takeoff_roll_limit_cd = roll_limit_cd;
+
+        if (takeoff_state.highest_airspeed < aparm.takeoff_rotate_speed) {
+            // before Vrotate (aka, on the ground)
+            takeoff_roll_limit_cd = static_cast<std::int32_t>(aparm.level_roll_limit_deg * 100.0f);
+        } else {
+            // lim1 - below altitude TKOFF_LVL_ALT, restrict roll to
+            // LEVEL_ROLL_LIMIT. lim2 - above altitude (TKOFF_LVL_ALT * 3)
+            // allow full flight envelope of ROLL_LIMIT_DEG. In between
+            // lim1 and lim2 use a scaled roll limit.
+            const float lim1 = std::max(mode_takeoff.level_alt, 0.0f);
+            const float lim2 = std::min(mode_takeoff.level_alt * 3.0f, mode_takeoff.target_alt);
+            // upstream: barometer.get_altitude() - see file banner's
+            // "BAROMETRIC ALTITUDE SUBSTITUTION" note.
+            const float current_alt_m = in.current_altitude_m;
+
+            takeoff_roll_limit_cd = static_cast<std::int32_t>(
+                math::linear_interpolate(aparm.level_roll_limit_deg * 100.0f, static_cast<float>(roll_limit_cd), current_alt_m,
+                                          takeoff_state.takeoff_start_alt_m + lim1, takeoff_state.takeoff_start_alt_m + lim2));
+        }
+
+        nav_roll_cd = math::constrain_value(nav_roll_cd, -takeoff_roll_limit_cd, takeoff_roll_limit_cd);
+    }
+
+    // upstream: Plane::takeoff_calc_pitch() (takeoff.cpp, ~line 189), read
+    // in full. GET_TAKEOFF_PITCH_MIN_CD() is simplified to a direct read of
+    // takeoff_state.takeoff_pitch_cd - see file banner's own note for why.
+    // `in.airspeed_valid` substitutes for `ahrs.using_airspeed_sensor()` -
+    // see plane.hpp's own "NO SINGLETONS" note (StabilizeInputs::airspeed_
+    // valid/airspeed_eas's established role throughout this file).
+    void takeoff_calc_pitch(const StabilizeInputs& in) {
+        // First see if TKOFF_ROTATE_SPD applies. This sets the pitch for
+        // the first portion of the takeoff, up until cruise speed is
+        // reached.
+        if (!takeoff_state.rotation_complete && aparm.takeoff_rotate_speed > 0.0f) {
+            // A non-zero rotate speed is recommended for ground takeoffs.
+            if (takeoff_state.highest_airspeed < aparm.takeoff_rotate_speed) {
+                // We have not reached rotate speed - use the specified
+                // takeoff target pitch angle.
+                nav_pitch_cd = static_cast<std::int32_t>(100.0f * mode_takeoff.ground_pitch);
+                tecs.set_pitch_min(0.01f * static_cast<float>(nav_pitch_cd));
+                tecs.set_pitch_max(0.01f * static_cast<float>(nav_pitch_cd));
+                return;
+            } else if (gps.sample().ground_speed_ms <= aparm.airspeed_cruise) {
+                // If rotate speed applied, gradually transition from
+                // TKOFF_GND_PITCH to the climb angle - delay rotation
+                // until ground speed indicates adequate airspeed.
+                constexpr std::int32_t kMinPitchCd = 500; // 5 deg minimum climb angle
+                const float ratio = gps.sample().ground_speed_ms / aparm.airspeed_cruise;
+                nav_pitch_cd = static_cast<std::int32_t>(ratio * static_cast<float>(takeoff_state.takeoff_pitch_cd));
+                nav_pitch_cd = math::constrain_value(nav_pitch_cd, kMinPitchCd, takeoff_state.takeoff_pitch_cd);
+                tecs.set_pitch_min(0.01f * static_cast<float>(nav_pitch_cd));
+                tecs.set_pitch_max(0.01f * static_cast<float>(nav_pitch_cd));
+                return;
+            }
+        }
+        takeoff_state.rotation_complete = true;
+
+        // We are now past rotation. Initialize pitch limits for TECS - see
+        // file banner's "GET_TAKEOFF_PITCH_MIN_CD()" note for why this is
+        // just takeoff_state.takeoff_pitch_cd, not upstream's own ramped
+        // version of it.
+        std::int32_t pitch_min_cd = takeoff_state.takeoff_pitch_cd;
+        bool pitch_clipped_max = false;
+
+        // If we're using an airspeed sensor, we consult TECS.
+        if (in.airspeed_valid) {
+            calc_nav_pitch();
+            // At any rate, we don't want to go lower than the minimum
+            // pitch bound.
+            if (nav_pitch_cd < pitch_min_cd) {
+                nav_pitch_cd = pitch_min_cd;
+            }
+        } else {
+            // If not, we will use the minimum allowed angle.
+            nav_pitch_cd = pitch_min_cd;
+            pitch_clipped_max = true;
+        }
+
+        // Check if we have trouble with roll control. During takeoff we
+        // want to prioritise roll control over pitch: apply a reduction in
+        // pitch demand if our roll is significantly off, to help hand-
+        // launch recovery in cross-winds.
+        if (aparm.stall_prevention) {
+            // fly_inverted() is always false in this port (see its own
+            // doc comment above) - upstream's inversion adjustment to
+            // local_nav_roll_cd is dead code here, not reproduced.
+            const std::int32_t local_nav_roll_cd = nav_roll_cd;
+            const float roll_error_rad =
+                math::cd_to_rad(math::constrain_value(std::fabs(static_cast<float>(local_nav_roll_cd - roll_sensor_cd())), 0.0f, 9000.0f));
+            const float reduction = static_cast<float>(std::pow(std::cos(roll_error_rad), 2.0));
+            nav_pitch_cd = static_cast<std::int32_t>(static_cast<float>(nav_pitch_cd) * reduction);
+
+            if (nav_pitch_cd < pitch_min_cd) {
+                pitch_min_cd = nav_pitch_cd;
+            }
+        }
+
+        // Notify TECS about the external pitch setting, for the next
+        // iteration - see file banner's "TECS THROTTLE/PITCH LIMIT TIMING"
+        // note.
+        tecs.set_pitch_min(0.01f * static_cast<float>(pitch_min_cd));
+        if (pitch_clipped_max) {
+            tecs.set_pitch_max(0.01f * static_cast<float>(nav_pitch_cd));
+        }
+    }
+
+    // upstream: Plane::takeoff_calc_throttle() (takeoff.cpp, ~line 268),
+    // read in full - SIMPLIFIED, see file banner's "TKOFF_OPTIONS/
+    // THROTTLE_RANGE" note for why this collapses directly to the one
+    // branch this port can ever reach (throttle_lim_min = throttle_lim_max).
+    void takeoff_calc_throttle() {
+        takeoff_state.throttle_lim_max =
+            (aparm.takeoff_throttle_max != 0.0f) ? aparm.takeoff_throttle_max : aparm.throttle_max;
+        takeoff_state.throttle_lim_min = takeoff_state.throttle_lim_max;
+
+        // upstream: TECS_controller.set_throttle_min/max(), called from
+        // apply_throttle_limits() (servos.cpp) - see file banner's "TECS
+        // THROTTLE/PITCH LIMIT TIMING" note for why this port calls them
+        // directly here instead.
+        tecs.set_throttle_min(0.01f * static_cast<float>(takeoff_state.throttle_lim_min));
+        tecs.set_throttle_max(0.01f * static_cast<float>(takeoff_state.throttle_lim_max));
+
+        calc_throttle();
+    }
+
+    // =====================================================================
     // CPP-031 SLICE 7 (real mode-switching) - see file banner addendum for
     // the full design rationale (why Mode's class hierarchy is declared
     // above rather than in mode.hpp, enter()/exit() becoming real virtual
@@ -4451,6 +5017,17 @@ public:
     // gap this addition surfaces: rc_failsafe_short_on_event() (below)
     // does not yet classify this mode.
     ModeLOITER mode_loiter{*this};
+    // CPP-031 SLICE 12 - see plane.hpp's own "CPP-031 SLICE 12 ADDENDUM"
+    // file banner ("RC_FAILSAFE_SHORT_ON_EVENT()" note) for why this mode
+    // needs NO corresponding addition to rc_failsafe_short_on_event()
+    // (below) - its real upstream classification is already the implicit
+    // else/no-op fallthrough that function takes for CIRCLE/TAKEOFF/RTL.
+    // Not added to flight_modes (below) - matches upstream's own stock
+    // FLIGHT_MODE_1..6 defaults (RTL/RTL/FBWA/FBWA/MANUAL/MANUAL,
+    // config.h), none of which is TAKEOFF - reachable only via an
+    // explicit set_mode(plane.mode_takeoff) call, same as a real vehicle
+    // would need a GCS/mission command to select it.
+    ModeTAKEOFF mode_takeoff{*this};
 
     // upstream: Plane::control_mode (Plane.h), `Mode *control_mode =
     // &mode_initializing;` - see file banner's "CONTROL_MODE'S DEFAULT"
