@@ -321,3 +321,14 @@ catch_discover_tests(ekf_fusion_test)
 add_executable(ekf_mag_fusion_test ekf_mag_fusion_test.cpp)
 target_link_libraries(ekf_mag_fusion_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_mag_fusion_test)
+
+# CPP-061 phase 7: closed-loop EkfCore validation against SimPlane's
+# ground truth (see fwcpp/ekf/ekf_core.hpp's phase banners for phases
+# 1-6 - this is the first test to run the WHOLE assembled pipeline
+# together, continuously, against a realistic simulated flight). ap-sim,
+# ap-compass, and ap-vehicle are TEST-ONLY dependencies here (same
+# precedent as vehicle_test.cpp's own ap-sim dependency) - ap-ekf itself
+# links none of them.
+add_executable(ekf_closed_loop_test ekf_closed_loop_test.cpp)
+target_link_libraries(ekf_closed_loop_test PRIVATE ap-ekf ap-sim ap-compass ap-vehicle Catch2::Catch2WithMain)
+catch_discover_tests(ekf_closed_loop_test)
