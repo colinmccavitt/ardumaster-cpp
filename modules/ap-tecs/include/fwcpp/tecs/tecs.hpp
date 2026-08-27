@@ -388,10 +388,17 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 
 #include <fwcpp/math/matrix3.hpp>
 #include <fwcpp/math/scalar.hpp>
+#include <fwcpp/param/defaults.hpp>       // get_default_value (CPP-022 slice 6, type-agnostic half only - see CPP-049 ADDENDUM)
+#include <fwcpp/param/group_info.hpp>     // GroupInfo, get_base, adjust_group_offset, group_id (CPP-022)
+#include <fwcpp/param/native_value.hpp>   // set_native_value/native_cast_to_float (CPP-043) - see CPP-049 ADDENDUM for why, not defaults.hpp's set_value
+#include <fwcpp/param/param.hpp>          // VarType, ParamHeader, set_key (CPP-021)
+#include <fwcpp/param/persistence.hpp>    // load_raw/save_raw/scan/type_size/should_skip_save (CPP-022 slices 4-5/7)
+#include <fwcpp/param/storage.hpp>        // storage::StorageAccess (CPP-020)
 
 namespace fwcpp::tecs {
 
@@ -1601,5 +1608,367 @@ private:
 
     MovingAverage5 vdot_filter_;
 };
+
+// === CPP-049 ADDENDUM: real AP_Param Info[]/GroupInfo[] table for
+// Tecs::Gains (TECS_ prefix), phase 2f of the AP_Param vehicle-
+// integration effort CPP-043 started (phase 1: Plane::aparm) ===
+//
+// Read libraries/AP_TECS/AP_TECS.cpp's real var_info[] table (lines
+// 19-294) and ArduPlane/Parameters.cpp:870-872 in full for this ticket,
+// not assumed - see each finding below for what that reading confirmed
+// or corrected.
+//
+// FINDING #1, CORRECTS THIS TICKET'S OWN ASSUMED SHAPE: unlike CPP-043's
+// aparm (which turned out to be a FLAT set of individually-keyed
+// top-level Info entries, no GROUP wrapper), TECS genuinely IS a real
+// upstream GROUP object. ArduPlane/Parameters.cpp:872 reads exactly
+// `GOBJECT(TECS_controller, "TECS_", AP_TECS)` - a real GOBJECT
+// registration (confirmed byte-exact, including the trailing underscore
+// in the prefix string) under Plane::var_info[], not a flat ASCALAR-per-
+// field shape. This ticket's own scope text describes the deliverable as
+// `tecs_param_info(Tecs::Gains&) -> std::array<param::Info, N+1>` "N real
+// fields + sentinel, matching CPP-043's aparm_param_info() shape exactly"
+// - reading upstream directly shows that a literal flat-N-scalars
+// reproduction would misrepresent TECS's real shape (single top-level
+// GROUP entry whose group_info points at a nested per-field table),
+// exactly the kind of ticket-framing-vs-upstream-reality mismatch this
+// project's history (CPP-036/037/039 through 043) has repeatedly found
+// and corrected. This ticket therefore builds TWO tables, both below:
+//   - tecs_group_info(): the real nested table (22 GroupInfo scalar
+//     entries + sentinel - AP_TECS's real per-field idx/name/default,
+//     see FINDING #2) - the equivalent of AP_TECS::var_info[] itself.
+//   - tecs_param_info(Gains&): std::array<param::Info, 2> - ONE real
+//     top-level Info entry (type Group, name "TECS_", ptr=&gains,
+//     group_info=tecs_group_info()) + a VarType::None sentinel. N=1 here
+//     because there is genuinely only one top-level entry for the whole
+//     TECS object - matching upstream's actual GOBJECT shape, not the
+//     ticket's own literal wording (which assumed aparm's flat shape
+//     would generalize; it doesn't, for this particular upstream object).
+// This is also the FIRST real (non-synthetic) exerciser of
+// top_level::find()'s GROUP-dispatch branch (fwcpp/param/top_level.hpp,
+// CPP-043) - CPP-043's own aparm table turned out not to need that
+// branch at all (its own commit message says so explicitly), so it was
+// only ever tested by top_level_test.cpp's synthetic table. tecs_param_
+// test.cpp's own top_level::find() test below exercises the real branch
+// for the first time via a real, in-scope port object.
+//
+// FINDING #2 - every one of Gains's 24 fields checked individually
+// against the real var_info[] table (AP_TECS.cpp:19-294, read in full),
+// not assumed to be 1:1 upstream-backed just because CPP-029/CPP-040/
+// CPP-041 built this struct by porting real upstream fields one at a
+// time (matching this ticket's own instruction to verify each field
+// individually, as CPP-043 finding #2 also had to for FixedWingTunables):
+//
+//   22 of 24 fields ARE genuinely, individually upstream AP_Param-backed
+//   (name/idx/default all read directly from the real AP_GROUPINFO line
+//   cited in each Gains field's own pre-existing comment, re-verified
+//   here) - see tecs_group_info() below for the exact name/idx/default
+//   used for each. idx values below are upstream's REAL AP_GROUPINFO
+//   second argument (e.g. `AP_GROUPINFO("CLMB_MAX", 0, ...)` -> idx 0) -
+//   these are meaningful, storage-affecting values (group_id below packs
+//   idx into ParamHeader.group_element - group_info.hpp's own encoding),
+//   unlike CPP-043's own top-level `key` values for aparm (which that
+//   ticket correctly noted are "informed by, but independent of" upstream
+//   numbering, since a top-level key only has to be distinct within THIS
+//   port's own key space). Reusing upstream's real per-field idx here
+//   costs nothing and is the more faithful choice for a GROUP's OWN
+//   nested table, though nothing in this ticket's acceptance criteria
+//   requires cross-implementation byte compatibility either (same
+//   caveat CPP-043 registered for aparm - see FINDING #3 below).
+//
+//   2 of 24 fields (option_glider_only, option_descent_speedup) have NO
+//   individually-addressable real upstream backing and are EXCLUDED from
+//   both tables below, named explicitly per this ticket's own acceptance
+//   criteria: upstream's real "OPTIONS" parameter (AP_TECS.cpp:251,
+//   `AP_GROUPINFO("OPTIONS", 28, AP_TECS, _options, 0)`) is a SINGLE
+//   AP_Int32 bitmask (AP_TECS.h:213, `AP_Int32 _options`), with
+//   GLIDER_ONLY=bit0/DESCENT_SPEEDUP=bit1 (AP_TECS.h:217-220's
+//   `enum class Option`) read via `_options.get() & int32_t(option)`.
+//   This port's Gains struct, built before this ticket (CPP-029),
+//   already decomposed that single bitmask into two separate `bool`
+//   fields at the C++ level - there is no single 4-byte "options" object
+//   in Gains for a scalar Info/GroupInfo entry to address, and this
+//   ticket's own instructions forbid adding one ("do not add any new
+//   Gains fields in this ticket"). Fabricating two INDIVIDUAL top-level
+//   entries under invented per-bit names (e.g. "OPTIONS_GLIDER_ONLY")
+//   would misrepresent upstream, which has exactly one real name/key for
+//   both bits combined - the same "don't fabricate a name upstream
+//   doesn't have" reasoning CPP-043 finding #2 already applied to
+//   FixedWingTunables' non-aparm fields. Correctly reproducing OPTIONS as
+//   a single real AP_Param entry would require Gains to hold the raw
+//   packed bitmask (matching upstream's own `AP_Int32 _options` byte-for-
+//   byte) instead of two pre-decomposed bools - a real, disclosed,
+//   deferred fix for a future ticket that revisits Gains's own field
+//   shape, not something this persistence-only ticket does silently.
+//
+// FINDING #3, a registered divergence (ADR-0007: fix bugs in the PORT,
+// disclose divergences from upstream - not a bug, a narrower version of
+// CPP-043's own finding #3): upstream stores pitch_max/pitch_min/
+// thr_min_pct_ext_rate_lim as AP_Int8 (1 byte each - AP_TECS.h:209-210,
+// 229) but this port's Gains (established CPP-029, long before this
+// ticket) declares all three as plain C++ `float` (4 bytes), for
+// arithmetic convenience alongside Gains's many genuinely-float
+// neighbors. Retrofitting these three fields' C++ type to match
+// upstream's narrower integer width was rejected here for the identical
+// reason CPP-043 rejected it for aparm's seven analogous fields: it would
+// ripple through every read site across CPP-029/CPP-040/CPP-041 for a
+// byte-width change with no behavioral benefit this ticket's acceptance
+// criteria need. tecs_group_info() below uses VarType::Float (this
+// port's own live width) for these three, meaning this port's on-storage
+// encoding for exactly these three parameters would not match a byte
+// blob a real upstream vehicle would produce for the same names -
+// ADR-0013's FORMAT-level byte compatibility (headers/keys/sentinels,
+// CPP-021) is untouched; only these three fields' width diverges, the
+// same narrow, explicit trade-off CPP-043 already registered for its own
+// seven analogous fields. use_synthetic_airspeed (also AP_Int8 upstream)
+// has NO such mismatch: it's a C++ `bool` (1 byte) here, matching
+// upstream's real AP_Int8 width exactly - same treatment CPP-043 gave
+// aparm's own stall_prevention.
+//
+// WHY native_value.hpp, NOT defaults.hpp'S set_value/setup_object_
+// defaults, AND NOT persistence.hpp's cast_to_float (CPP-022 slice 6/7):
+// same reasoning as CPP-043's own finding #4, re-verified here rather
+// than assumed to carry over automatically - Gains's fields are plain
+// `float`/`bool`, not this port's own ParamValue<T>/ParamFloat wrapper
+// classes (param.hpp), so reinterpreting a field's address as a
+// `ParamInt8*`/`ParamFloat*` to call that class's own member functions
+// would be exactly the unsafe reinterpretation ADR-0012 forbids, even
+// though the two happen to share layout on every compiler this port
+// targets. native_value.hpp's memcpy-based set_native_value/
+// native_cast_to_float (CPP-043) are the honest, already-built
+// replacement - reused here UNCHANGED, no new byte-level helper needed
+// for this ticket. get_default_value (defaults.hpp) IS reused unchanged
+// for both apply_tecs_defaults and save_tecs_parameters below: it only
+// ever reads info.def_value (a float) or, for the unused-here
+// kFlagDefaultPointer case, a sibling float - it never touches the
+// pointee's own static type, so it applies to Gains's native fields
+// exactly as it already does to NotchFilterParams' ParamFloat ones.
+//
+// EXPLICIT, NOT IMPLICIT (matching CPP-043's own precedent exactly):
+// apply_tecs_defaults/load_tecs_parameters/save_tecs_parameters below are
+// ordinary free functions a caller invokes explicitly - not wired into
+// Tecs's constructor, and (per this ticket's own scope boundary) not
+// wired into Plane at all - plane.hpp/mode.hpp are untouched by this
+// ticket; a future, separate integration ticket adds Plane-level
+// convenience wrappers across all of CPP-044 through CPP-049 at once,
+// exactly as CPP-043's own Plane::apply_aparm_defaults()/etc member
+// wrappers previewed for aparm alone.
+//
+// SCOPE, matching this ticket's own instruction: only fields ALREADY on
+// Gains today (built across CPP-029/CPP-040/CPP-041) are covered here -
+// no new Gains fields are added by this ticket, including for OPTIONS
+// (FINDING #2 above).
+
+// This port's own top-level key allocation for the ONE real GROUP entry
+// below - informed by, but independent of, upstream's real Parameters.h
+// `k_param_TECS_controller` (an EEPROM-migration/ordering detail this
+// port has no reason to reproduce - CPP-043's own identical treatment of
+// AparmParamKey). Only this one value is allocated in this port's own
+// top-level key space so far by THIS ticket; CPP-043's own AparmParamKey
+// occupies a separate, non-overlapping enum (this port has no shared
+// vehicle-wide key space yet - see CPP-043's own note on that).
+enum class TecsParamKey : std::uint16_t {
+    kTecsController = 1,
+};
+
+// Real upstream AP_GROUPINFO idx (the macro's own 2nd argument,
+// AP_TECS.cpp:19-294, read directly) for each of the 22 genuinely
+// upstream-backed Gains fields - see FINDING #2 above for why these
+// (unlike TecsParamKey's single top-level value) reproduce upstream's
+// real numbering rather than allocating this port's own. Named to match
+// each field's own real AP_GROUPINFO name argument.
+enum class TecsGroupIdx : std::uint8_t {
+    kClmbMax = 0,
+    kSinkMin = 1,
+    kTimeConst = 2,
+    kThrDamp = 3,
+    kIntegGain = 4,
+    kVertAcc = 5,
+    kHgtOmega = 6,
+    kSpdOmega = 7,
+    kRll2Thr = 8,
+    kSpdWeight = 9,
+    kPtchDamp = 10,
+    kSinkMax = 11,
+    kPitchMax = 15,
+    kPitchMin = 16,
+    kLandSink = 17,
+    kLandSrc = 22,
+    kSynAirspeed = 27,
+    kPtchFfV0 = 29,
+    kPtchFfK = 30,
+    kThrErate = 31,
+    kFlareHgt = 32,
+    kHdemTconst = 33,
+};
+
+// The real nested GroupInfo[] table for Tecs::Gains - the equivalent of
+// AP_TECS::var_info[] itself (AP_TECS.cpp:19-294). A `static const`
+// function-local table, matching upstream's own `static const
+// AP_Param::GroupInfo AP_TECS::var_info[]` exactly: unlike CPP-043's
+// per-instance aparm_param_info (which had to rebuild its table per call
+// because Info.ptr there held an ABSOLUTE per-instance field address),
+// every entry here only needs `offsetof(Gains, field)` - a compile-time,
+// class-level constant with no per-instance dependency - so one shared
+// table genuinely is the correct, upstream-matching shape, not a
+// simplification. Names/idx/defaults are transcribed directly from
+// AP_TECS.cpp's real AP_GROUPINFO lines (see FINDING #2); every
+// VarType::Float entry among pitch_max/pitch_min/thr_min_pct_ext_rate_lim
+// is FINDING #3's registered width divergence (real upstream type is
+// AP_Int8) - every other Float entry matches upstream's real AP_Float
+// width exactly, and use_synthetic_airspeed's Int8 matches upstream's
+// real AP_Int8 width exactly (no divergence for that one field).
+[[nodiscard]] inline const param::GroupInfo* tecs_group_info() {
+    using param::GroupInfo;
+    using param::VarType;
+    using Gains = Tecs::Gains;
+    auto entry = [](const char* name, std::size_t offset, float def_value, TecsGroupIdx idx, VarType type) {
+        GroupInfo info{};
+        info.name = name;
+        info.offset = static_cast<std::ptrdiff_t>(offset);
+        info.def_value = def_value;
+        info.flags = 0;
+        info.idx = static_cast<std::uint8_t>(idx);
+        info.type = static_cast<std::uint8_t>(type);
+        return info;
+    };
+    static const std::array<GroupInfo, 23> table = {{
+        entry("CLMB_MAX", offsetof(Gains, max_climb_rate), 5.0f, TecsGroupIdx::kClmbMax, VarType::Float),
+        entry("SINK_MIN", offsetof(Gains, min_sink_rate), 2.0f, TecsGroupIdx::kSinkMin, VarType::Float),
+        entry("TIME_CONST", offsetof(Gains, time_const), 5.0f, TecsGroupIdx::kTimeConst, VarType::Float),
+        entry("THR_DAMP", offsetof(Gains, thr_damp), 0.5f, TecsGroupIdx::kThrDamp, VarType::Float),
+        entry("INTEG_GAIN", offsetof(Gains, integ_gain), 0.3f, TecsGroupIdx::kIntegGain, VarType::Float),
+        entry("VERT_ACC", offsetof(Gains, vert_acc_lim), 7.0f, TecsGroupIdx::kVertAcc, VarType::Float),
+        entry("HGT_OMEGA", offsetof(Gains, hgt_comp_filt_omega), 3.0f, TecsGroupIdx::kHgtOmega, VarType::Float),
+        entry("SPD_OMEGA", offsetof(Gains, spd_comp_filt_omega), 2.0f, TecsGroupIdx::kSpdOmega, VarType::Float),
+        entry("RLL2THR", offsetof(Gains, roll_comp), 10.0f, TecsGroupIdx::kRll2Thr, VarType::Float),
+        entry("SPDWEIGHT", offsetof(Gains, spd_weight), 1.0f, TecsGroupIdx::kSpdWeight, VarType::Float),
+        entry("PTCH_DAMP", offsetof(Gains, ptch_damp), 0.3f, TecsGroupIdx::kPtchDamp, VarType::Float),
+        entry("SINK_MAX", offsetof(Gains, max_sink_rate), 5.0f, TecsGroupIdx::kSinkMax, VarType::Float),
+        entry("PITCH_MAX", offsetof(Gains, pitch_max), 15.0f, TecsGroupIdx::kPitchMax, VarType::Float), // FINDING #3: real upstream AP_Int8
+        entry("PITCH_MIN", offsetof(Gains, pitch_min), 0.0f, TecsGroupIdx::kPitchMin, VarType::Float),  // FINDING #3: real upstream AP_Int8
+        entry("LAND_SINK", offsetof(Gains, land_sink), 0.25f, TecsGroupIdx::kLandSink, VarType::Float),
+        entry("LAND_SRC", offsetof(Gains, land_sink_rate_change), 0.0f, TecsGroupIdx::kLandSrc, VarType::Float),
+        entry("SYNAIRSPEED", offsetof(Gains, use_synthetic_airspeed), 0.0f, TecsGroupIdx::kSynAirspeed, VarType::Int8),
+        entry("PTCH_FF_V0", offsetof(Gains, pitch_ff_v0), 12.0f, TecsGroupIdx::kPtchFfV0, VarType::Float),
+        entry("PTCH_FF_K", offsetof(Gains, pitch_ff_k), 0.0f, TecsGroupIdx::kPtchFfK, VarType::Float),
+        entry("THR_ERATE", offsetof(Gains, thr_min_pct_ext_rate_lim), 20.0f, TecsGroupIdx::kThrErate, VarType::Float), // FINDING #3: real upstream AP_Int8
+        entry("FLARE_HGT", offsetof(Gains, flare_holdoff_hgt), 1.0f, TecsGroupIdx::kFlareHgt, VarType::Float),
+        entry("HDEM_TCONST", offsetof(Gains, hgt_dem_tconst), 3.0f, TecsGroupIdx::kHdemTconst, VarType::Float),
+        GroupInfo{}, // sentinel: type == VarType::None (0) via zero-init, matching every other table in this port's AP_Param module
+    }};
+    return table.data();
+}
+
+// The real top-level Info table for the whole TECS object - std::array<
+// param::Info, 2>: ONE real GROUP entry (name "TECS_", matching
+// ArduPlane/Parameters.cpp:872's real GOBJECT prefix byte-exactly) plus a
+// VarType::None sentinel. See FINDING #1 above for why N=1 here, not the
+// flat N=22 this ticket's own text assumed by analogy with CPP-043's
+// aparm. Built fresh per call (unlike tecs_group_info()'s shared static
+// table) because Info.ptr here DOES hold a per-instance absolute address
+// (&gains) - same "more than one live Gains can exist, no single fixed
+// address to bake in at compile time" reasoning CPP-043's own
+// aparm_param_info comment gives for its own per-call construction.
+[[nodiscard]] inline std::array<param::Info, 2> tecs_param_info(Tecs::Gains& gains) {
+    using param::Info;
+    using param::VarType;
+    Info group{};
+    group.name = "TECS_";
+    group.ptr = &gains;
+    group.group_info = tecs_group_info();
+    group.flags = 0;
+    group.key = static_cast<std::uint16_t>(TecsParamKey::kTecsController);
+    group.type = static_cast<std::uint8_t>(VarType::Group);
+    return {{group, Info{}}};
+}
+
+// Applies every one of tecs_group_info()'s 22 real entries' own
+// AP_Param-table default directly into `gains`'s live fields - the
+// GROUP-nested equivalent of AP_Param::setup_object_defaults(), but
+// built fresh here (not a call to defaults.hpp's own
+// setup_object_defaults) because that function's set_value casts its
+// target to a ParamInt8/ParamFloat wrapper object - wrong for Gains's
+// plain native fields, see this addendum's own "WHY native_value.hpp"
+// note above. get_default_value (defaults.hpp) IS reused unchanged - it
+// never touches the pointee's own static type. Not called from Tecs's
+// constructor - see this addendum's own "EXPLICIT, NOT IMPLICIT" note.
+inline void apply_tecs_defaults(Tecs::Gains& gains) {
+    const param::GroupInfo* group_info = tecs_group_info();
+    const auto base = reinterpret_cast<std::ptrdiff_t>(&gains);
+    for (std::uint8_t i = 0; group_info[i].type != static_cast<std::uint8_t>(param::VarType::None); ++i) {
+        const auto type = static_cast<param::VarType>(group_info[i].type);
+        void* field_ptr = reinterpret_cast<void*>(base + group_info[i].offset);
+        param::set_native_value(type, field_ptr, param::get_default_value(field_ptr, group_info[i]));
+    }
+}
+
+// Port of AP_Param::load() (AP_Param.cpp ~line 1310, read in full),
+// specialized to exactly one level of GROUP nesting (tecs_group_info()'s
+// flat 22-entry table - no sub-groups beneath it) and to NOT use
+// find_var_info's by-pointer-identity self-discovery, matching CPP-043's
+// own load_aparm_parameters precedent exactly: the caller already knows
+// which object/table it is loading. Reuses get_base (CPP-022, resolves
+// the GROUP entry's own base address - here always &gains directly,
+// since `group.flags` is never kFlagPointer for this object) and
+// group_id (CPP-022's group_info.hpp, packs tecs_group_info()[i].idx
+// into ParamHeader.group_element for a single level of nesting - shift=0
+// since "TECS_" is itself a top-level group, not nested inside another
+// group) - both genuinely reused unchanged, exercising the GROUP-nesting
+// machinery CPP-043's own flat aparm table never needed. load_raw/
+// type_size (CPP-022) and set_native_value (CPP-043) are reused exactly
+// as CPP-043's own load_aparm_parameters used them.
+inline void load_tecs_parameters(const storage::StorageAccess& storage, Tecs::Gains& gains) {
+    const std::array<param::Info, 2> table = tecs_param_info(gains);
+    const param::Info& group = table[0];
+    std::ptrdiff_t base = 0;
+    if (!param::get_base(group, base)) {
+        return; // kFlagPointer sub-object not allocated - defensive only, never set for this object
+    }
+    const param::GroupInfo* group_info = group.group_info;
+    for (std::uint8_t i = 0; group_info[i].type != static_cast<std::uint8_t>(param::VarType::None); ++i) {
+        const auto type = static_cast<param::VarType>(group_info[i].type);
+        void* field_ptr = reinterpret_cast<void*>(base + group_info[i].offset);
+        param::ParamHeader phdr{};
+        phdr.type = group_info[i].type;
+        param::set_key(phdr, group.key);
+        phdr.group_element = param::group_id(group_info, 0, i, 0);
+        if (!param::load_raw(storage, phdr, field_ptr, param::type_size(type))) {
+            param::set_native_value(type, field_ptr, param::get_default_value(field_ptr, group_info[i]));
+        }
+    }
+}
+
+// Port of AP_Param::save_sync's default-skip-then-write path
+// (AP_Param.cpp ~line 1138, read in full), specialized the same way
+// load_tecs_parameters is above. Reuses should_skip_save (CPP-022 slice
+// 7, persistence.hpp) COMPLETELY UNCHANGED - pure float arithmetic, no
+// pointer casting - exactly CPP-043's own save_aparm_parameters
+// precedent. `force_save` matches upstream's own save_sync(force_save,
+// ...) parameter, wired through for a future caller, unused by this
+// ticket's own default-skip-path test.
+inline void save_tecs_parameters(storage::StorageAccess& storage, Tecs::Gains& gains, bool force_save = false) {
+    const std::array<param::Info, 2> table = tecs_param_info(gains);
+    const param::Info& group = table[0];
+    std::ptrdiff_t base = 0;
+    if (!param::get_base(group, base)) {
+        return;
+    }
+    const param::GroupInfo* group_info = group.group_info;
+    for (std::uint8_t i = 0; group_info[i].type != static_cast<std::uint8_t>(param::VarType::None); ++i) {
+        const auto type = static_cast<param::VarType>(group_info[i].type);
+        const void* field_ptr = reinterpret_cast<const void*>(base + group_info[i].offset);
+        const float current = param::native_cast_to_float(type, field_ptr);
+        const float default_value = param::get_default_value(field_ptr, group_info[i]);
+        if (param::should_skip_save(type, current, default_value, force_save)) {
+            continue;
+        }
+        param::ParamHeader phdr{};
+        phdr.type = group_info[i].type;
+        param::set_key(phdr, group.key);
+        phdr.group_element = param::group_id(group_info, 0, i, 0);
+        (void)param::save_raw(storage, phdr, field_ptr, param::type_size(type));
+    }
+}
 
 } // namespace fwcpp::tecs

@@ -201,8 +201,31 @@ target_link_libraries(sim_plane_test PRIVATE ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sim_plane_test)
 
 add_executable(tecs_test tecs_test.cpp)
-target_link_libraries(tecs_test PRIVATE ap-tecs Catch2::Catch2WithMain)
+# ap-param added by CPP-049: tecs.hpp itself now #includes several
+# fwcpp/param/ headers for its own "CPP-049 ADDENDUM" (tecs_group_info/
+# tecs_param_info/apply_tecs_defaults/load_tecs_parameters/
+# save_tecs_parameters) - any translation unit that includes tecs.hpp,
+# including this pre-existing test, needs ap-param's include path too.
+# modules/ap-tecs/CMakeLists.txt itself is intentionally left untouched
+# (out of this ticket's scope - see tecs_param_test's own target below
+# for the fuller note); adding the dependency here, at every consuming
+# test target, is the fix available within this ticket's touched files.
+target_link_libraries(tecs_test PRIVATE ap-tecs ap-param Catch2::Catch2WithMain)
 catch_discover_tests(tecs_test)
+
+# CPP-049: storage/persistence integration test for Tecs::Gains (TECS_
+# prefix) - no ap-sim needed (not a closed-loop test, see the ticket's
+# own "NOT a SimPlane closed-loop test" instruction). Links ap-param
+# directly (in addition to ap-tecs) because tecs_param_test.cpp itself,
+# not just tecs.hpp, uses fwcpp::param:: types (GroupInfo, ParamHeader,
+# storage::StorageAccess, top_level::find) directly - ap-tecs's own
+# CMakeLists.txt is intentionally left untouched by this ticket (see the
+# ticket's own scope note restricting changes to tecs.hpp/this test
+# file/this CMakeLists.txt only), so this test target picks up
+# fwcpp/param/'s include path via its own direct ap-param link instead.
+add_executable(tecs_param_test tecs_param_test.cpp)
+target_link_libraries(tecs_param_test PRIVATE ap-tecs ap-param Catch2::Catch2WithMain)
+catch_discover_tests(tecs_param_test)
 
 add_executable(fw_control_test fw_control_test.cpp)
 target_link_libraries(fw_control_test PRIVATE ap-fw-control Catch2::Catch2WithMain)
