@@ -3,6 +3,22 @@
 // "CPP-059, PHASE 5" banner for the full scope/exclusions/corrections
 // discussion this ticket's own ticket file asked for.
 //
+// CPP-060 phase 6 ADDENDUM (see fwcpp/ekf/ekf_core.hpp's "CPP-060, PHASE
+// 6" banner): tests 7/8 below cover the new mag_test_ratio()/magHealth
+// innovation-consistency gate. Test 7 exploits the gate's real,
+// verified-directly per-axis (NOT combined) structure: a single-axis-
+// dominant inconsistency large enough to fail ONLY that one axis's
+// magTestRatio[i] < 1.0 check still fails the whole gate (magHealth
+// requires ALL three), and - the critical distinction this phase exists
+// to get right - the rejection is a bare upstream `return;` with NO
+// covariance_init() call, so state/P must be byte-for-byte untouched,
+// NOT reset the way tests 4/5's bad-conditioning/healthyFusion failures
+// are. Test 8 locates the real gate boundary by bisection (rather than
+// hand-deriving the exact closed-form varInnovMag[0] under covariance_
+// init()'s real, un-engineered P) and confirms a reading just inside it
+// still fuses normally - regression coverage against phase 5's existing
+// fusion behavior.
+//
 // Test strategy (per the ticket's own acceptance criteria):
 //   1. A mag reading exactly consistent with the current attitude/field
 //      state produces zero innovation on all 3 axes, so the state is left
@@ -198,7 +214,19 @@ TEST_CASE("fuse_magnetometer: with inhibit_mag_states cleared, one fusion call m
     ekf.inhibit_mag_states = false;  // unlock mag-field learning for this test
     ekf.covariance_init(ftype(0.01));
 
-    const Vector3F true_field(ftype(0.25), ftype(0.0), ftype(0.4));
+    // CPP-060 phase 6 ADDENDUM: this fixture's true_field was originally
+    // (0.25, 0.0, 0.4) - with a zero-initialized earth_magfield (MagPred
+    // = 0), that put the Z-axis innovation (-0.4) past the real,
+    // newly-enforced MAG_I_GATE_DEFAULT=300 gate (verified: with this
+    // fixture's default P, var_innov_mag is ~0.0075 on every axis - see
+    // this file's own tests 7/8 above for how that's derived - so the
+    // real per-axis gate boundary here is |innovation| < sqrt(9*0.0075)
+    // ~= 0.26; 0.4 fails it, 0.25 barely passes). Shrunk to (0.2, 0.0,
+    // 0.15), comfortably inside the real gate on every axis, while still
+    // leaving initial_err well above the sanity floor below - this test
+    // is about the field-LEARNING behavior once a reading passes the
+    // gate, not the gate itself (see tests 7/8 above for that).
+    const Vector3F true_field(ftype(0.2), ftype(0.0), ftype(0.15));
     MagSample mag;
     mag.mag = true_field;  // body_magfield stays 0 throughout - isolate earth-field learning
 
@@ -390,4 +418,137 @@ TEST_CASE("EkfCore: magnetometer fusion measurably constrains yaw drift versus p
     // rounder-looking number picked without checking what this code
     // actually produces.
     REQUIRE(fused_yaw_err < unfused_yaw_err * 0.85);
+}
+
+TEST_CASE("fuse_magnetometer: a single-axis-dominant inconsistency fails the per-axis magTestRatio gate "
+          "and leaves state/covariance byte-for-byte untouched (NOT a covariance_init() reset)",
+          "[ekf_core][mag_fusion]") {
+    // Identity attitude, zero earth_magfield/body_magfield (a fresh
+    // EkfCore's real defaults) - collapses SH_MAG to {0,0,0,0,0,0,1,0,0}
+    // (see file banner above tests 4/5), so MagPred = (0,0,0) exactly and
+    // innov_mag = -mag.mag on every axis, with var_innov_mag depending
+    // only on P (from covariance_init(), never hand-engineered here) and
+    // NOT on the injected reading at all - i.e. the bad-conditioning
+    // checks above the new gate are completely unaffected by how large
+    // the injected reading is, only the NEW gate is exercised here.
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.covariance_init(ftype(0.01));
+
+    const StateVector state_before = ekf.state;
+    const Matrix24 P_before = ekf.P;
+
+    // A large error concentrated on ONE axis (X), with Y/Z exactly
+    // consistent (0 innovation) - exploiting the real, verified-directly
+    // per-axis (not combined sum-of-squares, unlike CPP-057's GPS gate)
+    // magHealth structure: a single bad axis must fail the whole gate on
+    // its own, per the ticket's own instruction.
+    MagSample mag;
+    mag.mag = Vector3F(ftype(1000), ftype(0), ftype(0));
+
+    const bool applied = ekf.fuse_magnetometer(mag, make_gyro(ftype(0.01)), ftype(0.01));
+
+    REQUIRE_FALSE(applied);
+
+    // Confirm this is genuinely the NEW gate, not one of CPP-059's
+    // existing abort paths: var_innov_mag.x must still show as "not
+    // badly conditioned" (>= R_MAG, matching test 4's own check), and
+    // the per-axis test ratio itself must show X failing while Y/Z pass
+    // comfortably - the single-axis-dominant structure this test is
+    // built to exploit.
+    const ftype r_mag_used = sq(fwcpp::math::constrain_value(ekf.mag_noise, ftype(0.01), ftype(0.5)));
+    REQUIRE(static_cast<double>(ekf.var_innov_mag.x) >= static_cast<double>(r_mag_used));
+    const Vector3F ratio = ekf.mag_test_ratio();
+    REQUIRE(static_cast<double>(ratio.x) >= 1.0);
+    REQUIRE(static_cast<double>(ratio.y) < 1.0);
+    REQUIRE(static_cast<double>(ratio.z) < 1.0);
+
+    // THE critical distinction this phase exists to get right: upstream
+    // is a bare `return;` here, with NO CovarianceInit() call - unlike
+    // tests 4/5's covariance-reset abort paths, state/P must be
+    // EXACTLY, byte-for-byte what they were at entry, not merely
+    // "changed less" or "reset to a fresh covariance_init() result".
+    for (int i = 0; i < 24; ++i) {
+        for (int j = 0; j < 24; ++j) {
+            REQUIRE(ekf.P[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] ==
+                    P_before[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]);
+        }
+    }
+    REQUIRE(ekf.state.quat.q1 == state_before.quat.q1);
+    REQUIRE(ekf.state.quat.q2 == state_before.quat.q2);
+    REQUIRE(ekf.state.quat.q3 == state_before.quat.q3);
+    REQUIRE(ekf.state.quat.q4 == state_before.quat.q4);
+    REQUIRE(ekf.state.velocity.x == state_before.velocity.x);
+    REQUIRE(ekf.state.velocity.y == state_before.velocity.y);
+    REQUIRE(ekf.state.velocity.z == state_before.velocity.z);
+    REQUIRE(ekf.state.position.x == state_before.position.x);
+    REQUIRE(ekf.state.position.y == state_before.position.y);
+    REQUIRE(ekf.state.position.z == state_before.position.z);
+    REQUIRE(ekf.state.gyro_bias.x == state_before.gyro_bias.x);
+    REQUIRE(ekf.state.gyro_bias.y == state_before.gyro_bias.y);
+    REQUIRE(ekf.state.gyro_bias.z == state_before.gyro_bias.z);
+    REQUIRE(ekf.state.accel_bias.x == state_before.accel_bias.x);
+    REQUIRE(ekf.state.accel_bias.y == state_before.accel_bias.y);
+    REQUIRE(ekf.state.accel_bias.z == state_before.accel_bias.z);
+    REQUIRE(ekf.state.earth_magfield.x == state_before.earth_magfield.x);
+    REQUIRE(ekf.state.earth_magfield.y == state_before.earth_magfield.y);
+    REQUIRE(ekf.state.earth_magfield.z == state_before.earth_magfield.z);
+    REQUIRE(ekf.state.body_magfield.x == state_before.body_magfield.x);
+    REQUIRE(ekf.state.body_magfield.y == state_before.body_magfield.y);
+    REQUIRE(ekf.state.body_magfield.z == state_before.body_magfield.z);
+}
+
+TEST_CASE("fuse_magnetometer: a borderline-inside-gate reading still fuses normally (regression vs. "
+          "phase 5's existing fusion behavior)",
+          "[ekf_core][mag_fusion]") {
+    // Locate the real gate boundary along a single-axis (X) injected
+    // reading by bisection, against covariance_init()'s real,
+    // un-engineered P - rather than hand-deriving the exact closed-form
+    // varInnovMag[0] value, which is legitimate for tests 4/5's
+    // hand-engineered P but would be circular here (this test's whole
+    // point is to confirm the real formula end to end, boundary
+    // included). Each probe uses a completely fresh EkfCore so a
+    // rejected (state-untouched, per the test above) or accepted
+    // (state-mutated) trial never contaminates the next one.
+    auto make_fixture = [] {
+        EkfCore ekf;
+        ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+        ekf.covariance_init(ftype(0.01));
+        return ekf;
+    };
+
+    auto ratio_x_for = [&](ftype mag_x) {
+        EkfCore probe = make_fixture();
+        MagSample mag;
+        mag.mag = Vector3F(mag_x, ftype(0), ftype(0));
+        probe.fuse_magnetometer(mag, make_gyro(ftype(0.01)), ftype(0.01));
+        return probe.mag_test_ratio().x;
+    };
+
+    REQUIRE(static_cast<double>(ratio_x_for(ftype(0))) < 1.0);  // zero innovation: sanity floor
+    ftype lo = ftype(0);       // ratio(lo) < 1.0, invariant maintained throughout
+    ftype hi = ftype(1000);    // must be comfortably >= 1.0 - checked below, matches test above
+    REQUIRE(static_cast<double>(ratio_x_for(hi)) >= 1.0);
+    for (int iter = 0; iter < 60; ++iter) {
+        const ftype mid = (lo + hi) / ftype(2);
+        if (static_cast<double>(ratio_x_for(mid)) < 1.0) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    // `lo` is now a reading whose per-axis test ratio is just inside the
+    // gate (< 1.0, converged to within 2^-60 of the real boundary) - the
+    // exact "borderline-inside-gate" case the ticket's acceptance
+    // criteria ask for. It must still fuse exactly as phase 5 already
+    // established for a smaller, non-borderline inconsistent reading.
+    EkfCore ekf = make_fixture();
+    MagSample mag;
+    mag.mag = Vector3F(lo, ftype(0), ftype(0));
+
+    const bool applied = ekf.fuse_magnetometer(mag, make_gyro(ftype(0.01)), ftype(0.01));
+
+    REQUIRE(applied);
+    REQUIRE(static_cast<double>(ekf.mag_test_ratio().x) < 1.0);
 }

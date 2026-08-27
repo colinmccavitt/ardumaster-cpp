@@ -801,6 +801,143 @@
 // mag-field states still inhibited, verified by this phase's own tests.
 // ============================================================================
 
+// ============================================================================
+// CPP-060, PHASE 6 (this ticket): magnetometer innovation-consistency
+// gating. Everything above this point is phase 1 (CPP-052) through phase
+// 5 (CPP-059), unmodified. Read AP_NavEKF3_MagFusion.cpp lines ~571-582
+// directly before extending anything below - it was read in full for
+// this phase (short, ~12 lines, unlike phase 1/5's dense algebra, but
+// verified directly anyway per the ticket's own instruction).
+// ============================================================================
+//
+// THE GAP THIS PHASE CLOSES: phase 5's own banner above named it
+// explicitly, in its own "CORRECTION / CLARIFICATION" section -
+// fuse_magnetometer() fuses every reading that clears the coarser
+// per-axis bad-conditioning/healthyFusion checks, with no way to reject
+// a reading that is merely INCONSISTENT (e.g. local magnetic
+// interference, a miscalibrated compass) but not extreme enough to trip
+// either of those. This mirrors the exact gap CPP-057 already closed for
+// GPS fusion.
+//
+// THE REAL, VERIFIED FORMULA AND LOCATION (AP_NavEKF3_MagFusion.cpp
+// lines 571-582, read directly this round):
+//   for (i = 0..2):
+//     magTestRatio[i] = sq(innovMag[i]) /
+//                        (sq(MAX(0.01*_magInnovGate, 1.0)) * varInnovMag[i]);
+//   magHealth = (magTestRatio[0] < 1.0 && magTestRatio[1] < 1.0 &&
+//                magTestRatio[2] < 1.0);
+//   if (!magHealth) { return; }
+// Verified directly: this is ALL THREE axes individually passing < 1.0,
+// NOT one combined sum-of-squares ratio the way gps_vel_test_ratio()/
+// gps_pos_test_ratio() work (those sum sq(innovation) across N/E/D or
+// N/E into ONE ratio before comparing to 1.0 - see this file's "CPP-057,
+// PHASE 3" banner). A single badly-wrong axis here fails the whole gate
+// on its own, with no averaging-out across the other two axes the way a
+// combined ratio would allow - this port's own test exploits exactly
+// that per-axis structure.
+//
+// Real default verified this round: MAG_I_GATE_DEFAULT = 300
+// (AP_NavEKF3.cpp #define, identical across all four APM_BUILD_TYPE
+// #elif blocks including ArduPlane's own, ~line 37/63/89/115 - same
+// pattern as CPP-057's VEL_I_GATE_DEFAULT/POS_I_GATE_DEFAULT).
+// `_magInnovGate` is an AP_Int16 "Percentage number of standard
+// deviations", hence this port's mag_innov_gate_pct field name (same
+// _pct convention as gps_vel_innov_gate_pct/gps_pos_innov_gate_pct).
+//
+// WHAT THIS PHASE BUILDS:
+//   - mag_test_ratio(): the real per-axis magTestRatio formula, public
+//     (like gps_vel_test_ratio()/gps_pos_test_ratio()) so tests can
+//     verify it independently. Reads this object's own stored
+//     innov_mag/var_innov_mag - unlike the GPS gates (which take a fresh
+//     GpsSample and recompute innovations themselves from state), this
+//     phase's innovations are already populated as members by
+//     fuse_magnetometer() itself before this gate needs them (they are
+//     computed unconditionally near the top of that function, phase 5),
+//     so there is nothing left for mag_test_ratio() to recompute from
+//     scratch - it just applies the gate formula to what is already
+//     there.
+//   - mag_innov_gate_pct: new public field, defaulted to the real
+//     MAG_I_GATE_DEFAULT = 300 (see above) - same "AP_Param not wired in
+//     yet" treatment as this file's other noise/limit/gate parameters.
+//   - Wiring into fuse_magnetometer(): the gate is evaluated ONCE, using
+//     var_innov_mag/innov_mag as populated by THIS call (all three axes'
+//     bad-conditioning checks have already run and passed by this
+//     point - matching upstream's own real textual ordering exactly,
+//     verified directly: the magTestRatio/magHealth block sits between
+//     the three varInnovMag checks, ~line 532-569, and the per-axis
+//     H_MAG/Kalman-gain obsIndex loop, ~line 584 onward). On failure,
+//     fuse_magnetometer() returns false immediately - see below for why
+//     this is NOT the same false as the two existing failure modes.
+//
+// WHERE THIS PLUGS IN, exactly (verified directly, not assumed from the
+// ticket's own summary): AFTER the three per-axis bad-conditioning
+// checks (unchanged from CPP-059 - each can still independently abort
+// with its own full covariance_init() reset, before the gate ever runs),
+// BUT BEFORE the per-axis H_MAG/Kalman-gain obsIndex loop. A reading that
+// fails a bad-conditioning check never reaches this gate at all (it has
+// already returned); a reading that passes all three bad-conditioning
+// checks is then subjected to this new gate before any Kalman gain is
+// even computed for any axis.
+//
+// THE CRITICAL, DISTINCT THIRD OUTCOME (get this right - CPP-059's own
+// banner already flagged this as the real, disclosed gap this phase
+// closes): unlike a badly-conditioned axis or a failed healthyFusion
+// guard - BOTH of which call covariance_init() (upstream:
+// CovarianceInit()) and reset the ENTIRE covariance matrix before
+// aborting - a failed mag_test_ratio()/magHealth gate is upstream's own
+// bare `return;` (~line 580-582) with NO CovarianceInit() call anywhere
+// near it. This port's fuse_magnetometer() therefore returns false on
+// THREE genuinely different real upstream conditions now, only two of
+// which reset P:
+//   1. Badly-conditioned axis            -> covariance_init() then false.
+//   2. Failed healthyFusion guard        -> covariance_init() then false.
+//   3. (THIS PHASE) Failed mag gate      -> false, P/state UNTOUCHED.
+// A false return alone no longer distinguishes "the filter recovered by
+// resetting P" from "this one reading was simply skipped, state intact"
+// - callers/tests that need to tell these apart must inspect state/P
+// directly (byte-for-byte, as this phase's own tests do), exactly the
+// same caveat CPP-059's own doc comment already carried for
+// distinguishing failure modes 1 and 2 from each other, now extended to
+// a third.
+//
+// CORRECTION TO NOTHING - THE TICKET'S OWN PREMISE CHECKED OUT: this
+// ticket's own text already carried forward CPP-059's real, disclosed
+// correction (the gate lives textually INSIDE FuseMagnetometer() itself,
+// between the bad-conditioning checks and the H_MAG loop - NOT a
+// separate outer wrapper the way CPP-057's GPS gating was originally,
+// mistakenly framed as analogous to). Re-verified directly this round
+// against the live upstream source at lines 571-582: the formula, the
+// per-axis (not combined) magHealth structure, the MAG_I_GATE_DEFAULT=300
+// constant, and the exact textual ordering all matched the ticket's own
+// text exactly. No further correction needed this round.
+//
+// EXPLICITLY OUT OF SCOPE (each named with its real upstream trigger, per
+// the ticket's own acceptance criterion):
+//   - Any timeout/reset-on-timeout recovery mechanism for magnetometer,
+//     analogous to CPP-058's GPS work - verified directly: no such
+//     mechanism exists inside FuseMagnetometer() itself. The real
+//     yaw-realignment/reset machinery for a persistently bad compass
+//     lives in the separate, unrelated, still-excluded
+//     controlMagYawReset()/realignYawGPS()/alignYawAngle() state
+//     machine - already a named CPP-059 exclusion, confirmed again this
+//     round to be genuinely distinct from (and not called by)
+//     FuseMagnetometer(). A gate failure here simply means this one
+//     reading is skipped for this one cycle; there is no wall-clock
+//     "how long has mag fusion been failing" bookkeeping analogous to
+//     last_vel_pass_time_s/last_pos_pass_time_s (CPP-058), and none is
+//     added by this phase.
+//   - Any change to the existing bad-conditioning/healthyFusion failure
+//     paths (both unchanged from CPP-059 - this phase only adds the new,
+//     additional gate that runs between them and the fusion loop).
+//   - `faultStatus.bad_xmag`/`bad_ymag`/`bad_zmag` bookkeeping remains
+//     out of scope for the same reason CPP-059 already excluded it for
+//     the other two failure modes (write-only diagnostic flags, no
+//     faultStatus struct in this port) - upstream sets no additional
+//     faultStatus flag on a magHealth failure either way (verified:
+//     lines 571-582 touch no faultStatus field at all), so this phase
+//     introduces no new instance of that already-named gap.
+// ============================================================================
+
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -1006,6 +1143,16 @@ public:
     ftype gps_vel_innov_gate_pct = static_cast<ftype>(500);  // VEL_I_GATE_DEFAULT
     ftype gps_pos_innov_gate_pct = static_cast<ftype>(500);  // POS_I_GATE_DEFAULT
 
+    // CPP-060 phase 6: real MAG_I_GATE_DEFAULT gate parameter
+    // (AP_NavEKF3.cpp _magInnovGate, AP_Int16 "Percentage number of
+    // standard deviations applied to magnetometer innovation consistency
+    // check" - hence the _pct suffix, same convention as the GPS gates
+    // above), verified identical (300) across every APM_BUILD_TYPE #elif
+    // block including ArduPlane's own (~line 37, 63, 89, 115). Same
+    // "AP_Param not wired in yet" treatment as this file's other noise/
+    // limit parameters.
+    ftype mag_innov_gate_pct = static_cast<ftype>(300);  // MAG_I_GATE_DEFAULT
+
     // upstream: NavEKF3_core::InitialGyroBiasUncertainty(),
     // AP_NavEKF3_GyroBias.cpp - a fixed 2.5 deg/sec, not vehicle-specific
     // despite its own doc comment claiming otherwise (read directly:
@@ -1164,19 +1311,45 @@ public:
     // sq(gpsPosVarAccScale*accNavMag)`.
     [[nodiscard]] ftype gps_horiz_pos_obs_variance() const;
 
-    // CPP-059 phase 5. upstream: NavEKF3_core::FuseMagnetometer(),
-    // AP_NavEKF3_MagFusion.cpp ~line 473-843 - see this file's "CPP-059,
-    // PHASE 5" banner for the full scope, the verbatim-transcription
-    // rationale, and the CovarianceInit()-on-failure behavior this
-    // reproduces. `gyro` supplies R_MAG's angular-rate-scaling term
-    // (upstream: imuDataDelayed.delAng/delAngDT - this port's existing
-    // GyroSample already carries exactly those two fields, no new type
-    // needed). Returns false if EITHER upstream abort path fired (a
-    // badly-conditioned axis, or a failed healthyFusion guard) - P has
-    // already been reset via covariance_init() by the time this returns
-    // false, matching upstream's real CovarianceInit()-then-return
-    // behavior exactly. Returns true only if all 3 axes (X, Y, Z, fused
-    // sequentially) completed without either abort path firing.
+    // CPP-060 phase 6. upstream: magTestRatio/magHealth, AP_NavEKF3_
+    // MagFusion.cpp ~line 571-577 - `magTestRatio[i] = sq(innovMag[i]) /
+    // (sq(MAX(0.01*_magInnovGate, 1.0)) * varInnovMag[i])` per axis,
+    // `magHealth = (magTestRatio[0]<1.0 && magTestRatio[1]<1.0 &&
+    // magTestRatio[2]<1.0)` - ALL THREE axes individually, NOT a single
+    // combined sum-of-squares ratio the way gps_vel_test_ratio()/gps_pos_
+    // test_ratio() work (see this file's "CPP-060, PHASE 6" banner).
+    // Reads this object's own stored innov_mag/var_innov_mag (set once
+    // per fuse_magnetometer() call, before this gate runs) and
+    // mag_innov_gate_pct - unlike gps_vel_test_ratio()/gps_pos_test_ratio(),
+    // which take a fresh sample and recompute innovations themselves,
+    // this phase's innovations are already members by the time the gate
+    // needs them (see fuse_magnetometer()'s own body). Public so tests
+    // can verify the exact per-axis formula independently, same
+    // treatment as the GPS gates above.
+    [[nodiscard]] Vector3F mag_test_ratio() const;
+
+    // CPP-059 phase 5 (CPP-060 phase 6 ADDENDUM below). upstream:
+    // NavEKF3_core::FuseMagnetometer(), AP_NavEKF3_MagFusion.cpp ~line
+    // 473-843 - see this file's "CPP-059, PHASE 5" banner for the full
+    // scope, the verbatim-transcription rationale, and the
+    // CovarianceInit()-on-failure behavior this reproduces. `gyro`
+    // supplies R_MAG's angular-rate-scaling term (upstream:
+    // imuDataDelayed.delAng/delAngDT - this port's existing GyroSample
+    // already carries exactly those two fields, no new type needed).
+    //
+    // Returns false on any of THREE distinct outcomes (see this file's
+    // "CPP-060, PHASE 6" banner for the third):
+    //   1. A badly-conditioned axis (varInnovMag[i] < R_MAG) - P has
+    //      ALREADY been reset via covariance_init() by the time this
+    //      returns.
+    //   2. A failed healthyFusion guard - P has ALREADY been reset via
+    //      covariance_init() by the time this returns.
+    //   3. (CPP-060) A failed mag_test_ratio()/magHealth gate - P and
+    //      state are COMPLETELY UNTOUCHED (upstream's own bare `return;`,
+    //      no CovarianceInit()) - do NOT treat this the same as 1/2.
+    // Returns true only if the gate passed AND all 3 axes (X, Y, Z, fused
+    // sequentially) completed without either covariance-reset abort path
+    // firing.
     bool fuse_magnetometer(const MagSample& mag, const GyroSample& gyro, ftype dt_ekf_avg);
 
 private:

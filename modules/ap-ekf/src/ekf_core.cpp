@@ -1234,6 +1234,23 @@ int EkfCore::fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg, ftype now
 // don't apply to the current axis (e.g. H_MAG[20]/H_MAG[21] = 0 in the X
 // branch) - so which indices happen to hold stale values from a previous
 // iteration is never observable either way.
+
+// CPP-060 phase 6. upstream: magTestRatio[i] = sq(innovMag[i]) /
+// (sq(MAX(0.01f*(ftype)frontend->_magInnovGate, 1.0f)) * varInnovMag[i]),
+// AP_NavEKF3_MagFusion.cpp ~line 571-573 - reads this object's own
+// stored innov_mag/var_innov_mag (populated by fuse_magnetometer() itself
+// before this is ever called, see that function's body) rather than
+// recomputing anything from a fresh sample. See ekf_core.hpp's
+// "CPP-060, PHASE 6" banner for the full derivation and the real
+// MAG_I_GATE_DEFAULT=300 default.
+Vector3F EkfCore::mag_test_ratio() const {
+    const ftype gate = std::max(ftype(0.01) * mag_innov_gate_pct, ftype(1.0));
+    const ftype gate_sq = sq(gate);
+    return Vector3F(sq(innov_mag.x) / (gate_sq * var_innov_mag.x),
+                    sq(innov_mag.y) / (gate_sq * var_innov_mag.y),
+                    sq(innov_mag.z) / (gate_sq * var_innov_mag.z));
+}
+
 bool EkfCore::fuse_magnetometer(const MagSample& mag, const GyroSample& gyro, ftype dt_ekf_avg) {
     // create aliases for state to make code easier to read (upstream:
     // identical aliases, ~line 481-490).
@@ -1318,12 +1335,25 @@ bool EkfCore::fuse_magnetometer(const MagSample& mag, const GyroSample& gyro, ft
         return false;
     }
 
-    // EXCLUDED: the real magTestRatio/magHealth innovation-consistency
-    // gate (upstream ~line 606-616, `frontend->_magInnovGate`) - see
-    // ekf_core.hpp's "CPP-059, PHASE 5" banner "CORRECTION /
-    // CLARIFICATION" section for exactly what this is, where it really
-    // lives in upstream's source, and why it is deliberately not
-    // reproduced here.
+    // CPP-060 phase 6: the real per-axis magTestRatio/magHealth gate
+    // upstream computes right here (~line 571-582) - see ekf_core.hpp's
+    // "CPP-060, PHASE 6" banner for the full derivation, the real
+    // MAG_I_GATE_DEFAULT=300 default, and why a gate failure below is a
+    // bare `return false;` with NO covariance_init() call - a THIRD,
+    // distinct outcome from the two covariance-reset abort paths above
+    // (badly-conditioned axis; healthyFusion guard failure later in this
+    // function) - unlike either of those, this leaves state/P completely
+    // untouched.
+    const Vector3F test_ratio = mag_test_ratio();
+    const bool mag_health = (test_ratio.x < ftype(1.0)) && (test_ratio.y < ftype(1.0)) &&
+                             (test_ratio.z < ftype(1.0));
+    if (!mag_health) {
+        // upstream ~line 579-582: `if (!magHealth) { return; }` - a bare
+        // return, no CovarianceInit(). Skip the ENTIRE 3-axis fusion
+        // call for this cycle; state/P are left exactly as they were at
+        // entry to this function.
+        return false;
+    }
 
     const int lim = state_index_lim();
 
