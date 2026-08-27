@@ -220,3 +220,13 @@ catch_discover_tests(compass_test)
 add_executable(steer_controller_test steer_controller_test.cpp)
 target_link_libraries(steer_controller_test PRIVATE ap-steer-control Catch2::Catch2WithMain)
 catch_discover_tests(steer_controller_test)
+
+# CPP-045: storage/persistence integration test for
+# PitchController::Gains - no ap-sim needed (not a closed-loop test, see
+# the ticket's own "NOT a SimPlane closed-loop test" instruction).
+# ap-fw-control's own transitive link chain (ap-pid -> ap-filter -> a
+# PUBLIC ap-param dependency) already brings in ap-param's include path,
+# so no module CMakeLists.txt needs editing for this ticket.
+add_executable(pitch_controller_param_test pitch_controller_param_test.cpp)
+target_link_libraries(pitch_controller_param_test PRIVATE ap-fw-control Catch2::Catch2WithMain)
+catch_discover_tests(pitch_controller_param_test)
