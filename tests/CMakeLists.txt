@@ -239,3 +239,13 @@ catch_discover_tests(pitch_controller_param_test)
 add_executable(yaw_controller_param_test yaw_controller_param_test.cpp)
 target_link_libraries(yaw_controller_param_test PRIVATE ap-fw-control Catch2::Catch2WithMain)
 catch_discover_tests(yaw_controller_param_test)
+
+# CPP-047: storage/persistence integration test for
+# steer_control::SteerController::Gains - no ap-sim needed (not a
+# closed-loop test, matching CPP-043's own plane_aparm_param_test
+# precedent above). Links ap-param directly (in addition to
+# ap-steer-control, whose own module CMakeLists.txt does not depend on
+# ap-param) for the same reason notch_filter_params_test does above.
+add_executable(steer_controller_param_test steer_controller_param_test.cpp)
+target_link_libraries(steer_controller_param_test PRIVATE ap-steer-control ap-param Catch2::Catch2WithMain)
+catch_discover_tests(steer_controller_param_test)
