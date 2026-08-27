@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -5802,6 +5803,178 @@ TEST_CASE("Closed loop: TAKEOFF accelerates down the runway under a real ground-
                                 << ", climb_out_complete = " << takeoff.climb_out_complete());
     REQUIRE(takeoff.climb_out_complete());
     REQUIRE(final_altitude == Catch::Approx(takeoff.target_alt).margin(15.0f));
+}
+
+// ---------------------------------------------------------------------
+// CPP-039: AUTO's real MAV_CMD_NAV_TAKEOFF mission command - wires the
+// shared takeoff_calc_roll()/pitch()/throttle() core and TakeoffState
+// (CPP-031 slice 12, ModeTAKEOFF, closed-loop test immediately above)
+// into ModeAUTO's own mission dispatch via the new Plane::do_takeoff()/
+// verify_takeoff() (plane.hpp) and MissionItem::command tag. This is the
+// ticket's own required closed-loop test: the first one able to prove an
+// AUTOMATIC handoff from the takeoff control laws to normal L1 waypoint
+// navigation INSIDE one AUTO mission, with no manual mode-switching -
+// ModeTAKEOFF itself (the test above) has no "hand off to the next
+// waypoint" mechanism at all; only AUTO's mission-command dispatch does.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Closed loop: AUTO flies a 2-item mission (Takeoff, then Waypoint), automatically handing off from the "
+          "shared takeoff control laws to normal L1 waypoint navigation once verify_takeoff()'s altitude check "
+          "passes, with no manual mode-switching, in SimPlane's ground truth",
+          "[vehicle][integration][auto][takeoff]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    // Start ON the ground - same precondition as the standalone ModeTAKEOFF
+    // closed-loop test above.
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f);
+
+    // Ground steering must be explicitly enabled - see plane.hpp's
+    // "GROUND_STEER_ALT's REAL DEFAULT IS 0" note, same as the ModeTAKEOFF
+    // closed-loop test above.
+    plane.aparm.ground_steer_alt = 5.0f;
+
+    // A real 2-item mission: climb out under the shared takeoff control
+    // laws to 50m, then cruise 600m north at that same altitude under
+    // normal L1 waypoint navigation - the ticket's own required scenario.
+    std::array<MissionItem, 2> items;
+    items[0].command = MissionCommand::Takeoff;
+    items[0].loc = make_loc(50.0f, 0.0f, 50.0f); // horizontal component is overwritten near-home by do_takeoff() itself (see its own doc comment) - only the 50m altitude is really consumed.
+    items[0].takeoff_pitch_deg = 15.0f;          // upstream: cmd.p1 - a real, explicit, non-default/non-fallback pitch.
+    items[1].command = MissionCommand::Waypoint;
+    items[1].loc = make_loc(600.0f, 0.0f, 50.0f); // straight ahead, same altitude - the real post-takeoff leg.
+    REQUIRE(plane.mission.load(items));
+
+    // The real entry point - runs ModeAUTO::enter() for real, which (since
+    // the FIRST mission item is a Takeoff) calls Plane::do_takeoff() - see
+    // ModeAUTO::enter()'s own "CPP-039" doc comment (plane.hpp/mode.hpp).
+    REQUIRE(plane.set_mode(plane.mode_auto));
+    REQUIRE(plane.control_mode == &plane.mode_auto);
+
+    // do_takeoff() ran for real - confirm its own real effects directly,
+    // before a single tick() has run.
+    REQUIRE(plane.mission.current() != nullptr);
+    REQUIRE(plane.mission.current()->command == MissionCommand::Takeoff);
+    REQUIRE(plane.takeoff_state.takeoff_altitude_rel_cm == 5000); // items[0].loc.alt (5000cm) - home.alt (0)
+    REQUIRE(plane.takeoff_state.takeoff_pitch_cd == 1500);        // items[0].takeoff_pitch_deg * 100
+    REQUIRE(plane.steer_state.hold_course_cd == -1);              // do_takeoff() resets it - not locked yet
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    bool saw_takeoff_item = false;
+    int transition_tick = -1;        // first tick mission.current() became the Waypoint item
+    float min_dist_to_wp_after_transition = std::numeric_limits<float>::max();
+
+    // CPP-031 slice 7: tick() dispatches through plane.control_mode - see
+    // the FBWA closed-loop test's own comment. 4000 ticks (80 simulated
+    // seconds) is generous headroom: this scenario's own real climb (under
+    // full takeoff throttle/a 15deg pitch floor, no TKOFF_ROTATE_SPD gate -
+    // aparm.takeoff_rotate_speed's real default is 0, same as the
+    // standalone ModeTAKEOFF closed-loop test above) reaches the 50m
+    // takeoff altitude in only a few seconds, and cruising the remaining
+    // ~550m at AIRSPEED_CRUISE's real default (12 m/s, plane.hpp) to reach
+    // the Waypoint item takes well under a minute more. NOTE: once the
+    // vehicle reaches the Waypoint item (this mission's LAST item),
+    // ModeAUTO::navigate()'s own PRE-EXISTING, already-tested mission-
+    // complete-to-RTL transition (plane.hpp's "CPP-031 SLICE 7 ADDENDUM")
+    // fires automatically and flies it back toward home - real, correct,
+    // out-of-scope-for-THIS-ticket behavior this test must not mistake for
+    // a bug. That is exactly why this test tracks the CLOSEST approach to
+    // the waypoint during the run, below, rather than asserting on the
+    // final position (which legitimately moves away again once RTL takes
+    // over).
+    constexpr int kTotalTicks = 4000;
+
+    for (int i = 0; i < kTotalTicks; ++i) {
+        now_us += 20000;
+        now_ms += 20;
+
+        // Autonomous mode throughout - sticks stay centered (AUTO drives
+        // roll/pitch/throttle itself, whichever mission item is current).
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.now_ms = now_ms;
+        in.now_us = now_us;
+        // CPP-031 slice 9: armed_and_safety_off is COMPUTED - see the AUTO
+        // 3-waypoint closed-loop test's own comment above for why arm()
+        // itself isn't used here.
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
+        in.position_ned = sim_plane.position;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+        // Real airspeed sensor reading, same established treatment as
+        // every other closed-loop test in this file.
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+
+        tick(plane, gyro_sample, in);
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+
+        // Track the vehicle's real progress through the mission - see
+        // this loop's own comment above for why the CLOSEST approach to
+        // the waypoint is tracked, not the final position.
+        if (plane.mission.current() != nullptr) {
+            if (plane.mission.current()->command == MissionCommand::Takeoff) {
+                saw_takeoff_item = true;
+            } else if (plane.mission.current()->command == MissionCommand::Waypoint) {
+                if (transition_tick < 0) {
+                    transition_tick = i;
+                }
+                min_dist_to_wp_after_transition =
+                    std::min(min_dist_to_wp_after_transition, plane.current_loc.get_distance(items[1].loc));
+            }
+        }
+
+        // Real climb, genuinely airborne well past the takeoff target
+        // altitude's own completion threshold - captured mid-loop (not
+        // just at the end) since RTL's own climb (RTL_ALTITUDE, a
+        // different, later, pre-existing real feature) will also be
+        // above 30m and would otherwise make this check meaningless.
+        if (transition_tick >= 0 && transition_tick == i) {
+            REQUIRE(-sim_plane.position.z > 30.0f);
+        }
+    }
+
+    INFO("saw_takeoff_item = " << saw_takeoff_item << ", transition_tick = " << transition_tick
+                                 << ", min distance to waypoint after transition (m) = "
+                                 << min_dist_to_wp_after_transition << ", final control_mode is mode_rtl = "
+                                 << (plane.control_mode == &plane.mode_rtl) << ", final true position (N,E,D) = ("
+                                 << sim_plane.position.x << ", " << sim_plane.position.y << ", "
+                                 << sim_plane.position.z << ")");
+
+    // The vehicle genuinely flew the Takeoff item first (the shared
+    // takeoff control laws actually ran, not just a mission-index skip)...
+    REQUIRE(saw_takeoff_item);
+    // ...THEN, automatically (no manual mode-switching anywhere in this
+    // test), transitioned to the Waypoint item once verify_takeoff()'s own
+    // altitude check passed...
+    REQUIRE(transition_tick >= 0);
+    // ...and actually flew there under normal L1 waypoint navigation,
+    // genuinely closing to near it in SimPlane's ground truth at some
+    // point after the handoff - not just "the index advanced somehow"
+    // (same standard the AUTO 3-waypoint closed-loop test above already
+    // holds itself to). The CLOSEST approach is what is checked, not the
+    // final position, because reaching this mission's LAST item
+    // legitimately triggers the pre-existing mission-complete-to-RTL
+    // transition (see this loop's own comment above) - the vehicle is
+    // correctly flying AWAY from the waypoint again by the time this test
+    // ends, exactly as RTL is supposed to do.
+    REQUIRE(min_dist_to_wp_after_transition < 150.0f);
 }
 
 // ---------------------------------------------------------------------

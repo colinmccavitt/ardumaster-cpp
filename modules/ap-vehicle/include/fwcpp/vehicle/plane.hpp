@@ -2701,6 +2701,19 @@
 // work, not silently dropped - see this addendum's own final "WHAT'S
 // LEFT" note.
 //
+// CPP-039 UPDATE: NAV_TAKEOFF is that anticipated future slice, now done -
+// MissionItem got its command-type tag (MissionCommand, above the
+// MissionItem struct declaration), ModeAUTO::update()/navigate() (mode.hpp)
+// got the real dispatch switch this note predicted, and Plane::do_takeoff()
+// /verify_takeoff() (below Plane::verify_nav_wp(), this file) turned out to
+// be exactly the thin wrapper this note anticipated FOR takeoff_calc_roll()
+// /pitch()/throttle() specifically - but NOT for ModeTAKEOFF::update() as a
+// whole: do_takeoff()/verify_takeoff() are their own genuinely separate
+// implementations from ModeTAKEOFF::enter()/update()'s course-lock logic
+// (verified directly, not assumed - see verify_takeoff()'s own doc comment
+// for the two real differences found). This is the fuller "real, working
+// slice of takeoff behavior" this addendum's opening paragraph promised.
+//
 // BAROMETRIC ALTITUDE SUBSTITUTION - FOLLOWING ESTABLISHED PRECEDENT, NOT
 // A NEW SHORTCUT: takeoff_calc_roll()'s altitude-scaled roll-limit
 // interpolation and takeoff_calc_throttle()'s (excluded, see below)
@@ -3232,20 +3245,54 @@ struct StabilizeInputs {
 // slice's own tests and any realistic hand-authored test mission.
 inline constexpr std::size_t kMaxMissionItems = 32;
 
+// upstream: AP_Mission::Mission_Command::id (MAV_CMD_NAV_*) - CPP-039 adds
+// the minimal real command-type discriminant this port's mission
+// vocabulary now needs, NOT a full ~80-value MAV_CMD_NAV_*/MAV_CMD_DO_*
+// port (per the ticket's own instruction). Only the two real command
+// types this port's Mode dispatch (ModeAUTO, mode.hpp) can act on today.
+// LAND/LOITER*/RTL/jump/do-commands/splines/VTOL/NAV_SCRIPT_TIME remain
+// entirely absent from this vocabulary - see MissionItem's own banner
+// below and ModeAUTO's class banner (plane.hpp) for the full, still-
+// current exclusion list. MAV_CMD_NAV_LAND in particular is explicitly a
+// separate, larger, future ticket (needs a real AP_Landing-equivalent
+// subsystem this port has not built) - not attempted here.
+enum class MissionCommand : std::uint8_t {
+    Waypoint, // upstream: MAV_CMD_NAV_WAYPOINT
+    Takeoff,  // upstream: MAV_CMD_NAV_TAKEOFF
+};
+
 // upstream: AP_Mission::Mission_Command, reduced to exactly what this
-// slice's vocabulary supports - see file banner. Deliberately NOT tagged
-// with a command "type" at all: every MissionItem IS a NAV_WAYPOINT: there
-// is no other kind in this slice (TAKEOFF/LAND/LOITER*/RTL/jump/do-
-// commands/splines/VTOL are all excluded - see file banner's exclusion
-// list).
+// slice's vocabulary supports - see file banner. CPP-039: now tagged with
+// a real (minimal) command type - see MissionCommand above - rather than
+// the previous "every MissionItem IS a NAV_WAYPOINT" untagged design;
+// LOITER*/RTL/jump/do-commands/splines/VTOL/NAV_LAND/NAV_SCRIPT_TIME are
+// still all excluded (see file banner's exclusion list and MissionCommand's
+// own doc comment above for MAV_CMD_NAV_LAND's own separate-ticket status).
 struct MissionItem {
+    // Defaults to Waypoint - EVERY PRE-CPP-039 CALLER'S EXACT BEHAVIOR IS
+    // PRESERVED: a MissionItem constructed without setting `command`
+    // explicitly (every existing test, e.g. the AUTO/RTL closed-loop
+    // tests) is still a plain NAV_WAYPOINT, byte-for-byte the same as
+    // before this field existed.
+    MissionCommand command = MissionCommand::Waypoint;
     Location loc;
     // 0 means "use the default turn_distance()-based radius" - matches
     // upstream's own cmd_acceptance_distance==0 fallback (commands_logic.cpp
     // Plane::verify_nav_wp) exactly, as a plain float rather than a packed
     // LOWBYTE(p1) byte (which upstream itself caps at 255m - this field has
-    // no such packing constraint to reproduce).
+    // no such packing constraint to reproduce). MEANINGFUL ONLY FOR
+    // MissionCommand::Waypoint - a Takeoff item never reads this.
     float acceptance_radius_m = 0.0f;
+    // upstream: cmd.p1 (uint16_t, whole degrees) - Plane::do_takeoff()
+    // (commands_logic.cpp) reads it as `(int16_t)cmd.p1 * 100` to seed
+    // takeoff_state.takeoff_pitch_cd, falling back to 400 centidegrees (4
+    // degrees) if the result is <= 0 - see Plane::do_takeoff() below (this
+    // file) for the real fallback logic reproduced faithfully. A plain
+    // float degrees here rather than reproducing cmd.p1's packed uint16_t
+    // shape - same "no packing constraint to reproduce" reasoning
+    // acceptance_radius_m's own doc comment already gives. MEANINGFUL ONLY
+    // FOR MissionCommand::Takeoff - a Waypoint item never reads this.
+    float takeoff_pitch_deg = 0.0f;
 };
 
 // upstream: AP_Mission (libraries/AP_Mission) - THIS PORT'S DELIBERATELY
@@ -3706,10 +3753,31 @@ private:
 // reading prev_WP_loc/next_WP_loc - e.g. RTL, CPP-031 slice 6 - would also
 // need).
 //
+// CPP-039 ADDENDUM: MAV_CMD_NAV_TAKEOFF is now real (MissionCommand::
+// Takeoff, plane.hpp's own MissionItem/MissionCommand doc comments) - see
+// mode.hpp's ModeAUTO::update()/navigate() for the real dispatch branch
+// this adds, and Plane::do_takeoff()/verify_takeoff() (plane.hpp, below
+// Plane::verify_nav_wp()) for the two new upstream-traced methods it
+// calls. Reuses takeoff_calc_roll()/pitch()/throttle() and TakeoffState
+// completely unmodified (CPP-031 slice 12) - exactly the "thin wrapper,
+// not a re-implementation" that slice's own commit message anticipated.
+//
 // EXCLUDED (documented, not silently dropped):
-//   - The MAV_CMD_NAV_TAKEOFF/MAV_CMD_NAV_LAND/MAV_CMD_NAV_SCRIPT_TIME/
-//     quadplane special-case branches in update() - no such commands in
-//     MissionItem's vocabulary (see plane.hpp's exclusion list).
+//   - MAV_CMD_NAV_LAND's own dispatch branch (`nav_cmd_id == MAV_CMD_
+//     NAV_LAND` in update(), `case MAV_CMD_NAV_LAND: return verify_land()`
+//     -equivalent in navigate()) - needs a real AP_Landing-equivalent
+//     subsystem this port has not built. Explicitly a SEPARATE, LARGER,
+//     FUTURE TICKET (CPP-039's own scope note) - not attempted here.
+//   - MAV_CMD_NAV_SCRIPT_TIME and the quadplane special-case branches in
+//     update() (`quadplane.in_vtol_auto()`, `is_vtol_takeoff()`/
+//     `do_vtol_takeoff()`, `is_vtol_land()`/`do_vtol_land()`/
+//     `verify_vtol_takeoff()`/`verify_vtol_land()`) - no scripting
+//     subsystem and no quadplane in this port; still no such commands in
+//     MissionItem's two-value vocabulary (Waypoint/Takeoff only).
+//   - `mission.starts_with_takeoff_cmd()`'s guided-mode-entry gate
+//     (ModeAuto::_enter()'s own `HAL_QUADPLANE_ENABLED` block, checking
+//     `previous_mode == &mode_guided`) - no GUIDED mode in this port at
+//     all, so the gate's own precondition can never be true here.
 //   - AP_SCRIPTING_ENABLED's nav_scripting_active()/wiggle_servos()/
 //     MAV_CMD_NAV_ALTITUDE_WAIT handling in run() - no scripting
 //     subsystem, and ModeAUTO has no run() override at all (see below).
@@ -3739,11 +3807,14 @@ public:
     // (`plane.mission.load(...)` THEN this method ONCE, before the first
     // tick()/update() while ModeAUTO is active - unchanged). Body:
     // mode.hpp.
+    // CPP-039: now also dispatches do_takeoff() when the first mission item
+    // is a Takeoff, not just do_nav_wp() - see this class's own "CPP-039
+    // ADDENDUM" note above. Body: mode.hpp.
     bool enter() override;
 
-    // upstream: ModeAuto::update() - the normal-NAV_WAYPOINT branch only
-    // (see this file's own "CPP-031 SLICE 5 ADDENDUM" note for why
-    // update_auto_speed_height() is called first). Body: mode.hpp.
+    // upstream: ModeAuto::update() - CPP-039: now the real Takeoff-vs-
+    // Waypoint dispatch (see this class's own "CPP-039 ADDENDUM" note
+    // above), not just the NAV_WAYPOINT-only branch. Body: mode.hpp.
     void update(const StabilizeInputs& in) override;
 
     // upstream: ModeAuto::navigate() - see this file's own "CPP-031 SLICE
@@ -5358,6 +5429,227 @@ public:
             return true;
         }
 
+        return false;
+    }
+
+    // =====================================================================
+    // CPP-039 (AUTO's MAV_CMD_NAV_TAKEOFF) - do_takeoff()/verify_takeoff(),
+    // both read in full from ArduPlane/commands_logic.cpp. Wires the
+    // shared takeoff_calc_roll()/pitch()/throttle() core and TakeoffState
+    // (both CPP-031 slice 12/ModeTAKEOFF, above) into AUTO's own mission
+    // dispatch - see ModeAUTO's own class banner and mode.hpp's
+    // ModeAUTO::update()/navigate() for the dispatch itself, and
+    // MissionCommand/MissionItem's own doc comments above for the new
+    // command-type discriminant this needed.
+    // =====================================================================
+
+    // upstream: Plane::do_takeoff() (commands_logic.cpp), read in full -
+    // runs once when the mission advances ONTO a Takeoff item (ModeAUTO::
+    // enter()/navigate(), mode.hpp). DELIBERATE SIGNATURE DIFFERENCE from
+    // upstream (no Mission_Command parameter) - same "Plane already owns
+    // mission" reasoning as do_nav_wp() above. A no-op if no mission is
+    // loaded (defensive, same precedent as do_nav_wp()).
+    //
+    // EXCLUDED (named, not silently dropped):
+    //   - `crash_state.is_crashed = false;` - start_command()'s own real
+    //     pre-dispatch line (commands_logic.cpp ~line 43), not part of
+    //     do_takeoff() itself - no crash-detection subsystem in this port.
+    //   - Quadplane VTOL takeoff dispatch (`quadplane.is_vtol_takeoff(cmd.
+    //     id)` / `quadplane.do_vtol_takeoff(cmd)`) - no quadplane in this
+    //     port (ticket's own explicit exclusion).
+    //   - `auto_state.takeoff_complete = false;` - upstream's own comment:
+    //     "set flag to use gps ground course during TO". This port never
+    //     added a takeoff_complete field at all (not just here): every
+    //     real upstream READER of it is itself an excluded subsystem -
+    //     avoidance_adsb.cpp's ADSB gate (no ADSB), Plane.cpp's stick-
+    //     mixing "extra elevator" branch (Mode::run()'s StickMixing switch
+    //     is skipped entirely in this port - see plane.hpp's Mode-hierarchy
+    //     banner), and servos.cpp's takeoff-throttle-slewrate/ground-
+    //     throttle-disable checks (neither wired in this port) - so a
+    //     takeoff_complete field here would be pure dead bookkeeping, the
+    //     same "write-only in this slice's scope" reasoning update_speed_
+    //     scaler()'s own highest_airspeed comment already established for
+    //     a different field.
+    //   - `auto_state.height_below_takeoff_to_level_off_cm = 0;` - upstream
+    //     itself never reads this field from ANY function this port's own
+    //     scope includes (grep of commands_logic.cpp/takeoff.cpp/mode_
+    //     takeoff.cpp confirms its only real reader is Plane.cpp's stick-
+    //     mixing branch, excluded above) - same dead-bookkeeping reasoning.
+    void do_takeoff() {
+        const MissionItem* item = mission.current();
+        if (item == nullptr) {
+            return;
+        }
+        prev_WP_loc = current_loc;
+        set_next_WP(item->loc);
+
+        // upstream: `auto_state.takeoff_pitch_cd = (int16_t)cmd.p1 * 100;
+        // if (auto_state.takeoff_pitch_cd <= 0) { ...use 4 degrees... }` -
+        // see MissionItem::takeoff_pitch_deg's own doc comment above for
+        // the field-equivalence trace.
+        takeoff_state.takeoff_pitch_cd = static_cast<std::int32_t>(item->takeoff_pitch_deg * 100.0f);
+        if (takeoff_state.takeoff_pitch_cd <= 0) {
+            // upstream: "if the mission doesn't specify a pitch use 4 degrees"
+            takeoff_state.takeoff_pitch_cd = 400;
+        }
+        takeoff_state.takeoff_altitude_rel_cm = next_WP_loc.alt - home.alt;
+
+        // upstream: `next_WP_loc.lat = home.lat + 10; next_WP_loc.lng =
+        // home.lng + 10;` - a literal, direct port (Location::lat/lng are
+        // both plain int32_t 1e7-degree fields in this port too, same
+        // representation - see location.hpp). Pins next_WP_loc's
+        // HORIZONTAL position to (within ~1mm of) home once the takeoff
+        // leg starts, leaving only its altitude (just captured above)
+        // meaningful - verify_takeoff() below never calls nav_controller.
+        // update_waypoint() against next_WP_loc at all (it drives heading
+        // hold/level flight directly, from steer_state.hold_course_cd),
+        // matching ModeTAKEOFF's own established precedent of not caring
+        // about next_WP_loc's bearing until a real GPS ground course is
+        // known.
+        next_WP_loc.lat = home.lat + 10;
+        next_WP_loc.lng = home.lng + 10;
+
+        // upstream: `auto_state.rotation_complete = false;` plus
+        // `steer_state.locked_course_err = 0; steer_state.hold_course_cd =
+        // -1;` - all reproduced directly, all fields that already exist on
+        // this port's Plane (shared with ModeTAKEOFF, CPP-031 slice 12).
+        takeoff_state.rotation_complete = false;
+        steer_state.locked_course_err = 0.0f;
+        steer_state.hold_course_cd = -1;
+
+        // upstream: `auto_state.baro_takeoff_alt = barometer.get_altitude();`
+        // - see plane.hpp's own "BAROMETRIC ALTITUDE SUBSTITUTION" note
+        // (CPP-031 slice 12 addendum) for why StabilizeInputs::current_
+        // altitude_m is this port's real substitute for the barometer.
+        // do_takeoff() itself takes no StabilizeInputs (matching do_nav_wp
+        // ()'s own zero-argument precedent) - current_loc.alt is used
+        // instead, which update_current_loc() (tick(), mode.hpp) already
+        // refreshes from the SAME position_ned every tick BEFORE mode.
+        // navigate()/update() ever run (tick() step 5b, strictly before
+        // step 6) - i.e. current_loc.alt (cm, home.alt==0 in this port's
+        // one collapsed altitude frame - see file banner) and in.current_
+        // altitude_m (m) are simply two views of the exact same fresh
+        // per-tick value, not two different clocks. This keeps do_takeoff
+        // () callable from ModeAUTO::enter() too (no StabilizeInputs
+        // available there either, same as do_nav_wp()), unlike ModeTAKEOFF
+        // ::update()'s own re-priming setup block, which DOES receive an
+        // explicit `in` (it runs every tick, not once).
+        takeoff_state.takeoff_start_alt_m = static_cast<float>(current_loc.alt) * 0.01f;
+    }
+
+    // upstream: Plane::verify_takeoff() (commands_logic.cpp), read in
+    // full. Called every tick while a Takeoff mission item is current
+    // (ModeAUTO::navigate(), mode.hpp) - returns true once the mission
+    // should advance to its next item. Takes an explicit L1Inputs (ADR-
+    // 0012, same treatment verify_nav_wp() already gets above).
+    //
+    // DELIBERATELY A SEPARATE IMPLEMENTATION FROM ModeTAKEOFF::update()'s
+    // OWN course-lock (mode.hpp) - the ticket's own instruction was to
+    // verify this directly rather than assume the two could share one
+    // body, and reading both confirms they are genuinely different
+    // upstream functions:
+    //   - ModeTAKEOFF::update() (mode.hpp) locks steer_state.hold_course_cd
+    //     from the RAW GPS ground course (`gps_sample.ground_course_deg`)
+    //     the instant ground speed clears kGpsGndCrsMinSpd - no yaw-drift
+    //     correction term at all.
+    //   - verify_takeoff() (upstream, reproduced below) locks it from the
+    //     GPS ground course CORRECTED for summed yaw drift (`wrap_PI(
+    //     radians(gps.ground_course())) - steer_state.locked_course_err`)
+    //     - upstream's own comment: "corrected for summed yaw to set the
+    //     take off course... allows us to cope with arbitrary compass
+    //     errors for auto takeoff".
+    //   - ModeTAKEOFF::update() never calls nav_controller.update_heading_
+    //     hold()/update_level_flight() at all - its own navigate() calls
+    //     update_loiter(0, in) UNCONDITIONALLY instead (see ModeTAKEOFF's
+    //     own class banner). verify_takeoff() calls one of those two EVERY
+    //     tick, directly, itself - genuinely different navigation-
+    //     controller wiring, not just a naming difference.
+    // So this port gives them two separate bodies too, sharing only
+    // takeoff_calc_roll()/pitch()/throttle() and TakeoffState/SteerState -
+    // exactly as the ticket's own scope note anticipated ("a future
+    // NAV_TAKEOFF slice gets it for free as a thin wrapper" refers to
+    // THOSE three functions, not to ModeTAKEOFF::update() as a whole).
+    //
+    // EXCLUDED (named, not silently dropped):
+    //   - `trust_ahrs_yaw = AP::ahrs().initialised() [|]= ahrs.dcm_yaw_
+    //     initialised()` - traced directly against AP_AHRS::initialised()
+    //     (AP_AHRS.cpp): its real EKFType::DCM case is an unconditional
+    //     `return true;` - no EKF2/3 backend exists in this port (AhrsDcm
+    //     is the ONLY backend), so `trust_ahrs_yaw` is UNCONDITIONALLY TRUE
+    //     here - not reproduced as a variable/branch because it can never
+    //     evaluate false for this port's one real backend.
+    //   - `hal.util->safety_switch_state() != SAFETY_DISARMED` - folded
+    //     into is_armed_and_safety_off() (armed && safety==kArmed), this
+    //     port's own established substitute (see its own doc comment
+    //     above, "SAFETY STATE"). Slightly stricter than upstream (also
+    //     requires `armed`), but honest: force_safety_off() is only ever
+    //     called from arm() in this port, so "disarmed but safety off"
+    //     cannot occur here.
+    //   - gcs().send_text() calls (x2, "Holding course.../Takeoff complete
+    //     at...") - no GCS/MAVLink subsystem anywhere in this port.
+    //   - `plane.check_takeoff_timeout()` / `mission.reset()` - the real
+    //     gate is `takeoff_state.start_time_ms != 0 && g2.takeoff_timeout >
+    //     0` (takeoff.cpp); `start_time_ms` is written ONLY by auto_
+    //     takeoff_check() (mode_takeoff.cpp's own hand-launch-detection
+    //     state machine), which CPP-031 slice 12 already excluded in full
+    //     (see plane.hpp's "CPP-031 SLICE 12 ADDENDUM", "AUTO_TAKEOFF_
+    //     CHECK() - EXCLUDED") - this port's TakeoffState has no start_
+    //     time_ms/g2.takeoff_timeout fields at all, so there is no real
+    //     writer that could ever make this condition true. A genuine,
+    //     already-established gap, not a new one - named here rather than
+    //     silently re-dropped.
+    //   - `plane.check_takeoff_timeout_level_off()` - same root cause: its
+    //     real gate is `takeoff_state.level_off_start_time_ms > 0`, written
+    //     only by the same excluded auto_takeoff_check() state machine -
+    //     permanently dead code for this port's TakeoffState shape.
+    //   - `plane.fence.auto_enable_fence_after_takeoff()` (inside `#if
+    //     AP_FENCE_ENABLED`) - no fence subsystem anywhere in this port
+    //     (ticket's own explicit exclusion).
+    //   - `auto_state.takeoff_complete = true;` - see do_takeoff()'s own
+    //     "EXCLUDED" note above for why this field was never added at all.
+    [[nodiscard]] bool verify_takeoff(const nav::L1Inputs& l1_in) {
+        if (steer_state.hold_course_cd == -1) {
+            // once we reach sufficient speed for good GPS course
+            // estimation we save our current GPS ground course corrected
+            // for summed yaw to set the take off course. This keeps wings
+            // level until we are ready to rotate, and also allows us to
+            // cope with arbitrary compass errors for auto takeoff.
+            const ahrs::GpsSample& gps_sample = gps.sample();
+            if (gps_sample.has_3d_fix && gps_sample.ground_speed_ms > kGpsGndCrsMinSpd && is_armed_and_safety_off()) {
+                float takeoff_course = math::wrap_PI(math::radians(gps_sample.ground_course_deg) - steer_state.locked_course_err);
+                takeoff_course = math::wrap_PI(takeoff_course);
+                steer_state.hold_course_cd = static_cast<std::int32_t>(math::wrap_360_cd(math::degrees(takeoff_course) * 100.0f));
+            }
+        }
+
+        if (steer_state.hold_course_cd != -1) {
+            nav_controller.update_heading_hold(steer_state.hold_course_cd, l1_in);
+        } else {
+            nav_controller.update_level_flight(l1_in);
+        }
+
+        // see if we have reached takeoff altitude. upstream:
+        // `adjusted_relative_altitude_cm()` = `(relative_altitude -
+        // mission_alt_offset())*100` (altitude.cpp) - `mission_alt_offset
+        // ()`'s own real body is `g.alt_offset` (an ALT_OFFSET param this
+        // port has never ported - no rangefinder/aborted-landing offset
+        // subsystem either), so it is always exactly 0 for this port,
+        // collapsing adjusted_relative_altitude_cm() to plain
+        // relative_altitude_m()*100 - the real, already-established
+        // substitute (this method's own doc comment above), not an
+        // invented one.
+        const std::int32_t relative_alt_cm = static_cast<std::int32_t>(relative_altitude_m() * 100.0f);
+        if (relative_alt_cm > takeoff_state.takeoff_altitude_rel_cm) {
+            steer_state.hold_course_cd = -1;
+            next_WP_loc = prev_WP_loc = current_loc;
+
+            // upstream: "don't cross-track on completion of takeoff, as
+            // otherwise we can end up doing too sharp a turn" - this
+            // port's next_wp_crosstrack is the real, already-wired
+            // equivalent (set_next_WP()'s own crosstrack state machine).
+            next_wp_crosstrack = false;
+            return true;
+        }
         return false;
     }
 

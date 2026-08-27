@@ -209,27 +209,89 @@ inline bool ModeAUTO::enter() {
     }
 
     plane_.next_WP_loc = plane_.prev_WP_loc = plane_.current_loc;
-    if (plane_.mission.current() != nullptr) {
-        plane_.do_nav_wp();
+    // CPP-039 - upstream: start_command()'s own `switch(cmd.id)` dispatch
+    // (commands_logic.cpp), restricted to this port's two-command
+    // vocabulary (MissionCommand::Waypoint/Takeoff - see plane.hpp's own
+    // MissionItem/MissionCommand doc comments). ModeAuto::_enter()'s real
+    // body calls `plane.mission.start_or_resume()`, which itself dispatches
+    // to start_command() for whatever the first command happens to be -
+    // this port's own smaller Mission has no separate start_or_resume()
+    // state machine (SLICE 5's own scope boundary), so ModeAUTO::enter()
+    // dispatches directly on mission.current()'s own command tag instead,
+    // exactly reproducing the one real behavior start_or_resume() would
+    // have produced here (do_takeoff()/do_nav_wp() called once, for
+    // whichever command is first).
+    const MissionItem* first_item = plane_.mission.current();
+    if (first_item != nullptr) {
+        if (first_item->command == MissionCommand::Takeoff) {
+            plane_.do_takeoff();
+        } else {
+            plane_.do_nav_wp();
+        }
     }
     return true;
 }
 
 inline void ModeAUTO::update(const StabilizeInputs& in) {
     plane_.update_auto_speed_height(in);
-    plane_.calc_nav_roll(in);
-    plane_.calc_nav_pitch();
-    plane_.calc_throttle();
+
+    // CPP-039 - upstream: mode_auto.cpp's own `if (nav_cmd_id ==
+    // MAV_CMD_NAV_TAKEOFF || (nav_cmd_id == MAV_CMD_NAV_LAND &&
+    // flight_stage == ABORT_LANDING)) { takeoff_calc_roll(); takeoff_calc_
+    // pitch(); takeoff_calc_throttle(); } else { calc_nav_roll(); calc_nav_
+    // pitch(); calc_throttle(); }` (ModeAuto::update(), ~line 82-90),
+    // verified directly. The MAV_CMD_NAV_LAND/ABORT_LANDING half of the
+    // OR is dropped - no NAV_LAND/landing subsystem in this port's
+    // MissionItem vocabulary at all (ticket's own explicit exclusion,
+    // separate future ticket) - so this collapses to a plain command-type
+    // check. takeoff_calc_roll()/pitch()/throttle() (plane.hpp, CPP-031
+    // slice 12) are called completely UNMODIFIED - the literal "thin
+    // wrapper, not a re-implementation" that slice's own commit message
+    // anticipated, including their own reads of `mode_takeoff.level_alt`/
+    // `.target_alt`/`.ground_pitch` (plane.hpp's takeoff_calc_roll()/pitch(),
+    // traced directly against upstream's own takeoff.cpp: these three
+    // functions read the mode_takeoff OBJECT's own tunables regardless of
+    // which mode/command actually triggered the takeoff - a single global
+    // TKOFF_* parameter set, not a per-mode copy - verified, not assumed).
+    const MissionItem* item = plane_.mission.current();
+    if (item != nullptr && item->command == MissionCommand::Takeoff) {
+        plane_.takeoff_calc_roll(in);
+        plane_.takeoff_calc_pitch(in);
+        plane_.takeoff_calc_throttle();
+    } else {
+        plane_.calc_nav_roll(in);
+        plane_.calc_nav_pitch();
+        plane_.calc_throttle();
+    }
 }
 
 inline void ModeAUTO::navigate(const StabilizeInputs& in) {
-    if (plane_.mission.current() == nullptr) {
+    const MissionItem* item = plane_.mission.current();
+    if (item == nullptr) {
         return; // no mission loaded
     }
     const nav::L1Inputs l1_in = plane_.build_l1_inputs(in);
-    if (plane_.verify_nav_wp(l1_in)) {
+
+    // CPP-039 - upstream: Plane::verify_command()'s own `switch(cmd.id)`
+    // dispatch (commands_logic.cpp) - `case MAV_CMD_NAV_TAKEOFF: return
+    // verify_takeoff(); case MAV_CMD_NAV_WAYPOINT: return verify_nav_wp
+    // (cmd);` - restricted to this port's two-command vocabulary, same
+    // reasoning as ModeAUTO::enter() above.
+    const bool item_complete =
+        (item->command == MissionCommand::Takeoff) ? plane_.verify_takeoff(l1_in) : plane_.verify_nav_wp(l1_in);
+
+    if (item_complete) {
         if (plane_.mission.advance()) {
-            plane_.do_nav_wp();
+            // upstream: AP_Mission::update()'s own advance-then-dispatch-
+            // start_command() sequence - the newly-current item's REAL
+            // command type decides do_takeoff() vs do_nav_wp(), not
+            // whichever one just completed.
+            const MissionItem* next_item = plane_.mission.current();
+            if (next_item != nullptr && next_item->command == MissionCommand::Takeoff) {
+                plane_.do_takeoff();
+            } else {
+                plane_.do_nav_wp();
+            }
         } else {
             // CPP-031 slice 7 - reached/passed the FINAL waypoint with no
             // more legs to advance to: the real upstream mission-complete
