@@ -175,6 +175,19 @@ enum class AuxFunc : std::uint16_t {
     Loiter = 56,              // upstream: LOITER - loiter mode
     Takeoff = 77,             // upstream: TAKEOFF - takeoff
     Fbwa = 92,                // upstream: FBWA - Fly-By-Wire-A
+
+    // CPP-042: upstream: FBWA_TAILDRAGGER (RC_Channel.h:269), grepped
+    // directly - 95, NOT renumbered. "enables FBWA taildragger takeoff
+    // mode... elevator will be forced to TKOFF_TDRAG_ELEV" (upstream's own
+    // doc comment). RC_Channel_Plane::do_aux_function()'s own dispatch
+    // switch (RC_Channel_Plane.cpp ~line 305) treats this exactly like
+    // FLAP above - "break; // input labels, nothing to do" - VERIFIED
+    // DIRECTLY. The actual read is the RAW (non-debounced) switch position
+    // via RcChannel::read_3pos_switch() below, resolved through
+    // RcChannels::channel_for() - see plane.hpp's ModeFBWA::update() (the
+    // real consumer, mode.hpp) and its own "CPP-042 ADDENDUM" file banner.
+    FbwaTaildragger = 95,
+
     ModeSwitchReset = 96,     // upstream: MODE_SWITCH_RESET - trigger re-reading of mode switch
     Cruise = 150,             // upstream: CRUISE mode
     ArmDisarm = 153,          // upstream: ARMDISARM (4.2+ value - NOT the UNUSED(41) 4.1-and-lower one)

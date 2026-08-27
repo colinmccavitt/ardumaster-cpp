@@ -103,6 +103,22 @@ inline void ModeManual::run(const StabilizeInputs&) { reset_controllers(); }
 // documentation: plane.hpp.
 // ---------------------------------------------------------------------
 
+// CPP-042 - upstream: Mode::enter() shared wrapper body (mode.cpp ~line
+// 72), the two lines this port's ModeFBWA needs: `plane.auto_state.
+// initial_pitch_cd = ahrs.pitch_sensor;` and (per plane.hpp own
+// "HIGHEST_AIRSPEED" file banner note, extended this ticket) `plane.
+// auto_state.highest_airspeed = 0;`. This port has no shared Mode::
+// enter() wrapper (CPP-031 slice 7 own precedent) - ModeTAKEOFF::enter()
+// (below) already does the highest_airspeed reset for its own real need;
+// ModeFBWA::update() new FbwaTaildragger engage check (above) is a
+// second real reader of both fields, so ModeFBWA now needs its own
+// enter() too, doing exactly the same two lines.
+inline bool ModeFBWA::enter() {
+    plane_.takeoff_state.initial_pitch_cd = plane_.pitch_sensor_cd();
+    plane_.takeoff_state.highest_airspeed = 0.0f;
+    return true;
+}
+
 inline void ModeFBWA::update(const StabilizeInputs&) {
     // set nav_roll and nav_pitch using sticks
     plane_.nav_roll_cd =
@@ -120,6 +136,34 @@ inline void ModeFBWA::update(const StabilizeInputs&) {
                                                   static_cast<std::int32_t>(plane_.aparm.pitch_limit_max_deg * 100.0f));
     if (plane_.fly_inverted()) {
         plane_.nav_pitch_cd = -plane_.nav_pitch_cd;
+    }
+
+    // CPP-042 - upstream: ModeFBWA::update() own AuxFunc::FBWA_TAILDRAGGER
+    // check (mode_fbwa.cpp, read in full): a channel tagged FBWA_
+    // TAILDRAGGER is looked up via find_channel_for_option(); when found
+    // and its raw switch position is HIGH, and fbwa_tdrag_takeoff_mode
+    // isn't already set, and highest_airspeed is still below TKOFF_
+    // TDRAG_SPD1, engage fbwa_tdrag_takeoff_mode. channel_for() (CPP-038,
+    // rc_channels.hpp) is this port's find_channel_for_option()
+    // equivalent - reused directly, not duplicated. get_aux_switch_pos()
+    // (RC_Channel.cpp ~line 2053) calls read_3pos_switch() DIRECTLY - the
+    // RAW, un-debounced switch position, deliberately bypassing read_
+    // aux()'s own debounce/first-read-suppression machinery (CPP-037) -
+    // and falls back to LOW if reading the switch fails (that function's
+    // own doc comment), reproduced here by seeding `pos` to kLow before
+    // the call and ignoring read_3pos_switch()'s bool return, exactly
+    // matching that fallback.
+    if (rc::RcChannel* chan = plane_.rc_channels.channel_for(rc::AuxFunc::FbwaTaildragger); chan != nullptr) {
+        rc::AuxSwitchPos pos = rc::AuxSwitchPos::kLow;
+        static_cast<void>(chan->read_3pos_switch(pos));
+        const bool tdrag_mode = pos == rc::AuxSwitchPos::kHigh;
+        if (tdrag_mode && !plane_.takeoff_state.fbwa_tdrag_takeoff_mode) {
+            if (plane_.takeoff_state.highest_airspeed < plane_.aparm.takeoff_tdrag_speed1) {
+                plane_.takeoff_state.fbwa_tdrag_takeoff_mode = true;
+                // upstream: gcs().send_text(MAV_SEVERITY_WARNING, "FBWA
+                // tdrag mode") - excluded, no GCS subsystem (disclosed).
+            }
+        }
     }
 }
 
@@ -489,6 +533,14 @@ inline bool ModeTAKEOFF::enter() {
     takeoff_mode_setup_ = false;
     climb_out_complete_ = false;
     plane_.takeoff_state.highest_airspeed = 0.0f;
+    // CPP-042 - upstream: Mode::enter() shared `plane.auto_state.
+    // initial_pitch_cd = ahrs.pitch_sensor;` (mode.cpp ~line 72) - the
+    // only other real reader of this field is takeoff_tail_hold() itself
+    // (plane.hpp), gated on in_takeoff (TAKEOFF or FBWA-tdrag-mode), so
+    // capturing it here and in ModeFBWA::enter() (this file, above) is
+    // the complete, honest substitute for upstream's real per-mode-change
+    // capture - see plane.hpp own "CPP-042 ADDENDUM" file banner.
+    plane_.takeoff_state.initial_pitch_cd = plane_.pitch_sensor_cd();
     plane_.takeoff_state.rotation_complete = false;
     plane_.steer_state.hold_course_cd = -1;
 

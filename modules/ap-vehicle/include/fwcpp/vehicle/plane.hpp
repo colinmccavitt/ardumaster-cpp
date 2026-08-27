@@ -2786,20 +2786,41 @@
 // climb to target altitude still results, just without the last-few-
 // meters pitch taper upstream's default configuration would add.
 //
-// TAKEOFF_TAIL_HOLD() - EXCLUDED, A NICHE AIRFRAME-CONFIG FEATURE:
+// CPP-042 ADDENDUM - TAKEOFF_TAIL_HOLD() IS NOW REAL:
 // takeoff_calc_throttle()'s sibling `takeoff_tail_hold()` (takeoff.cpp
-// ~line 352) is real, but exclusively a taildragger (3-point/tailwheel
-// aircraft) concern - `g.takeoff_tdrag_elevator` defaults 0 (Parameters.cpp),
-// so upstream's own `if (g.takeoff_tdrag_elevator == 0) goto return_zero;`
-// means this is a documented NO-OP for any vehicle that hasn't explicitly
-// configured a taildragger elevator-hold percentage, i.e. the entire
-// tricycle-gear/nosewheel configuration this port's own ground-steering
-// slice already targets (AP_SteerController models NOSEWHEEL/TAILWHEEL
-// steering uniformly, but tail-hold-DOWN torque is a physically distinct,
-// taildragger-only need). stabilize_pitch()'s own existing exclusion note
-// ("takeoff_tail_hold() and the LANDING_FLARE branch are skipped") stays
-// accurate and unchanged by this slice - not closed, since the underlying
-// feature is out of scope, not merely unreachable.
+// ~line 352, read in full) - a taildragger (3-point/tailwheel aircraft)
+// elevator override that holds the tail down during the initial ground
+// roll for maximum steering authority - was excluded by CPP-031 slice 12
+// as a documented no-op (TKOFF_TDRAG_ELEV defaults 0, Parameters.cpp,
+// verified not assumed). CPP-042 makes it real: Plane::takeoff_tail_
+// hold() (below, next to takeoff_calc_throttle()), wired into stabilize_
+// pitch()'s own early-return (see that method's own doc comment), plus
+// the two pieces that ENGAGE it - ModeFBWA::update()'s raw (non-
+// debounced) AuxFunc::FbwaTaildragger switch read (mode.hpp - reuses
+// RcChannels::channel_for(), CPP-038, and RcChannel::read_3pos_switch(),
+// CPP-037, exactly as they already exist; the switch's DEBOUNCED dispatch
+// case, dispatch_aux_function() below, is a real, verified no-op, the
+// same shape as AuxFunc::Flap) - and the two new pieces of state upstream
+// keeps in auto_state (folded into TakeoffState above, matching this
+// file's own established "one struct, not two" convention):
+// initial_pitch_cd (captured on ModeTAKEOFF::enter()/ModeFBWA::enter() -
+// mode.hpp - the only two real readers, verified by re-reading takeoff_
+// tail_hold() itself, not assumed) and fbwa_tdrag_takeoff_mode (cleared
+// on every real mode change via Plane::set_mode(), the CPP-036 long_
+// failsafe_pending choke-point precedent, since this port has no shared
+// Mode::enter() wrapper to hang upstream's unconditional reset on).
+// gcs().send_text() calls (both in ModeFBWA::update() and takeoff_tail_
+// hold() itself) are excluded - no GCS subsystem, disclosed in the
+// ticket, not silently dropped. This remains a genuine no-op for the
+// entire tricycle-gear/nosewheel configuration this port's own ground-
+// steering slice already targets (AP_SteerController models NOSEWHEEL/
+// TAILWHEEL steering uniformly, but tail-hold-DOWN torque is a physically
+// distinct, taildragger-only need) unless TKOFF_TDRAG_ELEV is explicitly
+// set nonzero - verified by a dedicated closed-loop regression test
+// (vehicle_test.cpp) confirming takeoff_tail_hold() returns 0 on every
+// single tick of a real ground roll under the default configuration, so
+// the elevator is driven entirely by the normal pitch controller, never
+// overridden - unaffected by this ticket, exactly as before it existed.
 //
 // TKOFF_OPTIONS/THROTTLE_RANGE - EXCLUDED, COLLAPSING takeoff_calc_
 // throttle() TO ITS ONE REACHABLE BRANCH: upstream's real function first
@@ -2860,11 +2881,21 @@
 // change (Mode::enter()'s own wrapper body, mode.cpp), a general reset
 // this port's own Mode::enter() base class has never ported (see this
 // file's Mode-hierarchy banner) since, before this slice, nothing ever
-// read highest_airspeed at all. TAKEOFF is this port's first and only
-// consumer, so its own enter() resetting it is the honest, minimal,
-// self-contained equivalent - not a silent narrowing of upstream's real
-// per-mode-change reset, since no OTHER mode in this port's scope reads
-// this field either way.
+// read highest_airspeed at all. TAKEOFF was this port's first and only
+// consumer at the time, so its own enter() resetting it was the honest,
+// minimal, self-contained equivalent - not a silent narrowing of
+// upstream's real per-mode-change reset, since no OTHER mode in this
+// port's scope read this field either way.
+//
+// UPDATE (CPP-042): ModeFBWA::update()'s own FbwaTaildragger engage
+// check (`highest_airspeed < TKOFF_TDRAG_SPD1`) and takeoff_tail_hold()'s
+// own speed1 early-out are a SECOND real reader - extending the same
+// reasoning, ModeFBWA::enter() (mode.hpp, new this ticket) now ALSO
+// resets takeoff_state.highest_airspeed = 0, matching upstream's real
+// unconditional per-mode-change reset for the one other mode that now
+// actually reads it. Still not a general Mode::enter() hook - no third
+// consumer exists in this port's scope, so extending further remains
+// unnecessary.
 //
 // STEERCONTROLLER::RESET_I() ON MODE ENTRY - THE GAP THE GROUND-STEERING
 // SLICE FLAGGED, NOW CLOSED FOR TAKEOFF: that slice's own file banner
@@ -2894,7 +2925,7 @@
 //     with a command-type tag (see "MODETAKEOFF VS. NAV_TAKEOFF" above) -
 //     the shared takeoff_calc_*() core this slice builds is specifically
 //     structured so that work is thin wrapper code, not a re-implementation.
-//   - takeoff_tail_hold() - taildragger-only, see its own note above.
+//   - takeoff_tail_hold() - DONE, CPP-042 (see this file's own CPP-042 ADDENDUM above).
 //   - Fence auto-enable (ModeTakeoff's have_autoenabled_fences) - no fence
 //     subsystem anywhere in this port.
 //   - get_takeoff_pitch_min_cd()'s TKOFF_PLIM_SEC early-level-off ramp -
@@ -3088,6 +3119,16 @@ struct FixedWingTunables {
     float flare_alt_m = 3.0f;  // LAND_FLARE_ALT / AP_Landing::flare_alt, m
     float flare_sec = 2.0f;    // LAND_FLARE_SEC / AP_Landing::flare_sec, s
     float flare_aim_pct = 50.0f; // LAND_FLARE_AIM / AP_Landing::flare_effectivness_pct, %
+
+    // --- CPP-042 (taildragger tail hold) additions - see plane.hpp's own
+    // "CPP-042 ADDENDUM" file banner (Plane::takeoff_tail_hold()). Both
+    // defaults grepped directly from ArduPlane/Parameters.cpp - GSCALAR(...,
+    // "TKOFF_TDRAG_ELEV", 0) and GSCALAR(..., "TKOFF_TDRAG_SPD1", 0) - real
+    // zero, not assumed, so the feature stays a genuine no-op for any
+    // vehicle that hasn't explicitly configured a taildragger elevator-hold
+    // percentage.
+    std::int8_t takeoff_tdrag_elevator = 0; // TKOFF_TDRAG_ELEV / g.takeoff_tdrag_elevator, Parameters.cpp default 0, %
+    float takeoff_tdrag_speed1 = 0.0f;      // TKOFF_TDRAG_SPD1 / g.takeoff_tdrag_speed1, Parameters.cpp default 0, m/s
 };
 
 // CPP-038: a small, LOCAL port of upstream's SRV_Channels::set_slew_rate()/
@@ -3570,17 +3611,30 @@ public:
 //     plane.g.fs_action_short == FS_ACTION_SHORT_FBWA) { nav_roll_cd = 0;
 //     nav_pitch_cd = 0; SRV_Channels::set_output_limit(k_throttle, MIN);
 //     }`) - no failsafe subsystem in this port.
-//   - The FBWA-taildragger-takeoff aux-switch check (`rc().find_channel_
-//     for_option(RC_Channel::AUX_FUNC::FBWA_TAILDRAGGER)`) - needs the
-//     aux-function-dispatch subsystem CPP-027 explicitly deferred.
 // fly_inverted()'s pitch negation IS kept (cheap, self-contained, and
 // upstream's own real behavior) even though it is always a no-op in this
 // slice's scope - Plane::fly_inverted() always returns false for MANUAL/
-// FBWA (see its own doc comment in plane.hpp). No enter()/exit() override
-// - same "nothing left to port" reasoning as ModeManual's own note above.
+// FBWA (see its own doc comment in plane.hpp).
+//
+// CPP-042: the FBWA-taildragger-takeoff aux-switch check (`rc().find_
+// channel_for_option(RC_Channel::AUX_FUNC::FBWA_TAILDRAGGER)`), previously
+// excluded here pending the aux-function-dispatch subsystem (CPP-027), is
+// now real - see update()'s body (mode.hpp) and plane.hpp's own "CPP-042
+// ADDENDUM" file banner. This is also why ModeFBWA now has a real enter()
+// override (it didn't before this ticket) - it needs to capture
+// takeoff_state.initial_pitch_cd, the second (and last) real reader of
+// that field alongside ModeTAKEOFF::enter().
 class ModeFBWA : public Mode {
 public:
     using Mode::Mode;
+
+    // CPP-042: captures takeoff_state.initial_pitch_cd (upstream: Mode::
+    // enter()'s shared `plane.auto_state.initial_pitch_cd = ahrs.pitch_
+    // sensor;`, mode.cpp ~line 72) and extends ModeTAKEOFF::enter()'s own
+    // highest_airspeed reset to this mode too, now that ModeFBWA::update()
+    // is a second real reader of it (see plane.hpp's "CPP-042 ADDENDUM").
+    // Body: mode.hpp.
+    bool enter() override;
 
     // Body: mode.hpp (touches plane_).
     void update(const StabilizeInputs&) override;
@@ -4671,6 +4725,10 @@ public:
         float takeoff_start_alt_m = 0.0f;           // upstream: auto_state.baro_takeoff_alt - see file banner's "BAROMETRIC ALTITUDE SUBSTITUTION" note
         std::int32_t throttle_lim_max = 0;          // upstream: takeoff_state.throttle_lim_max, percent
         std::int32_t throttle_lim_min = 0;          // upstream: takeoff_state.throttle_lim_min, percent
+
+        // CPP-042 additions - see file banner's "CPP-042 ADDENDUM".
+        std::int32_t initial_pitch_cd = 0;    // upstream: auto_state.initial_pitch_cd, centidegrees - captured on ModeTAKEOFF::enter()/ModeFBWA::enter() (mode.hpp), NOT a general per-mode-change reset - see addendum for why that's sufficient.
+        bool fbwa_tdrag_takeoff_mode = false; // upstream: auto_state.fbwa_tdrag_takeoff_mode - cleared on every real mode change (Plane::set_mode(), below - the same CPP-036 long_failsafe_pending choke-point treatment), set by ModeFBWA::update() (mode.hpp), read/cleared by takeoff_tail_hold() (below).
     };
     TakeoffState takeoff_state;
 
@@ -4832,12 +4890,27 @@ public:
     }
 
     // upstream: Plane::stabilize_pitch()/stabilize_pitch_get_pitch_out()
-    // (Attitude.cpp). takeoff_tail_hold() and the LANDING_FLARE/
-    // FORCE_FLARE_ATTITUDE branch are skipped - no takeoff/landing
-    // subsystem in this port. mode_stabilize disable_integrator check and
-    // HAL_QUADPLANE_ENABLED/AP_PLANE_SYSTEMID_ENABLED branches dropped,
-    // same reasoning as stabilize_roll() above.
+    // (Attitude.cpp). CPP-042: takeoff_tail_hold() is now real (see this
+    // file's "CPP-042 ADDENDUM") - reproduced here EXACTLY as upstream's
+    // real body has it: called first, and a nonzero result bypasses the
+    // rest of pitch stabilization entirely for this tick (an early
+    // RETURN, not a blended/additive override - matches upstream's own
+    // shape, Attitude.cpp ~line 197). The LANDING_FLARE/FORCE_FLARE_
+    // ATTITUDE branch is still skipped - no landing-flare subsystem in
+    // this port. mode_stabilize disable_integrator check and HAL_
+    // QUADPLANE_ENABLED/AP_PLANE_SYSTEMID_ENABLED branches dropped, same
+    // reasoning as stabilize_roll() above.
     void stabilize_pitch(const StabilizeInputs& in) {
+        const std::int8_t force_elevator = takeoff_tail_hold();
+        if (force_elevator != 0) {
+            // we are holding the tail down during takeoff. Just convert
+            // from a percentage to a -4500..4500 centidegree angle -
+            // upstream: `SRV_Channels::set_output_scaled(k_elevator,
+            // 45*force_elevator); return;` (Attitude.cpp), ported verbatim.
+            srv_channels.set_output_scaled(srv::Function::kElevator, 45.0f * static_cast<float>(force_elevator));
+            return;
+        }
+
         const float scaler = get_speed_scaler();
         fw_control::PitchInputs pin;
         pin.measured_rate = ahrs.omega.y;
@@ -6497,6 +6570,57 @@ public:
         calc_throttle();
     }
 
+    // upstream: Plane::takeoff_tail_hold() (takeoff.cpp, ~line 352), read
+    // in full - CPP-042. "return a tail hold percentage during initial
+    // takeoff for a tail dragger... used either in auto-takeoff or in
+    // FBWA mode with FBWA_TDRAG_CHAN enabled" (upstream's own comment).
+    // `in_takeoff`'s first disjunct uses this port's established
+    // `control_mode == &mode_takeoff` substitute for `flight_stage ==
+    // TAKEOFF` (CPP-031 slice 12/CPP-036/CPP-040/CPP-041 precedent, see
+    // file banner). The three real early-outs (elevator unconfigured,
+    // speed1 exceeded, pitch-safety) are reproduced as a sequential
+    // early-out chain in the SAME priority order as upstream's own
+    // sequential `goto return_zero` checks - equivalent short-circuiting,
+    // not a reordering. gcs().send_text() calls (both upstream's "FBWA
+    // tdrag off" here and ModeFBWA::update()'s own "FBWA tdrag mode",
+    // mode.hpp) are excluded - no GCS subsystem, disclosed in the ticket.
+    [[nodiscard]] std::int8_t takeoff_tail_hold() {
+        const bool in_takeoff = (control_mode == &mode_takeoff) ||
+                                 (control_mode == &mode_fbwa && takeoff_state.fbwa_tdrag_takeoff_mode);
+        if (!in_takeoff) {
+            // not in takeoff
+            return 0;
+        }
+
+        bool hold_tail = true;
+        if (aparm.takeoff_tdrag_elevator == 0) {
+            // no takeoff elevator set
+            hold_tail = false;
+        } else if (takeoff_state.highest_airspeed >= aparm.takeoff_tdrag_speed1) {
+            // we've passed speed1. We now raise the tail and aim for
+            // level pitch. No fixed elevator setting.
+            hold_tail = false;
+        } else if (pitch_sensor_cd() > takeoff_state.initial_pitch_cd + 1000) {
+            // the pitch has gone up by more than 10 degrees over the
+            // initial pitch. This may mean the nose is coming up for an
+            // early liftoff, perhaps due to a bad setting of
+            // TKOFF_TDRAG_SPD1. Go to level flight to prevent a stall.
+            hold_tail = false;
+        }
+
+        if (!hold_tail) {
+            if (takeoff_state.fbwa_tdrag_takeoff_mode) {
+                // upstream: gcs().send_text(MAV_SEVERITY_NOTICE, "FBWA
+                // tdrag off") - excluded, no GCS subsystem (disclosed).
+                takeoff_state.fbwa_tdrag_takeoff_mode = false;
+            }
+            return 0;
+        }
+
+        // we are holding the tail down
+        return aparm.takeoff_tdrag_elevator;
+    }
+
     // =====================================================================
     // CPP-031 SLICE 7 (real mode-switching) - see file banner addendum for
     // the full design rationale (why Mode's class hierarchy is declared
@@ -6699,6 +6823,17 @@ public:
         // file's own "CPP-036 ADDENDUM" for the full design.
         long_failsafe_pending = false;
 
+        // CPP-042 - upstream: Mode::enter()'s own unconditional
+        // `plane.auto_state.fbwa_tdrag_takeoff_mode = false;` (mode.cpp,
+        // "disable taildrag takeoff on mode change" - the SAME shared
+        // wrapper, right alongside the long_failsafe_pending clear above).
+        // This port has no shared Mode::enter() wrapper (CPP-031 slice 7's
+        // own precedent, reused by CPP-036 above) - same choke-point
+        // treatment here: run BEFORE the derived enter() and NOT rolled
+        // back on a failed entry, matching upstream's own "assumed
+        // success" ordering exactly.
+        takeoff_state.fbwa_tdrag_takeoff_mode = false;
+
         if (!new_mode.enter()) {
             // upstream: "we failed entering new mode, roll back to old".
             // Not exercised by any of this port's six real modes today
@@ -6857,6 +6992,17 @@ public:
             // completely separate path (rc_channels.channel_for(AuxFunc::
             // Flap), not read_aux_all()/dispatch_aux_function()). Matches
             // upstream's own real "input labels, nothing to do" comment.
+            break;
+
+        case rc::AuxFunc::FbwaTaildragger:
+            // CPP-042: upstream: RC_Channel_Plane::do_aux_function()'s own
+            // FBWA_TAILDRAGGER case (RC_Channel_Plane.cpp ~line 305) is
+            // `break; // input labels, nothing to do` - the SAME shape as
+            // FLAP above, VERIFIED DIRECTLY. The real read is the channel's
+            // RAW (non-debounced) switch position via RcChannel::
+            // read_3pos_switch(), resolved through RcChannels::channel_for() -
+            // a completely separate path from this debounced dispatch
+            // switch, exercised by ModeFBWA::update() (mode.hpp) instead.
             break;
 
         case rc::AuxFunc::ArmDisarm:

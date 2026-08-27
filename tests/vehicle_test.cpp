@@ -67,6 +67,9 @@ constexpr std::uint8_t kChannelAuxModeSelect = 11;
 // tests below - a distinct physical channel, same convention as the three
 // constants above.
 constexpr std::uint8_t kChannelFlap = 12;
+// CPP-042: the FbwaTaildragger aux-switch channel used by the taildragger
+// tail-hold tests below - a distinct physical channel, same convention.
+constexpr std::uint8_t kChannelFbwaTaildragger = 13;
 
 // Sets an aux-function channel's PWM and pulls it in - a caller still
 // calls set_sticks()/set_mode_switch_pwm() itself for the channels those
@@ -5803,6 +5806,370 @@ TEST_CASE("Closed loop: TAKEOFF accelerates down the runway under a real ground-
                                 << ", climb_out_complete = " << takeoff.climb_out_complete());
     REQUIRE(takeoff.climb_out_complete());
     REQUIRE(final_altitude == Catch::Approx(takeoff.target_alt).margin(15.0f));
+}
+
+// ---------------------------------------------------------------------
+// CPP-042: takeoff_tail_hold() - a taildragger elevator override that
+// holds the tail down during the initial ground-roll phase of takeoff.
+// Real branches tested directly (unit level): holding, speed1-exceeded
+// early-out, pitch-safety early-out, plus the elevator-unconfigured
+// no-op. ModeFBWA::update()'s new raw (non-debounced) AuxFunc::
+// FbwaTaildragger switch read is tested separately, then a closed-loop
+// test drives the whole thing end to end through tick()/SimPlane.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Plane::takeoff_tail_hold(): returns 0 (no override) when not in a takeoff-eligible mode, even with "
+          "TKOFF_TDRAG_ELEV configured",
+          "[vehicle][takeoff][tdrag]") {
+    Plane plane;
+    plane.aparm.takeoff_tdrag_elevator = 100;
+    plane.aparm.takeoff_tdrag_speed1 = 10.0f;
+
+    plane.control_mode = &plane.mode_manual;
+    REQUIRE(plane.takeoff_tail_hold() == 0);
+
+    // FBWA without fbwa_tdrag_takeoff_mode engaged is ALSO not in_takeoff -
+    // upstream's own second disjunct requires BOTH control_mode == &mode_
+    // fbwa AND auto_state.fbwa_tdrag_takeoff_mode.
+    plane.control_mode = &plane.mode_fbwa;
+    plane.takeoff_state.fbwa_tdrag_takeoff_mode = false;
+    REQUIRE(plane.takeoff_tail_hold() == 0);
+}
+
+TEST_CASE("Plane::takeoff_tail_hold(): TKOFF_TDRAG_ELEV at its real Parameters.cpp default (0) is a genuine "
+          "no-op, even in TAKEOFF mode with every other condition otherwise satisfied",
+          "[vehicle][takeoff][tdrag]") {
+    Plane plane;
+    plane.control_mode = &plane.mode_takeoff;
+    // aparm.takeoff_tdrag_elevator/takeoff_tdrag_speed1 left at their real
+    // defaults (0/0) - see plane.hpp CPP-042 addendum, verified directly
+    // against Parameters.cpp, not assumed.
+    plane.takeoff_state.highest_airspeed = 0.0f;
+    plane.takeoff_state.initial_pitch_cd = 0;
+    REQUIRE(plane.takeoff_tail_hold() == 0);
+}
+
+TEST_CASE("Plane::takeoff_tail_hold(): holds the tail down (returns TKOFF_TDRAG_ELEV) below TKOFF_TDRAG_SPD1 and "
+          "within the pitch-safety margin, in real ModeTAKEOFF ground roll",
+          "[vehicle][takeoff][tdrag]") {
+    Plane plane;
+    plane.control_mode = &plane.mode_takeoff;
+    plane.aparm.takeoff_tdrag_elevator = 100;
+    plane.aparm.takeoff_tdrag_speed1 = 8.0f;
+    plane.takeoff_state.highest_airspeed = 3.0f; // below speed1
+    plane.takeoff_state.initial_pitch_cd = 0;
+    plane.ahrs.pitch = 0.0f; // pitch_sensor_cd() == 0, well within initial_pitch_cd + 1000
+
+    REQUIRE(plane.takeoff_tail_hold() == 100);
+}
+
+TEST_CASE("Plane::takeoff_tail_hold(): speed1-exceeded early-out - returns 0 once highest_airspeed reaches "
+          "TKOFF_TDRAG_SPD1 (upstream's own >= comparison), and disengages fbwa_tdrag_takeoff_mode if it was set",
+          "[vehicle][takeoff][tdrag]") {
+    Plane plane;
+    plane.control_mode = &plane.mode_fbwa;
+    plane.aparm.takeoff_tdrag_elevator = 100;
+    plane.aparm.takeoff_tdrag_speed1 = 8.0f;
+    plane.takeoff_state.fbwa_tdrag_takeoff_mode = true; // engaged
+    plane.takeoff_state.initial_pitch_cd = 0;
+    plane.ahrs.pitch = 0.0f;
+
+    plane.takeoff_state.highest_airspeed = 8.0f; // exactly at speed1 - upstream's real ">=" includes the boundary
+    REQUIRE(plane.takeoff_tail_hold() == 0);
+    REQUIRE_FALSE(plane.takeoff_state.fbwa_tdrag_takeoff_mode); // upstream: "FBWA tdrag off" side effect
+}
+
+TEST_CASE("Plane::takeoff_tail_hold(): pitch-safety early-out - returns 0 once pitch has risen more than 10 "
+          "degrees over initial_pitch_cd (an early-liftoff/stall guard), the boundary is exclusive (upstream's "
+          "own strict > comparison), and disengages fbwa_tdrag_takeoff_mode if it was set",
+          "[vehicle][takeoff][tdrag]") {
+    Plane plane;
+    plane.control_mode = &plane.mode_fbwa;
+    plane.aparm.takeoff_tdrag_elevator = 100;
+    plane.aparm.takeoff_tdrag_speed1 = 8.0f;
+    plane.takeoff_state.fbwa_tdrag_takeoff_mode = true;
+    plane.takeoff_state.highest_airspeed = 2.0f; // well below speed1
+    plane.takeoff_state.initial_pitch_cd = 0;
+
+    // Exactly AT the +10deg boundary (1000 centidegrees) - upstream's own
+    // strict "> initial_pitch_cd + 1000" comparison does NOT trigger here,
+    // so the tail is still held.
+    plane.ahrs.pitch = fwcpp::math::radians(10.0f);
+    REQUIRE(plane.takeoff_tail_hold() == 100);
+    REQUIRE(plane.takeoff_state.fbwa_tdrag_takeoff_mode); // still engaged - not yet tripped
+
+    // Just past the boundary - trips the safety early-out.
+    plane.ahrs.pitch = fwcpp::math::radians(11.0f);
+    REQUIRE(plane.takeoff_tail_hold() == 0);
+    REQUIRE_FALSE(plane.takeoff_state.fbwa_tdrag_takeoff_mode);
+}
+
+TEST_CASE("Plane::stabilize_pitch(): when takeoff_tail_hold() returns nonzero, the elevator is set to exactly "
+          "45*force_elevator and the normal pitch controller is completely bypassed for that tick - an early "
+          "return, not a blended/additive override",
+          "[vehicle][takeoff][tdrag]") {
+    Plane plane;
+    plane.control_mode = &plane.mode_takeoff;
+    plane.aparm.takeoff_tdrag_elevator = 37; // arbitrary nonzero, deliberately not a "round" number
+    plane.aparm.takeoff_tdrag_speed1 = 10.0f;
+    plane.takeoff_state.highest_airspeed = 0.0f;
+    plane.takeoff_state.initial_pitch_cd = 0;
+
+    // Give the normal pitch-controller path a large, unmistakable demand
+    // it would otherwise act on, so a passing assertion below can only be
+    // explained by the early return actually firing, not by the two
+    // paths coincidentally agreeing.
+    plane.nav_pitch_cd = 2000;
+    plane.ahrs.pitch = fwcpp::math::radians(-5.0f);
+
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 20;
+    plane.stabilize_pitch(in);
+
+    REQUIRE(plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) == Catch::Approx(45.0f * 37.0f));
+}
+
+TEST_CASE("Plane::dispatch_aux_function: FbwaTaildragger is a real no-op, the SAME shape as AuxFunc::Flap - the "
+          "actual read is the raw channel_for()+read_3pos_switch() path in ModeFBWA::update(), not this debounced "
+          "dispatch",
+          "[vehicle][aux][tdrag]") {
+    Plane plane;
+    plane.control_mode = &plane.mode_manual;
+    plane.dispatch_aux_function(AuxFunc::FbwaTaildragger, AuxSwitchPos::kHigh, 0);
+    REQUIRE(plane.control_mode == &plane.mode_manual); // unchanged - no mode switch, no side effect at all
+    REQUIRE_FALSE(plane.takeoff_state.fbwa_tdrag_takeoff_mode); // unchanged - dispatch never touches this
+}
+
+TEST_CASE("ModeFBWA::enter() captures takeoff_state.initial_pitch_cd from the current attitude and resets "
+          "highest_airspeed, extending ModeTAKEOFF::enter() own treatment now that ModeFBWA is a second real "
+          "reader of both fields",
+          "[vehicle][fbwa][tdrag]") {
+    Plane plane;
+    plane.ahrs.pitch = fwcpp::math::radians(7.5f);
+    plane.takeoff_state.highest_airspeed = 42.0f; // stale, from a hypothetical prior takeoff/mode
+
+    ModeFBWA fbwa(plane);
+    REQUIRE(fbwa.enter());
+
+    REQUIRE(plane.takeoff_state.initial_pitch_cd == plane.pitch_sensor_cd());
+    REQUIRE(static_cast<float>(plane.takeoff_state.initial_pitch_cd) == Catch::Approx(750.0f));
+    REQUIRE(plane.takeoff_state.highest_airspeed == 0.0f);
+}
+
+TEST_CASE("ModeFBWA::update(): AuxFunc::FbwaTaildragger switch HIGH engages fbwa_tdrag_takeoff_mode via the RAW, "
+          "non-debounced switch read (RcChannel::read_3pos_switch(), not the debounced read_aux()), when "
+          "highest_airspeed is still below TKOFF_TDRAG_SPD1",
+          "[vehicle][fbwa][tdrag]") {
+    Plane plane;
+    plane.rc_channels.channel(kChannelFbwaTaildragger)->option = AuxFunc::FbwaTaildragger;
+    plane.aparm.takeoff_tdrag_speed1 = 8.0f;
+    plane.takeoff_state.highest_airspeed = 3.0f; // below speed1
+
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    set_aux_channel_pwm(plane, kChannelFbwaTaildragger, 2000); // HIGH raw pwm
+    plane.rc_channels.read_input(plane.hal.rc_input);
+
+    REQUIRE_FALSE(plane.takeoff_state.fbwa_tdrag_takeoff_mode);
+
+    ModeFBWA fbwa(plane);
+    StabilizeInputs in;
+    fbwa.update(in);
+
+    REQUIRE(plane.takeoff_state.fbwa_tdrag_takeoff_mode);
+
+    // Idempotent - calling update() again while already engaged does not
+    // re-run the engage gate (upstream's own `!fbwa_tdrag_takeoff_mode`
+    // guard) or otherwise misbehave.
+    fbwa.update(in);
+    REQUIRE(plane.takeoff_state.fbwa_tdrag_takeoff_mode);
+}
+
+TEST_CASE("ModeFBWA::update(): AuxFunc::FbwaTaildragger switch HIGH does NOT engage fbwa_tdrag_takeoff_mode once "
+          "highest_airspeed has already reached TKOFF_TDRAG_SPD1 - the real upstream engage gate, not merely the "
+          "switch position",
+          "[vehicle][fbwa][tdrag]") {
+    Plane plane;
+    plane.rc_channels.channel(kChannelFbwaTaildragger)->option = AuxFunc::FbwaTaildragger;
+    plane.aparm.takeoff_tdrag_speed1 = 8.0f;
+    plane.takeoff_state.highest_airspeed = 8.0f; // at/above speed1
+
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    set_aux_channel_pwm(plane, kChannelFbwaTaildragger, 2000); // HIGH raw pwm
+    plane.rc_channels.read_input(plane.hal.rc_input);
+
+    ModeFBWA fbwa(plane);
+    StabilizeInputs in;
+    fbwa.update(in);
+
+    REQUIRE_FALSE(plane.takeoff_state.fbwa_tdrag_takeoff_mode);
+}
+
+TEST_CASE("ModeFBWA::update(): no channel configured for AuxFunc::FbwaTaildragger is a real no-op, matching "
+          "upstream's own `if (chan != nullptr)` guard",
+          "[vehicle][fbwa][tdrag]") {
+    Plane plane;
+    plane.aparm.takeoff_tdrag_speed1 = 8.0f;
+    plane.takeoff_state.highest_airspeed = 3.0f;
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+
+    ModeFBWA fbwa(plane);
+    StabilizeInputs in;
+    fbwa.update(in);
+
+    REQUIRE_FALSE(plane.takeoff_state.fbwa_tdrag_takeoff_mode);
+}
+
+TEST_CASE("Closed loop: a real taildragger-configured ground roll (TKOFF_TDRAG_ELEV nonzero) produces a real, "
+          "fixed elevator deflection via k_elevator scaled output during the initial ground roll, that correctly "
+          "stops once TKOFF_TDRAG_SPD1 is reached",
+          "[vehicle][integration][takeoff][tdrag]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f);
+
+    plane.aparm.ground_steer_alt = 5.0f;
+    plane.aparm.takeoff_tdrag_elevator = 50; // TKOFF_TDRAG_ELEV - a real, nonzero taildragger configuration
+    plane.aparm.takeoff_tdrag_speed1 = 1.5f; // TKOFF_TDRAG_SPD1, m/s - low enough to be reached quickly under real acceleration, well before SimPlane (no weight-on-wheels ground model) could pitch up 10deg under a sustained elevator command
+
+    // MUST use the real plane.mode_takeoff member (via set_mode(), which
+    // also calls its own real enter()) rather than a locally-constructed
+    // ModeTAKEOFF instance - takeoff_tail_hold() own in_takeoff condition
+    // is a POINTER comparison against Plane own &mode_takeoff/&mode_fbwa
+    // members (this port established substitute for flight_stage ==
+    // TAKEOFF, CPP-031 slice 12 precedent), matching the existing
+    // failsafe-long TAKEOFF closed-loop test own same precedent above.
+    REQUIRE(plane.set_mode(plane.mode_takeoff));
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+
+    constexpr float kExpectedPinnedElevator = 45.0f * 50.0f; // upstream: 45*force_elevator
+
+    constexpr float kDt = 0.02f;
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    bool saw_pinned_elevator = false;
+    bool crossed_speed1 = false;
+    bool saw_release_after_speed1 = false;
+
+    for (int i = 0; i < 600; ++i) { // up to 12 simulated seconds - well past a typical ground roll to 8 m/s
+        now_us += 20000;
+        now_ms += 20;
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.now_ms = now_ms;
+        in.now_us = now_us;
+        in.position_ned = sim_plane.position;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+
+        tick(plane, gyro_sample, in);
+
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator);
+
+        if (plane.takeoff_state.highest_airspeed < plane.aparm.takeoff_tdrag_speed1) {
+            // still inside the tail-hold window - elevator MUST be pinned
+            // EXACTLY at 45*TKOFF_TDRAG_ELEV, not whatever the normal
+            // pitch controller would otherwise demand.
+            REQUIRE(elevator == Catch::Approx(kExpectedPinnedElevator));
+            saw_pinned_elevator = true;
+        } else {
+            crossed_speed1 = true;
+            if (elevator != Catch::Approx(kExpectedPinnedElevator).margin(1.0f)) {
+                saw_release_after_speed1 = true;
+            }
+        }
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator / fwcpp::vehicle::kServoMax, rudder, throttle, kDt);
+    }
+
+    INFO("saw_pinned_elevator=" << saw_pinned_elevator << ", crossed_speed1=" << crossed_speed1
+                                 << ", saw_release_after_speed1=" << saw_release_after_speed1
+                                 << ", final highest_airspeed=" << plane.takeoff_state.highest_airspeed);
+    REQUIRE(saw_pinned_elevator);      // the ground roll actually exercised the tail-hold window
+    REQUIRE(crossed_speed1);           // the vehicle actually reached TKOFF_TDRAG_SPD1 within the test window
+    REQUIRE(saw_release_after_speed1); // and control genuinely reverted to the normal pitch controller afterward
+}
+
+TEST_CASE("Closed loop: with TKOFF_TDRAG_ELEV at its real, unconfigured default (0), takeoff_tail_hold() never "
+          "engages during a real TAKEOFF ground roll - the elevator is driven entirely by the normal pitch "
+          "controller, a genuine no-op exactly as before this ticket existed",
+          "[vehicle][integration][takeoff][tdrag]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f);
+    plane.aparm.ground_steer_alt = 5.0f;
+    // TKOFF_TDRAG_ELEV/TKOFF_TDRAG_SPD1 left at their real Parameters.cpp
+    // defaults (0/0, verified directly - see plane.hpp CPP-042 addendum) -
+    // the exact configuration every OTHER test/vehicle in this port own
+    // suite uses.
+
+    // Real plane.mode_takeoff member, same reasoning as the test above.
+    REQUIRE(plane.set_mode(plane.mode_takeoff));
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+
+    constexpr float kDt = 0.02f;
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+    float first_elevator = 0.0f;
+    bool saw_different_elevator = false;
+
+    for (int i = 0; i < 150; ++i) { // 3s ground roll, matching the pre-existing TAKEOFF closed-loop test's own phase 1
+        now_us += 20000;
+        now_ms += 20;
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.now_ms = now_ms;
+        in.now_us = now_us;
+        in.position_ned = sim_plane.position;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+
+        tick(plane, gyro_sample, in);
+
+        REQUIRE(plane.takeoff_tail_hold() == 0); // genuine no-op, every single tick, default config
+
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator);
+        if (i == 0) {
+            first_elevator = elevator;
+        } else if (elevator != Catch::Approx(first_elevator).margin(0.01f)) {
+            saw_different_elevator = true;
+        }
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator / fwcpp::vehicle::kServoMax, rudder, throttle, kDt);
+    }
+
+    // Not pinned at a constant value at any point - the normal pitch
+    // controller (not a fixed override) drove the elevator throughout.
+    REQUIRE(saw_different_elevator);
 }
 
 // ---------------------------------------------------------------------
