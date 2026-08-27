@@ -496,6 +496,27 @@ inline void ModeTAKEOFF::update(const StabilizeInputs& in) {
         plane_.calc_nav_roll(in);
         plane_.calc_nav_pitch();
         plane_.calc_throttle();
+
+        // CPP-036 - upstream: ModeTakeoff::update()'s own real recall,
+        // read directly (mode_takeoff.cpp ~192-196): "check if in long
+        // failsafe due to being in initial TAKEOFF stage; if it is,
+        // recall long failsafe now to get fs action via events call" -
+        // `if (plane.long_failsafe_pending) { plane.long_failsafe_pending
+        // = false; plane.failsafe_long_on_event(FAILSAFE_LONG, ModeReason
+        // ::MODE_TAKEOFF_FAILSAFE); }`. See plane.hpp file banner's
+        // "CPP-036 ADDENDUM" ("LONG_FAILSAFE_PENDING" section) for why
+        // this is a real, NECESSARY mechanism (not optional bookkeeping):
+        // failsafe_long_on_event() stamps failsafe.state = Long
+        // unconditionally on the FIRST (deferred) call, so check_long_
+        // failsafe() alone would never re-invoke it once climb-out
+        // completes - only this explicit recall, placed exactly where
+        // upstream places it (the same `else` branch, i.e. only once
+        // climb_out_complete_ has actually become true this tick or
+        // earlier), applies the deferred escalation for real.
+        if (plane_.long_failsafe_pending) {
+            plane_.long_failsafe_pending = false;
+            plane_.failsafe_long_on_event();
+        }
     }
 }
 
@@ -606,6 +627,15 @@ inline void ModeTAKEOFF::navigate(const StabilizeInputs& in) {
 // mode_switch() (Plane.cpp's scheduler_tasks[], gated inside AP_Vehicle's
 // update_mode() task) always runs after read_radio()/control_failsafe()
 // have already updated last_valid_rc_ms for the current frame.
+//
+// CPP-036 NOTE: adds step 1b-2 (plane.check_long_failsafe()) - see
+// plane.hpp's own "CPP-036 ADDENDUM" file banner for the full RC long
+// failsafe escalation design. Placed immediately after step 1b's
+// check_short_rc_failsafe(), matching upstream's own relative scheduler
+// ordering (check_short_rc_failsafe() priority 9, check_long_failsafe()
+// priority 96 - short always runs first), and before step 1c is
+// unaffected (1c's freshness guard reads last_valid_rc_ms, untouched by
+// either failsafe-tier check).
 inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const StabilizeInputs& in) {
     Mode& mode = *plane.control_mode; // see this function's own "CPP-031 SLICE 7 NOTE" above
 
@@ -627,6 +657,19 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     //     separate task-table entry.
     plane.update_throttle_failsafe(in.now_ms);
     plane.check_short_rc_failsafe();
+
+    // 1b-2. RC long failsafe escalation - CPP-036, see plane.hpp's own
+    //     "CPP-036 ADDENDUM" file banner for the full design. Upstream
+    //     schedules check_long_failsafe() at 3Hz (Plane.cpp's scheduler_
+    //     tasks[], priority 96) versus check_short_rc_failsafe()'s 50Hz
+    //     (priority 9) - this port's single fixed-sequence tick() checks
+    //     every tick instead (a named simplification, see file banner -
+    //     both functions are pure timestamp-threshold comparisons against
+    //     a monotonic clock, so checking more often can only detect the
+    //     timeout SOONER, never later or less often). Placed immediately
+    //     after check_short_rc_failsafe(), matching upstream's own
+    //     relative ordering (short's lower priority number runs first).
+    plane.check_long_failsafe(in.now_ms);
 
     // 1c. RC mode-switch channel dispatch - CPP-031 slice 11, see this
     //     function's own "CPP-031 SLICE 11 NOTE" and plane.hpp's "CPP-031

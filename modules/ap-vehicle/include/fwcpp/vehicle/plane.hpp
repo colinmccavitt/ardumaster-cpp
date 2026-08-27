@@ -1198,11 +1198,17 @@
 // (NONE/GCS/SHORT/LONG). This port's FailsafeState keeps exactly
 // rc_failsafe/throttle_counter/last_valid_rc_ms (all real, in-scope) plus
 // last_seen_input_update_count (NEW, see update_throttle_failsafe()'s own
-// "NEW-FRAME DETECTION" note) and short_failsafe_active - a plain bool
-// substituting for `state != FAILSAFE_NONE` restricted to the NONE/SHORT
-// distinction this slice's check_short_rc_failsafe() actually needs
-// (FAILSAFE_GCS/FAILSAFE_LONG don't exist in this port's scope at all -
-// see the EXCLUDED list below).
+// "NEW-FRAME DETECTION" note) and (as of this slice) `state`, a real
+// three-value FailsafeState::Level enum (None/Short/Long - GCS dropped
+// entirely, no GCS subsystem anywhere in this port).
+//
+// UPDATE (CPP-036): `state` was originally `short_failsafe_active`, a
+// plain bool substituting for `state != FAILSAFE_NONE` restricted to the
+// NONE/SHORT distinction that slice's check_short_rc_failsafe() alone
+// needed (FAILSAFE_LONG didn't exist yet). CPP-036 promotes it to the
+// real tri-state - see this file's own "CPP-036 ADDENDUM" (its
+// "FAILSAFE.STATE PROMOTED..." section) for why this is a necessary
+// correctness fix, not a cosmetic rename.
 //
 // MODE-RESTORATION DESIGN - failsafe_saved_mode / mode_set_by_failsafe /
 // set_mode()'s NEW from_failsafe PARAMETER: see rc_failsafe_short_off_
@@ -1325,6 +1331,10 @@
 //     action table (RTL/continue/parachute/land, gated on GCS heartbeat OR
 //     a long RC outage) - this slice is short-RC-failsafe only, per the
 //     ticket.
+//     UPDATE (CPP-036): the RADIO_FAILSAFE (RC-only) half of this gap is
+//     now closed - see this file's own "CPP-036 ADDENDUM" below. The GCS-
+//     heartbeat half remains excluded (no GCS/MAVLink subsystem exists in
+//     this port at all, per CPP-036's own ticket).
 //   - GCS heartbeat failsafe (gcs_heartbeat_fs_enabled, GCS_FAILSAFE_*) -
 //     no GCS subsystem anywhere in this port.
 //   - Battery failsafe (handle_battery_failsafe) - no battery subsystem.
@@ -1339,6 +1349,237 @@
 // rc_failsafe_short_on_event()/rc_failsafe_short_off_event()/apply_
 // fs_action_short() below (Plane class body) and mode.hpp's own "CPP-031
 // SLICE 8 NOTE" (on tick()) for the concrete code.
+
+// =====================================================================
+// CPP-036 ADDENDUM: RC long failsafe escalation (FS_LONG_ACTN/
+// FS_LONG_TIMEOUT, RADIO_FAILSAFE only - the GCS-heartbeat half of both
+// upstream functions stays excluded, see below). Upstream (Plane-4.7.0,
+// read directly, in full where the ticket asked): ArduPlane/events.cpp's
+// Plane::failsafe_long_on_event()/failsafe_long_off_event() (~line
+// 111-260, full); ArduPlane/system.cpp's Plane::check_long_failsafe()
+// (~line 371-409, full); ArduPlane/Parameters.cpp's FS_LONG_ACTN/
+// FS_LONG_TIMEOUT real GSCALAR defaults; ArduPlane/defines.h's
+// failsafe_action_long and failsafe_state enums; ArduPlane/mode.cpp's
+// Mode::enter() (~line 27-134, the shared pre-_enter() setup every real
+// mode passes through - ~line 97 specifically) and
+// ArduPlane/mode_takeoff.cpp's ModeTakeoff::update() (~line 130-197,
+// full) for the long_failsafe_pending recall mechanism.
+//
+// A REAL FINDING THAT CONTRADICTS THE TICKET'S OWN SUMMARY - LOITER'S
+// GROUP, TRACED NOT ASSUMED: the ticket describes the "stays in mode
+// unless told" group as "AUTO/GUIDED/AVOID_ADSB/LOITER/THERMAL", i.e.
+// LOITER alongside AUTO. Reading failsafe_long_on_event()'s actual switch
+// statement (events.cpp) directly shows this is WRONG for LONG failsafe
+// specifically: LOITER (and THERMAL) are case-labels in the FIRST group
+// (~line 124-135 - MANUAL/STABILIZE/ACRO/FLY_BY_WIRE_A/AUTOTUNE/
+// FLY_BY_WIRE_B/CRUISE/TRAINING/CIRCLE/LOITER/THERMAL/TAKEOFF), sharing
+// the SAME RTL/FBWA/AUTO-driven body as MANUAL/CIRCLE/TAKEOFF - NOT the
+// AUTO/AVOID_ADSB/GUIDED group's "stays unless FS_LONG_ACTN says
+// otherwise" body (~line 184-219), which LOITER is not a member of at
+// all. This is a real, deliberate upstream ASYMMETRY versus SHORT
+// failsafe: rc_failsafe_short_on_event() (events.cpp ~78-90, CPP-031
+// slice 8) genuinely DOES group LOITER with AUTO/GUIDED/THERMAL/
+// AVOID_ADSB - the two failsafe tiers classify the SAME mode differently.
+// Confirmed by reading both switch statements side by side (`grep -n
+// "case Mode::Number::"` over events.cpp), not an error in either.
+// Ported per the traced source below, per this port's own "read upstream
+// directly, don't trust the ticket's summary" rule - see failsafe_long_
+// on_event()'s own doc comment for the concrete grouping this port
+// implements.
+//
+// THIS PORT'S REAL PER-MODE GROUPING (8 modes, exhaustive):
+//   - Group A (events.cpp ~124-166): MANUAL/FBWA/FBWB/CRUISE/LOITER/
+//     TAKEOFF (6 of this port's 8 modes) - PARACHUTE(3) no-ops, GLIDE(2)
+//     -> FBWA, AUTO(4) -> AUTO, else (CONTINUE(0)/RTL(1)/AUTOLAND(5)) ->
+//     RTL. TAKEOFF additionally gates on the climb-out substitution below
+//     before any of this runs.
+//   - Group B (events.cpp ~184-219): AUTO (1 of 8; AVOID_ADSB/GUIDED
+//     don't exist in this port) - failsafe_in_landing_sequence() dropped,
+//     always false, same established precedent as rc_failsafe_short_
+//     on_event()'s own AUTO handling (no landing-sequence subsystem,
+//     ticket's own instruction) - PARACHUTE(3) no-ops, GLIDE(2) -> FBWA,
+//     AUTO(4) -> AUTO (a real no-op, already there), RTL(1) -> RTL; else
+//     (CONTINUE(0)/AUTOLAND(5)) is a genuine no-op - upstream's real
+//     if/else-if chain here has NO trailing else at all (unlike Group A),
+//     confirmed by reading the literal source, not assumed.
+//   - Group C (events.cpp ~220-229): RTL (1 of 8) - ONLY AUTO(4) switches
+//     mode (-> AUTO); every other value, including AUTOLAND(5), is a
+//     real, traced no-op (RTL simply continues) - upstream's switch case
+//     here checks nothing but FS_ACTION_LONG_AUTO.
+//
+// PARACHUTE(3) AND AUTOLAND(5) - REAL VALUES, DISCLOSED NO-OP/FALLBACK,
+// NOT FABRICATED: both are kept in the FsActionLong enum (matching
+// upstream's real failsafe_action_long exactly, so a real FS_LONG_ACTN
+// value always round-trips) but this port has neither a parachute nor an
+// AUTOLAND-mode subsystem (ticket's own out-of-scope list). Traced
+// against the ACTUAL preprocessor-gated upstream body, not invented:
+//   - PARACHUTE(3): upstream's own body is
+//     `#if HAL_PARACHUTE_ENABLED parachute_release() #endif` - with that
+//     flag undefined (the real, common configuration for any vehicle
+//     without a parachute fitted, not a hypothetical), this is LITERALLY
+//     a no-op in upstream too. apply_fs_action_long()/failsafe_long_
+//     on_event() below reproduce that exact no-op.
+//   - AUTOLAND(5): upstream's real chain is
+//     `if (PARACHUTE) {...} else if (GLIDE) {...} else if (AUTO) {...}
+//     #if MODE_AUTOLAND_ENABLED else if (AUTOLAND) {...} #endif else
+//     {RTL}` (Group A) / the same shape minus the trailing else (Group
+//     B/C). With MODE_AUTOLAND_ENABLED undefined (no AUTOLAND mode, this
+//     port's own real, already-disclosed gap), the AUTOLAND arm is
+//     compiled OUT, so AUTOLAND(5) falls through to whatever the NEXT arm
+//     is: Group A's trailing `else` (RTL) or Group B/C's real absence of
+//     one (no-op) - exactly matching a real MODE_AUTOLAND_ENABLED=0
+//     upstream build, not an invented substitution.
+//
+// TAKEOFF CLIMB-OUT SUBSTITUTION (per the ticket's own explicit
+// instruction): upstream's real gate is
+//   `plane.flight_stage == AP_FixedWing::FlightStage::TAKEOFF &&
+//    !(fs_action_long == GLIDE || fs_action_long == PARACHUTE)`
+// (events.cpp ~139). This port has never built flight_stage (CPP-031
+// slice 12's own precedent - ModeTAKEOFF's climb_out_complete_ field is
+// the established substitute). Substituted here as `control_mode ==
+// &mode_takeoff && !mode_takeoff.climb_out_complete()`.
+// CONSERVATISM ARGUMENT (per the ticket's own requirement - "verify it is
+// at least as conservative as upstream, never escalates less often"):
+// upstream's flight_stage can ALSO read TAKEOFF while in AUTO mode
+// executing a NAV_TAKEOFF mission item - a scenario this port cannot
+// reach at all (ModeAUTO, plane.hpp, has no NAV_TAKEOFF item handling, a
+// separate, already-disclosed gap) - so the substitution's defer
+// condition is NEVER reachable via a path where upstream's real one could
+// ALSO fire (AUTO is Group B, which never even reaches the TAKEOFF-defer
+// check - that check only exists in Group A's switch-case body).
+// Conversely, whenever this port's `control_mode == &mode_takeoff` is
+// true, climb_out_complete_ being false is EXACTLY this port's own "below
+// TKOFF_ALT and before target_dist" condition (mode.hpp's ModeTAKEOFF::
+// update(), CPP-031 slice 12) - the identical altitude/distance test
+// upstream's own flight_stage transition uses (mode_takeoff.cpp ~166-169,
+// `altitude_cm >= (alt*100-200) || start_loc.get_distance(...) >= dist`
+// -> set_flight_stage(NORMAL)). The two conditions are therefore driven
+// by the SAME real state (climb progress) at the SAME real threshold,
+// verified directly, not assumed - the substitution never defers within
+// TAKEOFF mode any differently than upstream's own flight_stage would.
+//
+// LONG_FAILSAFE_PENDING - THE RECALL MECHANISM, A REAL, NECESSARY PIECE,
+// NOT OPTIONAL BOOKKEEPING: traced directly from mode_takeoff.cpp
+// ~192-196 - once climb_out_complete_ transitions true, ModeTAKEOFF::
+// update()'s own `else` branch (mode.hpp) re-invokes failsafe_long_on_
+// event() directly (bypassing check_long_failsafe() entirely) if a defer
+// is still pending, clearing the flag first. This is NECESSARY, not
+// redundant with check_long_failsafe()'s own periodic re-check: failsafe_
+// long_on_event() stamps `failsafe.state = Level::Long` UNCONDITIONALLY,
+// before the per-mode switch, even on the deferred path (events.cpp
+// ~117's `failsafe.state = fstype;` runs BEFORE ~124's switch) - so
+// check_long_failsafe()'s own outer guard (`state != Long`) is
+// immediately false on every subsequent tick, and it will NEVER call
+// failsafe_long_on_event() again on its own once a defer has happened.
+// Without this port's own copy of the mode_takeoff.cpp recall, a long
+// failsafe that began during TAKEOFF's climb-out would defer forever,
+// even after climb_out_complete_ becomes true - verified by a dedicated
+// closed-loop test (vehicle_test.cpp) that fails without this recall in
+// place. `long_failsafe_pending` is ALSO cleared on every genuine mode
+// change (Plane::set_mode(), see its own doc comment) - upstream's real
+// equivalent (Mode::enter(), mode.cpp ~97, "clear postponed long failsafe
+// if mode change (from GCS) occurs before recall of long failsafe") runs
+// as part of the shared pre-_enter() setup every mode's real _enter()
+// passes through; this port has no such shared base-class enter()
+// wrapper (each derived mode's enter() does its own full setup - CPP-031
+// slice 7's own precedent for why no shared hook exists), so the one line
+// is placed in set_mode() instead, at the single choke point every real
+// mode change in this port already passes through, at the equivalent
+// point in the sequence (before the new mode's own enter() runs) and with
+// the equivalent no-rollback-on-failure behavior (upstream never rolls it
+// back either - it is set unconditionally before _enter() can even fail).
+//
+// FAILSAFE.STATE PROMOTED FROM A PLAIN BOOL TO A REAL TRI-STATE - A
+// NECESSARY REFACTOR OF CPP-031 SLICE 8's OWN FailsafeState, NOT
+// COSMETIC: that slice's own `short_failsafe_active` bool was an exact
+// substitute for `state != FAILSAFE_NONE` ONLY BECAUSE no third state
+// existed yet - `!short_failsafe_active` and `state == FAILSAFE_NONE`
+// were equivalent then. Adding a real LONG state breaks that equivalence:
+// upstream's check_short_rc_failsafe() (system.cpp ~413-426) gates its
+// own on-check on `state == FAILSAFE_NONE` SPECIFICALLY (not merely
+// `!= SHORT`), which is precisely how upstream prevents short failsafe's
+// own off-event (and its mode-restoration side effect, rc_failsafe_
+// short_off_event()) from ever firing again once escalated to LONG - once
+// `state == FAILSAFE_LONG`, `state == FAILSAFE_SHORT` is false, so
+// check_short_rc_failsafe()'s own off-check block never runs at all,
+// leaving failsafe_long_off_event() (which does NOT restore any mode) as
+// the only path back to NONE. A plain independent `long_failsafe_active`
+// bool alongside the existing `short_failsafe_active` bool could NOT
+// reproduce this: both would stay simultaneously true after escalation,
+// and on RC recovery BOTH check_short_rc_failsafe() and check_long_
+// failsafe() would fire their own off-events THE SAME TICK - incorrectly
+// restoring failsafe_saved_mode (short's real side effect) even though
+// upstream's real behavior after a LONG escalation never restores
+// anything. `FailsafeState::Level` (None/Short/Long - GCS dropped
+// entirely, ticket's own out-of-scope list) and the field rename to
+// `state` fix this, and required updating check_short_rc_failsafe()'s
+// on-check from the old (equivalent-until-now) `!short_failsafe_active`
+// to the precise `state == Level::None` - a real, disclosed, behavior-
+// relevant fix enabled by this ticket, verified by the existing short-
+// failsafe test suite passing unchanged (vehicle_test.cpp) plus a new
+// escalation test exercising the exact double-off-event scenario this
+// refactor prevents.
+//
+// CHECK_LONG_FAILSAFE()'S SCHEDULING RATE - SIMPLIFIED, A NAMED JUDGMENT
+// CALL: upstream schedules check_long_failsafe() at 3Hz (Plane.cpp's
+// scheduler_tasks[], priority 96) versus check_short_rc_failsafe()'s 50Hz
+// (priority 9) - a real rate difference with no behavioral consequence
+// for either function's own logic (both are pure timestamp-threshold
+// comparisons against a monotonic clock, not counters advanced once per
+// call). This port's tick() (mode.hpp, CPP-036 NOTE) calls plane.check_
+// long_failsafe() every tick, immediately after check_short_rc_failsafe()
+// - matching upstream's own relative ORDERING (short's priority 9 runs
+// before long's priority 96 within any tick both would fire) while
+// checking more often than upstream's real 3Hz. This can only make this
+// port's long failsafe react QUICKER (smaller worst-case detection
+// latency, bounded by fs_timeout_long_ms either way) - never slower or
+// less often - the same class of simplification check_short_rc_
+// failsafe()'s own file banner already establishes for its flight_stage
+// guard.
+//
+// FLIGHT_STAGE != LAND GUARD - TREATED AS ALWAYS TRUE: same established
+// precedent as check_short_rc_failsafe()'s own note (no LAND flight-stage
+// concept anywhere in this port).
+//
+// GCS().SEND_TEXT() CALLS - dropped throughout, matching this port's
+// exclusion everywhere else (no GCS subsystem).
+//
+// EXCLUDED, PER THE TICKET'S OWN EXPLICIT LIST (real traces, not merely
+// restated):
+//   - GCS/heartbeat failsafe (FS_GCS_ENABL, the FAILSAFE_GCS branches of
+//     both check_long_failsafe() (system.cpp ~384-397) and failsafe_long_
+//     on_event()/failsafe_long_off_event() (events.cpp ~113-114,
+//     ~254-256)) - no MAVLink/GCS subsystem anywhere in this port, so
+//     there is no real "last heartbeat" producer to wire in; fabricating
+//     one would be exactly the stubbing this port's own conventions
+//     forbid.
+//   - Parachute release (FS_LONG_ACTN==3, HAL_PARACHUTE_ENABLED) - see
+//     "PARACHUTE(3) AND AUTOLAND(5)" above for the real, disclosed no-op.
+//   - AUTOLAND mode (FS_LONG_ACTN==5, MODE_AUTOLAND_ENABLED) - see same
+//     note for the real, disclosed RTL-fallback/no-op.
+//   - `plane.emergency_landing` override in both on/off-event bodies
+//     (events.cpp) - driven by an aux-function switch this port has never
+//     built (tracked separately as the "aux-function switches" gap, same
+//     exclusion CPP-031 slice 8's own rc_failsafe_short_on_event() note
+//     already made for its own emergency_landing branch).
+//   - `failsafe_check()` (ArduPlane/failsafe.cpp) - a HAL timer-
+//     interrupt-driven main-loop-lockup passthrough, an entirely
+//     different failsafe concept (scheduler stall, not RC/GCS loss)
+//     requiring HAL timer-interrupt infrastructure this port does not
+//     model.
+//   - `RC_Channels::clear_overrides()` (events.cpp ~117) - no MAVLink
+//     RC-override subsystem.
+//   - HAL_QUADPLANE_ENABLED case groups (QSTABILIZE/QHOVER/QLOITER/
+//     QACRO/QAUTOTUNE, QLAND/QRTL/LOITER_ALT_QLAND) and in_vtol_takeoff()
+//     - no quadplane modes exist in this port.
+//   - `Mode::Number::INITIALISING`/`AUTOLAND` no-op case labels - neither
+//     exists as a distinct state/mode in this port.
+//
+// See check_long_failsafe()/failsafe_long_on_event()/failsafe_long_off_
+// event()/apply_fs_action_long() below (Plane class body), set_mode()'s
+// own doc comment (long_failsafe_pending clearing), ModeTAKEOFF::update()
+// (mode.hpp)'s own recall block, and mode.hpp's own "CPP-036 NOTE" (on
+// tick()) for the concrete code.
 
 // =====================================================================
 // CPP-031 SLICE 9 ADDENDUM: Plane::arm()/disarm() - the real armed/
@@ -2531,6 +2772,24 @@ enum class FsActionShort : std::uint8_t {
     Fbwb = 4,
 };
 
+// upstream: ArduPlane/defines.h's failsafe_action_long - FS_LONG_ACTN.
+// See file banner's "CPP-036 ADDENDUM". PARACHUTE(3) and AUTOLAND(5) are
+// both real, valid parameter values (kept so the enum matches upstream's
+// real value space exactly, same "port every value, not just the ones
+// this port's scope actively branches on" precedent FsActionShort/
+// ThrFailsafe already establish above) but this port dispatches neither
+// to a real subsystem - see apply_fs_action_long()/failsafe_long_
+// on_event()'s own doc comments for the disclosed, upstream-traced
+// no-op/RTL-fallback each produces.
+enum class FsActionLong : std::uint8_t {
+    Continue = 0,
+    Rtl = 1,
+    Glide = 2,
+    Parachute = 3,
+    Auto = 4,
+    Autoland = 5,
+};
+
 // Every AP_Param-backed tunable MANUAL/FBWA's real code paths (as scoped
 // by the ticket) actually read, as a plain aggregate defaulted to
 // upstream's real GSCALAR/ASCALAR/config.h value - same established
@@ -2590,6 +2849,11 @@ struct FixedWingTunables {
     float takeoff_rotate_speed = 0.0f; // TKOFF_ROTATE_SPD / g.takeoff_rotate_speed, Parameters.cpp default 0, m/s
     float throttle_max = 100.0f;       // THR_MAX / aparm.throttle_max, config.h THROTTLE_MAX default
     float takeoff_throttle_max = 0.0f; // TKOFF_THR_MAX / aparm.takeoff_throttle_max, Parameters.cpp default 0 ("use THR_MAX")
+
+    // --- CPP-036 (RC long failsafe escalation) additions - see file
+    // banner's "CPP-036 ADDENDUM" ---
+    FsActionLong fs_action_long = FsActionLong::Continue; // FS_LONG_ACTN / g.fs_action_long, Parameters.cpp default FS_ACTION_LONG_CONTINUE (0)
+    std::uint32_t fs_timeout_long_ms = 5000; // FS_LONG_TIMEOUT / g.fs_timeout_long, Parameters.cpp default 5 (seconds), stored here pre-converted to ms - same "pre-converted" precedent rc_fs_timeout_ms already establishes above
 };
 
 // Explicit per-tick sensor/environment inputs stabilize_roll()/
@@ -3523,10 +3787,17 @@ public:
     // shape as every other navigation mode in this port.
     [[nodiscard]] bool does_auto_throttle() const override { return true; }
 
-    // Test-only observability accessor, matching ModeCRUISE's own get_
-    // target_heading_cd() precedent (plane.hpp) - "ported for completeness"
-    // even though no production code in this port's scope needs to read
-    // climb_out_complete_ from outside this class.
+    // Originally a test-only observability accessor, matching
+    // ModeCRUISE's own get_target_heading_cd() precedent (plane.hpp) -
+    // "ported for completeness" even though no production code in this
+    // port's scope needed to read climb_out_complete_ from outside this
+    // class at the time (CPP-031 slice 12).
+    //
+    // UPDATE (CPP-036): now also a real production consumer -
+    // Plane::failsafe_long_on_event() reads this directly as the
+    // substitute for upstream's `flight_stage == TAKEOFF` gate (see
+    // plane.hpp file banner's "CPP-036 ADDENDUM", "TAKEOFF CLIMB-OUT
+    // SUBSTITUTION").
     [[nodiscard]] bool climb_out_complete() const { return climb_out_complete_; }
 
     // Real AP_Param defaults - see class banner's "TUNABLES" note.
@@ -5075,7 +5346,17 @@ public:
     // below for the full design rationale.
     struct FailsafeState {
         bool rc_failsafe = false;                       // upstream: failsafe.rc_failsafe
-        bool short_failsafe_active = false;              // upstream: failsafe.state != FAILSAFE_NONE, reduced to the NONE/SHORT distinction this slice needs
+
+        // upstream: enum failsafe_state (Plane.h ~line 17-22) - NONE/
+        // SHORT/LONG only, GCS(=3 upstream) dropped entirely (no GCS/
+        // MAVLink subsystem, ticket's own out-of-scope list). CPP-036
+        // promotes this from CPP-031 slice 8's own plain bool
+        // (short_failsafe_active) to a real tri-state - see this file's
+        // own "CPP-036 ADDENDUM" ("FAILSAFE.STATE PROMOTED..." section)
+        // for why this is a necessary correctness fix, not a rename.
+        enum class Level : std::uint8_t { None = 0, Short = 1, Long = 2 };
+        Level state = Level::None; // upstream: failsafe.state
+
         std::uint8_t throttle_counter = 0;               // upstream: failsafe.throttle_counter
         std::uint32_t last_valid_rc_ms = 0;              // upstream: failsafe.last_valid_rc_ms
         std::uint32_t last_seen_input_update_count = 0;  // NEW - see update_throttle_failsafe()'s own "NEW-FRAME DETECTION" note
@@ -5087,6 +5368,13 @@ public:
     // (plus set_mode()'s new from_failsafe parameter) implement together.
     Mode* failsafe_saved_mode = nullptr;
     bool mode_set_by_failsafe = false;
+
+    // CPP-036 - upstream: Plane::long_failsafe_pending (Plane.h ~line
+    // 266). See failsafe_long_on_event()'s own doc comment (TAKEOFF
+    // branch) and ModeTAKEOFF::update()'s (mode.hpp) recall block for the
+    // full design, and set_mode()'s own doc comment below for where/why
+    // this is cleared on every real mode change.
+    bool long_failsafe_pending = false;
 
     // upstream: Plane::set_mode(Mode& new_mode, const ModeReason reason)
     // (system.cpp, ~line 252-352) - see file banner's "SET_MODE()" note
@@ -5128,6 +5416,23 @@ public:
         control_mode = &new_mode;
         mode_set_by_failsafe = from_failsafe;
 
+        // CPP-036 - upstream: Mode::enter()'s (mode.cpp, the shared
+        // wrapper every real mode's own _enter() passes through) own
+        // unconditional `plane.long_failsafe_pending = false;` (~line 97,
+        // "clear postponed long failsafe if mode change (from GCS) occurs
+        // before recall of long failsafe") - run BEFORE the derived
+        // _enter() and NOT rolled back on a failed entry (mode.cpp never
+        // restores it either; it's set as part of the "assume success"
+        // shared setup, not tied to the tentative control_mode swap this
+        // port's mode_set_by_failsafe otherwise rolls back below). This
+        // port has no shared Mode::enter() base wrapper (each derived
+        // mode's enter() does its own full setup - CPP-031 slice 7's own
+        // precedent), so this one line lives here instead, at the single
+        // choke point every real mode change in this port already passes
+        // through, at the equivalent point in the sequence. See this
+        // file's own "CPP-036 ADDENDUM" for the full design.
+        long_failsafe_pending = false;
+
         if (!new_mode.enter()) {
             // upstream: "we failed entering new mode, roll back to old".
             // Not exercised by any of this port's six real modes today
@@ -5137,6 +5442,8 @@ public:
             // failing mode (vehicle_test.cpp).
             control_mode = &old_mode;
             mode_set_by_failsafe = old_mode_set_by_failsafe;
+            // long_failsafe_pending is deliberately NOT rolled back here -
+            // matches upstream exactly (see comment above).
             return false;
         }
 
@@ -5303,14 +5610,22 @@ public:
     // update_throttle_failsafe() above) by calling the on/off event
     // handlers. `flight_stage != AP_FixedWing::FlightStage::LAND` is
     // dropped - see file banner's own note - always true here.
+    //
+    // CPP-036: the on-check's gate was `!failsafe.short_failsafe_active`
+    // (equivalent to `state != Short` back when only NONE/SHORT existed);
+    // now that `state` is a real tri-state, this is tightened to the
+    // precise upstream condition, `state == FAILSAFE_NONE` - see file
+    // banner's "CPP-036 ADDENDUM" ("FAILSAFE.STATE PROMOTED..." section)
+    // for why the old, now-imprecise form would incorrectly re-fire once
+    // escalated to Long.
     void check_short_rc_failsafe() {
-        if (aparm.fs_action_short != FsActionShort::Disabled && !failsafe.short_failsafe_active) {
+        if (aparm.fs_action_short != FsActionShort::Disabled && failsafe.state == FailsafeState::Level::None) {
             if (failsafe.rc_failsafe) {
                 rc_failsafe_short_on_event();
             }
         }
 
-        if (failsafe.short_failsafe_active) {
+        if (failsafe.state == FailsafeState::Level::Short) {
             if (!failsafe.rc_failsafe || aparm.fs_action_short == FsActionShort::Disabled) {
                 rc_failsafe_short_off_event();
             }
@@ -5347,7 +5662,7 @@ public:
     // substitution, and AUTO's own real (traced, not assumed)
     // fs_action_short handling.
     void rc_failsafe_short_on_event() {
-        failsafe.short_failsafe_active = true; // upstream: failsafe.state = FAILSAFE_SHORT
+        failsafe.state = FailsafeState::Level::Short; // upstream: failsafe.state = FAILSAFE_SHORT
         failsafe_saved_mode = control_mode;    // upstream: failsafe.saved_mode_number = control_mode->mode_number(), unconditionally - see file banner
 
         if (control_mode == &mode_manual || control_mode == &mode_fbwa || control_mode == &mode_fbwb ||
@@ -5435,13 +5750,167 @@ public:
     //     mode_set_by_failsafe=true left over from the restoration
     //     itself.
     void rc_failsafe_short_off_event() {
-        failsafe.short_failsafe_active = false; // upstream: failsafe.state = FAILSAFE_NONE
+        failsafe.state = FailsafeState::Level::None; // upstream: failsafe.state = FAILSAFE_NONE
         if (mode_set_by_failsafe && failsafe_saved_mode != nullptr) {
             // upstream: `if (control_mode_reason == ModeReason::
             // RADIO_FAILSAFE) { set_mode_by_number(failsafe.saved_mode_
             // number, ModeReason::RADIO_FAILSAFE_RECOVERY); }`
             set_mode(*failsafe_saved_mode);
         }
+    }
+
+    // =====================================================================
+    // CPP-036 (RC long failsafe escalation) - see file banner's own
+    // "CPP-036 ADDENDUM" for the full design rationale (the real per-mode
+    // grouping traced from events.cpp, including the LOITER classification
+    // finding that contradicts the ticket's own summary; the PARACHUTE/
+    // AUTOLAND disclosed no-op/fallback; the TAKEOFF climb-out
+    // substitution and its conservatism argument; the long_failsafe_
+    // pending recall mechanism; and why failsafe.state needed promoting to
+    // a real tri-state).
+    // =====================================================================
+
+    // upstream: Plane::check_long_failsafe() (system.cpp ~line 371, full)
+    // - RADIO_FAILSAFE path only; every GCS_FAILSAFE branch dropped (no
+    // GCS/MAVLink subsystem, ticket's own out-of-scope list);
+    // `flight_stage != AP_FixedWing::FlightStage::LAND` dropped from the
+    // outer guard - same "always true here" precedent check_short_
+    // rc_failsafe() already establishes (no LAND flight-stage concept
+    // among this port's 8 modes). With the GCS/LAND arms removed,
+    // upstream's real outer `if (state != LONG && state != GCS &&
+    // flight_stage != LAND) {...} else {...}` collapses to `if (state !=
+    // Long) {...} else {...}` exactly.
+    void check_long_failsafe(std::uint32_t now_ms) {
+        if (failsafe.state != FailsafeState::Level::Long) {
+            if (failsafe.rc_failsafe && (now_ms - failsafe.last_valid_rc_ms) > aparm.fs_timeout_long_ms) {
+                failsafe_long_on_event();
+            }
+        } else if (!failsafe.rc_failsafe) {
+            // upstream's real else-if also re-checks `failsafe.state ==
+            // FAILSAFE_LONG` explicitly - redundant here since the outer
+            // `else` already implies it (no GCS/LAND arm can also land in
+            // this else in this port).
+            failsafe_long_off_event();
+        }
+    }
+
+    // upstream: the identical if/else-if/else-if/else body upstream
+    // repeats verbatim across the MANUAL-group case block of failsafe_
+    // long_on_event() (events.cpp ~141-153, Group A per file banner) -
+    // factored into a helper, the same pattern apply_fs_action_short()
+    // already establishes for short failsafe. PARACHUTE(3) and
+    // AUTOLAND(5) are real, disclosed no-op/fallback values, not
+    // fabricated - see file banner's "PARACHUTE(3) AND AUTOLAND(5)" note
+    // for the traced, preprocessor-gated upstream source each reproduces.
+    void apply_fs_action_long() {
+        if (aparm.fs_action_long == FsActionLong::Parachute) {
+            // no-op - HAL_PARACHUTE_ENABLED assumed undefined (no
+            // parachute subsystem) - see file banner.
+        } else if (aparm.fs_action_long == FsActionLong::Glide) {
+            set_mode(mode_fbwa, /*from_failsafe=*/true);
+        } else if (aparm.fs_action_long == FsActionLong::Auto) {
+            set_mode(mode_auto, /*from_failsafe=*/true);
+        } else {
+            // CONTINUE(0)/RTL(1)/AUTOLAND(5, MODE_AUTOLAND_ENABLED
+            // assumed undefined) all fall here - see file banner.
+            set_mode(mode_rtl, /*from_failsafe=*/true);
+        }
+    }
+
+    // upstream: Plane::failsafe_long_on_event(enum failsafe_state fstype,
+    // ModeReason reason) (events.cpp ~line 111, RADIO_FAILSAFE path only,
+    // read in full). GCS_FAILSAFE's AP_Notify::flags.failsafe_gcs stamp
+    // and `RC_Channels::clear_overrides()` are both dropped (ticket's own
+    // out-of-scope list: no GCS subsystem, no MAVLink RC-override
+    // subsystem). The `fstype`/`reason` parameters are dropped entirely -
+    // every real call site in this port's scope is the RADIO_FAILSAFE
+    // case (this method IS the RC-only long failsafe), and the TAKEOFF
+    // recall below (mode.hpp) is upstream's own MODE_TAKEOFF_FAILSAFE
+    // reason, itself just a more specific spelling of "not a deliberate
+    // change" that this port's from_failsafe bool on set_mode() already
+    // captures - same "no consumer, no plumbing" rationale set_mode()'s
+    // own dropped ModeReason parameter already established (CPP-031
+    // slice 8).
+    //
+    // REAL PER-MODE GROUPING - see file banner's "CPP-036 ADDENDUM" for
+    // the full trace (including the LOITER-classification finding that
+    // contradicts the ticket's own summary). This port's 8 modes split
+    // exhaustively into Group A (MANUAL/FBWA/FBWB/CRUISE/LOITER/TAKEOFF),
+    // Group B (AUTO), and Group C (RTL).
+    void failsafe_long_on_event() {
+        // upstream: `failsafe.state = fstype;` (events.cpp ~117) - stamped
+        // UNCONDITIONALLY, BEFORE the per-mode switch below, even on the
+        // TAKEOFF-deferred path - traced directly from source order, not
+        // assumed. See file banner's "LONG_FAILSAFE_PENDING" note for why
+        // this ordering is exactly what makes the TAKEOFF recall in
+        // mode.hpp necessary (check_long_failsafe() will never re-enter
+        // this method on its own once state is already Long).
+        failsafe.state = FailsafeState::Level::Long;
+
+        if (control_mode == &mode_manual || control_mode == &mode_fbwa || control_mode == &mode_fbwb ||
+            control_mode == &mode_cruise || control_mode == &mode_loiter || control_mode == &mode_takeoff) {
+            // Group A (events.cpp ~124-166) - see file banner for the real
+            // trace of why LOITER/TAKEOFF belong here, NOT with AUTO.
+            if (control_mode == &mode_takeoff && !mode_takeoff.climb_out_complete() &&
+                !(aparm.fs_action_long == FsActionLong::Glide || aparm.fs_action_long == FsActionLong::Parachute)) {
+                // upstream: `if (plane.flight_stage == AP_FixedWing::
+                // FlightStage::TAKEOFF && !(g.fs_action_long == GLIDE ||
+                // g.fs_action_long == PARACHUTE)) { long_failsafe_pending
+                // = true; break; }` (events.cpp ~139-143) - see file
+                // banner's "TAKEOFF CLIMB-OUT SUBSTITUTION" note for the
+                // climb_out_complete_ substitution and its conservatism
+                // argument.
+                long_failsafe_pending = true;
+                return;
+            }
+
+            // upstream's `plane.emergency_landing` override dropped
+            // entirely - ticket's own out-of-scope list (no aux-function-
+            // switch subsystem).
+            apply_fs_action_long();
+        } else if (control_mode == &mode_auto) {
+            // Group B (events.cpp ~184-219) - failsafe_in_landing_
+            // sequence() dropped (always false, no landing-sequence
+            // subsystem, same established precedent as rc_failsafe_
+            // short_on_event()'s own AUTO handling); in_vtol_takeoff()
+            // dropped (no quadplane). Unlike Group A, upstream's real
+            // if/else-if chain here has NO trailing else - CONTINUE(0)
+            // and AUTOLAND(5, disabled) are genuine no-ops, verified by
+            // reading the literal source, not assumed.
+            if (aparm.fs_action_long == FsActionLong::Parachute) {
+                // no-op - see apply_fs_action_long()'s own doc comment.
+            } else if (aparm.fs_action_long == FsActionLong::Glide) {
+                set_mode(mode_fbwa, /*from_failsafe=*/true);
+            } else if (aparm.fs_action_long == FsActionLong::Auto) {
+                set_mode(mode_auto, /*from_failsafe=*/true); // real no-op - already in AUTO, set_mode()'s own early-return handles it
+            } else if (aparm.fs_action_long == FsActionLong::Rtl) {
+                set_mode(mode_rtl, /*from_failsafe=*/true);
+            }
+        } else {
+            // control_mode == &mode_rtl - Group C (events.cpp ~220-229):
+            // ONLY FS_ACTION_LONG_AUTO(4) switches mode; every other
+            // value (CONTINUE/RTL/GLIDE/PARACHUTE/AUTOLAND) is a real,
+            // traced no-op - RTL simply continues. This `else` is
+            // exhaustive over all 8 of this port's modes (6 in Group A,
+            // AUTO in Group B, RTL here).
+            if (aparm.fs_action_long == FsActionLong::Auto) {
+                set_mode(mode_auto, /*from_failsafe=*/true);
+            }
+        }
+    }
+
+    // upstream: Plane::failsafe_long_off_event(ModeReason reason)
+    // (events.cpp ~line 253, full) - RADIO_FAILSAFE path only, the
+    // GCS_FAILSAFE branch (AP_Notify::flags.failsafe_gcs clear) dropped
+    // (no GCS subsystem, ticket's own out-of-scope list). Does NOT
+    // restore any saved mode - a real, deliberate upstream asymmetry
+    // versus rc_failsafe_short_off_event() above (confirmed by reading
+    // this function in full: no saved-mode/ModeReason logic anywhere in
+    // it) - wherever failsafe_long_on_event() (or its TAKEOFF recall)
+    // already drove the vehicle, it simply stays there on RC recovery.
+    void failsafe_long_off_event() {
+        long_failsafe_pending = false; // upstream: unconditional, first line
+        failsafe.state = FailsafeState::Level::None; // upstream: failsafe.state = FAILSAFE_NONE
     }
 
 private:

@@ -2725,7 +2725,7 @@ TEST_CASE("Plane::mode_switch_changed correctly clears a stale mode_set_by_fails
     // Recovery must NOT clobber the pilot's own deliberate choice.
     plane.rc_failsafe_short_off_event();
     REQUIRE(plane.control_mode == &plane.mode_fbwa);
-    REQUIRE_FALSE(plane.failsafe.short_failsafe_active);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::None); // CPP-036: state, was short_failsafe_active
 }
 
 TEST_CASE("tick(): a stable mode-switch channel PWM, fed every tick, drives a real set_mode() call exactly once "
@@ -3112,7 +3112,7 @@ TEST_CASE("Plane::rc_failsafe_short_on_event: MANUAL-group modes (MANUAL/FBWA/FB
     }
 
     REQUIRE(plane.failsafe_saved_mode == &plane.mode_manual);
-    REQUIRE(plane.failsafe.short_failsafe_active);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Short); // CPP-036: state, was short_failsafe_active
 }
 
 TEST_CASE("Plane::rc_failsafe_short_on_event: AUTO applies fs_action_short only when it is NOT BestGuess (a real, "
@@ -3141,10 +3141,10 @@ TEST_CASE("Plane::rc_failsafe_short_on_event: AUTO applies fs_action_short only 
         REQUIRE(plane.control_mode == &plane.mode_rtl);
     }
 
-    // failsafe_saved_mode/short_failsafe_active are bookkept unconditionally,
+    // failsafe_saved_mode/failsafe.state are bookkept unconditionally,
     // even for the BESTGUESS/no-action case - matches upstream exactly.
     REQUIRE(plane.failsafe_saved_mode == &plane.mode_auto);
-    REQUIRE(plane.failsafe.short_failsafe_active);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Short); // CPP-036: state, was short_failsafe_active
 }
 
 TEST_CASE("Plane::rc_failsafe_short_on_event: LOITER is classified with AUTO's group, not RTL's "
@@ -3171,7 +3171,7 @@ TEST_CASE("Plane::rc_failsafe_short_on_event: LOITER is classified with AUTO's g
     }
 
     REQUIRE(plane.failsafe_saved_mode == &plane.mode_loiter);
-    REQUIRE(plane.failsafe.short_failsafe_active);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Short); // CPP-036: state, was short_failsafe_active
 }
 
 TEST_CASE("Plane::rc_failsafe_short_on_event: RTL never takes any short-failsafe action and continues",
@@ -3185,7 +3185,7 @@ TEST_CASE("Plane::rc_failsafe_short_on_event: RTL never takes any short-failsafe
 
     REQUIRE(plane.control_mode == &plane.mode_rtl); // unchanged - RTL "continues"
     REQUIRE(plane.failsafe_saved_mode == &plane.mode_rtl); // still bookkept, matching upstream
-    REQUIRE(plane.failsafe.short_failsafe_active);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Short); // CPP-036: state, was short_failsafe_active
 }
 
 TEST_CASE("Plane::rc_failsafe_short_off_event: restores the pre-failsafe mode on recovery, but NOT over a deliberate "
@@ -3203,7 +3203,7 @@ TEST_CASE("Plane::rc_failsafe_short_off_event: restores the pre-failsafe mode on
         plane.rc_failsafe_short_off_event();
         REQUIRE(plane.control_mode == &plane.mode_fbwa); // restored
         REQUIRE_FALSE(plane.mode_set_by_failsafe);        // no longer failsafe-owned
-        REQUIRE_FALSE(plane.failsafe.short_failsafe_active);
+        REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::None); // CPP-036: state, was short_failsafe_active
     }
 
     SECTION("a deliberate set_mode() during the failsafe window is NOT overwritten on recovery") {
@@ -3311,7 +3311,8 @@ TEST_CASE("Plane::check_short_rc_failsafe: wires the debounce counter to rc_fail
 // ---------------------------------------------------------------------
 
 TEST_CASE("Closed loop: AUTO flying a mission, RC signal loss (throttle drops to the classic receiver-failsafe PWM) "
-          "triggers a real switch to RTL which flies sensibly toward home, then RC recovery switches back to AUTO",
+          "triggers a real switch to RTL which flies sensibly toward home; RC loss long enough also escalates past "
+          "SHORT to LONG (CPP-036), so recovery leaves it in RTL rather than restoring AUTO",
           "[vehicle][integration][failsafe][auto]") {
     Plane plane;
     fwcpp::sim::SimPlane sim_plane;
@@ -3427,28 +3428,539 @@ TEST_CASE("Closed loop: AUTO flying a mission, RC signal loss (throttle drops to
     // crashing/diverging), reusing the same convergence-checking style
     // the dedicated RTL and AUTO-to-RTL closed-loop tests above
     // established.
+    //
+    // CPP-036: this window is far longer than FS_LONG_TIMEOUT's real
+    // 5-second default, so partway through, check_long_failsafe() also
+    // fires - failsafe.state escalates Short -> Long. RTL is Group C
+    // (plane.hpp file banner's "CPP-036 ADDENDUM"), and the real default
+    // FS_LONG_ACTN (CONTINUE=0) dispatches to a genuine no-op there, so
+    // this escalation is NOT independently observable via control_mode
+    // (already RTL) - only via failsafe.state, checked below - and Phase
+    // 3's own convergence assertions are unaffected either way.
     float min_dist_to_home = dist_at_loss;
+    bool escalated_to_long = false;
     for (int i = 0; i < 16000; ++i) { // 320 simulated seconds - matches the existing AUTO-to-RTL test's own budget
+        step(900);
+        min_dist_to_home = std::min(min_dist_to_home, plane.current_loc.get_distance(plane.home));
+        escalated_to_long = escalated_to_long || (plane.failsafe.state == Plane::FailsafeState::Level::Long);
+    }
+    const float dist_after_rtl_flight = plane.current_loc.get_distance(plane.home);
+    INFO("distance from home after RTL flight (m) = " << dist_after_rtl_flight
+                                                        << ", min distance reached (m) = " << min_dist_to_home);
+    REQUIRE(escalated_to_long); // confirms the scenario this Phase 4 update below actually depends on
+    REQUIRE(plane.control_mode == &plane.mode_rtl); // still in RTL - RC hasn't recovered yet
+    REQUIRE(dist_after_rtl_flight < 150.0f); // genuinely converged near home - the same real standard the dedicated RTL/AUTO-to-RTL tests above use
+
+    // Phase 4: RC signal returns - throttle back to a normal value.
+    //
+    // UPDATE (CPP-036): Phase 3's own 320-simulated-second RC-loss window
+    // is far longer than FS_LONG_TIMEOUT's real 5-second default, so by
+    // the time Phase 4 begins the failsafe has ALREADY escalated past
+    // SHORT to LONG (failsafe.state == Level::Long, control_mode still
+    // RTL - Group C's real dispatch for the real default FS_LONG_ACTN,
+    // CONTINUE(0), is "do nothing", so an already-RTL vehicle simply
+    // stays RTL - see plane.hpp file banner's "CPP-036 ADDENDUM"). This
+    // is a REAL, deliberate change in this test's own expected outcome,
+    // not a regression: once escalated to LONG, check_short_rc_
+    // failsafe()'s own off-check is permanently gated off (failsafe.state
+    // is no longer Short), so rc_failsafe_short_off_event() - the ONLY
+    // path that would have restored AUTO - never runs again; recovery
+    // instead goes through failsafe_long_off_event() (check_long_
+    // failsafe()), which upstream's own failsafe_long_off_event() (events.
+    // cpp ~253-260, read in full) does NOT restore any saved mode at all
+    // - a real, disclosed asymmetry versus short failsafe (ticket's own
+    // requirement: "confirm failsafe_long_off_event() restores control on
+    // RC recovery...it does NOT restore saved_mode_number the way short
+    // failsafe does"). The vehicle therefore correctly stays in RTL
+    // permanently here, exactly matching a real upstream vehicle
+    // configured with every FS_LONG_ACTN/FS_SHORT_ACTN default that lost
+    // RC for this long. See the dedicated escalation tests below for the
+    // debounce-timing and mode-restoration behavior in isolation.
+    for (int i = 0; i < 20; ++i) {
+        step(1700);
+    }
+    REQUIRE_FALSE(plane.failsafe.rc_failsafe);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::None); // failsafe_long_off_event() ran
+    REQUIRE(plane.control_mode == &plane.mode_rtl); // NOT restored to AUTO - see comment above
+}
+
+// ---------------------------------------------------------------------
+// CPP-036: RC long failsafe escalation (FS_LONG_ACTN/FS_LONG_TIMEOUT,
+// RADIO_FAILSAFE only). See plane.hpp's own "CPP-036 ADDENDUM" file
+// banner for the full design (the real per-mode grouping traced from
+// events.cpp - including the LOITER-classification finding that
+// contradicts the ticket's own summary - the TAKEOFF climb-out
+// substitution, the long_failsafe_pending recall mechanism, and why
+// failsafe.state needed promoting to a real tri-state).
+// ---------------------------------------------------------------------
+
+TEST_CASE("Plane::failsafe_long_on_event: Group A modes (MANUAL/FBWA/FBWB/CRUISE) apply fs_action_long "
+          "(Glide->Fbwa, Auto->Auto, else(Continue/Rtl/Autoland-disabled)->Rtl)",
+          "[vehicle][failsafe][long]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.set_mode(plane.mode_fbwa));
+
+    SECTION("fs_action_long = Glide switches to FBWA") {
+        plane.aparm.fs_action_long = FsActionLong::Glide;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_fbwa); // already there - a real no-op, matches set_mode()'s own early return
+    }
+    SECTION("fs_action_long = Auto switches to AUTO") {
+        plane.aparm.fs_action_long = FsActionLong::Auto;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_auto);
+    }
+    SECTION("fs_action_long = Continue (the real default) switches to RTL - NOT a no-op for this group, unlike AUTO's "
+            "group") {
+        REQUIRE(plane.aparm.fs_action_long == FsActionLong::Continue);
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_rtl);
+    }
+    SECTION("fs_action_long = Rtl also switches to RTL") {
+        plane.aparm.fs_action_long = FsActionLong::Rtl;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_rtl);
+    }
+    SECTION("fs_action_long = Parachute is a real, disclosed no-op (no parachute subsystem)") {
+        plane.aparm.fs_action_long = FsActionLong::Parachute;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_fbwa); // unchanged
+    }
+    SECTION("fs_action_long = Autoland falls to the same else-branch as Continue/Rtl (no AUTOLAND mode, matching a "
+            "real MODE_AUTOLAND_ENABLED=0 upstream build)") {
+        plane.aparm.fs_action_long = FsActionLong::Autoland;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_rtl);
+    }
+
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Long); // stamped unconditionally, before dispatch
+}
+
+TEST_CASE("Plane::failsafe_long_on_event: LOITER is classified with Group A (MANUAL's group), NOT with AUTO's group "
+          "- a real finding that CONTRADICTS the ticket's own summary (see plane.hpp file banner's \"CPP-036 "
+          "ADDENDUM\" for the full events.cpp trace)",
+          "[vehicle][failsafe][long][loiter]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.set_mode(plane.mode_loiter));
+    REQUIRE(plane.aparm.fs_action_long == FsActionLong::Continue); // the real default
+
+    // If LOITER were (incorrectly) grouped with AUTO/GUIDED (Group B, as
+    // the ticket's own summary describes), CONTINUE(0) would be a genuine
+    // no-op there (Group B's real if/else-if chain has no trailing else)
+    // and LOITER would stay LOITER. Group A's real trailing else is RTL -
+    // this is the one value that actually distinguishes the two possible
+    // classifications observably.
+    plane.failsafe_long_on_event();
+    REQUIRE(plane.control_mode == &plane.mode_rtl);
+}
+
+TEST_CASE("Plane::failsafe_long_on_event: AUTO (Group B) stays in mode unless fs_action_long says Rtl/Glide "
+          "(Continue/Auto(no-op)/Autoland(disabled) are real, traced no-ops - upstream's own if/else-if chain here "
+          "has NO trailing else, unlike Group A)",
+          "[vehicle][failsafe][long][auto]") {
+    Plane plane;
+    std::array<MissionItem, 1> items;
+    items[0].loc = make_loc(300.0f, 0.0f, 60.0f);
+    REQUIRE(plane.mission.load(items));
+    REQUIRE(plane.set_mode(plane.mode_auto));
+
+    SECTION("Continue (the real default) takes no action") {
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_auto);
+    }
+    SECTION("Glide switches to FBWA") {
+        plane.aparm.fs_action_long = FsActionLong::Glide;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_fbwa);
+    }
+    SECTION("Rtl switches to RTL") {
+        plane.aparm.fs_action_long = FsActionLong::Rtl;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_rtl);
+    }
+    SECTION("Auto is a real no-op - already there") {
+        plane.aparm.fs_action_long = FsActionLong::Auto;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_auto);
+    }
+    SECTION("Parachute is a real, disclosed no-op") {
+        plane.aparm.fs_action_long = FsActionLong::Parachute;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_auto);
+    }
+    SECTION("Autoland is a real, disclosed no-op (no trailing else in this group, unlike Group A)") {
+        plane.aparm.fs_action_long = FsActionLong::Autoland;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_auto);
+    }
+}
+
+TEST_CASE("Plane::failsafe_long_on_event: RTL (Group C) only responds to fs_action_long = Auto - every other value "
+          "is a real, traced no-op",
+          "[vehicle][failsafe][long][rtl]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.set_mode(plane.mode_rtl));
+
+    SECTION("Auto switches to AUTO") {
+        plane.aparm.fs_action_long = FsActionLong::Auto;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_auto);
+    }
+    SECTION("Continue (the real default) is a no-op") {
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_rtl);
+    }
+    SECTION("Rtl is a no-op (already there)") {
+        plane.aparm.fs_action_long = FsActionLong::Rtl;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_rtl);
+    }
+    SECTION("Glide is a no-op - upstream's RTL case checks nothing but FS_ACTION_LONG_AUTO") {
+        plane.aparm.fs_action_long = FsActionLong::Glide;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_rtl);
+    }
+    SECTION("Autoland is a no-op") {
+        plane.aparm.fs_action_long = FsActionLong::Autoland;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_rtl);
+    }
+}
+
+TEST_CASE("Plane::failsafe_long_off_event: does NOT restore any saved mode, unlike rc_failsafe_short_off_event() - "
+          "a real, disclosed upstream asymmetry",
+          "[vehicle][failsafe][long]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.set_mode(plane.mode_fbwa));
+
+    plane.failsafe_long_on_event(); // default Continue -> RTL
+    REQUIRE(plane.control_mode == &plane.mode_rtl);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Long);
+
+    plane.failsafe_long_off_event();
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::None);
+    REQUIRE(plane.control_mode == &plane.mode_rtl); // NOT restored to FBWA
+    REQUIRE_FALSE(plane.long_failsafe_pending);
+}
+
+TEST_CASE("Plane::check_long_failsafe: wires failsafe.rc_failsafe + fs_timeout_long_ms to failsafe_long_on_event()/"
+          "off_event(), and does not re-trigger once already Long",
+          "[vehicle][failsafe][long]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.set_mode(plane.mode_fbwa));
+    plane.aparm.fs_timeout_long_ms = 1000;
+
+    // Not yet timed out - no escalation.
+    plane.failsafe.rc_failsafe = true;
+    plane.failsafe.last_valid_rc_ms = 0;
+    plane.check_long_failsafe(500);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::None);
+    REQUIRE(plane.control_mode == &plane.mode_fbwa);
+
+    // Past the timeout - escalates for real.
+    plane.check_long_failsafe(1500);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Long);
+    REQUIRE(plane.control_mode == &plane.mode_rtl); // default Continue -> Rtl for this group
+
+    // A pilot deliberately switches to FBWB while still in long failsafe -
+    // check_long_failsafe() must NOT re-trigger failsafe_long_on_event()
+    // again on every subsequent call (state is already Long).
+    REQUIRE(plane.set_mode(plane.mode_fbwb));
+    plane.check_long_failsafe(2000);
+    REQUIRE(plane.control_mode == &plane.mode_fbwb); // unchanged - no re-dispatch
+
+    // RC recovers - off_event fires, no mode restore.
+    plane.failsafe.rc_failsafe = false;
+    plane.check_long_failsafe(2020);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::None);
+    REQUIRE(plane.control_mode == &plane.mode_fbwb);
+}
+
+TEST_CASE("Plane::check_short_rc_failsafe: once escalated to Long, its own off-check is permanently suppressed - "
+          "the real reason failsafe.state needed promoting to a tri-state (see plane.hpp file banner's "
+          "\"FAILSAFE.STATE PROMOTED...\" note)",
+          "[vehicle][failsafe][long]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.set_mode(plane.mode_fbwa));
+    plane.aparm.fs_timeout_long_ms = 1000;
+
+    // Short failsafe fires first - saves FBWA, switches to RTL (BestGuess
+    // default's own RTL substitute).
+    plane.failsafe.rc_failsafe = true;
+    plane.failsafe.last_valid_rc_ms = 0;
+    plane.check_short_rc_failsafe();
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Short);
+    REQUIRE(plane.control_mode == &plane.mode_rtl);
+    REQUIRE(plane.failsafe_saved_mode == &plane.mode_fbwa);
+
+    // RC loss persists past FS_LONG_TIMEOUT - escalates to Long.
+    plane.check_long_failsafe(1500);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Long);
+
+    // RC now recovers. If check_short_rc_failsafe()'s own off-check were
+    // still gated on the OLD, imprecise `!short_failsafe_active` (true
+    // whenever state != Short, which is now the case since state == Long)
+    // it would incorrectly fire rc_failsafe_short_off_event() here too,
+    // restoring failsafe_saved_mode (FBWA) - a real bug this tri-state
+    // fix prevents. The precise `state == Level::Short` gate means this
+    // call is correctly a no-op.
+    plane.failsafe.rc_failsafe = false;
+    plane.check_short_rc_failsafe();
+    REQUIRE(plane.control_mode == &plane.mode_rtl); // NOT restored to FBWA - check_short_rc_failsafe() was a no-op
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Long); // unchanged - only check_long_failsafe() may clear this now
+
+    plane.check_long_failsafe(1520);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::None);
+    REQUIRE(plane.control_mode == &plane.mode_rtl); // long's own off_event never restores anything either
+}
+
+TEST_CASE("Plane::set_mode: clears long_failsafe_pending on every real mode change, matching upstream's shared "
+          "Mode::enter() setup (mode.cpp ~97)",
+          "[vehicle][failsafe][long]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.set_mode(plane.mode_fbwa));
+
+    plane.long_failsafe_pending = true; // simulate a defer left over from a TAKEOFF-mode long failsafe
+    REQUIRE(plane.set_mode(plane.mode_cruise));
+    REQUIRE_FALSE(plane.long_failsafe_pending);
+
+    // The "already in this mode" early-return path does NOT run the
+    // clearing logic (matches upstream: Mode::enter() is never called at
+    // all on that path either - see set_mode()'s own doc comment).
+    plane.long_failsafe_pending = true;
+    REQUIRE(plane.set_mode(plane.mode_cruise)); // already there
+    REQUIRE(plane.long_failsafe_pending); // NOT cleared
+}
+
+TEST_CASE("Closed loop: FBWA flying normally, sustained RC signal loss escalates from SHORT (immediate, RTL) "
+          "through LONG (FS_LONG_TIMEOUT later) - the exact scenario this ticket adds - and stays in RTL on "
+          "recovery rather than restoring FBWA",
+          "[vehicle][integration][failsafe][long]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+
+    // Start already airborne, well away from home, cruising - lets RTL's
+    // real navigation-toward-home be genuinely observable once it takes
+    // over (same established pattern the AUTO-to-RTL closed-loop test
+    // above uses).
+    sim_plane.position = fwcpp::math::Vector3f(300.0f, 0.0f, -60.0f); // 300m north, 60m up (NED)
+    sim_plane.velocity_ef = fwcpp::math::Vector3f(15.0f, 0.0f, 0.0f);
+    sim_plane.airspeed = 15.0f;
+
+    plane.set_home(plane.current_loc); // current_loc is still the default origin - matches sim_plane's own fixed reference frame
+    REQUIRE(plane.set_mode(plane.mode_fbwa));
+    REQUIRE(plane.control_mode == &plane.mode_fbwa);
+
+    // Real defaults throughout: fs_action_short = BestGuess -> RTL
+    // (MANUAL group's own else-branch, CPP-031 slice 8); fs_action_long =
+    // Continue -> RTL (Group A's own else-branch, this ticket) -
+    // deliberately left untouched so this test exercises the REAL default
+    // configuration, not a contrived one. fs_timeout_long_ms is also left
+    // at its real 5000ms default.
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    auto step = [&](std::uint16_t throttle_pwm) {
+        now_us += 20000;
+        now_ms += 20;
+        set_sticks(plane, 1500, 1500, throttle_pwm, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
+        in.now_ms = now_ms;
+        in.now_us = now_us;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+        in.position_ned = sim_plane.position;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+
+        tick(plane, gyro_sample, in);
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+    };
+
+    // Phase 1: brief normal flight, confirm nothing spurious triggers.
+    for (int i = 0; i < 100; ++i) { // 2 simulated seconds
+        step(1700);
+    }
+    REQUIRE(plane.control_mode == &plane.mode_fbwa);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::None);
+
+    // Phase 2: RC signal loss begins - SHORT fires almost immediately
+    // (10-tick debounce, CPP-031 slice 8) -> RTL.
+    bool switched_to_rtl_short = false;
+    for (int i = 0; i < 40 && !switched_to_rtl_short; ++i) {
+        step(900);
+        if (plane.control_mode == &plane.mode_rtl) {
+            switched_to_rtl_short = true;
+        }
+    }
+    REQUIRE(switched_to_rtl_short);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Short);
+    REQUIRE(plane.failsafe_saved_mode == &plane.mode_fbwa);
+
+    // Phase 3: keep losing RC well past FS_LONG_TIMEOUT's real 5-second
+    // default - confirm the escalation to LONG actually happens (this
+    // ticket's own core requirement).
+    float min_dist_to_home = plane.current_loc.get_distance(plane.home);
+    for (int i = 0; i < 400; ++i) { // 8 simulated seconds - comfortably past the 5s default
+        step(900);
+        min_dist_to_home = std::min(min_dist_to_home, plane.current_loc.get_distance(plane.home));
+    }
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Long);
+    REQUIRE(plane.control_mode == &plane.mode_rtl); // Group C's real dispatch for the default CONTINUE is a no-op here
+
+    // Phase 4: let RTL fly for real, long enough to genuinely converge
+    // toward home under full SimPlane dynamics.
+    for (int i = 0; i < 16000; ++i) { // 320 simulated seconds
         step(900);
         min_dist_to_home = std::min(min_dist_to_home, plane.current_loc.get_distance(plane.home));
     }
     const float dist_after_rtl_flight = plane.current_loc.get_distance(plane.home);
     INFO("distance from home after RTL flight (m) = " << dist_after_rtl_flight
                                                         << ", min distance reached (m) = " << min_dist_to_home);
-    REQUIRE(plane.control_mode == &plane.mode_rtl); // still in RTL - RC hasn't recovered yet
-    REQUIRE(dist_after_rtl_flight < 150.0f); // genuinely converged near home - the same real standard the dedicated RTL/AUTO-to-RTL tests above use
+    REQUIRE(dist_after_rtl_flight < 150.0f);
 
-    // Phase 4: RC signal returns - throttle back to a normal value. The
-    // debounce recovers within 4 ticks from a fully-saturated counter
-    // (see the dedicated unit test above), and rc_failsafe_short_off_event()
-    // restores the exact mode that was active before the failsafe
-    // triggered - AUTO - since nothing else called set_mode() during the
-    // failsafe window.
+    // Phase 5: RC recovers. failsafe.state escalated past SHORT, so
+    // recovery goes through failsafe_long_off_event() (check_long_
+    // failsafe()), which does NOT restore any saved mode (a real,
+    // disclosed asymmetry vs. short failsafe - see plane.hpp's own doc
+    // comment on failsafe_long_off_event()). The vehicle correctly stays
+    // in RTL rather than reverting to FBWA.
     for (int i = 0; i < 20; ++i) {
         step(1700);
     }
     REQUIRE_FALSE(plane.failsafe.rc_failsafe);
-    REQUIRE(plane.control_mode == &plane.mode_auto);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::None);
+    REQUIRE(plane.control_mode == &plane.mode_rtl);
+}
+
+TEST_CASE("Closed loop: TAKEOFF defers long failsafe escalation for real during a real climb-out (climb_out_"
+          "complete_ substitution for flight_stage), then applies it for real the moment climb_out_complete() "
+          "becomes true - the ticket's own required TAKEOFF substitution, proven end to end",
+          "[vehicle][integration][failsafe][long][takeoff]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    // Start ON the ground - see sim_plane.hpp's own on_ground() doc
+    // comment and the existing TAKEOFF closed-loop test's own precedent.
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f);
+
+    plane.aparm.ground_steer_alt = 5.0f; // ground steering must be explicitly enabled - see plane.hpp's "GROUND_STEER_ALT's REAL DEFAULT IS 0" note
+    // A short FS_LONG_TIMEOUT so escalation state flips to Long within a
+    // couple hundred ms of RC loss beginning (well before climb-out
+    // completes, tens of seconds later) - isolates "does the defer/recall
+    // mechanism work", not "does the debounce/timeout math work" (already
+    // covered by the dedicated unit tests above).
+    plane.aparm.fs_timeout_long_ms = 200;
+    plane.aparm.fs_action_long = FsActionLong::Rtl; // a distinctive, observable target mode once the deferred action finally applies
+
+    REQUIRE(plane.set_mode(plane.mode_takeoff));
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    auto step = [&](int num_ticks, std::uint16_t throttle_pwm) {
+        for (int i = 0; i < num_ticks; ++i) {
+            now_us += 20000;
+            now_ms += 20;
+
+            // Autonomous mode throughout - sticks stay centered (TAKEOFF
+            // drives roll/pitch/throttle itself; failsafe is driven purely
+            // by throttle_pwm here, matching the established RC-loss-
+            // simulation pattern the other failsafe closed-loop tests
+            // above use).
+            set_sticks(plane, 1500, 1500, throttle_pwm, 1500);
+
+            fwcpp::ahrs::GyroSample gyro_sample;
+            gyro_sample.gyro = sim_plane.gyro;
+            gyro_sample.delta_angle = sim_plane.gyro * kDt;
+            gyro_sample.dangle_dt = kDt;
+
+            StabilizeInputs in;
+            in.dt = kDt;
+            in.now_ms = now_ms;
+            in.now_us = now_us;
+            in.position_ned = sim_plane.position;
+            in.current_altitude_m = -sim_plane.position.z;
+            in.true_velocity_ned = sim_plane.velocity_ef;
+            in.gps_use_enabled = true;
+            in.airspeed_valid = true;
+            in.airspeed_eas = sim_plane.airspeed;
+
+            tick(plane, gyro_sample, in);
+
+            const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+            const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+            const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+            const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+            sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+        }
+    };
+
+    // Phase 1: ground roll under RC loss from the very start (throttle
+    // pinned at the classic receiver-failsafe PWM throughout) - well
+    // within a couple hundred ms, rc_failsafe latches and check_long_
+    // failsafe() escalates state to Long (fs_timeout_long_ms=200), but
+    // since we're still in TAKEOFF with climb_out_complete() false, the
+    // dispatch is DEFERRED (long_failsafe_pending = true), not applied.
+    step(150, 900); // 3 simulated seconds
+    INFO("after 3s ground roll: speed = " << sim_plane.velocity_ef.length()
+                                            << ", climb_out_complete = " << plane.mode_takeoff.climb_out_complete());
+    REQUIRE(sim_plane.velocity_ef.length() > 5.0f); // real acceleration under a real (full, autonomous) throttle command - failsafe hasn't touched TAKEOFF's own control outputs
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Long); // escalated...
+    REQUIRE(plane.long_failsafe_pending); // ...but deferred
+    REQUIRE(plane.control_mode == &plane.mode_takeoff); // still TAKEOFF - the defer held
+
+    // Phase 2: continue through rotation and climb-out. The defer must
+    // hold for as long as climb_out_complete() is false, no matter how
+    // long RC stays lost.
+    step(2000, 900); // up to 40 more simulated seconds
+    INFO("mid-climb: altitude = " << -sim_plane.position.z
+                                    << ", climb_out_complete = " << plane.mode_takeoff.climb_out_complete());
+    if (!plane.mode_takeoff.climb_out_complete()) {
+        REQUIRE(plane.control_mode == &plane.mode_takeoff);
+        REQUIRE(plane.long_failsafe_pending);
+    }
+
+    // Phase 3: continue toward target altitude until climb-out genuinely
+    // completes under real dynamics (same real threshold the existing
+    // TAKEOFF closed-loop test converges within).
+    step(2500, 900); // up to 50 more simulated seconds
+    INFO("final: altitude = " << -sim_plane.position.z << ", target = " << plane.mode_takeoff.target_alt
+                                << ", climb_out_complete = " << plane.mode_takeoff.climb_out_complete());
+    REQUIRE(plane.mode_takeoff.climb_out_complete()); // the real precondition the recall depends on
+
+    // The moment climb-out completed, ModeTAKEOFF::update()'s own recall
+    // (mode.hpp) re-invoked failsafe_long_on_event() for real, applying
+    // the deferred FS_LONG_ACTN=Rtl action - a genuine, observable mode
+    // switch away from TAKEOFF, not merely a flag flip.
+    REQUIRE_FALSE(plane.long_failsafe_pending); // the recall cleared it
+    REQUIRE(plane.control_mode == &plane.mode_rtl); // the deferred action, finally applied
 }
 
 // ---------------------------------------------------------------------
