@@ -938,6 +938,283 @@
 //     introduces no new instance of that already-named gap.
 // ============================================================================
 
+// ============================================================================
+// CPP-062, PHASE 8 (this ticket): baro height fusion. Everything above this
+// point is phase 1 (CPP-052) through phase 6 (CPP-060), unmodified (phase 7,
+// CPP-061, was a validation-only ticket that added zero EkfCore production
+// code - see ekf_closed_loop_test.cpp's own banner). Read
+// AP_NavEKF3_PosVelFusion.cpp lines ~927-980 (the height innovation-
+// consistency gate) and ~1181-1382 (selectHeightForFusion(), read in full
+// this round, not just the baro branch, to confirm every other branch is
+// genuinely inapplicable) and NavEKF3_core::ResetHeight() (lines 287-355)
+// directly before extending anything below - all three were read in full
+// for this phase, not skimmed from the ticket's own summary of them.
+// ============================================================================
+//
+// THE GAP THIS PHASE CLOSES: CPP-061's own closed-loop validation named it
+// explicitly (see ekf_closed_loop_test.cpp's "REAL, DISCLOSED GAPS" section,
+// now stale as of this phase) - state.position.z (altitude) was never
+// directly observed, only indirectly disciplined via fuse_gps_velocity()'s
+// real vertical-velocity fusion integrated forward with no independent
+// position anchor. This phase adds the missing direct observation: real
+// baro height fusion, reusing fuse_direct_state_observation() (CPP-056) at
+// state_index=9, an innovation-consistency gate mirroring CPP-057/CPP-060's
+// structure, and a timeout/reset mirroring CPP-058's reset_position()-style
+// pattern - composition of three already-verified primitives at a new state
+// index, not new algorithmic machinery, exactly as the ticket predicted.
+//
+// SIGN CONVENTION - VERIFIED DIRECTLY, NOT ASSUMED: upstream's baro branch
+// (selectHeightForFusion(), ~line 1367-1382) sets `hgtMea = baroDataDelayed.
+// hgt - baroHgtOffset` then `velPosObs[5] = -hgtMea`. `baroDataDelayed.hgt`
+// traces to `dal.baro().get_altitude()` (AP_NavEKF3_Measurements.cpp
+// readBaroData(), ~line 784) - a positive-UP altitude reading (AP_Baro's own
+// convention), the same positive-up convention already established for GPS
+// height in this same function's GPS branch (`hgtMea = gpsDataDelayed.hgt;
+// velPosObs[5] = -hgtMea;`, ~line 1349-1350). The height gate (~line 929)
+// then computes `innovVelPos[5] = stateStruct.position.z - velPosObs[5]`,
+// i.e. `position.z - (-hgtMea) = position.z + hgtMea`. This port's
+// fuse_baro_height() takes `baro_altitude_m` as that same positive-up
+// reading (matching TECS's own `baro_altitude_m` convention exactly, see
+// "BaroSample vs. a bare scalar" below) and computes the innovation as
+// `state.position.z + baro_altitude_m` directly - algebraically identical
+// to upstream's `position.z - velPosObs[5]` via `velPosObs[5] =
+// -baro_altitude_m`, not a new formula.
+//
+// baroHgtOffset IS ALWAYS ZERO IN A BARO-ONLY PORT - A VERIFIED CONSEQUENCE,
+// NOT A SEPARATE EXCLUSION: `baroHgtOffset` (AP_NavEKF3_core.h:1345) is only
+// ever written by `calcFiltBaroOffset()`, and that call is itself gated by
+// `if (activeHgtSource != AP_NavEKF_Source::SourceZ::BARO)` (~line 1291) -
+// i.e. it exists solely to avoid a jump when SWITCHING TO baro from some
+// other active height source. This port has no other height source and no
+// source-selection state machine at all (see exclusions below) - baro is
+// unconditionally the only source, so that condition is never true and
+// baroHgtOffset is never written, remaining at its zero-initialized default
+// forever. `hgtMea = baroDataDelayed.hgt - baroHgtOffset` therefore
+// degenerates exactly to `baroDataDelayed.hgt` for this port - not an
+// approximation, a verified consequence of the baro-only exclusion already
+// named below, so no separate baro_hgt_offset field is added.
+//
+// BaroSample vs. a bare scalar (the ticket's own open question, per its
+// "New input needed" section): checked both established precedents directly
+// before deciding. GpsSample/MagSample (this file's own phase 2/5 structs)
+// exist because each bundles MULTIPLE distinct fields (velocity_ned +
+// position_ne; a single mag vector needing its own struct only for
+// consistency with GpsSample's precedent) AND, in GpsSample's case, made a
+// real documented convention decision (already-projected local-NE position)
+// worth anchoring a named type to. A single barometric altitude reading is
+// exactly one ftype with no such bundling or convention decision to anchor -
+// TECS's own precedent (`TecsInputs::baro_altitude_m`, modules/ap-tecs/
+// include/fwcpp/tecs/tecs.hpp:417, a bare float field reading directly from
+// upstream's own `AP::baro().get_altitude()`) is the closer match: a single
+// scalar sensor reading passed as a bare parameter, no wrapper type. This
+// phase follows that precedent - fuse_baro_height() takes `ftype
+// baro_altitude_m` directly, matching TECS's own field name for exactly the
+// same physical quantity, deliberately NOT adding a one-field BaroSample
+// struct that would carry no information a bare parameter doesn't already
+// convey.
+//
+// WHAT THIS PHASE BUILDS:
+//   - hgt_test_ratio(baro_altitude_m): the real hgtTestRatio formula (~line
+//     934, `sq(innovVelPos[5]) / (sq(MAX(0.01*_hgtInnovGate,1.0)) *
+//     varInnovVelPos[5])`), public (like gps_vel_test_ratio()/gps_pos_test_
+//     ratio()/mag_test_ratio()) so tests can verify it independently. Unlike
+//     mag_test_ratio() (which reads already-populated members) but LIKE
+//     gps_vel_test_ratio()/gps_pos_test_ratio() (which recompute fresh),
+//     this recomputes the innovation from the given `baro_altitude_m`
+//     itself - height fusion has exactly one obsIndex, the same
+//     single-fresh-sample shape as GPS's per-call recomputation, not mag's
+//     multi-axis stored-member shape.
+//   - baro_hgt_obs_variance(): the real `posDownObsNoise = sq(constrain_
+//     ftype(frontend->_baroAltNoise, 0.1f, 100.0f))` formula (~line
+//     1376-1377), reusing the ALREADY-EXISTING `baro_alt_noise` field
+//     (added in phase 1, defaulted to the real ALT_M_NSE_DEFAULT=3.0 for
+//     ArduPlane specifically, verified again this round directly against
+//     AP_NavEKF3.cpp's APM_BUILD_ArduPlane block, ~line 78) rather than
+//     adding a second noise field - phase 1's own field was already exactly
+//     what this phase needs, unused until now. Public, like the GPS/mag
+//     obs_variance() functions, so tests can verify it independently.
+//   - hgt_innov_gate_pct: new public field, defaulted to the real
+//     HGT_I_GATE_DEFAULT = 500 (AP_NavEKF3.cpp, verified identical across
+//     every APM_BUILD_TYPE #elif block including ArduPlane's own,
+//     ~line 39/65/91/117) - matching VEL_I_GATE_DEFAULT/POS_I_GATE_DEFAULT's
+//     own 500 and DIFFERENT from MAG_I_GATE_DEFAULT's 300, exactly as the
+//     ticket predicted. Same "AP_Param not wired in yet" treatment as this
+//     file's other gate parameters.
+//   - last_hgt_pass_time_s: elapsed-time bookkeeping (upstream:
+//     lastHgtPassTime_ms), same caller-supplied-time convention as
+//     last_vel_pass_time_s/last_pos_pass_time_s (CPP-058).
+//   - A new, SEPARATE `kBaroFusionTimeoutS = 10.0` file-local constant in
+//     ekf_core.cpp (upstream: `hgtRetryTimeMode0_ms = 10000`, AP_NavEKF3.h:
+//     495) - see "A REAL CONSTANT-IDENTITY CHECK" below for why this is
+//     deliberately NOT a reuse of the existing kGpsFusionTimeoutS constant
+//     despite sharing its numeric value.
+//   - reset_height(baro_altitude_m, now_s): a reduced-scope port of
+//     ResetHeight() covering ONLY state.position.z + P[9][9] - see "A REAL
+//     DIVERGENCE FOUND IN ResetHeight()'S OWN BODY" below for what upstream
+//     ADDITIONALLY does that this deliberately does not reproduce.
+//   - fuse_baro_height(baro_altitude_m, dt_ekf_avg, now_s=0): the obsIndex==5
+//     caller, wired exactly like fuse_gps_velocity()/fuse_gps_position() -
+//     gate check first (state/P completely untouched on failure), elapsed-
+//     time timeout check on a gate failure (reset_height() instead of a
+//     plain skip once timed out), fuse_direct_state_observation(9, ...) on a
+//     gate pass, last_hgt_pass_time_s stamped only when the fusion actually
+//     applied (same "gate passed AND healthyFusion passed" stricter
+//     convention CPP-058's own banner already established and named as a
+//     real, disclosed divergence from upstream's own gate-pass-only
+//     condition).
+//
+// RETURN TYPE - bool, NOT fuse_gps_*()'s int axes-fused count, AND NOT
+// fuse_magnetometer()'s "three distinct failure modes" bool: height fusion
+// has exactly ONE obsIndex (unlike GPS's 2-3 sequentially-fused axes) and
+// exactly ONE failure mode worth distinguishing from success (the gate,
+// gated on hgt_test_ratio() - there is no per-axis "some axes fused, some
+// didn't" partial-success state to count, and no CovarianceInit()-triggering
+// bad-conditioning path the way mag fusion has). A plain bool - true iff
+// fuse_direct_state_observation() actually applied the correction - is
+// therefore the honest return type for this specific primitive, not a
+// borrowed shape from either sibling.
+//
+// A REAL CONSTANT-IDENTITY CHECK (per the ticket's own instruction to verify
+// directly, not assume): `posRetryTimeUseVel_ms = 10000` (AP_NavEKF3.h:493,
+// already this port's kGpsFusionTimeoutS) and `hgtRetryTimeMode0_ms = 10000`
+// (AP_NavEKF3.h:495) are verified to be two TEXTUALLY SEPARATE upstream
+// `const uint16_t` declarations that simply happen to share the same
+// numeric value - not one shared constant used for two purposes. Confirmed
+// further by reading the real height-timeout-selection call site
+// (selectHeightForFusion()'s own end, ~line 1404-1411): `hgtRetryTime_ms =
+// ((useGpsVertVel || useExtNavVel) && !velTimeout) ? hgtRetryTimeMode0_ms :
+// hgtRetryTimeMode12_ms;` - Mode0 (10000ms, "WITH vertical velocity
+// measurement") is the applicable branch here because this port always
+// assumes GPS velocity aiding is available (`useGpsVertVel` always true in
+// upstream's own terms - the same always-has-GPS-velocity-aiding assumption
+// CPP-058's own banner already established and named for its own
+// posRetryTimeUseVel_ms/posRetryTimeNoVel_ms branch selection). The sibling
+// `hgtRetryTimeMode12_ms = 5000` (AP_NavEKF3.h:496, the without-vertical-
+// velocity case) is therefore never the applicable branch here and is not
+// ported, same reasoning as CPP-058's posRetryTimeNoVel_ms exclusion. This
+// phase adds its OWN `kBaroFusionTimeoutS` constant rather than reusing
+// kGpsFusionTimeoutS, preserving the real upstream fact that these are two
+// independently-declared constants that could in principle diverge in a
+// future upstream version, even though they are numerically identical
+// today.
+//
+// A REAL DIVERGENCE FOUND IN ResetHeight()'S OWN BODY - EXACTLY THE KIND OF
+// THING THE TICKET ASKED TO CHECK FOR (per CPP-058's own "ResetPosition()'s
+// caller-side glitch-radius override" precedent for what shape of surprise
+// to expect): ResetHeight() (AP_NavEKF3_PosVelFusion.cpp lines 287-355) is
+// NOT simply "ResetPosition()'s shape applied to one axis". After the
+// position.z/P[9][9] work this phase DOES reproduce, it ALSO unconditionally
+// zeroes P[6][6] (vertical velocity covariance, `zeroRows(P,6,6);
+// zeroCols(P,6,6);`, ~line 344-345) and re-seeds it (`P[6][6] =
+// sq(frontend->_gpsVertVelNoise);` in the non-ExtNav branch, ~line 353-355),
+// AND conditionally overwrites state.velocity.z itself (~line 328-338):
+// to GPS's reported vertical velocity if `inFlight && (gpsIsInUse ||
+// badIMUdata) && useVelZSource(GPS) && gpsDataNew.have_vz &&` a recency
+// check; to exactly 0 if `onGround`; left UNCHANGED in the remaining case
+// (in flight, no fresh GPS vz available). This is a real, verified
+// divergence, not assumed from the ticket's own framing (which only
+// predicted "it may have its own real divergences," not what shape) -
+// upstream's real height reset touches a SECOND, DIFFERENT state block
+// (vertical velocity) that this ticket's own axis (position.z) does not
+// obviously imply.
+//
+// DELIBERATELY NOT REPRODUCED, AND WHY: this port's reset_height() touches
+// ONLY state.position.z and P[9][9] - the velocity.z/P[6][6] touch above is
+// excluded, for three compounding reasons: (1) the ticket's own instruction
+// is explicit - "a reduced-scope reset_height() (state+covariance only)" -
+// read at the same granularity reset_position()/reset_velocity() (CPP-058)
+// were each scoped to touch only THEIR OWN axis's state+covariance, never
+// spilling into the other's; reset_velocity() does not touch position.x/y
+// on a velocity reset, so reset_height() touching velocity.z on a HEIGHT
+// reset would be the one asymmetric exception, not the established pattern;
+// (2) upstream's own condition for what to assign is built entirely from
+// state this port does not model (`inFlight`, `gpsIsInUse`, `onGround`,
+// `badIMUdata` - already-named exclusions since phase 1/3/4) with no
+// principled substitute available; (3) unlike ResetPosition()'s caller-side
+// P-override (CPP-058's own precedent - a real override this port
+// deliberately did NOT follow because it belonged to still-excluded
+// orchestration code outside ResetPosition() itself), this P[6][6] touch is
+// genuinely PART OF ResetHeight()'s own body, at the same "which reduced
+// scope does the ticket's own instruction draw" line CPP-058 already had to
+// draw for reset_position()/reset_velocity() individually. REAL, NAMED
+// CONSEQUENCE: after a height-timeout-triggered reset in this port,
+// P[6][6] (vertical velocity uncertainty) is NOT widened back to a fresh
+// sq(gps_vert_vel_noise) floor the way upstream's real ResetHeight() always
+// does - a real, disclosed gap for a future phase that wants closer
+// fidelity to revisit, not silently absorbed into today's behavior.
+//
+// EXPLICITLY OUT OF SCOPE (each named with its real upstream trigger, per
+// the ticket's own acceptance criterion):
+//   - selectHeightForFusion()'s full multi-source branching - this ticket
+//     is BARO-ONLY, this port's real intended primary height source for a
+//     fixed-wing vehicle. Verified directly this round (grepping this
+//     port's own module tree): no rangefinder or external-nav model exists
+//     anywhere in this port, confirming the ticket's own expectation.
+//     Named exclusions: the rangefinder branch (`activeHgtSource ==
+//     RANGEFINDER`, terrain-relative height via `terrainState`,
+//     `_terrGradMax`/`_rngNoise`/`rngOnGnd`, ~line 1338-1360); the
+//     GPS-as-height-source branch (`activeHgtSource == GPS`,
+//     `gpsHgtAccuracy`, ~line 1360-1367); and the `SourceZ::NONE` "fuse a
+//     constant height of 0 at 14Hz" branch (~line 1383-1394) - no
+//     source-selection state machine (`AP_NavEKF_Source`/`sources.
+//     getPosZSource()`) exists in this port at all, baro is unconditionally
+//     this ticket's only height source.
+//   - Ground-effect baro scaling (`dal.get_takeoff_expected()`/
+//     `get_touchdown_expected()`, `frontend->gndEffectBaroScaler`, ~line
+//     1378-1380) - no takeoff/touchdown-expected state modeled in this
+//     port.
+//   - `EKF_origin`/`ekfGpsRefHgt`/`_originHgtMode` height-datum-matching
+//     offset adjustments (`hgtMea += (float)(ekfGpsRefHgt - 0.01 *
+//     (double)EKF_origin.alt)`, ~line 1373-1375, and the whole
+//     `correctEkfOriginHeight()` call, ~line 1300-1305) - already an
+//     established exclusion pattern (same reasoning as GpsSample's
+//     already-projected-position convention, CPP-056's banner).
+//   - `baroHgtOffset`/`calcFiltBaroOffset()` - see "baroHgtOffset IS ALWAYS
+//     ZERO" above: a verified consequence of the baro-only exclusion, not a
+//     separately-triggered exclusion of its own.
+//   - `hgtInnovFiltState`'s on-ground pre-flight-health-check filtering
+//     (~line 963-969) - a diagnostic-only value with no consumer in this
+//     port (same "write-only diagnostic" treatment as `faultStatus.bad_*`
+//     fields, CPP-059's own precedent).
+//   - The `onGroundNotNavigating`/`AID_NONE`-driven `maxTestRatio=3.0`
+//     relaxation (~line 940-941: `const bool onGroundNotNavigating =
+//     (PV_AidingMode == AID_NONE) && onGround; const float maxTestRatio =
+//     onGroundNotNavigating ? 3.0f : 1.0f;`) - depends on both `onGround`
+//     and the aiding-mode state machine, neither modeled in this port
+//     (same reasoning CPP-057/CPP-058 already used to exclude AID_NONE's
+//     bypass/reset paths). hgt_test_ratio()'s pass condition is
+//     unconditionally `< 1.0`, matching the non-onGround branch always.
+//   - The glitch-radius soft-accept branch inside the height gate (~line
+//     945-951: `else if ((frontend->_gpsGlitchRadiusMax <= 0) &&
+//     !onGroundNotNavigating && (activeHgtSource ==
+//     AP_NavEKF_Source::SourceZ::GPS))`) - already-established dead code
+//     since CPP-057 (GLITCH_RADIUS_DEFAULT=25, positive, across every
+//     APM_BUILD_TYPE block), doubly so here since this branch additionally
+//     requires `activeHgtSource == GPS`, never true in a baro-only port.
+//   - "Detect changes in source and reset height" (~line 1398-1402: `if
+//     ((activeHgtSource != prevHgtSource) && fuseHgtData) { prevHgtSource =
+//     activeHgtSource; ResetPositionD(-hgtMea); }`) - dead code for a
+//     fixed, permanently-BARO source (`activeHgtSource` never changes, so
+//     this condition is never true). Note this calls `ResetPositionD()`
+//     (lines 263-286), a THIRD, textually distinct reset function from
+//     `ResetHeight()` (lines 287-355) - verified directly to avoid
+//     conflating the two; moot either way since this branch never fires
+//     for this port's fixed single-source configuration.
+//   - `ResetHeight()`'s velocity.z/P[6][6] touch - see "A REAL DIVERGENCE
+//     FOUND" and "DELIBERATELY NOT REPRODUCED" above.
+//   - `ResetHeight()`'s terrain-state update (~line 297-302) - already an
+//     established phase-1 exclusion (simplification 9, no terrain model).
+//   - `ResetHeight()`'s output-buffer/complementary-filter touches
+//     (`outputDataNew`/`outputDataDelayed`/`storedOutput[]`/
+//     `vertCompFiltState`, ~line 293-296, 303-306, 340, 350) - already an
+//     established exclusion since phase 1/4 (no output buffer in this
+//     port).
+//   - `ResetHeight()`'s `posResetD`/`lastPosResetD_ms` diagnostic
+//     bookkeeping (~line 289, 309-312) - write-only diagnostic fields,
+//     already-established exclusion pattern (velResetNE/posResetNE,
+//     CPP-058's own precedent).
+// ============================================================================
+
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -1153,6 +1430,25 @@ public:
     // limit parameters.
     ftype mag_innov_gate_pct = static_cast<ftype>(300);  // MAG_I_GATE_DEFAULT
 
+    // CPP-062 phase 8: real HGT_I_GATE_DEFAULT gate parameter (AP_NavEKF3.cpp
+    // _hgtInnovGate, AP_Int16 "Percentage number of standard deviations" -
+    // same _pct convention as the GPS/mag gates above), verified identical
+    // (500) across every APM_BUILD_TYPE #elif block including ArduPlane's
+    // own (~line 39, 65, 91, 117) - matching VEL_I_GATE_DEFAULT/
+    // POS_I_GATE_DEFAULT's own 500, DIFFERENT from MAG_I_GATE_DEFAULT's 300.
+    // Same "AP_Param not wired in yet" treatment as this file's other gate
+    // parameters. See this file's "CPP-062, PHASE 8" banner.
+    ftype hgt_innov_gate_pct = static_cast<ftype>(500);  // HGT_I_GATE_DEFAULT
+
+    // CPP-062 phase 8: upstream lastHgtPassTime_ms (AP_NavEKF3_core.h - the
+    // same bookkeeping family as lastVelPassTime_ms/lastGpsPosPassTime_ms
+    // above), elapsed-time bookkeeping used to detect a sustained baro
+    // outage (see this file's "CPP-062, PHASE 8" banner). Seconds, same
+    // caller-supplied-time convention as last_vel_pass_time_s/
+    // last_pos_pass_time_s - stamped from fuse_baro_height()'s own `now_s`
+    // parameter, never a real-time-clock read.
+    ftype last_hgt_pass_time_s = 0;  // upstream: lastHgtPassTime_ms
+
     // upstream: NavEKF3_core::InitialGyroBiasUncertainty(),
     // AP_NavEKF3_GyroBias.cpp - a fixed 2.5 deg/sec, not vehicle-specific
     // despite its own doc comment claiming otherwise (read directly:
@@ -1351,6 +1647,71 @@ public:
     // sequentially) completed without either covariance-reset abort path
     // firing.
     bool fuse_magnetometer(const MagSample& mag, const GyroSample& gyro, ftype dt_ekf_avg);
+
+    // CPP-062 phase 8. upstream: R_OBS[5]'s baro branch,
+    // selectHeightForFusion(), AP_NavEKF3_PosVelFusion.cpp ~line 1376-1377 -
+    // `posDownObsNoise = sq(constrain_ftype(frontend->_baroAltNoise, 0.1f,
+    // 100.0f))`. Reuses the already-existing baro_alt_noise field (phase 1,
+    // ALT_M_NSE_DEFAULT=3.0 for ArduPlane) rather than adding a second noise
+    // field - see this file's "CPP-062, PHASE 8" banner. Public (like the
+    // GPS/mag obs_variance() functions) so tests can verify it
+    // independently.
+    [[nodiscard]] ftype baro_hgt_obs_variance() const;
+
+    // CPP-062 phase 8. upstream: hgtTestRatio, AP_NavEKF3_PosVelFusion.cpp
+    // ~line 934, `sq(innovVelPos[5]) / (sq(MAX(0.01*_hgtInnovGate,1.0)) *
+    // varInnovVelPos[5])` - see this file's "CPP-062, PHASE 8" banner for
+    // the full sign-convention derivation of innovVelPos[5] from
+    // `baro_altitude_m` (upstream's positive-up hgtMea convention) and for
+    // why this recomputes fresh from the given reading (GPS-gate shape)
+    // rather than reading stored members (mag-gate shape). Pass if the
+    // returned ratio is < 1.0 (upstream: `if (hgtTestRatio < maxTestRatio)`
+    // with maxTestRatio unconditionally 1.0 here - the onGroundNotNavigating
+    // 3.0 relaxation does not apply, see banner).
+    [[nodiscard]] ftype hgt_test_ratio(ftype baro_altitude_m) const;
+
+    // CPP-062 phase 8. upstream: NavEKF3_core::ResetHeight(),
+    // AP_NavEKF3_PosVelFusion.cpp lines 287-355 - reduced to ONLY
+    // state.position.z + P[9][9], matching reset_position()'s/
+    // reset_velocity()'s own established per-axis reduction (CPP-058). See
+    // this file's "CPP-062, PHASE 8" banner ("A REAL DIVERGENCE FOUND IN
+    // ResetHeight()'S OWN BODY") for a real, verified divergence found and
+    // deliberately NOT followed here: upstream's real ResetHeight() ALSO
+    // unconditionally resets P[6][6] (vertical velocity covariance) and
+    // conditionally overwrites state.velocity.z, gated on state
+    // (inFlight/gpsIsInUse/onGround) this port does not model. Directly
+    // overwrites state.position.z from the given `baro_altitude_m`
+    // (upstream: `stateStruct.position.z = -hgtMea;`) and re-seeds P[9][9]
+    // to baro_hgt_obs_variance() (upstream: `P[9][9] = posDownObsNoise;`).
+    // Stamps last_hgt_pass_time_s = now_s, matching upstream's own
+    // `lastHgtPassTime_ms = imuSampleTime_ms;` at ResetHeight()'s own
+    // timeout-clearing line (~line 316-317) - a reset counts as "just
+    // passed", so the timeout clock restarts from here, same reasoning as
+    // reset_velocity()/reset_position().
+    void reset_height(ftype baro_altitude_m, ftype now_s);
+
+    // CPP-062 phase 8. upstream: FuseVelPosNED()'s obsIndex==5 path, wired
+    // exactly like fuse_gps_velocity()/fuse_gps_position() (CPP-057/
+    // CPP-058): gated by hgt_test_ratio() BEFORE any state/P is touched - a
+    // failing gate (ratio >= 1.0) leaves P/state completely untouched
+    // (upstream: `else { fuseHgtData = false; }`, ~line 979), UNLESS the
+    // elapsed time since last_hgt_pass_time_s has reached the real 10.0s
+    // hgtRetryTimeMode0_ms timeout (a NEW, separate constant from
+    // fuse_gps_velocity()/fuse_gps_position()'s own kGpsFusionTimeoutS - see
+    // this file's "CPP-062, PHASE 8" banner "A REAL CONSTANT-IDENTITY
+    // CHECK" for why these are not the same constant despite sharing a
+    // value), in which case reset_height() is called instead (not a fusion -
+    // matches upstream's own `ResetHeight(); fuseHgtData = false;`, ~line
+    // 975-977). On a gate pass, fuses state_index=9 via
+    // fuse_direct_state_observation() and stamps last_hgt_pass_time_s only
+    // if the fusion actually applied - same "gate passed AND healthyFusion
+    // passed" stricter convention as fuse_gps_velocity()/fuse_gps_position()
+    // (CPP-058's own named divergence from upstream's gate-pass-only
+    // condition). Returns a plain bool, NOT an axes-fused count or a
+    // three-outcome collapse - see banner's "RETURN TYPE" note for why
+    // that's the honest shape for a single-obsIndex primitive with exactly
+    // one failure mode.
+    bool fuse_baro_height(ftype baro_altitude_m, ftype dt_ekf_avg, ftype now_s = ftype(0));
 
 private:
     void constrain_states(ftype dt_ekf_avg);   // upstream: NavEKF3_core::ConstrainStates()

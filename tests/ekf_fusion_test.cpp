@@ -69,6 +69,41 @@
 //       once GPS reports a value matching where the vehicle actually is,
 //       confirms normal CPP-057 gated fusion resumes (n_fused > 0
 //       again).
+//
+// CPP-062 phase 8 adds (see ekf_core.hpp's "CPP-062, PHASE 8" banner for the
+// full scope/exclusions/corrections discussion) - baro height fusion at
+// state_index=9, mirroring the GPS position tests above at a single axis:
+//   12. baro_hgt_obs_variance()/hgt_test_ratio() are verified against
+//       hand-computed expected values, the same treatment as the GPS/mag
+//       formula tests above.
+//   13. A baro reading EXACTLY consistent with the current position.z state
+//       (zero innovation) leaves state.position.z exactly unchanged -
+//       mirrors ekf_mag_fusion_test.cpp's own "a reading consistent with the
+//       current state leaves state exactly unchanged" test shape.
+//   14. A baro reading inconsistent-but-not-extreme (comfortably inside the
+//       real HGT_I_GATE_DEFAULT=500 gate) measurably corrects
+//       state.position.z toward the reading over repeated fusion calls -
+//       the ticket's own explicit "(b)" acceptance criterion.
+//   15. A wild baro glitch, engineered to genuinely exceed the real gate,
+//       is rejected: fuse_baro_height() returns false and P/state are left
+//       byte-for-byte untouched, with NO reset triggered (elapsed time
+//       since the last pass is well under the 10.0s hgtRetryTimeMode0_ms
+//       threshold) - the gate-failure-vs-reset distinction the ticket
+//       explicitly asks not to conflate.
+//   16. A borderline-inside-gate sample still fuses normally - regression
+//       coverage against #14, same shape as the GPS borderline tests.
+//   17. Regression coverage: a gate-failing sample within the 10.0s
+//       hgtRetryTimeMode0_ms window still behaves exactly like #15 above -
+//       P/state byte-for-byte untouched, no reset.
+//   18. The real acceptance-criterion scenario: a sustained baro "outage"
+//       (a stuck sensor reporting one fixed, wildly wrong altitude) across
+//       a >10s span under clean dynamics. Every check before the 10.0s mark
+//       leaves P/state untouched. The first check at/after the 10.0s mark
+//       produces a HARD reset: state.position.z jumps directly to
+//       -baro_altitude_m (not a gradual blend) and P[9][9] is re-seeded to
+//       baro_hgt_obs_variance() exactly. One further check afterward, once
+//       the baro reading matches the vehicle's actual altitude, confirms
+//       normal gated fusion resumes.
 
 #include <array>
 #include <cmath>
@@ -769,4 +804,278 @@ TEST_CASE("EkfCore: a sustained GPS outage past the 10.0s timeout triggers a har
     const int n_pos_after = ekf.fuse_gps_position(gps_after, dt, elapsed_s);
     REQUIRE(n_vel_after > 0);
     REQUIRE(n_pos_after > 0);
+}
+
+// ============================================================================
+// CPP-062 PHASE 8: baro height fusion. See ekf_core.hpp's "CPP-062, PHASE 8"
+// banner for the full scope/exclusions/corrections discussion.
+// ============================================================================
+
+TEST_CASE("baro_hgt_obs_variance/hgt_test_ratio: match upstream's real posDownObsNoise/hgtTestRatio formulas",
+          "[ekf_core][fusion][cpp062]") {
+    EkfCore ekf;  // baro_alt_noise=3.0 (ALT_M_NSE_DEFAULT), hgt_innov_gate_pct=500 (HGT_I_GATE_DEFAULT), phase-1 defaults
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+
+    // upstream: posDownObsNoise = sq(constrain_ftype(3.0, 0.1, 100.0)) = 9.0
+    REQUIRE(static_cast<double>(ekf.baro_hgt_obs_variance()) == Catch::Approx(9.0));
+
+    // Manually controlled P[9][9] (not covariance_init()) for a
+    // hand-computable expected ratio, same convention as the GPS/mag
+    // formula tests above.
+    ekf.P[9][9] = ftype(1.0);
+    ekf.state.position.z = ftype(0.0);
+    const ftype baro_altitude_m = ftype(10.0);  // positive-up reading, 10m above origin
+
+    // upstream: innovVelPos[5] = position.z - velPosObs[5] = position.z -
+    // (-hgtMea) = position.z + hgtMea = 0 + 10 = 10. varInnovVelPos[5] =
+    // P[9][9] + R_OBS_DATA_CHECKS[5] = 1.0 + 9.0 = 10.0. gate =
+    // MAX(0.01*500,1.0) = 5.0, sq(gate) = 25. ratio = 100/(25*10) = 0.4.
+    const double expected_ratio = 100.0 / (25.0 * 10.0);
+    REQUIRE(static_cast<double>(ekf.hgt_test_ratio(baro_altitude_m)) == Catch::Approx(expected_ratio).margin(1e-6));
+}
+
+TEST_CASE("fuse_baro_height: a baro reading exactly consistent with the current altitude leaves state unchanged",
+          "[ekf_core][fusion][cpp062]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.covariance_init(ftype(0.01));
+    ekf.state.position.z = ftype(-100.0);  // 100m above origin, NED-down convention
+
+    const ftype baro_altitude_m = ftype(100.0);  // exactly consistent positive-up reading
+    const ftype p99_before = ekf.P[9][9];
+
+    const bool applied = ekf.fuse_baro_height(baro_altitude_m, ftype(0.01));
+
+    REQUIRE(applied);
+    // Zero innovation -> zero correction regardless of Kalman gain -
+    // state.position.z must be exactly unchanged (same convention as
+    // ekf_mag_fusion_test.cpp's own "consistent reading leaves state
+    // exactly unchanged" test).
+    REQUIRE(static_cast<double>(ekf.state.position.z) == Catch::Approx(-100.0).margin(1e-9));
+    // P[9][9] still shrinks (information is gained even from a
+    // zero-innovation update - the Kalman gain is nonzero, only the
+    // innovation itself is zero).
+    REQUIRE(static_cast<double>(ekf.P[9][9]) < static_cast<double>(p99_before));
+}
+
+TEST_CASE("fuse_baro_height: an inconsistent-but-not-extreme reading measurably corrects state.position.z "
+          "over repeated fusion",
+          "[ekf_core][fusion][cpp062]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.covariance_init(ftype(0.01));
+    ekf.state.position.z = ftype(-100.0);  // starts at 100m above origin
+
+    // Comfortably inside the real HGT_I_GATE_DEFAULT=500 gate: P[9][9]=9.0
+    // (covariance_init()'s own real baro_alt_noise-derived value), r_obs=9.0,
+    // varInnov=18.0, gate_sq=25 -> pass threshold is innov^2 < 450, i.e.
+    // |innov| < 21.2 - a 5m offset (innov=5) is nowhere near that boundary,
+    // "inconsistent but not extreme" per the ticket's own wording.
+    const ftype baro_altitude_m = ftype(105.0);  // sensor reads 105m - 5m high
+    REQUIRE(static_cast<double>(ekf.hgt_test_ratio(baro_altitude_m)) < 1.0);
+
+    double prev_err = std::abs(static_cast<double>(ekf.state.position.z) - (-105.0));
+    for (int i = 0; i < 10; ++i) {
+        const bool applied = ekf.fuse_baro_height(baro_altitude_m, ftype(0.01));
+        REQUIRE(applied);
+        const double err = std::abs(static_cast<double>(ekf.state.position.z) - (-105.0));
+        // Each repeated fusion against the same consistent reading must
+        // move state.position.z monotonically closer to -105 (textbook
+        // convergent Kalman behavior against a fixed observation).
+        REQUIRE(err <= prev_err);
+        prev_err = err;
+    }
+    // After repeated fusion the state must have moved measurably (not a
+    // no-op) toward the observation - the ticket's own explicit
+    // acceptance criterion.
+    REQUIRE(prev_err < 0.5);
+}
+
+TEST_CASE("fuse_baro_height: a wild baro glitch fails the real hgtTestRatio gate and leaves state/P untouched, "
+          "with no reset",
+          "[ekf_core][fusion][cpp062]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.P[9][9] = ftype(1.0);
+    // varInnov = 1.0+9.0 = 10.0; pass threshold is innov^2 < 250 (see the
+    // formula test above), i.e. |innov| < 15.81.
+    ekf.state.position.z = ftype(0.0);
+
+    const ftype baro_altitude_m = ftype(100.0);  // innov = 100, way over 15.81
+    REQUIRE(static_cast<double>(ekf.hgt_test_ratio(baro_altitude_m)) > 1.0);
+
+    const Matrix24 p_before = ekf.P;
+    const StateVector state_before = ekf.state;
+
+    // now_s defaults to 0, last_hgt_pass_time_s defaults to 0 -> elapsed
+    // time is 0, well under the 10.0s hgtRetryTimeMode0_ms threshold, so
+    // this must be a plain gate failure, NOT a timeout-triggered reset -
+    // the distinction the ticket explicitly asks not to conflate.
+    const bool applied = ekf.fuse_baro_height(baro_altitude_m, ftype(0.01));
+
+    REQUIRE_FALSE(applied);
+    for (int i = 0; i < 24; ++i) {
+        for (int j = 0; j < 24; ++j) {
+            REQUIRE(ekf.P[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] ==
+                    p_before[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]);
+        }
+    }
+    REQUIRE(ekf.state.position.z == state_before.position.z);
+    REQUIRE(ekf.state.velocity.z == state_before.velocity.z);
+    REQUIRE(ekf.state.quat.q1 == state_before.quat.q1);
+}
+
+TEST_CASE("fuse_baro_height: a borderline-inside-gate sample still fuses normally", "[ekf_core][fusion][cpp062]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.P[9][9] = ftype(1.0);
+    ekf.state.position.z = ftype(0.0);
+
+    const ftype baro_altitude_m = ftype(15.7);  // innov = 15.7, just under 15.81
+    const ftype ratio = ekf.hgt_test_ratio(baro_altitude_m);
+    REQUIRE(static_cast<double>(ratio) < 1.0);
+    REQUIRE(static_cast<double>(ratio) > 0.9);  // genuinely borderline, not trivially inside the gate
+
+    const bool applied = ekf.fuse_baro_height(baro_altitude_m, ftype(0.01));
+
+    REQUIRE(applied);
+    REQUIRE(static_cast<double>(ekf.state.position.z) < 0.0);  // moved toward -15.7
+}
+
+TEST_CASE("fuse_baro_height: a gap under the 10.0s hgtRetryTimeMode0_ms timeout does not trigger a reset "
+          "(regression)",
+          "[ekf_core][fusion][cpp062]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.covariance_init(ftype(0.01));
+    ekf.state.position.z = ftype(-50.0);
+
+    // Establish a successful pass at now_s = 0 - anchors last_hgt_pass_time_s = 0.
+    REQUIRE(ekf.fuse_baro_height(ftype(50.0), ftype(0.01), ftype(0.0)));
+
+    // Same wild-glitch magnitude class as the gate test above, genuinely
+    // failing hgt_test_ratio() - but at now_s = 9.0, i.e. elapsed = 9.0s,
+    // still inside the 10.0s hgtRetryTimeMode0_ms window.
+    const ftype glitch_baro_altitude_m = ftype(500.0);
+    REQUIRE(static_cast<double>(ekf.hgt_test_ratio(glitch_baro_altitude_m)) > 1.0);
+
+    const Matrix24 p_before = ekf.P;
+    const StateVector state_before = ekf.state;
+
+    const bool applied = ekf.fuse_baro_height(glitch_baro_altitude_m, ftype(0.01), ftype(9.0));
+
+    REQUIRE_FALSE(applied);
+    // No reset: P/state byte-for-byte untouched, exactly matching the
+    // gate-rejection behavior above - the timeout window has not yet
+    // elapsed, so the gate failure alone is still the only thing that
+    // happened.
+    for (int i = 0; i < 24; ++i) {
+        for (int j = 0; j < 24; ++j) {
+            REQUIRE(ekf.P[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] ==
+                    p_before[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]);
+        }
+    }
+    REQUIRE(ekf.state.position.z == state_before.position.z);
+}
+
+TEST_CASE("EkfCore: a sustained baro outage past the 10.0s hgtRetryTimeMode0_ms timeout triggers reset_height(), "
+          "and gated fusion resumes normally afterward",
+          "[ekf_core][fusion][cpp062]") {
+    // Same methodology as the analogous GPS sustained-outage test above:
+    // CLEAN dynamics (gravity-cancelling accel, zero rotation - state stays
+    // near its initial altitude, P grows only through ordinary process
+    // noise) so this isolates the timeout/reset wiring itself from the
+    // already-covered drift-vs-fusion behavior of the earlier tests.
+    const ftype dt = ftype(0.01);
+    const ftype outage_duration_s = ftype(13.0);  // comfortably past the 10.0s hgtRetryTimeMode0_ms threshold
+    const int total_steps = static_cast<int>(outage_duration_s / dt);
+    const int baro_check_period_steps = 100;  // attempt a baro check every 1.0s throughout the outage
+
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.state.position.z = ftype(0.0);
+    ekf.covariance_init(dt);
+
+    GyroSample gyro;
+    gyro.delta_angle_dt = dt;  // zero rotation throughout
+    AccelSample accel;
+    accel.delta_velocity = Vector3F(ftype(0), ftype(0), -kGravity * dt);  // clean: gravity-cancelling only
+    accel.delta_velocity_dt = dt;
+
+    // Establish a healthy pass at t = 0, right before the outage begins.
+    REQUIRE(ekf.fuse_baro_height(ftype(0.0), dt, ftype(0.0)));
+
+    // The "stuck sensor" reading - a wildly wrong altitude (-1000m,
+    // i.e. reporting the vehicle is 1000m BELOW its actual position),
+    // comfortably exceeding the real HGT_I_GATE_DEFAULT=500 gate against
+    // covariance that has grown over a real multi-second run.
+    const ftype stuck_baro_altitude_m = ftype(-1000.0);
+
+    ftype elapsed_s = ftype(0.0);
+    bool reset_seen = false;
+    ftype reset_at_s = ftype(0.0);
+
+    for (int step = 1; step <= total_steps; ++step) {
+        ekf.update_strapdown_equations_ned(gyro, accel, dt);
+        ekf.covariance_prediction(gyro, accel, dt);
+        elapsed_s += dt;
+
+        if (step % baro_check_period_steps != 0) {
+            continue;
+        }
+
+        if (!reset_seen) {
+            // Confirm this sample genuinely fails the real gate at every
+            // attempt throughout the outage.
+            REQUIRE(static_cast<double>(ekf.hgt_test_ratio(stuck_baro_altitude_m)) >= 1.0);
+        }
+
+        const Matrix24 p_before = ekf.P;
+        const StateVector state_before = ekf.state;
+
+        const bool applied = ekf.fuse_baro_height(stuck_baro_altitude_m, dt, elapsed_s);
+
+        if (!reset_seen && static_cast<double>(elapsed_s) < 10.0) {
+            // Still inside the timeout window: a gate failure alone -
+            // P/state left completely untouched.
+            REQUIRE_FALSE(applied);
+            for (int i = 0; i < 24; ++i) {
+                for (int j = 0; j < 24; ++j) {
+                    REQUIRE(ekf.P[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] ==
+                            p_before[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]);
+                }
+            }
+            REQUIRE(ekf.state.position.z == state_before.position.z);
+        } else if (!reset_seen) {
+            // The 10.0s timeout has now elapsed: this call must be a HARD
+            // reset, not a gradual Kalman blend - state.position.z jumps
+            // DIRECTLY to -stuck_baro_altitude_m and P[9][9] is re-seeded
+            // to baro_hgt_obs_variance() exactly.
+            reset_seen = true;
+            reset_at_s = elapsed_s;
+            REQUIRE_FALSE(applied);  // a reset does not count as a fusion
+            REQUIRE(static_cast<double>(ekf.state.position.z) ==
+                    Catch::Approx(-static_cast<double>(stuck_baro_altitude_m)).margin(1e-6));
+            REQUIRE(static_cast<double>(ekf.P[9][9]) ==
+                    Catch::Approx(static_cast<double>(ekf.baro_hgt_obs_variance())).margin(1e-9));
+            break;
+        }
+    }
+
+    REQUIRE(reset_seen);
+    REQUIRE(static_cast<double>(reset_at_s) >= 10.0);
+
+    // After the reset, normal gated fusion must resume working against the
+    // new baseline: one more second of clean dead reckoning from the
+    // just-reset state, followed by a baro reading matching wherever the
+    // vehicle now actually is, should PASS the gate and fuse normally.
+    for (int step = 0; step < baro_check_period_steps; ++step) {
+        ekf.update_strapdown_equations_ned(gyro, accel, dt);
+        ekf.covariance_prediction(gyro, accel, dt);
+        elapsed_s += dt;
+    }
+    const ftype baro_altitude_after = -ekf.state.position.z;  // matches current altitude exactly
+
+    const bool applied_after = ekf.fuse_baro_height(baro_altitude_after, dt, elapsed_s);
+    REQUIRE(applied_after);
 }

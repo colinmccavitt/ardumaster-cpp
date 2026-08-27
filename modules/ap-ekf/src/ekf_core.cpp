@@ -103,6 +103,18 @@ constexpr ftype kGpsPosVarAccScale = static_cast<ftype>(0.05f);    // AP_NavEKF3
 // timeout in this port.
 constexpr ftype kGpsFusionTimeoutS = static_cast<ftype>(10.0);  // posRetryTimeUseVel_ms
 
+// CPP-062 phase 8. upstream: AP_NavEKF3.h:495 - `const uint16_t
+// hgtRetryTimeMode0_ms = 10000;`, verified directly to be a TEXTUALLY
+// SEPARATE upstream constant from posRetryTimeUseVel_ms above (AP_NavEKF3.h:
+// 493) - both real, hardcoded (NOT AP_Param) constants that simply happen to
+// share the same 10000ms value today. See ekf_core.hpp's "CPP-062, PHASE 8"
+// banner "A REAL CONSTANT-IDENTITY CHECK" for the full verification
+// (including confirming, at the real height-timeout-selection call site,
+// that Mode0 - "with vertical velocity measurement" - is genuinely the
+// applicable branch for this port's always-has-GPS-velocity-aiding
+// assumption). Deliberately NOT a reuse of kGpsFusionTimeoutS.
+constexpr ftype kBaroFusionTimeoutS = static_cast<ftype>(10.0);  // hgtRetryTimeMode0_ms
+
 // CPP-059 phase 5. upstream: AP_NavEKF3.h:500 - `const float
 // magVarRateScale = 0.005f;`, a real, hardcoded upstream constant (NOT an
 // AP_Param), verified directly. Same "not user-tunable" treatment as
@@ -1579,6 +1591,92 @@ bool EkfCore::fuse_magnetometer(const MagSample& mag, const GyroSample& gyro, ft
     }
 
     return true;
+}
+
+// ============================================================================
+// CPP-062 PHASE 8: baro height fusion. See ekf_core.hpp's "CPP-062, PHASE 8"
+// banner for the full scope/exclusions/corrections discussion - only
+// implementation-level notes live here.
+// ============================================================================
+
+// upstream: selectHeightForFusion()'s baro branch, AP_NavEKF3_PosVelFusion.cpp
+// ~line 1376-1377 - `posDownObsNoise = sq(constrain_ftype(frontend->
+// _baroAltNoise, 0.1f, 100.0f))`. Reuses the phase-1 baro_alt_noise field
+// directly (see ekf_core.hpp banner).
+ftype EkfCore::baro_hgt_obs_variance() const { return sq(clamp(baro_alt_noise, ftype(0.1), ftype(100.0))); }
+
+// upstream: hgtTestRatio, AP_NavEKF3_PosVelFusion.cpp ~line 929-934 -
+// `innovVelPos[5] = stateStruct.position.z - velPosObs[5]; varInnovVelPos[5]
+// = P[9][9] + R_OBS_DATA_CHECKS[5]; hgtTestRatio = sq(innovVelPos[5]) /
+// (sq(MAX(0.01*_hgtInnovGate,1.0)) * varInnovVelPos[5]);`. See ekf_core.hpp
+// banner's sign-convention derivation for why `state.position.z +
+// baro_altitude_m` is exactly upstream's `position.z - velPosObs[5]` here
+// (velPosObs[5] = -baro_altitude_m). R_OBS_DATA_CHECKS[5] == R_OBS[5] ==
+// posDownObsNoise unconditionally upstream (~line 774: `for (i=3;i<=5;i++)
+// R_OBS_DATA_CHECKS[i] = R_OBS[i];`) - reuses baro_hgt_obs_variance()
+// directly, no duplicate formula, same reasoning as gps_pos_test_ratio()
+// reusing gps_horiz_pos_obs_variance().
+ftype EkfCore::hgt_test_ratio(ftype baro_altitude_m) const {
+    const ftype r_obs = baro_hgt_obs_variance();
+    const ftype innov = state.position.z + baro_altitude_m;
+    const ftype var_innov = P[9][9] + r_obs;
+    const ftype gate = std::max(ftype(0.01) * hgt_innov_gate_pct, ftype(1.0));
+    return sq(innov) / (sq(gate) * var_innov);
+}
+
+// upstream: NavEKF3_core::ResetHeight(), AP_NavEKF3_PosVelFusion.cpp lines
+// 287-355 - reduced to ONLY state.position.z + P[9][9], see ekf_core.hpp's
+// "CPP-062, PHASE 8" banner ("A REAL DIVERGENCE FOUND IN ResetHeight()'S OWN
+// BODY" / "DELIBERATELY NOT REPRODUCED") for the real velocity.z/P[6][6]
+// touch upstream additionally makes and why this port does not reproduce it.
+// Overwrites state.position.z directly from the given baro_altitude_m
+// (upstream: `stateStruct.position.z = -hgtMea;`) and re-seeds P[9][9] to
+// baro_hgt_obs_variance() (upstream: `P[9][9] = posDownObsNoise;`). Stamps
+// last_hgt_pass_time_s = now_s, matching upstream's own `lastHgtPassTime_ms
+// = imuSampleTime_ms;` at ResetHeight()'s own timeout-clearing line (~line
+// 316-317).
+void EkfCore::reset_height(ftype baro_altitude_m, ftype now_s) {
+    zero_rows_cols(P, 9, 9);  // upstream: zeroRows(P,9,9); zeroCols(P,9,9);
+    state.position.z = -baro_altitude_m;
+    P[9][9] = baro_hgt_obs_variance();
+    last_hgt_pass_time_s = now_s;
+}
+
+// upstream: FuseVelPosNED()'s obsIndex==5 path. Innovation formula (~line
+// 929): `innovVelPos[5] = stateStruct.position.z - velPosObs[5];` - see
+// hgt_test_ratio()'s own comment for the sign-convention derivation, reused
+// identically here.
+//
+// Gated by hgt_test_ratio(), computed ONCE here using the state/P as they
+// stand at entry, same reasoning as fuse_gps_velocity()/fuse_gps_position()
+// (CPP-057). Failing the gate (ratio >= 1.0) skips fusion entirely for this
+// cycle, P/state left completely untouched, matching upstream's own `else {
+// fuseHgtData = false; }` (~line 979).
+//
+// On a gate failure, checks the elapsed time since last_hgt_pass_time_s
+// against kBaroFusionTimeoutS (hgtRetryTimeMode0_ms = 10.0s, a SEPARATE
+// constant from fuse_gps_velocity()/fuse_gps_position()'s own
+// kGpsFusionTimeoutS - see ekf_core.hpp banner "A REAL CONSTANT-IDENTITY
+// CHECK") BEFORE returning false - if timed out, calls reset_height()
+// instead of simply skipping (upstream: `if (hgtTimeout) { ResetHeight();
+// fuseHgtData = false; }`, ~line 975-977). A reset is NOT a fusion (matches
+// upstream's own `fuseHgtData = false` right after the reset call), so this
+// still returns false either way on the failing branch.
+bool EkfCore::fuse_baro_height(ftype baro_altitude_m, ftype dt_ekf_avg, ftype now_s) {
+    if (hgt_test_ratio(baro_altitude_m) >= ftype(1.0)) {
+        if ((now_s - last_hgt_pass_time_s) >= kBaroFusionTimeoutS) {
+            reset_height(baro_altitude_m, now_s);
+        }
+        return false;
+    }
+
+    const ftype r_obs = baro_hgt_obs_variance();
+    const ftype innovation = state.position.z + baro_altitude_m;
+    const bool applied = fuse_direct_state_observation(9, innovation, r_obs, dt_ekf_avg);
+    if (applied) {
+        last_hgt_pass_time_s = now_s;
+    }
+    return applied;
 }
 
 } // namespace fwcpp::ekf
