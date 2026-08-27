@@ -85,11 +85,13 @@
 // and optional subsystem (camera/gripper/sprayer/generator/RunCam/
 // quadplane/ADSB-avoidance/soaring/terrain/relays/fence/mission-reset/
 // RC-override-enable/FFT-tune/mount/VTX/inverted-flight/reverse-throttle/
-// airbrake/flap/EKF-source/compass-learn/... - all real, all absent from
-// this enum on purpose, none of their backing subsystems exist in this
-// port). This ticket ports ONLY the handful of values with a real
-// dispatch target today (see fwcpp::vehicle::Plane::dispatch_aux_
-// function()'s own file banner, plane.hpp, for the full named exclusion
+// airbrake/EKF-source/compass-learn/... - all real, all absent from this
+// enum on purpose, none of their backing subsystems exist in this port
+// (CPP-038 addendum: FLAP is the one exception - added below once a real
+// consumer, Plane::set_servos_flaps(), needed it). This ticket ports ONLY
+// the handful of values with a real dispatch target today (see fwcpp::
+// vehicle::Plane::dispatch_aux_function()'s own file banner, plane.hpp,
+// for the full named exclusion
 // list and per-value upstream trace) - each kept at its REAL upstream
 // numeric value (RC_Channel.h, grepped directly) so a value here never
 // silently means something different than it does upstream, even though
@@ -177,6 +179,13 @@ enum class AuxFunc : std::uint16_t {
     Cruise = 150,             // upstream: CRUISE mode
     ArmDisarm = 153,          // upstream: ARMDISARM (4.2+ value - NOT the UNUSED(41) 4.1-and-lower one)
     EmergencyLandingEn = 157, // upstream: EMERGENCY_LANDING_EN - force long FS action to FBWA for landing out of range
+
+    // CPP-038: upstream: FLAP (RC_Channel.h:381), grepped directly -
+    // 208, NOT renumbered. The manual-flap-input channel Plane::
+    // set_servos_flaps() resolves via RcChannels::channel_for() (added
+    // this ticket, rc_channels.hpp, same module) - see plane.hpp's
+    // set_servos_flaps() for the real consumer.
+    Flap = 208,
 };
 
 class RcChannel {
@@ -469,6 +478,32 @@ public:
         const float ret = (reversed ? -2.0f : 2.0f)
             * ((static_cast<float>(radio_in - radio_min) / static_cast<float>(radio_max - radio_min)) - 0.5f);
         return math::constrain_value(ret, -1.0f, 1.0f);
+    }
+
+    // upstream: RC_Channel::percent_input() (RC_Channel.cpp:488-501, read
+    // in full) - CPP-038. VERIFIED DIRECTLY (the ticket's own instruction
+    // to double check this, since it is easy to mis-scope): this returns
+    // an UNSIGNED 0..100 value - trim and reversed's usual "centered at
+    // trim" treatment do NOT apply here at all; only radio_min/radio_max
+    // matter, and `reversed` flips which END maps to 0 vs 100, never
+    // producing a negative result. Upstream's own real caller
+    // (Plane::set_servos_flaps(), servos.cpp:685) assigns this into a
+    // SIGNED `int8_t manual_flap_percent` - safe precisely because the
+    // returned range (0..100) is always representable as a non-negative
+    // int8_t, never because the value itself can go negative.
+    [[nodiscard]] std::uint8_t percent_input() const {
+        if (radio_in <= radio_min) {
+            return reversed ? 100 : 0;
+        }
+        if (radio_in >= radio_max) {
+            return reversed ? 0 : 100;
+        }
+        std::uint8_t ret = static_cast<std::uint8_t>(
+            100.0f * static_cast<float>(radio_in - radio_min) / static_cast<float>(radio_max - radio_min));
+        if (reversed) {
+            ret = static_cast<std::uint8_t>(100 - ret);
+        }
+        return ret;
     }
 };
 

@@ -95,6 +95,7 @@ enum class Function : std::int16_t {
     kNone = 0,
     kManual = 1,
     kFlap = 2,
+    kFlapAuto = 3, // CPP-038 addition - upstream: k_flap_auto (SRV_Channel.h), grepped directly, not renumbered.
     kAileron = 4,
     kFlaperonLeft = 24,
     kFlaperonRight = 25,

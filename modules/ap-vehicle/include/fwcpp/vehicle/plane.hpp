@@ -3055,6 +3055,98 @@ struct FixedWingTunables {
     // banner's "CPP-036 ADDENDUM" ---
     FsActionLong fs_action_long = FsActionLong::Continue; // FS_LONG_ACTN / g.fs_action_long, Parameters.cpp default FS_ACTION_LONG_CONTINUE (0)
     std::uint32_t fs_timeout_long_ms = 5000; // FS_LONG_TIMEOUT / g.fs_timeout_long, Parameters.cpp default 5 (seconds), stored here pre-converted to ms - same "pre-converted" precedent rc_fs_timeout_ms already establishes above
+
+    // --- CPP-038 (flap servo output) additions - see plane.hpp's
+    // "CPP-038 ADDENDUM" file banner (set_servos_flaps()) for the full
+    // design. All five defaults grepped directly from ArduPlane/
+    // Parameters.cpp/config.h, not assumed - the first four really are
+    // all 0 upstream (flaps disabled out of the box; a real airframe with
+    // flaps must set these), only FLAP_SLEWRATE has a nonzero stock
+    // default.
+    float flap_1_percent = 0.0f; // FLAP_1_PERCNT / g.flap_1_percent, Parameters.cpp GSCALAR default FLAP_1_PERCENT (config.h: 0)
+    float flap_1_speed = 0.0f;   // FLAP_1_SPEED / g.flap_1_speed, Parameters.cpp GSCALAR default FLAP_1_SPEED (config.h: 0), m/s
+    float flap_2_percent = 0.0f; // FLAP_2_PERCNT / g.flap_2_percent, Parameters.cpp GSCALAR default FLAP_2_PERCENT (config.h: 0)
+    float flap_2_speed = 0.0f;   // FLAP_2_SPEED / g.flap_2_speed, Parameters.cpp GSCALAR default FLAP_2_SPEED (config.h: 0), m/s
+    float flap_slewrate = 75.0f; // FLAP_SLEWRATE / g.flap_slewrate, Parameters.cpp GSCALAR default 75, %/s
+};
+
+// CPP-038: a small, LOCAL port of upstream's SRV_Channels::set_slew_rate()/
+// get_slew_limited_output_scaled() (SRV_Channel_aux.cpp, read in full,
+// ~line 634-649 and ~801-825) - see plane.hpp's own "CPP-038 ADDENDUM"
+// (set_servos_flaps()) for the full slew-rate-limiting design decision
+// (LOCAL to flap output, not wired into SrvChannels generically) and
+// srv_channels.hpp's own updated file banner for why fwcpp::filter::
+// SlewLimiter (ap-filter, CPP-015) is NOT reused here - it ports a
+// different, algorithmically unrelated upstream file.
+//
+// SURPRISING UPSTREAM FINDING, VERIFIED BY READING BOTH REAL FUNCTIONS IN
+// FULL: get_slew_limited_output_scaled() never itself advances the slew
+// window - it has no code path that writes back to slew->last_scaled_
+// output. set_slew_rate() only seeds last_scaled_output ONCE, the first
+// time it is ever called for a given function (from the "add new item"
+// branch, SRV_Channel_aux.cpp:821-825); every later call to set_slew_rate
+// for the SAME function only updates max_change ("found existing item,
+// update max change", :808-813) - last_scaled_output is left exactly as
+// it was. The only other writer is set_slew_last_scaled_output()
+// (:831-839), called upstream ONLY by quadplane.cpp's throttle blending
+// (grepped directly across the whole tree) - never for k_flap/k_flap_auto.
+// Net real effect for flap: the clamp window returned by
+// get_slew_limited_output_scaled(k_flap_auto) is permanently anchored to
+// whatever k_flap_auto's raw scaled output was the FIRST time
+// set_slew_rate(k_flap_auto, ...) ever ran (i.e. this object's first
+// limited() call after construction) - it does not "chase" a changing
+// raw value tick after tick the way a conventional rate limiter would.
+// This looks like a real upstream quirk, not a deliberate feature - but
+// per this port's "port fixes bugs in the port, not upstream" rule, it is
+// reproduced FAITHFULLY here, not corrected.
+//
+// ONLY k_flap_auto GETS AN INSTANCE: upstream's real Plane::
+// set_servos_flaps() also calls `SRV_Channels::set_slew_rate(SRV_Channel::
+// k_flap, g.flap_slewrate, 100, G_Dt)` (servos.cpp:757) - allocating a
+// second, parallel slew-list node for k_flap - but grepping the ENTIRE
+// upstream tree for get_slew_limited_output_scaled(SRV_Channel::k_flap)
+// (the manual-flap function, as opposed to k_flap_auto) finds zero real
+// callers anywhere in ArduPlane (flaperon_update() reads only k_flap_auto;
+// so do Log.cpp/radio.cpp's zero-check/tiltrotor.cpp, none of which are in
+// this port's scope regardless - no logging subsystem, no radio.cpp
+// zero-flap arming check, no tiltrotor). Porting a k_flap slew state that
+// nothing ever reads would be dead weight with no observable behavior to
+// verify, not a behavior gap - so only k_flap_auto's slew state is
+// instantiated (Plane::flap_auto_slew_ below).
+struct FlapSlewState {
+    bool initialized = false;
+    float last_scaled_output = 0.0f;
+    float max_change = 0.0f;
+
+    // upstream: SRV_Channels::set_slew_rate() (SRV_Channel_aux.cpp:801-825,
+    // read in full). `current_raw` is this call's CURRENT k_flap_auto raw
+    // scaled value - matching upstream evaluating `functions[function].
+    // output_scaled` at the exact moment set_slew_rate() first runs, i.e.
+    // the value set_output_scaled() already wrote THIS SAME tick (real
+    // Plane::set_servos_flaps() calls set_output_scaled() before
+    // set_slew_rate() every tick, servos.cpp:754-757, verified directly -
+    // set_servos_flaps() below preserves that same order).
+    void set_rate(float slew_rate_percent_per_sec, float range, float dt, float current_raw) {
+        if (!initialized) {
+            last_scaled_output = current_raw;
+            initialized = true;
+        }
+        max_change = range * slew_rate_percent_per_sec * 0.01f * dt;
+    }
+
+    // upstream: SRV_Channels::get_slew_limited_output_scaled()
+    // (SRV_Channel_aux.cpp:634-649, read in full). A non-positive
+    // max_change means "disabled" (upstream: `!is_positive(slew->
+    // max_change)`) - the raw value passes through unclamped. Matches
+    // upstream's real behavior of NEVER writing back to last_scaled_output
+    // here - see this struct's own file-banner "SURPRISING UPSTREAM
+    // FINDING" above.
+    [[nodiscard]] float limited(float current_raw) const {
+        if (!math::is_positive(max_change)) {
+            return current_raw;
+        }
+        return math::constrain_value(current_raw, last_scaled_output - max_change, last_scaled_output + max_change);
+    }
 };
 
 // Explicit per-tick sensor/environment inputs stabilize_roll()/
@@ -4074,6 +4166,12 @@ public:
     // L1Control's constructor reads only the Gains passed to it.
     nav::L1Control nav_controller{nav::L1Control::Gains{}};
 
+    // CPP-038 - see plane.hpp's own FlapSlewState file banner and
+    // set_servos_flaps()'s "CPP-038 ADDENDUM" note for the full design.
+    // Only k_flap_auto gets a slew state (see FlapSlewState's own banner
+    // for why k_flap's parallel upstream slew-list node is not ported).
+    FlapSlewState flap_auto_slew_;
+
     // --- navigation/attitude-demand state - upstream: Plane.h members ---
     std::int32_t nav_roll_cd = 0;     // upstream: Plane::nav_roll_cd, set by the active mode
     std::int32_t nav_pitch_cd = 0;    // upstream: Plane::nav_pitch_cd, set by the active mode
@@ -4863,6 +4961,158 @@ public:
             return;
         }
         srv_channels.set_output_scaled(srv::Function::kThrottle, tecs.get_throttle_demand());
+    }
+
+    // upstream: Mode::does_auto_throttle() (mode.h:138, base `return
+    // false`) - grepped directly against every mode.h override this
+    // port's real 8 modes use: ModeFBWB (mode.h:654), ModeCruise (:684),
+    // ModeAuto (mode_auto.cpp:140, `return true`), ModeRTL (:535),
+    // ModeLoiter (:450), ModeTakeoff (:947) all override it true; ModeManual
+    // and ModeFBWA are the base class's real remaining two members of this
+    // port's mode set and neither overrides it (still false). NOT ported
+    // as a virtual Mode method - this port's established rule against
+    // resurrecting mode-identification machinery (mode.hpp's own ModeFBWB
+    // banner note: "without resurrecting the mode-identification machinery
+    // this port deliberately left unported") - the single boolean fact
+    // upstream's does_auto_throttle() carries is computed here the same
+    // way this codebase already computes every other per-mode fact: direct
+    // pointer-identity comparison against control_mode (e.g.
+    // dispatch_aux_function()'s do_aux_function_change_mode() calls,
+    // set_mode()'s own `control_mode == &mode_auto` checks elsewhere in
+    // this file) rather than a virtual call.
+    [[nodiscard]] bool has_target_airspeed() const { return !(control_mode == &mode_manual || control_mode == &mode_fbwa); }
+
+    // =====================================================================
+    // CPP-038 ADDENDUM: flap servo output. Upstream: Plane::
+    // set_servos_flaps() (ArduPlane/servos.cpp, ~line 677-761) and
+    // Plane::flaperon_update() (same file, ~line 202), BOTH READ IN FULL.
+    //
+    // MANUAL FLAP: upstream `channel_flap != nullptr && rc().has_valid_
+    // input()` - channel_flap is resolved fresh every call via
+    // rc_channels.channel_for(AuxFunc::Flap) (CPP-038 addition,
+    // rc_channels.hpp) rather than cached at vehicle-init time like
+    // upstream's own Plane::channel_flap (radio.cpp:45) - see channel_for()
+    // 's own doc comment for why a fresh scan replaces upstream's cache
+    // here. has_valid_input() reuses RcChannels::has_valid_input()
+    // (ap-rc-channel, real since CPP-027) exactly as the ticket requires,
+    // not reinvented.
+    //
+    // percent_input() RETURNS UNSIGNED 0..100 (RC_Channel.cpp:488-501,
+    // verified directly - see RcChannel::percent_input()'s own doc
+    // comment, rc_channel.hpp) - manual_flap_percent kept as upstream's own
+    // signed int8_t (safe: 0..100 always fits its positive range).
+    // upstream's `abs(manual_flap_percent) > auto_flap_percent` DROPS its
+    // abs() here: since manual_flap_percent is always >= 0, abs(x) == x
+    // for every real value it can hold, so the comparison is written
+    // directly - not a behavior change, just not re-deriving a no-op.
+    //
+    // AUTO FLAP - REAL, DISCLOSED EXCLUSIONS (every upstream branch in
+    // set_servos_flaps() verified by reading the function in full, not
+    // from this comment alone):
+    //   - `has_target_airspeed && ahrs.using_airspeed_sensor()` (the
+    //     target-airspeed branch) and `flap_actual_speed && have_airspeed`
+    //     (the FlightOptions::FLAP_ACTUAL_SPEED actual-speed branch) are
+    //     BOTH excluded: this port has no airspeed-sensor-presence concept
+    //     wired to a real consumer anywhere (grepped `using_airspeed_
+    //     sensor` and `ahrs.airspeed_EAS`-style usage across this module
+    //     and ap-vehicle - StabilizeInputs::airspeed_valid is the closest
+    //     analogue and nothing here treats it as "sensor present" the way
+    //     upstream's using_airspeed_sensor() gate does) and no
+    //     FlightOptions bitmask subsystem at all (same class of exclusion
+    //     CPP-036's TKOFF_OPTIONS note already made). Both real branches
+    //     upstream would take FIRST are therefore unreachable here; the
+    //     ONLY branch this port's set_servos_flaps() can ever take is
+    //     upstream's own final `else` - `flapSpeedSource = aparm.
+    //     throttle_cruise` - exactly the ticket's own named substitute.
+    //   - flight_stage-gated special flap levels (TAKEOFF/ABORT_LANDING/
+    //     NORMAL-pre-launch/LAND cases, TKOFF_FLAP_PCNT, landing.
+    //     get_flap_percent()) - this port has never built the flight_stage
+    //     concept (same established exclusion as TECS/CPP-031 slice
+    //     12/CPP-036) or a landing subsystem. Ticket-mandated exclusion.
+    //   - Soaring's `get_thermalling_flap()` override (`#if
+    //     HAL_SOARING_ENABLED`) - no soaring controller, no THERMAL mode.
+    //     Ticket-mandated exclusion.
+    //
+    // The OUTER `if (has_target_airspeed || flap_actual_speed)` gate itself
+    // (which decides whether ANY auto-flap computation runs at all) is
+    // reproduced using has_target_airspeed() above as the sole real
+    // substitute for BOTH of upstream's two disjuncts - flap_actual_speed
+    // is unconditionally false here (no FlightOptions bitmask, see above),
+    // so upstream's own `||` degenerates to just its left operand for this
+    // port, exactly matching has_target_airspeed()'s real per-mode value
+    // for every one of this port's 8 real modes (see that method's own doc
+    // comment).
+    //
+    // SLEW-RATE LIMITING DESIGN DECISION (ticket-required to be explicit):
+    // applied LOCALLY within this method via FlapSlewState (flap_
+    // auto_slew_ member, defined above), NOT wired into SrvChannels
+    // generically - see srv_channels.hpp's updated file banner and
+    // FlapSlewState's own file banner for the full rationale (including
+    // why fwcpp::filter::SlewLimiter is the WRONG existing primitive to
+    // reuse here, and the real, surprising "window never advances on its
+    // own" upstream behavior this reproduces faithfully).
+    //
+    // rc_channels.channel_for(AuxFunc::Flap) IS RESOLVED, THEN in.dt is
+    // WHAT G_Dt SUBSTITUTES FOR: upstream's G_Dt is the scheduler's fixed
+    // loop dt: this port's equivalent, threaded explicitly per ADR-0012,
+    // is StabilizeInputs::dt - the caller (tick(), mode.hpp) already
+    // threads it through every other per-tick computation this same way.
+    void set_servos_flaps(float dt) {
+        std::int8_t manual_flap_percent = 0;
+        if (rc::RcChannel* channel_flap = rc_channels.channel_for(rc::AuxFunc::Flap);
+            channel_flap != nullptr && rc_channels.has_valid_input()) {
+            manual_flap_percent = static_cast<std::int8_t>(channel_flap->percent_input());
+        }
+
+        std::int8_t auto_flap_percent = 0;
+        if (has_target_airspeed()) {
+            // Real substitute for upstream's flapSpeedSource - see this
+            // method's own file banner for the full derivation of why
+            // this port's version of the inner if/else-if/else chain can
+            // only ever reach the final `else` branch.
+            const float flap_speed_source = aparm.throttle_cruise;
+            if (aparm.flap_2_speed != 0.0f && flap_speed_source <= aparm.flap_2_speed) {
+                auto_flap_percent = static_cast<std::int8_t>(aparm.flap_2_percent);
+            } else if (aparm.flap_1_speed != 0.0f && flap_speed_source <= aparm.flap_1_speed) {
+                auto_flap_percent = static_cast<std::int8_t>(aparm.flap_1_percent);
+            } // else flaps stay at default zero deflection
+        }
+
+        // manual flap input overrides auto flap input - abs() dropped, see
+        // this method's own file banner.
+        if (manual_flap_percent > auto_flap_percent) {
+            auto_flap_percent = manual_flap_percent;
+        }
+
+        srv_channels.set_output_scaled(srv::Function::kFlapAuto, static_cast<float>(auto_flap_percent));
+        srv_channels.set_output_scaled(srv::Function::kFlap, static_cast<float>(manual_flap_percent));
+
+        // set_slew_rate() call order matches upstream exactly (servos.cpp:
+        // 756) - AFTER both set_output_scaled() calls above, which is why
+        // FlapSlewState::set_rate()'s first-ever call sees this tick's
+        // freshly-written auto_flap_percent as its seed value (see that
+        // struct's own doc comment).
+        flap_auto_slew_.set_rate(aparm.flap_slewrate, 100.0f, dt, static_cast<float>(auto_flap_percent));
+
+        // output to flaperons, if any - upstream calls flaperon_update()
+        // unconditionally at the end of set_servos_flaps() every tick.
+        flaperon_update();
+    }
+
+    // upstream: Plane::flaperon_update() (servos.cpp, ~line 202, read in
+    // full) - mixes k_aileron's current scaled output with a percentage of
+    // k_flap_auto's SLEW-LIMITED scaled output to drive k_flaperon_left/
+    // k_flaperon_right. Only meaningful once a caller has assigned real
+    // servo channels to k_flaperon_left/k_flaperon_right (SrvChannels::
+    // set_default_function) - exactly like upstream, where a non-flaperon
+    // airframe simply never reads these outputs.
+    void flaperon_update() {
+        const float aileron = srv_channels.get_output_scaled(srv::Function::kAileron);
+        const float flap_percent = flap_auto_slew_.limited(srv_channels.get_output_scaled(srv::Function::kFlapAuto));
+        const float flaperon_left = math::constrain_value(aileron + flap_percent * 45.0f, -4500.0f, 4500.0f);
+        const float flaperon_right = math::constrain_value(aileron - flap_percent * 45.0f, -4500.0f, 4500.0f);
+        srv_channels.set_output_scaled(srv::Function::kFlaperonLeft, flaperon_left);
+        srv_channels.set_output_scaled(srv::Function::kFlaperonRight, flaperon_right);
     }
 
     // upstream: Plane::calc_nav_pitch() (Attitude.cpp).
@@ -5798,6 +6048,22 @@ public:
             // for DoNothing (rc_channel.hpp's own read_aux()) - this case
             // exists only so the switch stays exhaustive over every
             // AuxFunc enumerator.
+            break;
+
+        case rc::AuxFunc::Flap:
+            // CPP-038: upstream: RC_Channel_Plane::do_aux_function()'s own
+            // real FLAP case (RC_Channel_Plane.cpp ~line 304) is `break; //
+            // input labels, nothing to do` - VERIFIED DIRECTLY, not
+            // assumed: FLAP is a dual-purpose option upstream. A channel
+            // tagged FLAP still runs through the ordinary 3-position-
+            // switch debounce machinery (read_aux_all() below), but its
+            // debounced result is intentionally discarded here - the
+            // channel's CONTINUOUS raw PWM (not this debounced position)
+            // is what Plane::set_servos_flaps() (this file, "CPP-038
+            // ADDENDUM") reads via RcChannel::percent_input(), via a
+            // completely separate path (rc_channels.channel_for(AuxFunc::
+            // Flap), not read_aux_all()/dispatch_aux_function()). Matches
+            // upstream's own real "input labels, nothing to do" comment.
             break;
 
         case rc::AuxFunc::ArmDisarm:

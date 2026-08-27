@@ -49,12 +49,10 @@
 //     init_aux_all, duplicate_options_exist, convert_options). A large
 //     separate subsystem (RC-channel-to-auxiliary-switch-function mapping)
 //     with its own scope. CPP-037 below ports read_aux_all() (and
-//     reset_mode_switch()) - the REST of this list (find_channel_for_
-//     option/init_aux_all/duplicate_options_exist/convert_options) is
-//     STILL out of scope: find_channel_for_option() has no caller in this
-//     port's own scope (nothing here needs to look UP from a function to
-//     its channel - dispatch is always driven the other direction, by
-//     scanning channels, exactly like read_aux_all() itself does);
+//     reset_mode_switch()); CPP-038 (see this file's own "CPP-038
+//     ADDENDUM" below) ports find_channel_for_option() too, as
+//     channel_for() - the REST of this list (init_aux_all/
+//     duplicate_options_exist/convert_options) is STILL out of scope:
 //     init_aux_all() exists purely to run each configured aux function
 //     ONCE at boot with its resting position (upstream: RC_Channel::
 //     init_aux(), which calls do_aux_function_armdisarm()/do_aux_function_
@@ -129,13 +127,14 @@
 // virtual callback.
 //
 // flight_mode_channel_conflicts_with_rc_option() is STILL NOT ported, even
-// after CPP-037 added a real aux-function subsystem below - it exists
-// purely to WARN (a GCS-facing diagnostic, no GCS subsystem here) about a
-// channel double-booked between the mode switch and an aux function, and
-// checking that requires find_channel_for_option() (a function -> channel
-// reverse lookup), itself still out of scope (this file's own "Aux
-// function dispatch" exclusion note above) - nothing for this method to
-// meaningfully check without it.
+// after CPP-037 added a real aux-function subsystem below AND CPP-038
+// added channel_for() (this file's own "CPP-038 ADDENDUM" below) - it
+// exists purely to WARN (a GCS-facing diagnostic, no GCS subsystem here)
+// about a channel double-booked between the mode switch and an aux
+// function; channel_for() now makes the LOOKUP half possible, but there
+// is still no GCS/diagnostic-message subsystem in this port for the
+// warning itself to go to - nothing for this method to meaningfully DO
+// with the answer yet.
 //
 // =====================================================================
 // CPP-037 ADDENDUM: the aux-function dispatch mechanism's RcChannels-level
@@ -394,6 +393,50 @@ public:
         c->switch_state.current_position = -1;
         c->switch_state.debounce_position = -1;
         (void)read_mode_switch(now_ms);
+    }
+
+    // =====================================================================
+    // CPP-038 ADDENDUM: find_channel_for_option(), ported as channel_for().
+    // Upstream: RC_Channels::find_channel_for_option() (RC_Channel.cpp
+    // ~line 2083, read in full) - a plain linear scan over every channel
+    // for the first one whose configured `option` matches. This file's own
+    // "Aux function dispatch" exclusion note (above) named this the one
+    // piece of the aux-dispatch subsystem deliberately deferred back in
+    // CPP-037 - "no caller in this port's scope, nothing here needs to
+    // look UP from a function to its channel". CPP-038 IS that caller:
+    // Plane::set_servos_flaps() (plane.hpp) resolves its manual-flap
+    // channel this way, matching upstream's own real `channel_flap =
+    // rc().find_channel_for_option(RC_Channel::AUX_FUNC::FLAP)`
+    // (ArduPlane/radio.cpp:45).
+    //
+    // NOT CACHED, UNLIKE UPSTREAM'S channel_flap: upstream resolves and
+    // caches this pointer once, in Plane::set_control_channels() (radio.
+    // cpp), re-run only when that function reruns (vehicle init, or a
+    // params-changed event this port doesn't model). This port has no
+    // equivalent one-time "channel configuration changed" hook to
+    // invalidate a cache from, and a channel's `option` field is a plain,
+    // freely-mutable value at any time (no AP_Param change-notification
+    // either) - so rather than inventing cache-invalidation machinery for
+    // a single caller, channel_for() just scans fresh every call. A
+    // 16-channel linear scan is cheap enough to redo every tick; this
+    // matches SrvChannels::find_first_channel()'s own same-shaped
+    // "scan on demand instead of cache-and-invalidate" precedent
+    // (ap-srv-channel/srv_channels.hpp), not a new convention.
+    [[nodiscard]] RcChannel* channel_for(AuxFunc option) {
+        for (std::uint8_t i = 0; i < kNumRcChannels; ++i) {
+            if (channels_[i].option == option) {
+                return &channels_[i];
+            }
+        }
+        return nullptr;
+    }
+    [[nodiscard]] const RcChannel* channel_for(AuxFunc option) const {
+        for (std::uint8_t i = 0; i < kNumRcChannels; ++i) {
+            if (channels_[i].option == option) {
+                return &channels_[i];
+            }
+        }
+        return nullptr;
     }
 
 private:

@@ -62,6 +62,10 @@ void set_mode_switch_pwm(Plane& plane, std::uint16_t pwm) {
 constexpr std::uint8_t kChannelArmDisarm = 9;
 constexpr std::uint8_t kChannelEmergencyLandingEn = 10;
 constexpr std::uint8_t kChannelAuxModeSelect = 11;
+// CPP-038: the manual-flap aux-switch channel used by the flap closed-loop
+// tests below - a distinct physical channel, same convention as the three
+// constants above.
+constexpr std::uint8_t kChannelFlap = 12;
 
 // Sets an aux-function channel's PWM and pulls it in - a caller still
 // calls set_sticks()/set_mode_switch_pwm() itself for the channels those
@@ -5798,4 +5802,193 @@ TEST_CASE("Closed loop: TAKEOFF accelerates down the runway under a real ground-
                                 << ", climb_out_complete = " << takeoff.climb_out_complete());
     REQUIRE(takeoff.climb_out_complete());
     REQUIRE(final_altitude == Catch::Approx(takeoff.target_alt).margin(15.0f));
+}
+
+// ---------------------------------------------------------------------
+// CPP-038: closed-loop flap servo output tests, driven entirely through
+// tick() - the ticket's own required end-to-end verification.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Manual flap contributes zero when no channel is configured for AuxFunc::Flap, even with valid RC input",
+          "[vehicle][flap]") {
+    Plane plane;
+    fwcpp::ahrs::GyroSample gyro_sample;
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 20;
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    tick(plane, gyro_sample, in);
+    REQUIRE(plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kFlap) == Catch::Approx(0.0f));
+}
+
+TEST_CASE("Closed loop: manual flap (AuxFunc::Flap) tracks percent_input() end to end via tick(), across a range of "
+          "stick positions",
+          "[vehicle][integration][flap]") {
+    Plane plane;
+    plane.rc_channels.channel(kChannelFlap)->option = AuxFunc::Flap;
+
+    fwcpp::ahrs::GyroSample gyro_sample;
+    std::uint32_t now_ms = 0;
+
+    // A representative range of stick positions across the full travel,
+    // including both endpoints. percent_input() (rc_channel.hpp) is a
+    // pure function of radio_in/radio_min(1100)/radio_max(1900) - one
+    // tick per position is enough to exercise it end to end through
+    // set_servos_flaps().
+    const std::array<std::uint16_t, 7> flap_pwms{1100, 1250, 1400, 1500, 1600, 1750, 1900};
+    for (const std::uint16_t pwm : flap_pwms) {
+        now_ms += 20;
+        set_aux_channel_pwm(plane, kChannelFlap, pwm);
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+        StabilizeInputs in;
+        in.dt = 0.02f;
+        in.now_ms = now_ms;
+        tick(plane, gyro_sample, in);
+
+        // Independent expectation, computed directly from RC_Channel::
+        // percent_input()'s own real formula (RC_Channel.cpp:488-501) -
+        // NOT by re-calling percent_input() on the channel itself, so this
+        // doesn't just check set_servos_flaps() against the same function
+        // it calls internally.
+        const float expected_percent =
+            100.0f * static_cast<float>(pwm - 1100) / static_cast<float>(1900 - 1100);
+        const float k_flap = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kFlap);
+        INFO("pwm = " << pwm << ", expected_percent = " << expected_percent);
+        REQUIRE(k_flap == Catch::Approx(std::floor(expected_percent)).margin(1.0f));
+    }
+
+    // Exact endpoints - upstream's own radio_in <= radio_min / >= radio_max
+    // early-return branches (RC_Channel.cpp:490-495), not the interpolated
+    // formula path.
+    now_ms += 20;
+    set_aux_channel_pwm(plane, kChannelFlap, 1100);
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    StabilizeInputs in_min;
+    in_min.dt = 0.02f;
+    in_min.now_ms = now_ms;
+    tick(plane, gyro_sample, in_min);
+    REQUIRE(plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kFlap) == Catch::Approx(0.0f));
+
+    now_ms += 20;
+    set_aux_channel_pwm(plane, kChannelFlap, 1900);
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    StabilizeInputs in_max;
+    in_max.dt = 0.02f;
+    in_max.now_ms = now_ms;
+    tick(plane, gyro_sample, in_max);
+    REQUIRE(plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kFlap) == Catch::Approx(100.0f));
+}
+
+TEST_CASE("Closed loop: speed-based auto flap crosses FLAP_1/2_SPEED thresholds via tick(), using aparm.throttle_"
+          "cruise as the flapSpeedSource substitute (this port has no airspeed-sensor-presence concept wired to a "
+          "real consumer)",
+          "[vehicle][integration][flap]") {
+    auto run_once = [](float throttle_cruise, float flap_1_percent, float flap_1_speed, float flap_2_percent,
+                        float flap_2_speed) {
+        Plane plane;
+        plane.control_mode = &plane.mode_fbwb; // does_auto_throttle()==true upstream -> has_target_airspeed()==true
+        plane.aparm.throttle_cruise = throttle_cruise;
+        plane.aparm.flap_1_percent = flap_1_percent;
+        plane.aparm.flap_1_speed = flap_1_speed;
+        plane.aparm.flap_2_percent = flap_2_percent;
+        plane.aparm.flap_2_speed = flap_2_speed;
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        StabilizeInputs in;
+        in.dt = 0.02f;
+        in.now_ms = 20;
+        set_sticks(plane, 1500, 1500, 1700, 1500);
+        tick(plane, gyro_sample, in);
+        return plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kFlapAuto);
+    };
+
+    // Above both thresholds - flaps stay at default zero deflection.
+    REQUIRE(run_once(20.0f, 30.0f, 10.0f, 50.0f, 5.0f) == Catch::Approx(0.0f));
+    // Below FLAP_1_SPEED(10) but above FLAP_2_SPEED(5) - FLAP_1_PERCNT engages.
+    REQUIRE(run_once(8.0f, 30.0f, 10.0f, 50.0f, 5.0f) == Catch::Approx(30.0f));
+    // At-or-below FLAP_2_SPEED(5) too - FLAP_2_PERCNT wins (upstream checks flap_2 FIRST).
+    REQUIRE(run_once(4.0f, 30.0f, 10.0f, 50.0f, 5.0f) == Catch::Approx(50.0f));
+    // Exactly AT FLAP_1_SPEED - upstream's real `<=` comparison includes the boundary.
+    REQUIRE(run_once(10.0f, 30.0f, 10.0f, 50.0f, 5.0f) == Catch::Approx(30.0f));
+    // FLAP_1_SPEED == 0 disables that tier even below the (nonzero) FLAP_2_SPEED threshold's speed value.
+    REQUIRE(run_once(2.0f, 30.0f, 0.0f, 50.0f, 5.0f) == Catch::Approx(50.0f));
+
+    // MANUAL/FBWA never auto-flap regardless of speed - has_target_airspeed()==false for both (plane.hpp's own
+    // doc comment on that method) - default control_mode (&mode_manual) is left untouched here.
+    {
+        Plane plane;
+        plane.aparm.throttle_cruise = 4.0f;
+        plane.aparm.flap_1_percent = 30.0f;
+        plane.aparm.flap_1_speed = 10.0f;
+        plane.aparm.flap_2_percent = 50.0f;
+        plane.aparm.flap_2_speed = 5.0f;
+        fwcpp::ahrs::GyroSample gyro_sample;
+        StabilizeInputs in;
+        in.dt = 0.02f;
+        in.now_ms = 20;
+        set_sticks(plane, 1500, 1500, 1700, 1500);
+        tick(plane, gyro_sample, in);
+        REQUIRE(plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kFlapAuto) == Catch::Approx(0.0f));
+    }
+}
+
+TEST_CASE("Closed loop: flaperon mixing produces the documented aileron +/- flap*45 split on k_flaperon_left/right "
+          "when both aileron and manual flap are simultaneously nonzero, via tick()",
+          "[vehicle][integration][flap]") {
+    // ModeManual (this port's default control_mode): manual flap ALWAYS
+    // applies (has_target_airspeed() only gates AUTO flap, plane.hpp's own
+    // set_servos_flaps() doc comment) and gives a direct, un-stabilized
+    // aileron passthrough from the roll stick - both nonzero on the very
+    // first tick, which sidesteps FlapSlewState's own first-call seeding
+    // quirk entirely (that struct's file banner: the FIRST call always
+    // seeds its window from THIS SAME tick's raw value, so tick 1's
+    // get_slew_limited_output_scaled() is always exact, unclamped).
+    Plane plane;
+    plane.rc_channels.channel(kChannelFlap)->option = AuxFunc::Flap;
+
+    fwcpp::ahrs::GyroSample gyro_sample;
+    StabilizeInputs in;
+    in.dt = 0.02f;
+    in.now_ms = 20;
+
+    set_aux_channel_pwm(plane, kChannelFlap, 1600); // manual flap > 0
+    set_sticks(plane, 1650, 1500, 1700, 1500);      // partial-right roll stick -> aileron > 0, well clear of +/-4500
+    tick(plane, gyro_sample, in);
+
+    const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron);
+    const float flap_percent = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kFlapAuto);
+    INFO("aileron = " << aileron << ", flap_percent = " << flap_percent);
+    REQUIRE(aileron != Catch::Approx(0.0f));
+    REQUIRE(flap_percent != Catch::Approx(0.0f));
+    // Confirms this test case actually exercises the additive/subtractive
+    // split without hitting the +/-4500 constrain_value() clamp.
+    REQUIRE(std::fabs(aileron) + std::fabs(flap_percent * 45.0f) < 4500.0f);
+
+    const float flaperon_left = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kFlaperonLeft);
+    const float flaperon_right = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kFlaperonRight);
+    REQUIRE(flaperon_left == Catch::Approx(aileron + flap_percent * 45.0f));
+    REQUIRE(flaperon_right == Catch::Approx(aileron - flap_percent * 45.0f));
+}
+
+TEST_CASE("FlapSlewState: the slew window is seeded once from the first raw value and does NOT advance on its own "
+          "afterward, matching upstream's own real (surprising) get_slew_limited_output_scaled() behavior",
+          "[vehicle][flap][slew]") {
+    fwcpp::vehicle::FlapSlewState state;
+    // First call: seeds last_scaled_output = 0.0 (the current raw value),
+    // matching upstream's set_slew_rate() "add new item" branch.
+    state.set_rate(75.0f, 100.0f, 0.02f, 0.0f);
+    REQUIRE(state.limited(0.0f) == Catch::Approx(0.0f));
+
+    // max_change = 100 * 75 * 0.01 * 0.02 = 1.5 per call - a raw jump to
+    // 50 is clamped hard against the window still anchored at 0.0.
+    REQUIRE(state.limited(50.0f) == Catch::Approx(1.5f));
+
+    // Calling set_rate() again (a later tick) does NOT reseed
+    // last_scaled_output - only max_change changes - so the window stays
+    // anchored at 0.0 no matter how many more ticks pass with the raw
+    // value pinned at 50.
+    for (int i = 0; i < 50; ++i) {
+        state.set_rate(75.0f, 100.0f, 0.02f, 50.0f);
+        REQUIRE(state.limited(50.0f) == Catch::Approx(1.5f));
+    }
 }

@@ -646,6 +646,15 @@ inline void ModeTAKEOFF::navigate(const StabilizeInputs& in) {
 // comment below for exactly why this ordering is required (a same-tick
 // MODE_SWITCH_RESET/aux-mode-release must not be read back by a mode-
 // switch dispatch that has already run this tick).
+//
+// CPP-038 NOTE: adds step 6b (plane.set_servos_flaps()) - see plane.hpp's
+// own "CPP-038 ADDENDUM" file banner for the full design. Placed strictly
+// AFTER step 6 (mode.run(), which is what actually writes k_aileron's
+// scaled output every tick) and strictly BEFORE step 7 (the hardware PWM
+// write) - flaperon_update() (called from inside set_servos_flaps())
+// reads k_aileron's just-written output back to mix into k_flaperon_
+// left/right, so it must observe THIS tick's value, not a stale one from
+// before mode.run() ran.
 inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const StabilizeInputs& in) {
     Mode& mode = *plane.control_mode; // see this function's own "CPP-031 SLICE 7 NOTE" above
 
@@ -798,6 +807,17 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     mode.navigate(in);
     mode.update(in);
     mode.run(in);
+
+    // 6b. flap servo output - CPP-038, see plane.hpp's own "CPP-038
+    //     ADDENDUM" (set_servos_flaps()) file banner for the full design.
+    //     Upstream: Plane::set_servos_flaps() is one of several steps
+    //     inside the real Plane::set_servos() (servos.cpp), called AFTER
+    //     the active mode has already written k_aileron's scaled output
+    //     (step 6 above, mode.run()) - flaperon_update() (called from
+    //     inside set_servos_flaps()) reads that value back to mix into
+    //     k_flaperon_left/right, so this must run strictly after mode.
+    //     run() and strictly before step 7's hardware write below.
+    plane.set_servos_flaps(in.dt);
 
     // 7. write computed PWM to hardware (upstream: Plane::set_servos() ->
     //    SRV_Channels::output_ch_all())

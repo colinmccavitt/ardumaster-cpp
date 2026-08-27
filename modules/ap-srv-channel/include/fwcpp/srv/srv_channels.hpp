@@ -150,10 +150,32 @@
 //
 // DELIBERATELY OUT OF SCOPE for this slice (left unported, not stubbed):
 //   - set_slew_rate/get_slew_limited_output_scaled/
-//     set_slew_last_scaled_output: slew-rate limiting exists in this port
-//     already as fwcpp::filter::SlewLimiter (ap-filter), but wiring it into
-//     this registry is a separate concern from this slice's core
-//     mapping/output scope.
+//     set_slew_last_scaled_output: this registry-wide, function-indexed
+//     slew mechanism is STILL not wired in generically (CPP-038's own
+//     decision, see plane.hpp's set_servos_flaps() file-banner note) -
+//     CPP-038 needed exactly this mechanism for flap output and, on
+//     reading both real upstream sources side by side, found that this
+//     module's ORIGINAL note above (claiming fwcpp::filter::SlewLimiter,
+//     ap-filter, CPP-015, was the reusable primitive for this) was
+//     mistaken: fwcpp::filter::SlewLimiter ports a DIFFERENT upstream
+//     file (libraries/Filter/SlewLimiter.h) - a control-theory modifier()
+//     that scales down a PID's P+D output, used only by
+//     AP_PitchController/AP_RollController's rate loops. SRV_Channel_
+//     aux.cpp's own set_slew_rate()/get_slew_limited_output_scaled()
+//     (read in full) is algorithmically unrelated: a simple per-function
+//     (last_scaled_output, max_change) pair with a constrain_float clamp.
+//     Reusing fwcpp::filter::SlewLimiter here would have silently
+//     substituted the wrong algorithm. CPP-038 ported the REAL mechanism
+//     as a small, new, LOCAL primitive (Plane::FlapSlewState, plane.hpp)
+//     scoped to just the two functions ArduPlane's flap code actually
+//     needs (k_flap_auto/k_flap) rather than adding a generic registry
+//     facility here - see that struct's own file-banner note for the
+//     full design rationale and the real, surprising upstream behavior
+//     it reproduces (the slew window's reference value is seeded once,
+//     at first use, and never advances again on its own). This
+//     registry's OWN gap (a genuinely generic, any-function slew list)
+//     is still open for a future ticket that needs it for a function
+//     other than flap's two.
 //   - set_output_min_max/set_output_min_max_defaults/save_output_min_max/
 //     save_trim/adjust_trim/auto_trim_enabled: need real AP_Param
 //     persistence wiring (parameter save-to-storage) this module doesn't
