@@ -35,15 +35,17 @@
 //         TASmin override (~line 419).
 //       * _update_speed_demand() is otherwise fully in scope (no landing
 //         reference in it at all).
-//       * _update_height_demand()'s entire `_landing.is_flaring()` flare
-//         branch (~line 613-651: flare height-rate profile, distance-
-//         beyond-land-wp sink adjustment) and its `is_doing_auto_land`
-//         approach-lag-compensation branch (~line 585-587); the
-//         `_maxSinkRate_approach` special-case (~line 559); the
-//         TAKEOFF/ABORT_LANDING exclusion inside max_climb_condition and
-//         the `!_landing.is_flaring()` guard inside max_descent_condition
-//         both become unconditionally-true/simplified-away terms since
-//         they can never be false/true respectively in NORMAL-only scope.
+//       * _update_height_demand()'s `is_doing_auto_land`
+//         approach-lag-compensation branch (~line 583-587, `_hgt_dem +=
+//         _hgt_dem_tconst*_hgt_rate_dem` vs. the "don't get too far ahead"
+//         else-arm this slice already ports); the `_maxSinkRate_approach`
+//         special-case (~line 540); the TAKEOFF/ABORT_LANDING exclusion
+//         inside max_climb_condition and the `!_landing.is_flaring()`
+//         guard inside max_descent_condition both become
+//         unconditionally-true/simplified-away terms since they can never
+//         be false/true respectively in NORMAL-only scope. (The
+//         `_landing.is_flaring()` flare branch itself, ~line 611-644, IS
+//         now ported - see the CPP-040 ADDENDUM below for its own scope.)
 //       * _detect_underspeed()'s `flight_stage==VTOL` clear and
 //         `!_landing.is_flaring()` guard (~line 658-663) - both
 //         unconditionally satisfied here, simplified away.
@@ -105,9 +107,18 @@
 //     build-time flags, and both ARE ported (see Gains::option_glider_only/
 //     option_descent_speedup below) since neither is landing-specific.
 //
-//   - get_land_sinkrate()/get_land_airspeed()/set_path_proportion() and
-//     the backing _land_sink/_landAirspeed/_path_proportion fields -
-//     landing-only accessors with no non-landing caller.
+//   - get_land_sinkrate()/get_land_airspeed()/set_path_proportion()
+//     accessors - STILL excluded as of CPP-040 (verified: grepped every
+//     call site of all three in AP_TECS.cpp/.h and ArduPlane, none is the
+//     flare height-rate blend CPP-040 ported). _landAirspeed and
+//     _path_proportion (and the AP_Landing-derived state
+//     set_path_proportion() feeds) likewise stay unported - no caller in
+//     this slice's scope needs them. _land_sink itself, however, is NOW
+//     ported as Gains::land_sink (CPP-040, LAND_SINK) because the flare
+//     blend's own arithmetic reads it directly - only the public
+//     get_land_sinkrate() accessor wrapper remains unported, since this
+//     slice has no external caller (e.g. a future AP_Landing-equivalent)
+//     that would call it instead of reading gains_.land_sink.
 //
 // UPSTREAM DEAD CODE FOUND, not ported (a fact about upstream, not a
 // judgment call about scope): `AP_Float _accel_gf;` is declared in
@@ -146,6 +157,151 @@
 // so the dangerous read never actually happens on either side. Concretely
 // tested by "TASmax adjustment uses the main-loop DT, not update_50hz's
 // own DT" in tests/tecs_test.cpp.
+//
+// CPP-040 ADDENDUM (flare height-rate-demand blending, phase 1 of
+// MAV_CMD_NAV_LAND): ports upstream's `_update_height_demand()` flare
+// branch (AP_TECS.cpp real line 611-644, the `} else {` arm of
+// `if (!_landing.is_flaring()) {...} else {...}`) - the smooth
+// height-rate blend from the pre-flare rate toward a configured sink
+// rate as the aircraft nears the ground, used during the last seconds
+// of an automatic landing. Read directly from AP_TECS.cpp/.h, not from
+// memory - every field/default below was grepped from the real
+// AP_GROUPINFO table and struct declarations.
+//
+//   - VERIFIED CORRECTION TO THE TASK'S OWN FRAMING: the task that
+//     scoped this ticket describes the branch split as
+//     `if (!is_doing_auto_land) {...} else {// flaring...}`. Reading
+//     AP_TECS.cpp directly shows this is NOT what the real code gates
+//     on: the flare branch is `if (!_landing.is_flaring())  {...} else
+//     {...}` - `is_flaring()` is a narrower, separate boolean
+//     (AP_Landing.cpp:356-371, `AP_Landing::is_flaring()`) that is true
+//     only once the slope-landing state machine reaches
+//     `SlopeStage::FINAL` (AP_Landing_Slope.cpp:393-396,
+//     `type_slope_is_flaring()`), a strict SUBSET of
+//     `is_doing_auto_land` (`_flight_stage == FlightStage::LAND`,
+//     AP_TECS.cpp:1344) - a plane can be `is_doing_auto_land` (on
+//     approach) for a long time before `is_flaring()` ever becomes
+//     true. Porting this as `is_doing_auto_land` would have started the
+//     flare blend the instant the (not-yet-existing) LAND flight stage
+//     was entered, rather than at the real, later flare trigger -
+//     wrong behavior. This port therefore takes a plain `is_flaring`
+//     bool (TecsLandingInputs::is_flaring below), matching what the
+//     ported arithmetic ACTUALLY reads upstream, not the task's
+//     approximate framing. A future phase-2 ticket, once an
+//     AP_Landing-equivalent exists, is responsible for computing this
+//     from real slope/flare-trigger state, not merely from flight_stage.
+//   - New Gains fields: land_sink (LAND_SINK, AP_TECS.cpp:163,
+//     `AP_GROUPINFO("LAND_SINK", 17, AP_TECS, _land_sink, 0.25f)`),
+//     land_sink_rate_change (LAND_SRC, AP_TECS.cpp:205,
+//     `AP_GROUPINFO("LAND_SRC", 22, AP_TECS, _land_sink_rate_change, 0)`),
+//     flare_holdoff_hgt (FLARE_HGT, AP_TECS.cpp:283,
+//     `AP_GROUPINFO("FLARE_HGT", 32, AP_TECS, _flare_holdoff_hgt, 1.0f)`)
+//     - all three defaults read directly from the real var_info[] table,
+//     not assumed.
+//   - New flare state (AP_TECS.h ~298-299/406-408/429): flare_initialised_,
+//     flare_hgt_dem_adj_, flare_hgt_dem_ideal_, hgt_at_start_of_flare_,
+//     hgt_rate_dem_at_flare_entry_ - same names, same reset-on-entry
+//     semantics (`if (!_flare_initialised) {...}` seeds all four from the
+//     current hgt_dem_/height_/hgt_afe/hgt_rate_dem_ exactly once per
+//     flare, AP_TECS.cpp:619-624).
+//   - CONSOLIDATED RESET, a deliberate, disclosed divergence from
+//     upstream's file LAYOUT (not its behavior): upstream resets
+//     `_flare_initialised = false` in `_update_pitch_limits()`
+//     (AP_TECS.cpp:1594 when on approach but not yet flaring, :1598/:1600
+//     when neither on approach nor flaring) - a function this port does
+//     not have any flare state in at all (see the existing "NOT PORTED"
+//     list above: update_pitch_limits() here never grew is_flaring()
+//     branches). Since this ticket adds NO changes to update_pitch_limits(),
+//     the reset is instead performed inline at the top of
+//     update_height_demand()'s own non-flare arm below - the same net
+//     effect (flare_initialised_ is false on every tick that isn't
+//     currently flaring, so the NEXT flare entry reseeds correctly) via a
+//     different, self-contained call site, since this ticket's own
+//     caller-facing contract is a single `is_flaring` bool with no
+//     separate "on approach" state to distinguish "just left flare" from
+//     "never approached".
+//   - The blend itself (update_height_demand()'s `else` arm below) ports
+//     AP_TECS.cpp:611-644 arithmetic line-for-line: `land_sink_rate_adj =
+//     land_sink + land_sink_rate_change*distance_beyond_land_wp`; `p`
+//     ramps 0->1 as hgt_afe drops from hgt_at_start_of_flare_ to
+//     flare_holdoff_hgt (or is pinned to 1.0 if the flare started at or
+//     below flare_holdoff_hgt already); hgt_rate_dem_ blends from the
+//     rate captured at flare entry toward `-land_sink_rate_adj`;
+//     flare_hgt_dem_ideal_/flare_hgt_dem_adj_ integrate that rate forward
+//     each tick; hgt_dem_ is the p-weighted blend of the two integrated
+//     profiles.
+//   - is_flaring/distance_beyond_land_wp are threaded through as a small
+//     TecsLandingInputs parameter struct (see below, next to TecsInputs),
+//     matching this port's ADR-0012 "explicit inputs, no singletons"
+//     precedent - not stored as a hidden Flags bit the way upstream's
+//     `_flags.is_doing_auto_land`/`_distance_beyond_land_wp` members are.
+//     hgt_afe is passed straight through from update_pitch_throttle()'s
+//     existing hgt_afe parameter (already in scope pre-CPP-040 for
+//     initialise_states()) rather than also cached as a new member -
+//     nothing else needs it to outlive the current tick.
+//     update_pitch_throttle() takes `const TecsLandingInputs& landing =
+//     {}` as a DEFAULTED trailing parameter specifically so the two
+//     existing call sites in plane.hpp (both pre-dating this ticket) need
+//     ZERO changes - a default-constructed TecsLandingInputs
+//     (is_flaring=false) reproduces this port's pre-CPP-040 behavior
+//     exactly, which is what the regression test below proves.
+//   - offset_altitude() (AP_TECS.cpp:1640-1665) gains the three flare-state
+//     offset lines (`flare_hgt_dem_ideal_`/`flare_hgt_dem_adj_`/
+//     `hgt_at_start_of_flare_` all `-= alt_offset`, AP_TECS.cpp:1652-1654)
+//     that this port's own pre-CPP-040 banner explicitly noted as dropped
+//     "since the remaining five height-state offsets are fully in scope" -
+//     now that the three flare fields themselves exist, leaving them
+//     un-offset would be a self-inflicted state-consistency bug on a home-
+//     altitude change during an active flare, so they are added to keep
+//     offset_altitude() correct for every float height state this port
+//     now has, exactly matching upstream's own real offset_altitude().
+//
+//   STILL OUT OF SCOPE for CPP-040 (real, disclosed, deferred to a future
+//   phase-2/3 ticket once Plane-side flight_stage/AP_Landing exist - every
+//   one of the ~15 is_doing_auto_land/flight_stage/is_flaring-gated
+//   branches in AP_TECS.cpp *other than* the one flare height-rate blend
+//   above):
+//     1. `_update_height_demand()`'s `_maxSinkRate_approach` special-case
+//        sink-rate limit (AP_TECS.cpp:540, `if (_maxSinkRate_approach > 0
+//        && is_doing_auto_land)`) - approach sink-rate limiting.
+//     2. `_update_height_demand()`'s approach-lag-compensation branch
+//        (AP_TECS.cpp:583-587, `if (is_doing_auto_land) { hgt_dem +=
+//        hgt_dem_tconst*hgt_rate_dem; } else {...}`).
+//     3. `timeConstant()`'s is_doing_auto_land branch (AP_TECS.cpp:704,
+//        selects `_landTimeConst`/LAND_TCONST instead of TIME_CONST).
+//     4. `_update_throttle_with_airspeed()`'s land throttle-damping
+//        override (AP_TECS.cpp:769, `_land_throttle_damp`/LAND_TDAMP).
+//     5. `_get_i_gain()`'s integral-gain selection (AP_TECS.cpp:899,
+//        `_integGain_land`/LAND_IGAIN).
+//     6. `_update_throttle_without_airspeed()`'s nominal-throttle override
+//        (AP_TECS.cpp:919, `_landThrottle`/LAND_THR) - inside a function
+//        this port already fully excludes (no airspeed-sensor subsystem).
+//     7. `_update_throttle_without_airspeed()`'s SKE/SPE speed-weighting
+//        sliding scale (AP_TECS.cpp:1005, `_spdWeightLand`/
+//        `_path_proportion`/set_path_proportion()) - same already-excluded
+//        function as #6.
+//     8. `_update_pitch()`'s land pitch-damping override (AP_TECS.cpp:1050,
+//        `_land_pitch_damp`/LAND_PDAMP) - a SEPARATE is_doing_auto_land
+//        gate from #9 below, both selecting `pitch_damp` in the same
+//        `if`/`else if` chain.
+//     9. `_update_pitch()`'s is_flaring() pitch-damping override
+//        (AP_TECS.cpp:1048-1049, `pitch_damp = _landDamp`/LAND_DAMP) -
+//        keyed on the SAME `is_flaring()` signal CPP-040 now threads
+//        through as TecsLandingInputs::is_flaring, but this ticket does
+//        NOT wire it into update_pitch()'s pitch_damp selection - only
+//        the height-rate-demand blend is in scope here.
+//    10. `_update_pitch_limits()`'s entire flare pitch-limit blend
+//        (AP_TECS.cpp:1573-1590, smoothly moving PITCHminf toward
+//        LAND_PITCH_DEG via `_landing.get_pitch_cd()` as the SAME `p`
+//        fraction computed independently there) and its `is_on_approach()`
+//        pitch-min hysteresis tracking (AP_TECS.cpp:1592-1614,
+//        `_land_pitch_min`/LAND_PMAX) - already noted in the pre-CPP-040
+//        "NOT PORTED" list above; unaffected by this ticket.
+//     Also unaffected, and land_sink/land_sink_rate_change/
+//     flare_holdoff_hgt notwithstanding: `get_land_sinkrate()`/
+//     `get_land_airspeed()`/`set_path_proportion()` accessors (see the
+//     "UPSTREAM QUIRK"-adjacent accessor note above, now updated for
+//     CPP-040) and `_landAirspeed`/LAND_ARSPD itself.
 //
 // NO SINGLETONS, EXPLICIT INPUTS INSTEAD (ADR-0012), matching L1Inputs'
 // established shape (see fwcpp/nav/l1_control.hpp's own banner for the
@@ -273,6 +429,28 @@ struct TecsInputs {
     std::uint32_t now_ms = 0; // upstream: AP_HAL::millis(), used only by _detect_underspeed()'s 3-second latch
 };
 
+// update_pitch_throttle()'s CPP-040 flare-blend inputs - see the file
+// banner's "CPP-040 ADDENDUM" for exactly what these drive and why
+// `is_flaring` (not `is_doing_auto_land`) is the real upstream gate.
+// Defaults reproduce this port's pre-CPP-040 behavior exactly (no flare),
+// which is what update_pitch_throttle()'s defaulted `landing` parameter
+// relies on to leave plane.hpp's existing call sites unchanged.
+struct TecsLandingInputs {
+    // upstream: AP_Landing::is_flaring() (AP_Landing.cpp:356-371), true
+    // only once the (not-yet-ported) landing state machine has reached its
+    // final flare stage - NOT the same thing as "in the LAND flight
+    // stage"/is_doing_auto_land. A future phase-2 ticket derives this from
+    // a real AP_Landing-equivalent.
+    bool is_flaring = false;
+
+    // upstream: update_pitch_throttle()'s `distance_beyond_land_wp`
+    // parameter / the `_distance_beyond_land_wp` member it is copied into
+    // - metres traveled past the LAND waypoint, used only by the flare
+    // blend's LAND_SRC adjustment below. Meaningless (and unread) while
+    // is_flaring is false.
+    float distance_beyond_land_wp = 0.0f;
+};
+
 class Tecs {
 public:
     // Upstream var_info[] tunables, NORMAL-flight-stage subset only - see
@@ -301,6 +479,13 @@ public:
         float pitch_ff_k = 0.0f;               // PTCH_FF_K
         float thr_min_pct_ext_rate_lim = 20.0f; // THR_ERATE
         float hgt_dem_tconst = 3.0f;           // HDEM_TCONST
+
+        // CPP-040: flare height-rate-demand blend tunables - see file
+        // banner's "CPP-040 ADDENDUM". Defaults are the real var_info[]
+        // defaults (AP_TECS.cpp, read directly), not invented.
+        float land_sink = 0.25f;               // LAND_SINK
+        float land_sink_rate_change = 0.0f;    // LAND_SRC
+        float flare_holdoff_hgt = 1.0f;        // FLARE_HGT
     };
 
     // Upstream `const AP_FixedWing &aparm` - the subset of AP_FixedWing's
@@ -372,14 +557,17 @@ public:
     }
 
     // upstream: AP_TECS::update_pitch_throttle(). Signature reduced to
-    // this slice's scope: `flight_stage` (always NORMAL), `ptchMinCO_cd`
-    // (TAKEOFF-only), `distance_beyond_land_wp` (landing-only, and never
-    // read by any in-scope function), `throttle_nudge`/`pitch_trim_deg`
+    // this slice's scope: `flight_stage` (always NORMAL - `landing` below
+    // carries only the two flare-blend-relevant facts a real flight_stage
+    // would otherwise gate, see file banner's "CPP-040 ADDENDUM"),
+    // `ptchMinCO_cd` (TAKEOFF-only), `throttle_nudge`/`pitch_trim_deg`
     // (no-airspeed fallback only) are all dropped - see file banner.
+    // `landing` defaults to a non-flaring TecsLandingInputs{} so this
+    // port's two pre-CPP-040 call sites (plane.hpp) need no changes.
     // Do not call slower than 10Hz or faster than 500Hz (upstream's own
     // documented contract - unchanged).
     void update_pitch_throttle(std::int32_t hgt_dem_cm, std::int32_t eas_dem_cm, float hgt_afe, float load_factor,
-                                const TecsInputs& in) {
+                                const TecsInputs& in, const TecsLandingInputs& landing = {}) {
         using_airspeed_sensor_ = in.using_airspeed_sensor;
         eas2tas_ = in.eas2tas;
         cos_roll_ = std::cos(in.roll_rad);
@@ -430,7 +618,7 @@ public:
         initialise_states(hgt_afe, in);
         update_ste_rate_lim();
         update_speed_demand();
-        update_height_demand();
+        update_height_demand(hgt_afe, landing);
         detect_underspeed(in);
         update_energies();
         update_pitch();
@@ -533,9 +721,18 @@ public:
     // Reset on next loop.
     void reset() { need_reset_ = true; }
 
-    // upstream: AP_TECS::offset_altitude() - see file banner for the
-    // three flare-only offsets this drops.
+    // upstream: AP_TECS::offset_altitude(). CPP-040 adds the three
+    // flare-state offsets (AP_TECS.cpp:1652-1654) this port's pre-CPP-040
+    // banner had explicitly dropped as flare-only - now that
+    // flare_hgt_dem_ideal_/flare_hgt_dem_adj_/hgt_at_start_of_flare_ exist,
+    // they must be offset too or a home-altitude change mid-flare would
+    // desync them from the other five height states below (a real bug,
+    // not upstream behavior to faithfully reproduce). See file banner's
+    // "CPP-040 ADDENDUM".
     void offset_altitude(float alt_offset) {
+        flare_hgt_dem_ideal_ -= alt_offset;
+        flare_hgt_dem_adj_ -= alt_offset;
+        hgt_at_start_of_flare_ -= alt_offset;
         hgt_dem_in_prev_ -= alt_offset;
         hgt_dem_lpf_ -= alt_offset;
         hgt_dem_rate_ltd_ -= alt_offset;
@@ -812,63 +1009,122 @@ private:
         tas_dem_adj_ = math::constrain_value(tas_dem_adj_, tas_min_, tas_max_);
     }
 
-    // upstream: AP_TECS::_update_height_demand() - flare branch and every
-    // landing-gated term dropped, see file banner.
-    void update_height_demand() {
+    // upstream: AP_TECS::_update_height_demand() - `_maxSinkRate_approach`
+    // special-case and the is_doing_auto_land approach-lag-compensation
+    // branch remain dropped (still out of scope, see file banner); the
+    // `_landing.is_flaring()` flare branch IS now ported (CPP-040) as the
+    // `else` arm below - see file banner's "CPP-040 ADDENDUM".
+    void update_height_demand(float hgt_afe, const TecsLandingInputs& landing) {
         climb_rate_limit_ = gains_.max_climb_rate * max_climb_scaler_;
         sink_rate_limit_ = gains_.max_sink_rate * max_sink_scaler_;
 
-        // Apply 2 point moving average to demanded height.
-        const float hgt_dem = 0.5f * (hgt_dem_in_ + hgt_dem_in_prev_);
-        hgt_dem_in_prev_ = hgt_dem_in_;
+        if (!landing.is_flaring) {
+            // CPP-040: upstream resets `_flare_initialised = false` inside
+            // `_update_pitch_limits()` (AP_TECS.cpp:1594/1598/1600, on
+            // every tick that isn't currently flaring) - a function this
+            // port has no flare state in at all (see file banner). The
+            // same net effect is achieved here instead: flare_initialised_
+            // is unconditionally false whenever this (non-flare) arm runs,
+            // so the next real flare entry below always reseeds. See file
+            // banner's "CONSOLIDATED RESET" note.
+            flare_initialised_ = false;
 
-        // Limit height rate of change.
-        if ((hgt_dem - hgt_dem_rate_ltd_) > (climb_rate_limit_ * dt_)) {
-            hgt_dem_rate_ltd_ = hgt_dem_rate_ltd_ + climb_rate_limit_ * dt_;
-            sink_fraction_ = 0.0f;
-        } else if ((hgt_dem - hgt_dem_rate_ltd_) < (-sink_rate_limit_ * dt_)) {
-            hgt_dem_rate_ltd_ = hgt_dem_rate_ltd_ - sink_rate_limit_ * dt_;
-            sink_fraction_ = 1.0f;
-        } else {
-            const float numerator = hgt_dem - hgt_dem_rate_ltd_;
-            const float denominator = -sink_rate_limit_ * dt_;
-            if (math::is_negative(numerator) && math::is_negative(denominator)) {
-                sink_fraction_ = numerator / denominator;
-            } else {
+            // Apply 2 point moving average to demanded height.
+            const float hgt_dem = 0.5f * (hgt_dem_in_ + hgt_dem_in_prev_);
+            hgt_dem_in_prev_ = hgt_dem_in_;
+
+            // Limit height rate of change.
+            if ((hgt_dem - hgt_dem_rate_ltd_) > (climb_rate_limit_ * dt_)) {
+                hgt_dem_rate_ltd_ = hgt_dem_rate_ltd_ + climb_rate_limit_ * dt_;
                 sink_fraction_ = 0.0f;
+            } else if ((hgt_dem - hgt_dem_rate_ltd_) < (-sink_rate_limit_ * dt_)) {
+                hgt_dem_rate_ltd_ = hgt_dem_rate_ltd_ - sink_rate_limit_ * dt_;
+                sink_fraction_ = 1.0f;
+            } else {
+                const float numerator = hgt_dem - hgt_dem_rate_ltd_;
+                const float denominator = -sink_rate_limit_ * dt_;
+                if (math::is_negative(numerator) && math::is_negative(denominator)) {
+                    sink_fraction_ = numerator / denominator;
+                } else {
+                    sink_fraction_ = 0.0f;
+                }
+                hgt_dem_rate_ltd_ = hgt_dem;
             }
-            hgt_dem_rate_ltd_ = hgt_dem;
-        }
 
-        // Apply a first order lag to height demand.
-        const float coef = std::min(dt_ / (dt_ + std::max(gains_.hgt_dem_tconst, dt_)), 1.0f);
-        hgt_rate_dem_ = (hgt_dem_rate_ltd_ - hgt_dem_lpf_) / gains_.hgt_dem_tconst;
-        hgt_dem_lpf_ = hgt_dem_rate_ltd_ * coef + (1.0f - coef) * hgt_dem_lpf_;
-        post_to_hgt_offset_ *= (1.0f - coef); // always 0 in this slice - see post_to_hgt_offset_'s own comment
-        hgt_dem_ = hgt_dem_lpf_ + post_to_hgt_offset_;
+            // Apply a first order lag to height demand.
+            const float coef = std::min(dt_ / (dt_ + std::max(gains_.hgt_dem_tconst, dt_)), 1.0f);
+            hgt_rate_dem_ = (hgt_dem_rate_ltd_ - hgt_dem_lpf_) / gains_.hgt_dem_tconst;
+            hgt_dem_lpf_ = hgt_dem_rate_ltd_ * coef + (1.0f - coef) * hgt_dem_lpf_;
+            post_to_hgt_offset_ *= (1.0f - coef); // always 0 in this slice - see post_to_hgt_offset_'s own comment
+            hgt_dem_ = hgt_dem_lpf_ + post_to_hgt_offset_;
 
-        // Don't allow height demand to get too far ahead of the vehicle's
-        // current height if it is unable to follow the demanded climb or
-        // descent. Upstream's `!(TAKEOFF||ABORT_LANDING)`/
-        // `!_landing.is_flaring()` guards are both unconditionally true in
-        // NORMAL-only scope and are dropped.
-        bool max_climb_condition = (pitch_dem_unc_ > pitchmaxf_) || (sebdot_dem_clip_ == ClipStatus::kMax);
-        bool max_descent_condition = (pitch_dem_unc_ < pitchminf_) || (sebdot_dem_clip_ == ClipStatus::kMin);
-        if (using_airspeed_for_throttle_) {
-            // large height errors will result in the throttle saturating.
-            max_climb_condition |= (thr_clip_status_ == ClipStatus::kMax);
-            max_descent_condition |= (thr_clip_status_ == ClipStatus::kMin);
-        }
-        const float hgt_dem_alpha = dt_ / std::max(dt_ + gains_.hgt_dem_tconst, dt_);
-        if (max_climb_condition && hgt_dem_ > hgt_dem_prev_) {
-            max_climb_scaler_ *= (1.0f - hgt_dem_alpha);
-        } else if (max_descent_condition && hgt_dem_ < hgt_dem_prev_) {
-            max_sink_scaler_ *= (1.0f - hgt_dem_alpha);
+            // Don't allow height demand to get too far ahead of the vehicle's
+            // current height if it is unable to follow the demanded climb or
+            // descent. Upstream's `!(TAKEOFF||ABORT_LANDING)`/
+            // `!_landing.is_flaring()` guards are both unconditionally true in
+            // NORMAL-only scope and are dropped (this whole block is itself
+            // nested inside `!landing.is_flaring`, so the guard would be
+            // unconditionally true here even with real landing state).
+            bool max_climb_condition = (pitch_dem_unc_ > pitchmaxf_) || (sebdot_dem_clip_ == ClipStatus::kMax);
+            bool max_descent_condition = (pitch_dem_unc_ < pitchminf_) || (sebdot_dem_clip_ == ClipStatus::kMin);
+            if (using_airspeed_for_throttle_) {
+                // large height errors will result in the throttle saturating.
+                max_climb_condition |= (thr_clip_status_ == ClipStatus::kMax);
+                max_descent_condition |= (thr_clip_status_ == ClipStatus::kMin);
+            }
+            const float hgt_dem_alpha = dt_ / std::max(dt_ + gains_.hgt_dem_tconst, dt_);
+            if (max_climb_condition && hgt_dem_ > hgt_dem_prev_) {
+                max_climb_scaler_ *= (1.0f - hgt_dem_alpha);
+            } else if (max_descent_condition && hgt_dem_ < hgt_dem_prev_) {
+                max_sink_scaler_ *= (1.0f - hgt_dem_alpha);
+            } else {
+                max_climb_scaler_ = max_climb_scaler_ * (1.0f - hgt_dem_alpha) + hgt_dem_alpha;
+                max_sink_scaler_ = max_sink_scaler_ * (1.0f - hgt_dem_alpha) + hgt_dem_alpha;
+            }
+            hgt_dem_prev_ = hgt_dem_;
         } else {
-            max_climb_scaler_ = max_climb_scaler_ * (1.0f - hgt_dem_alpha) + hgt_dem_alpha;
-            max_sink_scaler_ = max_sink_scaler_ * (1.0f - hgt_dem_alpha) + hgt_dem_alpha;
+            // CPP-040: when flaring, force height rate demand to the
+            // configured sink rate and adjust the demanded height to be
+            // kinematically consistent with the height rate (upstream:
+            // AP_TECS.cpp:611-644).
+
+            // set all height filter states to current height to prevent
+            // large pitch transients if flare is aborted.
+            hgt_dem_lpf_ = height_;
+            hgt_dem_rate_ltd_ = height_;
+            hgt_dem_in_prev_ = height_;
+
+            if (!flare_initialised_) {
+                flare_hgt_dem_adj_ = hgt_dem_;
+                flare_hgt_dem_ideal_ = height_;
+                hgt_at_start_of_flare_ = hgt_afe;
+                hgt_rate_dem_at_flare_entry_ = hgt_rate_dem_;
+                flare_initialised_ = true;
+            }
+
+            // adjust the flare sink rate to increase/decrease as you
+            // travel further beyond the land wp.
+            const float land_sink_rate_adj =
+                gains_.land_sink + gains_.land_sink_rate_change * landing.distance_beyond_land_wp;
+
+            // bring it in linearly with height.
+            float p;
+            if (hgt_at_start_of_flare_ > gains_.flare_holdoff_hgt) {
+                p = math::constrain_value((hgt_at_start_of_flare_ - hgt_afe) /
+                                               (hgt_at_start_of_flare_ - gains_.flare_holdoff_hgt),
+                                           0.0f, 1.0f);
+            } else {
+                p = 1.0f;
+            }
+            hgt_rate_dem_ = hgt_rate_dem_at_flare_entry_ * (1.0f - p) - land_sink_rate_adj * p;
+
+            flare_hgt_dem_ideal_ += dt_ * hgt_rate_dem_; // the ideal height profile to follow
+            flare_hgt_dem_adj_ += dt_ * hgt_rate_dem_;   // the demanded height profile that includes
+                                                          // the pre-flare height tracking offset
+
+            // fade across to the ideal height profile.
+            hgt_dem_ = flare_hgt_dem_adj_ * (1.0f - p) + flare_hgt_dem_ideal_ * p;
         }
-        hgt_dem_prev_ = hgt_dem_;
     }
 
     // upstream: AP_TECS::_detect_underspeed() - VTOL clear and
@@ -1241,6 +1497,17 @@ private:
 
     float hgt_dem_rate_ltd_ = 0.0f;
     float hgt_rate_dem_ = 0.0f;
+
+    // CPP-040 flare state - upstream: _flare_initialised/
+    // _flare_hgt_dem_adj/_flare_hgt_dem_ideal/_hgt_at_start_of_flare/
+    // _hgt_rate_dem_at_flare_entry (AP_TECS.h ~298-299/406-408/429). See
+    // file banner's "CPP-040 ADDENDUM" and update_height_demand()'s flare
+    // arm for how these are seeded/consumed.
+    bool flare_initialised_ = false;
+    float flare_hgt_dem_adj_ = 0.0f;
+    float flare_hgt_dem_ideal_ = 0.0f;
+    float hgt_at_start_of_flare_ = 0.0f;
+    float hgt_rate_dem_at_flare_entry_ = 0.0f;
 
     // Offset applied to height demand post-takeoff to compensate for
     // height demand filter lag - upstream: _post_TO_hgt_offset. Only ever

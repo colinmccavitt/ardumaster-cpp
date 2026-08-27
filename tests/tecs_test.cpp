@@ -531,3 +531,200 @@ TEST_CASE("update_pitch_throttle: a full tick sequence converges to sensible ste
     REQUIRE(tecs.get_hgt_dem() > 35.0f);
     REQUIRE(tecs.get_tas_dem_adj() == Catch::Approx(15.0f).margin(1.0f));
 }
+
+// ---------------------------------------------------------------------
+// CPP-040: flare height-rate-demand blending. See tecs.hpp's file banner
+// "CPP-040 ADDENDUM" for the exact upstream arithmetic (AP_TECS.cpp:
+// 611-644) these tests check, and for why the gating bool is named
+// `is_flaring` (matching the real upstream gate, `_landing.is_flaring()`)
+// rather than the ticket's original "is_doing_auto_land" framing.
+// ---------------------------------------------------------------------
+
+TEST_CASE("update_pitch_throttle: non-flare path is byte-identical whether the landing parameter is omitted or "
+          "explicitly non-flaring (CPP-040 regression)",
+          "[tecs][flare][regression]") {
+    Tecs::Gains gains;
+    Tecs::FixedWingParams aparm;
+
+    Tecs tecs_default(gains, aparm);  // pre-CPP-040 5-argument update_pitch_throttle() call form
+    Tecs tecs_explicit(gains, aparm); // explicitly passes a default-constructed (non-flaring) TecsLandingInputs
+
+    std::uint64_t now_us = 5'000'000;
+    std::uint32_t now_ms = 1000;
+    TecsInputs in = default_inputs(now_us, now_ms);
+    in.relative_position_d_home_m = -40.0f;
+    tecs_default.update_50hz(in);
+    tecs_explicit.update_50hz(in);
+
+    const TecsLandingInputs not_flaring{}; // is_flaring=false, distance_beyond_land_wp=0.0f
+
+    for (int i = 0; i < 300; ++i) {
+        now_us += 20000;
+        now_ms += 20;
+        in.now_us = now_us;
+        in.now_ms = now_ms;
+
+        // A varying, non-trivial input trajectory - not just two idle
+        // controllers agreeing by accident.
+        const float t = static_cast<float>(i);
+        const float height = 40.0f + 10.0f * std::sin(t * 0.01f);
+        in.relative_position_d_home_m = -height;
+        in.velocity_down_ms = -0.1f * std::cos(t * 0.01f);
+        in.airspeed_eas = 12.0f + 2.0f * std::sin(t * 0.02f);
+
+        tecs_default.update_50hz(in);
+        tecs_explicit.update_50hz(in);
+
+        tecs_default.update_pitch_throttle(6000, 1400, height, 1.0f, in);
+        tecs_explicit.update_pitch_throttle(6000, 1400, height, 1.0f, in, not_flaring);
+    }
+
+    // Exact equality, not Catch::Approx: both call forms must run the
+    // IDENTICAL arithmetic path (see tecs.hpp's update_height_demand() -
+    // the non-flare arm is upstream's pre-CPP-040 code unchanged, merely
+    // wrapped in `if (!landing.is_flaring)`), so their outputs must be
+    // bit-for-bit identical, not merely close.
+    REQUIRE(tecs_default.get_throttle_demand() == tecs_explicit.get_throttle_demand());
+    REQUIRE(tecs_default.get_pitch_demand() == tecs_explicit.get_pitch_demand());
+    REQUIRE(tecs_default.get_hgt_dem() == tecs_explicit.get_hgt_dem());
+    REQUIRE(tecs_default.get_height_rate_demand() == tecs_explicit.get_height_rate_demand());
+    REQUIRE(tecs_default.get_tas_dem_adj() == tecs_explicit.get_tas_dem_adj());
+
+    const auto e_default = tecs_default.energy_state();
+    const auto e_explicit = tecs_explicit.energy_state();
+    REQUIRE(e_default.spe_dem == e_explicit.spe_dem);
+    REQUIRE(e_default.ske_dem == e_explicit.ske_dem);
+    REQUIRE(e_default.spedot == e_explicit.spedot);
+    REQUIRE(e_default.skedot == e_explicit.skedot);
+}
+
+TEST_CASE("update_height_demand flare: hgt_rate_dem blends smoothly from the pre-flare rate toward -LAND_SINK as "
+          "height drops to FLARE_HGT",
+          "[tecs][flare]") {
+    Tecs::Gains gains;
+    Tecs::FixedWingParams aparm;
+    Tecs tecs(gains, aparm);
+
+    std::uint64_t now_us = 5'000'000;
+    std::uint32_t now_ms = 1000;
+    TecsInputs in = default_inputs(now_us, now_ms);
+    float height = 30.0f;
+    in.relative_position_d_home_m = -height;
+    tecs.update_50hz(in);
+
+    // Settle into a real, non-zero descending hgt_rate_dem_ BEFORE flare
+    // entry, by commanding a height demand well below the current height.
+    for (int i = 0; i < 200; ++i) {
+        now_us += 20000;
+        now_ms += 20;
+        in.now_us = now_us;
+        in.now_ms = now_ms;
+        in.relative_position_d_home_m = -height;
+        tecs.update_50hz(in);
+        tecs.update_pitch_throttle(0, 1200, height, 1.0f, in); // hgt_dem_cm=0: descend toward 0m
+    }
+    const float pre_flare_rate = tecs.get_height_rate_demand();
+    REQUIRE(pre_flare_rate < 0.0f); // must actually be descending going into flare
+
+    TecsLandingInputs landing;
+    landing.is_flaring = true;
+
+    // hgt_afe starts well above FLARE_HGT (1.0m default) and is driven
+    // down through it in small (0.05m) steps - this is the "final seconds
+    // before touchdown" sequence the ticket asks for. The step is kept
+    // small relative to the 7m (8.0-FLARE_HGT) flare range specifically so
+    // the per-tick continuity check below is a meaningful test of the
+    // blend formula rather than an artifact of a coarse height step.
+    float hgt_afe = 8.0f;
+    float prev_rate = pre_flare_rate;
+    float first_flare_rate = 0.0f;
+    float last_flare_rate = 0.0f;
+    for (int i = 0; i < 170; ++i) {
+        now_us += 20000;
+        now_ms += 20;
+        in.now_us = now_us;
+        in.now_ms = now_ms;
+        in.relative_position_d_home_m = -hgt_afe;
+        tecs.update_50hz(in);
+        tecs.update_pitch_throttle(0, 1200, hgt_afe, 1.0f, in, landing);
+
+        const float rate = tecs.get_height_rate_demand();
+        if (i == 0) {
+            first_flare_rate = rate;
+        }
+        last_flare_rate = rate;
+
+        // No discontinuity tick-to-tick: p and hgt_rate_dem_ are both
+        // continuous (in fact piecewise-linear) functions of hgt_afe,
+        // which itself only moves a small, bounded step (0.05m) each
+        // tick - a real bug (e.g. a sign error or an unseeded
+        // hgt_rate_dem_at_flare_entry_) would produce a jump far larger
+        // than this bound, not a violation by a hair.
+        REQUIRE(std::fabs(rate - prev_rate) < 0.05f);
+        prev_rate = rate;
+
+        hgt_afe = std::max(hgt_afe - 0.05f, 0.0f);
+    }
+
+    // At the instant flare begins, hgt_at_start_of_flare_ == hgt_afe (p==0
+    // exactly), so the demanded rate must equal the pre-flare rate exactly
+    // - no jump at flare entry.
+    REQUIRE(first_flare_rate == Catch::Approx(pre_flare_rate).margin(1e-4f));
+
+    // Once height has dropped to (and through) FLARE_HGT, p==1 and the
+    // demanded rate must equal exactly -LAND_SINK (LAND_SRC is 0 here, so
+    // land_sink_rate_adj == gains.land_sink).
+    REQUIRE(last_flare_rate == Catch::Approx(-gains.land_sink).margin(1e-4f));
+}
+
+TEST_CASE("update_height_demand flare: LAND_SRC increases the demanded sink rate as distance beyond the land wp "
+          "grows",
+          "[tecs][flare]") {
+    Tecs::Gains gains;
+    gains.land_sink_rate_change = 0.2f; // LAND_SRC
+    Tecs::FixedWingParams aparm;
+
+    // Runs a fresh Tecs through a full flare-entry-to-touchdown sequence at
+    // a fixed `distance_beyond_land_wp`, returning the demanded height rate
+    // once fully settled into flare (p==1).
+    auto settled_flare_rate = [&](float distance_beyond_land_wp) {
+        Tecs tecs(gains, aparm);
+        std::uint64_t now_us = 5'000'000;
+        std::uint32_t now_ms = 1000;
+        TecsInputs in = default_inputs(now_us, now_ms);
+        float hgt_afe = 5.0f;
+        in.relative_position_d_home_m = -hgt_afe;
+        tecs.update_50hz(in);
+
+        TecsLandingInputs landing;
+        landing.is_flaring = true;
+        landing.distance_beyond_land_wp = distance_beyond_land_wp;
+
+        for (int i = 0; i < 60; ++i) {
+            now_us += 20000;
+            now_ms += 20;
+            in.now_us = now_us;
+            in.now_ms = now_ms;
+            in.relative_position_d_home_m = -hgt_afe;
+            tecs.update_50hz(in);
+            tecs.update_pitch_throttle(0, 1200, hgt_afe, 1.0f, in, landing);
+            hgt_afe = std::max(hgt_afe - 0.2f, 0.0f);
+        }
+        return tecs.get_height_rate_demand();
+    };
+
+    const float rate_at_wp = settled_flare_rate(0.0f);
+    const float rate_beyond_wp = settled_flare_rate(10.0f);
+
+    // Hand-computed at full flare (p==1): hgt_rate_dem == -(LAND_SINK +
+    // LAND_SRC*distance_beyond_land_wp).
+    REQUIRE(rate_at_wp == Catch::Approx(-gains.land_sink).margin(1e-4f));
+    REQUIRE(rate_beyond_wp ==
+            Catch::Approx(-(gains.land_sink + gains.land_sink_rate_change * 10.0f)).margin(1e-4f));
+
+    // Upstream's own LAND_SRC doc-comment: "A positive value will force
+    // the plane to land sooner proportional to distance passed land
+    // point" - a larger distance_beyond_land_wp (with LAND_SRC>0) must
+    // produce a MORE NEGATIVE (faster) demanded sink rate.
+    REQUIRE(rate_beyond_wp < rate_at_wp);
+}
