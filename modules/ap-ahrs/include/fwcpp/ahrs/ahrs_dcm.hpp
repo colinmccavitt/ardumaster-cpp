@@ -362,7 +362,22 @@
 //     would normally take priority over it) - no wind-estimation or
 //     airspeed-sensor subsystem in this port (both already out of scope
 //     per slice 1/2's banner), so the caller supplies whatever estimate it
-//     has, 0/zero-vector if none. This class still maintains its OWN
+//     has, 0/zero-vector if none.
+//
+//     CPP-051 RE-EXAMINATION (ap-sim's SimPlane now models a REAL
+//     ground-truth wind_ef - steady vector + turbulence): this parameter's
+//     "no wind-estimation subsystem" reasoning is UNCHANGED by that.
+//     wind_estimate here is AHRS's own ESTIMATE of wind - upstream computes
+//     its real `_wind` via an EKF/DCM wind-estimation algorithm fusing
+//     airspeed+GPS+heading, never by reading SITL's ground truth directly
+//     (doing that would hand the estimator oracle knowledge no real flight
+//     controller has). This port still has no such estimation algorithm to
+//     port, so 0/zero-vector remains the correct default - this stays a
+//     real, disclosed exclusion, now for "no wind ESTIMATOR exists"
+//     specifically, rather than CPP-051's now-closed "no wind anywhere in
+//     this port" gap.
+//
+//     This class still maintains its OWN
 //     `_last_airspeed_TAS`-equivalent cache (last_airspeed_tas_, exposed
 //     via last_airspeed_tas()), computed from GPS velocity exactly as
 //     upstream does whenever GPS is available - that computation is pure

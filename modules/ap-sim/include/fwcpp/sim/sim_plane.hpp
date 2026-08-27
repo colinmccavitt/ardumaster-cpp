@@ -58,13 +58,6 @@
 //     are used as passed in, unmodified.
 //   - load_coeffs() / AP_JSON model-file loading - Coefficients is a plain
 //     aggregate a caller can hand-edit instead (see step 1 of the ticket).
-//   - Wind modeling (Aircraft::update_wind, wind_ef). Genuinely out of
-//     scope for a first slice: velocity_air_bf is simply the body-frame
-//     velocity with wind_ef treated as always zero (velocity_air_ef ==
-//     velocity_ef), and airspeed is the resulting true airspeed with
-//     eas2tas == 1 (no barometer/EAS-TAS model exists in this port either -
-//     see air_density below). A real wind model is slice 2 work (see the
-//     bottom-of-file note).
 //   - Atmosphere/air density model (AP_Baro::get_air_density_for_alt_amsl,
 //     eas2tas from altitude). air_density defaults to SSL_AIR_DENSITY
 //     (1.225f kg/m^3, AP_Math/definitions.h) and is held constant - a
@@ -98,6 +91,89 @@
 //     airspeed_pitot has no consumer in this port (no airspeed sensor
 //     model yet); the plain `airspeed` member upstream itself uses for all
 //     physics (as opposed to sensor simulation) is kept.
+//
+// WIND MODELING (CPP-051) - closes the "wind_ef treated as always zero"
+// gap CPP-030 originally disclosed. Upstream: Aircraft::update_wind()
+// (SIM_Aircraft.cpp:888, read in full), Aircraft::velocity_air_ef /
+// velocity_air_bf recomputation (SIM_Aircraft.cpp:762-766, in
+// update_dynamics()), `struct sitl_input`'s nested `wind` struct
+// (SITL_Input.h, read in full: speed/direction/turbulence/dir_z, exactly
+// that field order).
+//   - WindConfig (below) transcribes sitl_input.wind field-for-field: a
+//     real, but compile-time-or-test-supplied, input a caller sets on
+//     SimPlane::wind_config directly - the same "no AP_Param/GCS live-
+//     tunable path exists in this port" precedent Coefficients above
+//     already establishes. There is no SIM_WIND_* MAVLink/AP_Param
+//     runtime-set path here (no GCS at all in this port) - verified by
+//     checking there is no other AP_Param consumer of sitl->wind_*
+//     anywhere update_wind() reads besides input.wind itself.
+//   - update_wind() reproduces upstream's real body exactly: the steady
+//     wind vector `Vector3f(cos(direction)*cos(dir_z), sin(direction)*
+//     cos(dir_z), sin(dir_z)) * speed`, the turbulence gust IIR-filtered
+//     random walk (iir_coef=0.98, wind_turb = turbulence*10.0f, gated on
+//     `wind_turb > 0 && !on_ground()`, upstream's own comment on the
+//     10.0f scale transcribed verbatim), and the final `wind_ef =
+//     -wind_ef` sign flip. That flip is REAL and was verified algebraically
+//     against upstream's OWN two real call sites, not guessed: upstream's
+//     velocity_air_ef = velocity_ef - wind_ef (the member, i.e.
+//     POST-negation) is the standard physics identity "airmass-relative
+//     velocity = ground velocity - true wind velocity" only if the
+//     POST-negation wind_ef is the actual physical earth-frame velocity of
+//     the moving air mass. Direct substitution shows the PRE-negation
+//     vector this class builds points in the "wind is coming FROM this
+//     compass heading" sense (standard meteorological convention for
+//     input.wind.direction) - e.g. direction=0 (from due north) yields a
+//     pre-negation vector of (+speed,0,0) (pointing north), which negates
+//     to (-speed,0,0) (pointing south) - a physical air mass correctly
+//     moving away from the north it's blowing from. Reproduced here with
+//     the identical negate-the-whole-vector-at-the-end structure (steady
+//     term and turbulence term negated together, matching upstream's
+//     statement order).
+//   - get_local_updraft()'s terrain-relief thermal/updraft model
+//     (SIM_Aircraft.cpp:1241, read in full) is EXCLUDED: every non-zero
+//     `sitl->thermal_scenario` case hard-codes specific thermal
+//     positions/radii against a terrain-relative position query
+//     (`position + home.get_distance_NED_double(origin)`) this port has no
+//     Location/home/terrain subsystem to support (same absence the GROUND
+//     MODEL note below already establishes); the real upstream default
+//     (THML_SCENARI=0, verified against SITL.cpp's own AP_GROUPINFO table)
+//     unconditionally `return 0` before reaching any of that, so omitting
+//     the whole feature changes nothing for any wind configuration this
+//     port can express. wind_ef.z therefore has no updraft term added -
+//     a real, disclosed exclusion, not a silent drop.
+//   - rand_normal()-equivalent: this port has NO existing normal-random
+//     helper anywhere (checked every other SITL-adjacent module - ap-gps,
+//     ap-compass - both explicitly disclose "no noise model" instead of
+//     having one to reuse), so this is the first one. Upstream's own
+//     Aircraft::rand_normal (SIM_Aircraft.cpp:343) hand-rolls a Marsaglia-
+//     polar Box-Muller transform over the PROCESS-GLOBAL libc rand()/
+//     RAND_MAX, with its second sample cached in a FUNCTION-STATIC shared
+//     across every call site in the whole SITL binary (gyro/accel sensor
+//     noise elsewhere in Aircraft, ADSB/AIS/Vicon position noise, and this
+//     turbulence model, all drawing from the same global stream). ADR-0012
+//     rules out exactly this kind of hidden shared mutable state. This
+//     class instead owns its own explicitly-seedable std::mt19937 +
+//     std::normal_distribution<double>(0,1) member (wind_rng_ /
+//     wind_normal_dist_, seeded via the constructor's wind_rng_seed
+//     parameter) - statistically equivalent (mean 0, unit-variance
+//     Gaussian samples feeding the identical IIR-filtered random walk
+//     upstream uses) but per-instance and deterministic-per-seed rather
+//     than a process-global stream. This is NOT a bit-exact RNG-sequence
+//     match to upstream - neither achievable (libc rand()'s sequence is
+//     implementation-defined) nor required: turbulence is a stochastic
+//     gust MODEL, verified by this ticket's tests via its statistical/
+//     settling properties (mean/stddev of the IIR-filtered output), not by
+//     reproducing a specific pseudo-random sequence.
+//   - turbulence_azimuth's per-tick re-randomization
+//     (`turbulence_azimuth = turbulence_azimuth + (2 * rand())`,
+//     SIM_Aircraft.cpp:903) only matters modulo 360 degrees once run
+//     through cosf/sinf - its purpose is purely "give the horizontal gust
+//     a fresh, uncorrelated direction every tick", not to accumulate any
+//     meaningful angle. Reproduced with an explicit
+//     std::uniform_real_distribution<float>(0, 360) draw from the SAME
+//     wind_rng_ member instead of libc rand()/RAND_MAX - identical effect
+//     (full re-randomization every tick, no persistent directional
+//     memory), same RNG-substitution rationale as rand_normal() above.
 //
 // GROUND MODEL - A DELIBERATE FLAT-EARTH SIMPLIFICATION, not upstream's:
 // upstream's on_ground() is `hagl() <= 0.001f`, where hagl() itself is
@@ -137,6 +213,7 @@
 // constant" case, rather than adding a second hardcoded copy of M_PI here.
 
 #include <cmath>
+#include <random>
 
 #include <fwcpp/math/matrix3.hpp>
 #include <fwcpp/math/scalar.hpp>
@@ -204,6 +281,19 @@ struct Coefficients {
     math::Vector3f cg_offset{-0.15f, 0.0f, -0.05f};
 };
 
+// Upstream: `struct sitl_input`'s nested `wind` struct (SITL_Input.h, read
+// in full) - transcribed field-for-field, same names/units/order. See file
+// banner's "WIND MODELING" note for why this is a caller-set aggregate
+// rather than an AP_Param/MAVLink-tunable (no GCS in this port at all).
+// direction/dir_z use upstream's own meteorological "wind is coming FROM
+// this heading" convention - see update_wind()'s own sign-convention note.
+struct WindConfig {
+    float speed = 0.0f;       // m/s
+    float direction = 0.0f;   // deg, 0..360, compass bearing wind blows FROM
+    float turbulence = 0.0f;  // turbulence intensity (upstream's own SIM_WIND_TURB-equivalent units)
+    float dir_z = 0.0f;       // deg, -90..90, vertical wind angle
+};
+
 // Ground-truth fixed-wing flight dynamics model - upstream: SITL::Plane
 // (STANDARD configuration only; see file banner for every excluded
 // variant). Owns the aircraft's true attitude/velocity/position state and
@@ -216,8 +306,19 @@ public:
     // constructor-overridable here since nothing in this port's JSON-model
     // sense applies, but the defaults reproduce upstream's own standard
     // "skywalker_2013"-equivalent plane with zero configuration.
-    explicit SimPlane(const Coefficients& coeffs = Coefficients{}, float mass_kg = 2.0f, float hover_throttle = 0.7f)
-        : coefficient(coeffs), mass(mass_kg), hover_throttle(hover_throttle) {
+    //
+    // wind_rng_seed has no upstream counterpart (upstream's rand_normal()
+    // draws from a process-global libc rand() stream with no seed a
+    // caller controls) - see file banner's "rand_normal()-equivalent"
+    // note. Defaulted to a fixed, arbitrary constant rather than a
+    // time/random_device seed so `SimPlane plane;` stays fully
+    // deterministic and reproducible in tests that never touch wind_config
+    // (the overwhelming majority of existing sim_plane_test.cpp cases) -
+    // a caller exercising turbulence and wanting a specific sequence
+    // passes their own seed explicitly.
+    explicit SimPlane(const Coefficients& coeffs = Coefficients{}, float mass_kg = 2.0f, float hover_throttle = 0.7f,
+                       std::uint32_t wind_rng_seed = 20260827U)
+        : coefficient(coeffs), mass(mass_kg), hover_throttle(hover_throttle), wind_rng_(wind_rng_seed) {
         dcm.identity();
     }
 
@@ -394,6 +495,60 @@ public:
         return math::Vector3f(static_cast<float>(la), static_cast<float>(ma), static_cast<float>(na));
     }
 
+    // Upstream: Aircraft::rand_normal(0, 1) (SIM_Aircraft.cpp:343), always
+    // called with mean=0/stddev=1 at every real call site update_wind()
+    // uses - see file banner's "rand_normal()-equivalent" note for the
+    // std::mt19937/std::normal_distribution substitution rationale.
+    [[nodiscard]] double rand_normal() { return wind_normal_dist_(wind_rng_); }
+
+    // Upstream: Aircraft::update_wind (SIM_Aircraft.cpp:888, read in full)
+    // - see file banner's "WIND MODELING" note for the full trace of the
+    // sign convention, the get_local_updraft() exclusion, and the RNG
+    // substitutions. Takes no dt: upstream's own version doesn't either -
+    // the turbulence IIR filter's implicit timestep is baked into
+    // iir_coef=0.98 as a constant, tied to upstream's per-tick call
+    // cadence, not to an explicit dt argument.
+    void update_wind() {
+        // steady wind vector, earth frame - upstream's exact formula,
+        // meteorological "FROM heading" convention (see file banner).
+        wind_ef = math::Vector3f(std::cos(math::radians(wind_config.direction)) * std::cos(math::radians(wind_config.dir_z)),
+                                  std::sin(math::radians(wind_config.direction)) * std::cos(math::radians(wind_config.dir_z)),
+                                  std::sin(math::radians(wind_config.dir_z)))
+                  * wind_config.speed;
+
+        // get_local_updraft() term EXCLUDED here - see file banner.
+
+        // scale input.wind.turbulence to match standard deviation when
+        // using iir_coef=0.98 - upstream's own comment, transcribed
+        // verbatim (SIM_Aircraft.cpp:902-903).
+        const float wind_turb = wind_config.turbulence * 10.0f;
+        const float iir_coef = 0.98f;
+
+        if (wind_turb > 0.0f && !on_ground()) {
+            // re-randomize gust direction every tick - see file banner's
+            // turbulence_azimuth note for the RNG substitution.
+            turbulence_azimuth = std::fmod(turbulence_azimuth + wind_azimuth_step_dist_(wind_rng_), 360.0f);
+
+            turbulence_horizontal_speed = static_cast<float>(turbulence_horizontal_speed * iir_coef
+                                                               + wind_turb * rand_normal() * (1.0 - iir_coef));
+            turbulence_vertical_speed = static_cast<float>(turbulence_vertical_speed * iir_coef
+                                                             + wind_turb * rand_normal() * (1.0 - iir_coef));
+
+            wind_ef += math::Vector3f(std::cos(math::radians(turbulence_azimuth)) * turbulence_horizontal_speed,
+                                       std::sin(math::radians(turbulence_azimuth)) * turbulence_horizontal_speed,
+                                       turbulence_vertical_speed);
+        }
+
+        // "the AHRS wants wind with opposite sense" - upstream's own
+        // comment (SIM_Aircraft.cpp:915), transcribed verbatim. Negates
+        // the ENTIRE vector built above (steady + turbulence together),
+        // converting the meteorological "FROM heading" construction into
+        // the physical earth-frame air-mass velocity this class's
+        // velocity_air_ef = velocity_ef - wind_ef then consumes - see
+        // file banner's algebraic verification of this sign flip.
+        wind_ef = -wind_ef;
+    }
+
     // Upstream: Aircraft::hagl() (SIM_Aircraft.cpp:145) / on_ground()
     // (SIM_Aircraft.cpp:153) - replaced by a flat-earth simplification, see
     // file banner's "GROUND MODEL" note. position.z follows NED convention
@@ -412,6 +567,14 @@ public:
     // reverse_elevator_rudder/tailsitter/aerobatic/launcher) is skipped -
     // see file banner.
     void update(float aileron, float elevator, float rudder, float throttle, float dt) {
+        // Upstream: Plane::update calls update_wind(input) FIRST, before
+        // calculate_forces/update_dynamics (SIM_Plane.cpp:526) - reproduced
+        // in the same order. Uses THIS tick's pre-integration on_ground()
+        // state (matching upstream exactly, since upstream's update_wind()
+        // call also precedes the position integration inside
+        // update_dynamics()).
+        update_wind();
+
         // calculate angle of attack (upstream: Plane::calculate_forces,
         // reading the PREVIOUS tick's velocity_air_bf - exactly reproduced:
         // velocity_air_bf here is only ever written by update_dynamics(),
@@ -447,8 +610,9 @@ public:
     // integration + +-2000 deg/s clamp, body-accel +-64G clamp, DCM
     // rotate+normalize, body->earth accel rotation plus gravity, the
     // on-ground accel_earth.z clamp, accelerometer-equivalent accel_body
-    // re-derivation, velocity/position integration, and
-    // velocity_air_bf recomputation (wind=0, see file banner). The
+    // re-derivation, velocity/position integration, and the real
+    // velocity_air_ef/velocity_air_bf recomputation against wind_ef
+    // (CPP-051 - see file banner's "WIND MODELING" note). The
     // eas2tas/air_density-from-altitude recompute, the entire
     // `switch (ground_behavior)` block, slung-payload/tether hooks, and
     // adjust_frame_time are excluded - see file banner.
@@ -489,10 +653,17 @@ public:
         // new position vector
         position += velocity_ef * dt;
 
-        // velocity relative to airmass, body frame - wind_ef treated as
-        // always zero this slice (velocity_air_ef == velocity_ef), see file
-        // banner.
-        velocity_air_bf = dcm.transposed() * velocity_ef;
+        // velocity relative to airmass, earth then body frame - upstream:
+        // SIM_Aircraft.cpp:762-766, `velocity_air_ef = velocity_ef -
+        // wind_ef; velocity_air_bf = dcm.transposed() * velocity_air_ef;`
+        // - wind_ef is real as of CPP-051 (see file banner), populated by
+        // update_wind() (called from update(), once per tick, before this
+        // method runs); a caller driving update_dynamics() directly
+        // without ever calling update_wind() sees wind_ef at its
+        // zero-initialized default, so velocity_air_ef == velocity_ef
+        // exactly - identical to this slice's pre-CPP-051 behavior.
+        velocity_air_ef = velocity_ef - wind_ef;
+        velocity_air_bf = dcm.transposed() * velocity_air_ef;
 
         // Upstream: Aircraft::update_eas_airspeed() (SIM_Aircraft.cpp:1377),
         // airspeed = velocity_air_ef.length() / eas2tas with eas2tas held at
@@ -522,6 +693,17 @@ public:
     float mass;
     float hover_throttle;
 
+    // Wind-turbulence RNG state - upstream: the process-global libc
+    // rand()/RAND_MAX stream Aircraft::rand_normal shares with every other
+    // SITL rand_normal() call site (see file banner's "rand_normal()-
+    // equivalent" note). Public like every other field in this class (no
+    // access-control split exists anywhere in SimPlane), but internal
+    // plumbing a caller has no reason to read/write directly - only
+    // wind_config (input) and wind_ef (output) are the intended surface.
+    std::mt19937 wind_rng_;
+    std::normal_distribution<double> wind_normal_dist_{0.0, 1.0};
+    std::uniform_real_distribution<float> wind_azimuth_step_dist_{0.0f, 360.0f};
+
     // True attitude - upstream: Aircraft::dcm (_dcm_matrix's SITL-truth
     // counterpart; SITL's own dcm, not AhrsDcm's dcm_matrix - see file
     // banner's "shares no code with the estimator" note).
@@ -547,10 +729,40 @@ public:
     // module to a build option it doesn't otherwise need).
     math::Vector3f position;
 
+    // Wind configuration - upstream: `sitl_input.wind` (see WindConfig's
+    // own comment). All-zero by default, matching this slice's pre-CPP-051
+    // "wind assumed zero" behavior exactly when a caller never touches it.
+    WindConfig wind_config;
+
+    // True earth-frame (NED) wind velocity, m/s - upstream: Aircraft::wind_ef,
+    // POST the real `wind_ef = -wind_ef` sign flip (see update_wind()'s own
+    // note) - i.e. this IS the physical velocity of the moving air mass,
+    // not the pre-negation "FROM heading" construction. Written once per
+    // tick by update_wind() (called from update(); zero-initialized default
+    // if a caller only ever calls update_dynamics() directly).
+    math::Vector3f wind_ef;
+
+    // Turbulence gust IIR-filter state - upstream: Aircraft::turbulence_azimuth
+    // / turbulence_horizontal_speed / turbulence_vertical_speed
+    // (SIM_Aircraft.h:273-275). See update_wind() for the recurrence.
+    float turbulence_azimuth = 0.0f;
+    float turbulence_horizontal_speed = 0.0f;
+    float turbulence_vertical_speed = 0.0f;
+
+    // True earth-frame (NED) airmass-relative velocity, m/s - upstream:
+    // Aircraft::velocity_air_ef = velocity_ef - wind_ef (SIM_Aircraft.cpp:763).
+    // Had no counterpart at all before CPP-051 (velocity_air_bf was derived
+    // straight from velocity_ef); now a real intermediate, matching
+    // upstream's own two-step earth-frame-then-body-frame computation.
+    math::Vector3f velocity_air_ef;
+
     // True body-frame airmass-relative velocity, m/s - upstream:
-    // Aircraft::velocity_air_bf, with wind_ef treated as always zero this
-    // slice (see file banner), so this equals dcm.transposed() *
-    // velocity_ef exactly.
+    // Aircraft::velocity_air_bf = dcm.transposed() * velocity_air_ef
+    // (SIM_Aircraft.cpp:766). wind_ef is real as of CPP-051 (see file
+    // banner and update_wind()); with wind_ef at its zero default (no
+    // update_wind() call, or an all-zero wind_config) this equals
+    // dcm.transposed() * velocity_ef exactly, matching this slice's
+    // original pre-CPP-051 behavior.
     math::Vector3f velocity_air_bf;
 
     // True angle of attack / sideslip, rad - upstream: Plane::angle_of_attack,
@@ -574,16 +786,15 @@ public:
 
 } // namespace fwcpp::sim
 
-// SLICE 2 NOTE: a higher-fidelity ap-sim would add (a) wind modeling -
-// Aircraft::update_wind's turbulence + steady wind-vector model
-// (SIM_Aircraft.cpp:888), feeding a real wind_ef into velocity_air_bf/
-// airspeed/angle_of_attack/beta instead of this slice's wind_ef==0; (b) the
-// ground_behavior variants (GROUND_BEHAVIOR_NO_MOVEMENT/FWD_ONLY/
-// TAILSITTER) for realistic taxi/takeoff-roll behavior, once this port
-// wants to simulate ground operations rather than just "don't sink through
-// the floor"; and (c) the airframe config variants (elevons, vtail,
-// dspoilers, tailsitter, aerobatic, reverse_thrust, ICEngine, launcher) -
-// each is a self-contained addition to calculate_forces'/getTorque's
-// existing branch points, not a redesign of what's here. None of (a)-(c)
-// change update_dynamics' core rigid-body integration, which this slice
-// already ports in full.
+// SLICE 2 NOTE: a higher-fidelity ap-sim would add (a) the ground_behavior
+// variants (GROUND_BEHAVIOR_NO_MOVEMENT/FWD_ONLY/TAILSITTER) for realistic
+// taxi/takeoff-roll behavior, once this port wants to simulate ground
+// operations rather than just "don't sink through the floor"; and (b) the
+// airframe config variants (elevons, vtail, dspoilers, tailsitter,
+// aerobatic, reverse_thrust, ICEngine, launcher) - each is a self-contained
+// addition to calculate_forces'/getTorque's existing branch points, not a
+// redesign of what's here. Wind modeling (steady vector + turbulence
+// gusts) was this list's remaining item (a) through CPP-030/CPP-041; it is
+// now real - see the file banner's "WIND MODELING (CPP-051)" note. Neither
+// (a) nor (b) here change update_dynamics' core rigid-body integration,
+// which this slice already ports in full.

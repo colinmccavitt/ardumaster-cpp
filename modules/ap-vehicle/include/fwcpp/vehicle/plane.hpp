@@ -368,6 +368,14 @@
 //     parameter - the SAME single-source-of-truth derivation ahrs_dcm.hpp's
 //     banner documents upstream's own use_compass()/drift_correction() both
 //     performing from the one `_wind` member.
+//     CPP-051 RE-EXAMINATION: ap-sim's SimPlane now models real ground-truth
+//     wind (steady vector + turbulence) - this field stays a zero default
+//     regardless, for the SAME reason ahrs_dcm.hpp's own CPP-051
+//     re-examination note gives: wind_estimate is AHRS's ESTIMATE of wind,
+//     which needs a wind-ESTIMATION algorithm (none exists in this port) to
+//     produce - feeding SimPlane's ground truth straight into it would be
+//     giving the estimator oracle knowledge, not reproducing upstream's
+//     real EKF/DCM-derived _wind. Stays excluded, different reason now.
 //   - gps_use_enabled (bool, default true, upstream: AHRS_GPS_USE's real
 //     GSCALAR default, `AP_AHRS::GPSUse::Enable` - verified directly
 //     against AP_AHRS.cpp's own AP_GROUPINFO table, not assumed) - fed to
@@ -4373,8 +4381,12 @@ private:
 // airspeed_min)`. The headwind-compensation tail
 // (`ahrs.head_wind()*wind_comp`) and `allow_max_airspeed_on_land()`'s
 // AIRSPEED_MAX ceiling are both real but OBSERVABLY INERT for this port:
-// no wind model exists anywhere in this port's AHRS (SITL inputs carry no
-// wind estimate consumed here), so head_wind() is always 0 and the
+// no wind-ESTIMATION subsystem exists anywhere in this port's AHRS (see
+// ahrs_dcm.hpp's/plane.hpp's own CPP-051 re-examination notes on
+// wind_estimate) - CPP-051 made ap-sim's SITL ground-truth wind real, but
+// that is deliberately NOT the same thing ahrs.head_wind() would read, and
+// is not wired to it; there is still no AHRS wind estimate for
+// ahrs.head_wind() to derive from, so head_wind() is always 0 and the
 // downstream `constrain_int32(target+0, target, max)` clamp is a
 // mathematical no-op regardless of allow_max_airspeed_on_land()'s value -
 // not reproduced as dead arithmetic. The final `constrain_int32(...,
@@ -6413,8 +6425,14 @@ public:
         const float flare_time = aim_height / flare_sink_rate_avg;
 
         // distance to flare is based on ground speed, adjusted as we get
-        // closer - takes into account the wind (upstream's own comment;
-        // this port has no wind model, so this is purely groundspeed-based).
+        // closer - takes into account the wind (upstream's own comment).
+        // CPP-051 RE-EXAMINATION: this was never actually a wind-model gap -
+        // `groundspeed` here (gps.sample().ground_speed_ms) is real measured/
+        // true ground velocity magnitude, not derived through any airspeed+
+        // heading assumption, so it ALREADY reflects crosswind drift exactly
+        // as upstream's own comment describes, with zero additional wiring
+        // needed now that ap-sim's SimPlane produces a real wind_ef that
+        // actually shifts groundspeed (see sim_plane.hpp's CPP-051 banner).
         float flare_distance = groundspeed * flare_time;
         // don't allow the flare before half way along the final leg
         if (flare_distance > total_distance * 0.5f) {

@@ -1,5 +1,6 @@
 // Tests for fwcpp::sim::SimPlane (CPP-030: STANDARD-config ground-truth
-// fixed-wing flight dynamics, ported from upstream SITL::Plane).
+// fixed-wing flight dynamics, ported from upstream SITL::Plane; CPP-051:
+// wind modeling - steady vector + turbulence gusts).
 
 #include <cmath>
 
@@ -36,6 +37,21 @@ double reference_lift_coeff(const Coefficients& c, float alpha) {
 double reference_drag_coeff(const Coefficients& c, float alpha) {
     const double AR = std::pow(static_cast<double>(c.b), 2) / c.s;
     return c.c_drag_p + std::pow(c.c_lift_0 + c.c_lift_a * alpha, 2) / (M_PI * c.oswald * AR);
+}
+
+// Independently-transcribed reference for the STEADY-wind half of upstream's
+// Aircraft::update_wind (SIM_Aircraft.cpp:888) - built straight from degrees
+// via M_PI/180, not by calling fwcpp::math::radians(), and including the
+// real `wind_ef = -wind_ef` sign flip at the end - same cross-check style as
+// reference_lift_coeff/reference_drag_coeff above. Turbulence is NOT
+// modeled here (turbulence-free callers only).
+Vector3f reference_steady_wind_ef(float speed, float direction_deg, float dir_z_deg) {
+    const double dir = direction_deg * M_PI / 180.0;
+    const double dz = dir_z_deg * M_PI / 180.0;
+    Vector3f raw(static_cast<float>(std::cos(dir) * std::cos(dz)), static_cast<float>(std::sin(dir) * std::cos(dz)),
+                 static_cast<float>(std::sin(dz)));
+    raw = raw * speed;
+    return -raw; // upstream's real final negation - see sim_plane.hpp's sign-convention note
 }
 
 } // namespace
@@ -242,4 +258,239 @@ TEST_CASE("repeated update_dynamics keeps the DCM orthonormal over many integrat
     REQUIRE(plane.dcm.c.length() == Catch::Approx(1.0f).margin(1e-4f));
     REQUIRE((plane.dcm.a * plane.dcm.b) == Catch::Approx(0.0f).margin(1e-4f));
     REQUIRE(plane.dcm.det() == Catch::Approx(1.0f).margin(1e-3f));
+}
+
+// --- CPP-051: wind modeling ---
+
+TEST_CASE("update_wind reproduces the real steady wind vector and sign convention for zero turbulence", "[sim_plane][wind]") {
+    SimPlane plane;
+    plane.wind_config.turbulence = 0.0f;
+
+    // Wind FROM due east (direction=90), horizontal (dir_z=0): physically
+    // blows toward due WEST, i.e. wind_ef.y < 0 (NED: +y is East). Matches
+    // the file banner's worked example exactly (direction=0 case), just
+    // rotated 90 degrees.
+    plane.wind_config.speed = 6.0f;
+    plane.wind_config.direction = 90.0f;
+    plane.wind_config.dir_z = 0.0f;
+    plane.update_wind();
+    Vector3f expected = reference_steady_wind_ef(6.0f, 90.0f, 0.0f);
+    REQUIRE(plane.wind_ef.x == Catch::Approx(expected.x).margin(1e-5f));
+    REQUIRE(plane.wind_ef.y == Catch::Approx(expected.y).margin(1e-5f));
+    REQUIRE(plane.wind_ef.z == Catch::Approx(expected.z).margin(1e-5f));
+    // Directly pin the physical direction too, not just cross-check against
+    // the reference: wind FROM the east blows toward the west.
+    REQUIRE(plane.wind_ef.y < -5.9f);
+    REQUIRE(std::fabs(plane.wind_ef.x) < 1e-4f);
+
+    // Wind FROM due south (direction=180): physically blows toward due
+    // NORTH, i.e. wind_ef.x > 0 (a tailwind for a plane flying north).
+    plane.wind_config.speed = 8.0f;
+    plane.wind_config.direction = 180.0f;
+    plane.wind_config.dir_z = 0.0f;
+    plane.update_wind();
+    expected = reference_steady_wind_ef(8.0f, 180.0f, 0.0f);
+    REQUIRE(plane.wind_ef.x == Catch::Approx(expected.x).margin(1e-5f));
+    REQUIRE(plane.wind_ef.y == Catch::Approx(expected.y).margin(1e-4f));
+    REQUIRE(plane.wind_ef.x > 7.9f);
+
+    // A nonzero vertical angle (dir_z) - exercises the cos(dir_z)/sin(dir_z)
+    // terms the two horizontal-only cases above never touch.
+    plane.wind_config.speed = 10.0f;
+    plane.wind_config.direction = 0.0f;
+    plane.wind_config.dir_z = 30.0f;
+    plane.update_wind();
+    expected = reference_steady_wind_ef(10.0f, 0.0f, 30.0f);
+    REQUIRE(plane.wind_ef.x == Catch::Approx(expected.x).margin(1e-4f));
+    REQUIRE(plane.wind_ef.y == Catch::Approx(expected.y).margin(1e-4f));
+    REQUIRE(plane.wind_ef.z == Catch::Approx(expected.z).margin(1e-4f));
+}
+
+TEST_CASE("update_wind's turbulence gate matches upstream's wind_turb>0 && !on_ground() exactly", "[sim_plane][wind]") {
+    // On the ground: turbulence state must never move, however large
+    // wind_config.turbulence is - upstream's own `!on_ground()` gate.
+    SimPlane on_ground_plane;
+    on_ground_plane.position = Vector3f(0.0f, 0.0f, 0.0f); // on_ground() true
+    on_ground_plane.wind_config.turbulence = 5.0f;
+    for (int i = 0; i < 500; ++i) {
+        on_ground_plane.update_wind();
+    }
+    REQUIRE(on_ground_plane.turbulence_horizontal_speed == 0.0f);
+    REQUIRE(on_ground_plane.turbulence_vertical_speed == 0.0f);
+    REQUIRE(on_ground_plane.turbulence_azimuth == 0.0f);
+
+    // Airborne with turbulence==0: the `wind_turb > 0` half of the gate
+    // must also hold it at zero.
+    SimPlane no_turb_plane;
+    no_turb_plane.position = Vector3f(0.0f, 0.0f, -100.0f); // airborne
+    no_turb_plane.wind_config.turbulence = 0.0f;
+    for (int i = 0; i < 500; ++i) {
+        no_turb_plane.update_wind();
+    }
+    REQUIRE(no_turb_plane.turbulence_horizontal_speed == 0.0f);
+    REQUIRE(no_turb_plane.turbulence_vertical_speed == 0.0f);
+
+    // Airborne AND turbulence>0: the gust state must actually move.
+    SimPlane airborne_plane;
+    airborne_plane.position = Vector3f(0.0f, 0.0f, -100.0f);
+    airborne_plane.wind_config.turbulence = 5.0f;
+    for (int i = 0; i < 500; ++i) {
+        airborne_plane.update_wind();
+    }
+    REQUIRE((airborne_plane.turbulence_horizontal_speed != 0.0f || airborne_plane.turbulence_vertical_speed != 0.0f));
+}
+
+TEST_CASE("update_wind's turbulence settles to upstream's own IIR-filtered statistical distribution", "[sim_plane][wind]") {
+    // Upstream's own comment (SIM_Aircraft.cpp:902-903, transcribed in this
+    // class's update_wind()): "scale input.wind.turbulence to match
+    // standard deviation when using iir_coef=0.98". This is a real,
+    // checkable claim about the stationary distribution of the IIR-filtered
+    // random walk: turbulence_horizontal_speed follows an AR(1) recurrence
+    // h_n = iir_coef*h_{n-1} + (wind_turb*(1-iir_coef))*Z_n, Z_n ~ N(0,1),
+    // wind_turb = turbulence*10 - whose stationary variance is
+    // b^2/(1-a^2) with a=0.98, b=wind_turb*0.02, i.e. stddev ~= 1.005 *
+    // turbulence. Verify that statistically, not by reproducing an exact
+    // sequence (see file banner's RNG-substitution note - this class's RNG
+    // is not bit-for-bit upstream's).
+    SimPlane plane;
+    plane.position = Vector3f(0.0f, 0.0f, -100.0f); // airborne throughout
+    const float turbulence = 3.0f;
+    plane.wind_config.turbulence = turbulence;
+
+    const int burn_in = 1000; // let the AR(1) process reach its stationary distribution
+    const int samples = 200000;
+    double sum = 0.0;
+    double sumsq = 0.0;
+    for (int i = 0; i < burn_in + samples; ++i) {
+        plane.update_wind();
+        if (i >= burn_in) {
+            sum += plane.turbulence_horizontal_speed;
+            sumsq += static_cast<double>(plane.turbulence_horizontal_speed) * plane.turbulence_horizontal_speed;
+        }
+    }
+    const double mean = sum / samples;
+    const double variance = sumsq / samples - mean * mean;
+    const double stddev = std::sqrt(variance);
+
+    // Generous margins: the AR(1) process's ~50-tick correlation time means
+    // 200000 samples give roughly a few thousand independent draws, not
+    // 200000 - these margins are wide enough to be robust to that, while
+    // still failing hard if the IIR recurrence, the wind_turb=turbulence*10
+    // scale, or the iir_coef=0.98 constant is ever altered.
+    REQUIRE(mean == Catch::Approx(0.0).margin(0.5));
+    REQUIRE(stddev == Catch::Approx(turbulence).epsilon(0.25));
+}
+
+TEST_CASE("update_dynamics subtracts a real wind_ef when computing airmass-relative velocity", "[sim_plane][wind]") {
+    // Direct, non-closed-loop check of SIM_Aircraft.cpp:762-766's real body
+    // (`velocity_air_ef = velocity_ef - wind_ef; velocity_air_bf =
+    // dcm.transposed() * velocity_air_ef;`), with wind_ef set directly
+    // (bypassing update_wind()) to isolate this one recurrence.
+    SimPlane plane;
+    plane.position = Vector3f(0.0f, 0.0f, -100.0f);
+    plane.dcm.identity();
+    plane.velocity_ef = Vector3f(20.0f, 0.0f, 0.0f);
+    plane.wind_ef = Vector3f(5.0f, -2.0f, 0.5f);
+
+    plane.update_dynamics(Vector3f(0.0f, 0.0f, 0.0f), 0.0f); // dt=0 isolates the wind subtraction from integration
+
+    const Vector3f expected_air_ef = plane.velocity_ef - plane.wind_ef;
+    REQUIRE(plane.velocity_air_ef.x == Catch::Approx(expected_air_ef.x));
+    REQUIRE(plane.velocity_air_ef.y == Catch::Approx(expected_air_ef.y));
+    REQUIRE(plane.velocity_air_ef.z == Catch::Approx(expected_air_ef.z));
+
+    // dcm==identity, so velocity_air_bf == velocity_air_ef exactly here.
+    REQUIRE(plane.velocity_air_bf.x == Catch::Approx(expected_air_ef.x));
+    REQUIRE(plane.velocity_air_bf.y == Catch::Approx(expected_air_ef.y));
+    REQUIRE(plane.velocity_air_bf.z == Catch::Approx(expected_air_ef.z));
+
+    // Not simply equal to ground velocity - the whole point of this ticket.
+    REQUIRE(plane.velocity_air_ef.x != Catch::Approx(plane.velocity_ef.x));
+}
+
+TEST_CASE("update_dynamics with wind_ef left at its zero default reproduces the pre-CPP-051 always-still-air behavior", "[sim_plane][wind]") {
+    // Regression pin: a caller that never calls update_wind() (e.g. the
+    // existing update_dynamics-only tests above) must see EXACTLY the same
+    // velocity_air_bf == dcm.transposed()*velocity_ef this class always
+    // produced before CPP-051 - wind_config/wind_ef default to all-zero.
+    SimPlane plane;
+    plane.position = Vector3f(0.0f, 0.0f, -100.0f);
+    plane.dcm.identity();
+    plane.velocity_ef = Vector3f(12.0f, -3.0f, 1.0f);
+
+    REQUIRE(plane.wind_ef == Vector3f(0.0f, 0.0f, 0.0f));
+    plane.update_dynamics(Vector3f(0.0f, 0.0f, 0.0f), 0.0f);
+
+    REQUIRE(plane.velocity_air_ef.x == Catch::Approx(plane.velocity_ef.x));
+    REQUIRE(plane.velocity_air_ef.y == Catch::Approx(plane.velocity_ef.y));
+    REQUIRE(plane.velocity_air_ef.z == Catch::Approx(plane.velocity_ef.z));
+    REQUIRE(plane.velocity_air_bf.x == Catch::Approx(plane.velocity_ef.x));
+    REQUIRE(plane.velocity_air_bf.y == Catch::Approx(plane.velocity_ef.y));
+    REQUIRE(plane.velocity_air_bf.z == Catch::Approx(plane.velocity_ef.z));
+}
+
+TEST_CASE("a steady crosswind measurably shifts groundtrack/groundspeed relative to an otherwise-identical zero-wind run",
+          "[sim_plane][wind]") {
+    // The ticket's own required closed-loop proof: two SimPlane instances,
+    // IDENTICAL initial state and IDENTICAL control-surface/throttle inputs
+    // every tick, differing ONLY in wind_config. If SimPlane's physics
+    // genuinely distinguishes airspeed (what the aerodynamic model reacts
+    // to) from groundspeed (what actually gets integrated into position),
+    // a real crosswind must measurably alter the trajectory even though
+    // nothing else differs.
+    SimPlane plane_no_wind;
+    SimPlane plane_crosswind;
+
+    plane_no_wind.position = Vector3f(0.0f, 0.0f, -100.0f); // 100m up
+    plane_no_wind.dcm.identity();
+    plane_no_wind.velocity_ef = Vector3f(18.0f, 0.0f, 0.0f); // flying north at 18 m/s groundspeed
+    plane_crosswind.position = Vector3f(0.0f, 0.0f, -100.0f);
+    plane_crosswind.dcm.identity();
+    plane_crosswind.velocity_ef = Vector3f(18.0f, 0.0f, 0.0f);
+    // Wind FROM due east: blows toward due west (wind_ef.y < 0), directly
+    // crossing the plane's north-pointing initial track.
+    plane_crosswind.wind_config.speed = 6.0f;
+    plane_crosswind.wind_config.direction = 90.0f;
+    plane_crosswind.wind_config.turbulence = 0.0f; // deterministic - isolates the steady-wind effect
+
+    const float dt = 0.005f;
+    const int steps = 400; // 2 seconds
+    for (int i = 0; i < steps; ++i) {
+        plane_no_wind.update(0.0f, 0.0f, 0.0f, plane_no_wind.hover_throttle, dt);
+        plane_crosswind.update(0.0f, 0.0f, 0.0f, plane_crosswind.hover_throttle, dt);
+    }
+
+    REQUIRE_FALSE(plane_no_wind.dcm.is_nan());
+    REQUIRE_FALSE(plane_crosswind.dcm.is_nan());
+
+    // Baseline (no wind, no aileron/rudder, symmetric coefficients, zero
+    // initial sideslip): the whole trajectory stays confined to the x-z
+    // plane - lateral position/velocity stay at exactly zero.
+    REQUIRE(plane_no_wind.position.y == Catch::Approx(0.0f).margin(1e-3f));
+    REQUIRE(plane_no_wind.velocity_ef.y == Catch::Approx(0.0f).margin(1e-3f));
+
+    // The crosswind run's GROUNDTRACK measurably diverges: real lateral
+    // drift, in the physically-correct direction (toward -y, the direction
+    // this wind blows toward), an order of magnitude past any integration
+    // noise the zero-wind baseline shows.
+    REQUIRE(plane_crosswind.position.y < -0.5f);
+    REQUIRE(std::fabs(plane_crosswind.velocity_ef.y) > 0.2f);
+
+    // GROUNDSPEED (magnitude of velocity_ef) measurably differs between the
+    // two runs...
+    const float groundspeed_no_wind = plane_no_wind.velocity_ef.length();
+    const float groundspeed_crosswind = plane_crosswind.velocity_ef.length();
+    REQUIRE(std::fabs(groundspeed_no_wind - groundspeed_crosswind) > 0.1f);
+
+    // ...while AIRSPEED (what the shared aerodynamic model actually reacts
+    // to) stays close between the two runs - both aircraft are flying the
+    // same trimmed-ish condition relative to their OWN local air mass, they
+    // just have different air masses to be still relative to. This is the
+    // "distinguish airspeed from groundspeed" proof the ticket asks for:
+    // same airspeed-driven physics, different resulting groundspeed.
+    REQUIRE(std::fabs(plane_no_wind.airspeed - plane_crosswind.airspeed) < 0.5f);
+
+    // And wind_ef on the crosswind plane really did hold the expected,
+    // sign-verified value throughout (not just nonzero).
+    REQUIRE(plane_crosswind.wind_ef.y == Catch::Approx(-6.0f).margin(1e-4f));
 }
