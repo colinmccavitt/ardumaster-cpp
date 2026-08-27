@@ -169,6 +169,130 @@
 // Phase 2+ may want to hoist it into ap-math as a shared primitive
 // (upstream's own ftype.h is shared AP_Math, after all) once that can be
 // coordinated outside a multi-agent parallel session.
+//
+// ============================================================================
+// CPP-056, PHASE 2 (this ticket): the first real measurement update.
+// Everything above this point is phase 1 (CPP-052), unmodified. Read
+// FuseVelPosNED() in full (AP_NavEKF3_PosVelFusion.cpp ~line 694-1181)
+// before extending anything below - it was read in full for this phase,
+// not skimmed from the ticket's own summary of it.
+// ============================================================================
+//
+// WHAT THIS PHASE BUILDS:
+//   - fuse_direct_state_observation(): the reusable "fuse one direct
+//     observation of a single state element" primitive, transcribed
+//     line-by-line from FuseVelPosNED()'s obsIndex loop body (~line
+//     1024-1163) for the case that matters for GPS vel/pos: real GPS-
+//     derived aiding, i.e. upstream's PV_AidingMode == AID_ABSOLUTE (see
+//     "NOT PORTED FROM FuseVelPosNED" below for exactly what that
+//     excludes and why it's the right cut).
+//   - fuse_gps_velocity() / fuse_gps_position(): the GPS-specific
+//     obsIndex 0-2 / 3-4 callers, including the real R_OBS "no reported
+//     accuracy" noise-variance formula.
+//   - GpsSample: a new, EKF-specific explicit input struct (see below for
+//     why ahrs::GpsSample, used by AhrsDcm, is NOT reused as-is).
+//   - Four real inhibitDelAngBiasStates/inhibitDelVelBiasStates/
+//     inhibitMagStates/inhibitWindStates bool fields (see "CORRECTION TO
+//     THE CPP-056 TICKET'S OWN PREMISE" below).
+//
+// CORRECTION TO THE CPP-056 TICKET'S OWN PREMISE: the ticket asserts
+// phase 1 "already has real inhibitDelAngBiasStates/
+// inhibitDelVelBiasStates/inhibitMagStates/inhibitWindStates fields".
+// Verified directly against the phase-1 source (ekf_core.cpp) before
+// writing any phase-2 code: this is FALSE. Phase 1 has no such fields -
+// the equivalent permanently-true/permanently-false behavior is baked
+// directly into constrain_variances()'s and covariance_prediction()'s
+// control flow (unconditional branches, described only in prose
+// comments). Since fuse_direct_state_observation() genuinely needs these
+// as real, gateable fields (upstream's own Kfusion computation branches
+// on them per-call, and a future phase may want to flip inhibitMagStates
+// once mag fusion exists), this phase adds them as real public bool
+// fields below, defaulted to reproduce phase 1's existing hardcoded
+// behavior exactly (inhibit_del_ang_bias_states=false,
+// inhibit_del_vel_bias_states=false, inhibit_mag_states=true,
+// inhibit_wind_states=true) - a behavior-preserving correction, not a
+// new simplification. constrain_variances()/covariance_prediction()
+// themselves are NOT modified to read these fields dynamically (that
+// would mean touching the delicate, independently-verified transcribed
+// Jacobian block in ekf_core.cpp for no behavioral gain at today's fixed
+// defaults) - a named gap: a future phase that actually wants to flip
+// inhibit_mag_states at runtime must also wire it into those two
+// functions's currently-hardcoded branches.
+//
+// NOT PORTED FROM FuseVelPosNED() (named per the ticket's own acceptance
+// criterion - each is a real upstream mechanism, verified present in the
+// ~694-1181 read, deliberately left out of fuse_direct_state_observation
+// because it belongs to a mode/feature this port doesn't have yet):
+//   - The `PV_AidingMode == AID_NONE` "poorObservability" gyro-bias-
+//     Kalman-gain gate and "horizInhibit" delta-velocity-bias gate
+//     (~line 1051-1084). Both are guarded by `PV_AidingMode == AID_NONE`
+//     (upstream's fake-position/fake-velocity "hold attitude without
+//     real aiding" mode) and are UNCONDITIONALLY SKIPPED whenever
+//     PV_AidingMode == AID_ABSOLUTE, which is the real mode real GPS
+//     fusion runs under - so omitting them here is not an approximation,
+//     it's the literal AID_ABSOLUTE-mode behavior of upstream's own
+//     code, verified by reading the guard conditions directly.
+//   - `dvelBiasAxisInhibit[]` (per-axis delta-velocity-bias inhibit tied
+//     to onGround/ground-alignment, AP_NavEKF3_Control.cpp) - already a
+//     named phase-1 gap (see simplification 2 above); this phase's
+//     inhibit_del_vel_bias_states gate is all-or-nothing across x/y/z,
+//     same as phase 1.
+//   - `badIMUdata` gating of the delta-velocity-bias Kalman gain - always
+//     false, per phase-1 simplification 3.
+//   - `treatWindStatesAsTruth` narrowing the wind-state Kalman gain gate
+//     (`!inhibitWindStates && !treatWindStatesAsTruth`) - no such field
+//     exists in this port (no optical-flow/const-position-hold subsystem
+//     that would ever set it); moot in this phase anyway since
+//     inhibit_wind_states is permanently true.
+//   - `gpsNoiseScaler` (satellite-count-based R_OBS scaling, applied
+//     inside the obsIndex loop at ~line 1027/1032) - named in the ticket
+//     as part of SelectVelPosFusion()'s orchestration, out of scope here.
+//   - The innovation-consistency test-ratio gates (velTestRatio/
+//     posTestRatio, ~line 811-928) that decide fuseVelData/fusePosData
+//     in the first place, and faultStatus.bad_* bookkeeping - only the
+//     healthyFusion negative-variance guard is in scope (see ticket).
+//     fuse_gps_velocity()/fuse_gps_position() therefore have NO way to
+//     reject a bad GPS fix beyond that one guard - a REAL, NAMED GAP:
+//     upstream's real innovation gating is what lets the filter refuse a
+//     glitching GPS fix rather than being corrupted by it, and this
+//     phase cannot do that yet.
+//   - The GPS-reported-accuracy branch (`gpsSpdAccuracy > 0.0f` /
+//     `gpsPosAccuracy > 0.0f`, ~line 736-756) and the ExtNav branches -
+//     only the "no reported accuracy" R_OBS formula is ported (see
+//     GpsSample's own comment for why the struct has no accuracy
+//     fields).
+//   - The delay-buffer / observation-time-horizon machinery
+//     (AP_NavEKF3_Measurements.cpp's storedGPS/imuDataDelayed ring
+//     buffers) that lets upstream fuse a GPS sample against the state as
+//     of the time that sample was actually valid. fuse_gps_velocity()/
+//     fuse_gps_position() fuse a GpsSample against the CURRENT state,
+//     assuming it is already time-aligned - a real, disclosed
+//     simplification, not upstream's real behavior. Any future use of
+//     this against genuinely asynchronous sensor timing needs this
+//     buffer reintroduced first.
+//   - Height/baro fusion (obsIndex==5, selectHeightForFusion()) - no
+//     baro sensor model exists in this port.
+//   - ResetVelocity()/ResetPosition()/initial alignment, and
+//     SelectVelPosFusion()'s full orchestration (timeout detection,
+//     glitch-radius handling, the GPS-vertical-velocity-vs-baro aliasing
+//     cross-check) - this phase calls the fusion functions directly with
+//     an already-known-good GpsSample; it does not decide WHEN to call
+//     them or what to do on a stale/bad fix.
+//
+// GpsSample vs. ahrs::GpsSample (ADR-0012 explicit-input check, per the
+// ticket): read ap-ahrs/ahrs_dcm.hpp's GpsSample directly before adding a
+// new struct. It carries ground_speed_ms/ground_course_deg/velocity_ned/
+// num_sats/has_fix/has_3d_fix - built for AhrsDcm's drift-correction use,
+// which never fuses absolute position. It has NO position field at all
+// (DCM has no position state to correct). This phase's GPS position
+// fusion needs a local-NE position observation, which ahrs::GpsSample
+// cannot represent - so it is not "reusable as-is", and not a subset/
+// superset relationship either (ahrs::GpsSample's ground_speed_ms/
+// ground_course_deg polar form vs. this phase's NED velocity vector
+// don't correspond 1:1). This phase therefore defines its own
+// fwcpp::ekf::GpsSample below rather than extending or wrapping
+// ahrs::GpsSample - a genuinely different explicit input, not a
+// duplicate of an existing one.
 
 #include <array>
 #include <cmath>
@@ -221,6 +345,25 @@ struct GyroSample {
 struct AccelSample {
     Vector3F delta_velocity;      // upstream: imuDataDelayed.delVel, m/s
     ftype delta_velocity_dt = 0;  // upstream: imuDataDelayed.delVelDT, s
+};
+
+// CPP-056 phase 2. upstream: gps_elements (AP_NavEKF3_core.h), the subset
+// FuseVelPosNED()'s obsIndex 0-4 path actually reads (gpsDataDelayed.vel,
+// and the local-NE position AP_NavEKF3_PosVelFusion.cpp ~line 574-580
+// computes as `EKF_origin.get_distance_NE_ftype(gpsloc)` from the raw
+// lat/lng fix). See this file's banner ("GpsSample vs. ahrs::GpsSample")
+// for why this is a new struct, not a reuse of ap-ahrs's GpsSample.
+//
+// position_ne is ALREADY the local-NE projection, in metres relative to
+// whatever local origin the caller's EKF instance uses - the raw-fix-to-
+// local-NE projection itself (upstream: Location::get_distance_NE_ftype(),
+// tied to the EKF_origin/home-location singleton) is explicitly out of
+// scope for this phase (see banner) - the caller must have already done
+// that conversion, matching this port's general explicit-input
+// convention (ADR-0012).
+struct GpsSample {
+    Vector3F velocity_ned;  // upstream: gpsDataDelayed.vel, NED m/s
+    Vector2F position_ne;   // upstream: velPosObs[3]/[4] source value, local NE metres
 };
 
 // upstream: state_elements, AP_NavEKF3_core.h:566-575. Field order and
@@ -285,6 +428,18 @@ public:
     // collapsed" reset.
     std::uint32_t vert_vel_var_clip_counter = 0;
 
+    // CPP-056 phase 2: real inhibitDelAngBiasStates/inhibitDelVelBiasStates/
+    // inhibitMagStates/inhibitWindStates fields (AP_NavEKF3_core.h members,
+    // set by AP_NavEKF3_Control.cpp - out of scope). Defaults reproduce
+    // phase 1's existing hardcoded behavior exactly - see this file's
+    // banner "CORRECTION TO THE CPP-056 TICKET'S OWN PREMISE" for why
+    // these did not already exist and why constrain_variances()/
+    // covariance_prediction() are not (yet) wired to read them.
+    bool inhibit_del_ang_bias_states = false;  // upstream: inhibitDelAngBiasStates
+    bool inhibit_del_vel_bias_states = false;  // upstream: inhibitDelVelBiasStates
+    bool inhibit_mag_states = true;            // upstream: inhibitMagStates
+    bool inhibit_wind_states = true;           // upstream: inhibitWindStates
+
     // --- Noise/limit parameters. Defaults are upstream's real
     // Plane-4.7.0 AP_NavEKF3.cpp APM_BUILD_ArduPlane parameter-default
     // block (traced directly, not invented) - "AP_Param not wired in
@@ -329,9 +484,100 @@ public:
     void covariance_prediction(const GyroSample& gyro, const AccelSample& accel, ftype dt_ekf_avg,
                                 const Vector3F* rot_var_vec = nullptr);
 
+    // CPP-056 phase 2. upstream: FuseVelPosNED()'s obsIndex loop body,
+    // AP_NavEKF3_PosVelFusion.cpp ~line 1024-1163 - see this file's
+    // banner for exactly what is/isn't reproduced. `state_index` is the
+    // observed state's own index (upstream: `stateIndex = 4 + obsIndex`,
+    // computed by the caller here rather than derived from an obsIndex,
+    // since this primitive is meant to be reusable beyond GPS obsIndex
+    // 0-4 too - e.g. a future height-fusion phase's obsIndex==5, state
+    // index 9). `innovation` is upstream's innovVelPos[obsIndex]
+    // (observed convention: state MINUS observation, matching upstream's
+    // own `stateStruct.velocity[i] - velPosObs[i]` - NOT the more common
+    // observation-minus-prediction sign). `obs_variance` is upstream's
+    // R_OBS[obsIndex]. `dt_ekf_avg` is required only because this
+    // primitive calls the existing constrain_variances(ftype) - upstream
+    // doesn't need to pass it because ConstrainVariances() reads its own
+    // dtEkfAvg member directly; this port's explicit-input convention
+    // (ADR-0012) has no such member to read, hence the extra parameter
+    // versus the ticket's own suggested 3-argument signature.
+    //
+    // Returns whether the update was applied (upstream's local
+    // `healthyFusion` bool) - false means the negative-variance guard
+    // fired and P/state were left untouched, matching upstream's own
+    // "skip the update" branch exactly (see banner: this is the ONLY
+    // fusion-health check in scope for this phase, not full innovation-
+    // consistency gating).
+    bool fuse_direct_state_observation(int state_index, ftype innovation, ftype obs_variance, ftype dt_ekf_avg);
+
+    // CPP-056 phase 2. upstream: FuseVelPosNED()'s obsIndex 0-2 path
+    // (innovation ~line 1011-1014; R_OBS "no reported accuracy" branch
+    // ~line 741-742) - fuses the 3 GPS velocity axes sequentially against
+    // `gps.velocity_ned`, using the CURRENT state for each axis's
+    // innovation (matching upstream: obsIndex 1's innovation is computed
+    // AFTER obsIndex 0's state correction has already been applied,
+    // since correlated off-diagonal terms mean fusing velN can shift the
+    // velE/velD state estimate too). Returns the number of axes (0-3)
+    // whose healthyFusion guard passed - phase 1/this phase has no
+    // faultStatus.bad_nvel/bad_evel/bad_dvel bookkeeping to report this
+    // through instead.
+    int fuse_gps_velocity(const GpsSample& gps, ftype dt_ekf_avg);
+
+    // CPP-056 phase 2. upstream: FuseVelPosNED()'s obsIndex 3-4 path
+    // (innovation ~line 1016; R_OBS "no reported accuracy" branch ~line
+    // 750-756). Fuses the 2 GPS horizontal position axes sequentially
+    // against `gps.position_ne`. Returns the number of axes (0-2) fused.
+    int fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg);
+
+    // CPP-056 phase 2. upstream: FuseVelPosNED()'s R_OBS[0]/[1]/[2] "no
+    // reported accuracy" formula, AP_NavEKF3_PosVelFusion.cpp ~line
+    // 740-742 - `sq(constrain_ftype(noise, 0.05f, 5.0f)) +
+    // sq(accScale*accNavMag)`, accNavMag = velDotNEDfilt.length()
+    // (AP_NavEKF3_core.cpp ~line 772; this port's own vel_dot_ned_filt,
+    // populated by update_strapdown_equations_ned()). Public (not a
+    // fuse_gps_velocity() implementation detail) so tests can verify the
+    // exact formula independently, per the ticket's verification
+    // standard.
+    [[nodiscard]] ftype gps_horiz_vel_obs_variance() const;
+    [[nodiscard]] ftype gps_vert_vel_obs_variance() const;
+
+    // CPP-056 phase 2. upstream: FuseVelPosNED()'s R_OBS[3]/[4] "no
+    // reported accuracy" formula, ~line 750-756 -
+    // `sq(constrain_ftype(_gpsHorizPosNoise, 0.1f, 10.0f)) +
+    // sq(gpsPosVarAccScale*accNavMag)`.
+    [[nodiscard]] ftype gps_horiz_pos_obs_variance() const;
+
 private:
     void constrain_states(ftype dt_ekf_avg);   // upstream: NavEKF3_core::ConstrainStates()
     void constrain_variances(ftype dt_ekf_avg); // upstream: NavEKF3_core::ConstrainVariances()
+
+    // CPP-056 phase 2. upstream: NavEKF3_core::updateStateIndexLim(),
+    // AP_NavEKF3_Control.cpp ~line 190-208 - the same nested inhibit-flag
+    // logic, transcribed directly, reused here to bound
+    // fuse_direct_state_observation()'s KHP/healthyFusion/P-update loops
+    // exactly as upstream bounds them (not the full 0..23 every call).
+    [[nodiscard]] int state_index_lim() const;
+
+    // upstream: NavEKF3_core::ForceSymmetry(), AP_NavEKF3_core.cpp ~line
+    // 1862 - averages P[i][j]/P[j][i] for i in 1..lim. Did not exist in
+    // phase 1 (nothing needed it before fusion existed).
+    void force_symmetry(int lim);
+
+    // CPP-056 phase 2 helper (no direct upstream counterpart - upstream's
+    // statesArray is a flat float[24] alias over the same memory as
+    // stateStruct, so `statesArray[i] -= Kfusion[i]*innovation` IS its
+    // state update; this port's StateVector is a structured type, so the
+    // flat-index correction has to be unpacked field-by-field here
+    // instead). Applies `state -= kfusion*innovation` across all 24
+    // conceptual slots unconditionally, then re-normalizes the
+    // quaternion (upstream: `stateStruct.quat.normalize()`,
+    // unconditional, right after the state update loop). Safe to apply
+    // unconditionally to inhibited slots (16..23 when mag/wind
+    // inhibited) because kfusion[i] is exactly 0.0 there by construction
+    // (fuse_direct_state_observation() only ever writes a nonzero value
+    // into an index it has confirmed is not inhibited) - not a shortcut,
+    // provably identical to bounding this loop at state_index_lim() too.
+    void apply_state_correction(const std::array<ftype, 24>& kfusion, ftype innovation);
 };
 
 } // namespace fwcpp::ekf

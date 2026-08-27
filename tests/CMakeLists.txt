@@ -307,3 +307,10 @@ catch_discover_tests(steer_controller_param_test)
 add_executable(ekf_core_test ekf_core_test.cpp)
 target_link_libraries(ekf_core_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_core_test)
+
+# CPP-056 phase 2: fuse_direct_state_observation() primitive + GPS
+# velocity/position fusion unit tests (see fwcpp/ekf/ekf_core.hpp's
+# "CPP-056, PHASE 2" scope banner section).
+add_executable(ekf_fusion_test ekf_fusion_test.cpp)
+target_link_libraries(ekf_fusion_test PRIVATE ap-ekf Catch2::Catch2WithMain)
+catch_discover_tests(ekf_fusion_test)

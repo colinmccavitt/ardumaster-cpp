@@ -87,6 +87,13 @@ constexpr ftype kMinSafeStateVar = static_cast<ftype>(5e-9);       // ConstrainV
 constexpr std::uint32_t kEkfTargetRateHz = 83;                     // uint32_t(1.0/EKF_TARGET_DT), EKF_TARGET_DT=0.012
 constexpr std::uint32_t kVertVelVarClipCountLim = 5 * kEkfTargetRateHz; // VERT_VEL_VAR_CLIP_COUNT_LIM
 
+// CPP-056 phase 2. upstream: AP_NavEKF3.h ~line 486-488 - `const float`
+// members of NavEKF3 (NOT AP_Param-tunable, unlike gps_horiz_vel_noise
+// etc. above), read directly from the pinned Plane-4.7.0 source.
+constexpr ftype kGpsNeVelVarAccScale = static_cast<ftype>(0.05f);  // AP_NavEKF3.h gpsNEVelVarAccScale
+constexpr ftype kGpsDVelVarAccScale = static_cast<ftype>(0.07f);   // AP_NavEKF3.h gpsDVelVarAccScale
+constexpr ftype kGpsPosVarAccScale = static_cast<ftype>(0.05f);    // AP_NavEKF3.h gpsPosVarAccScale
+
 [[nodiscard]] ftype clamp(ftype v, ftype lo, ftype hi) {
     return fwcpp::math::constrain_value(v, lo, hi);
 }
@@ -760,6 +767,263 @@ void EkfCore::constrain_variances(ftype dt_ekf_avg) {
     // own inhibited-state branch exactly.
     zero_rows_cols(P, 16, 21);
     zero_rows_cols(P, 22, 23);
+}
+
+// ============================================================================
+// CPP-056 PHASE 2: GPS velocity/position fusion. See ekf_core.hpp's
+// "CPP-056, PHASE 2" banner section for the full scope/exclusions
+// discussion - only implementation-level notes live here.
+// ============================================================================
+
+// upstream: NavEKF3_core::updateStateIndexLim(), AP_NavEKF3_Control.cpp
+// ~line 190-208 - transcribed directly (same nested structure, same
+// literal thresholds).
+int EkfCore::state_index_lim() const {
+    if (inhibit_wind_states) {
+        if (inhibit_mag_states) {
+            if (inhibit_del_vel_bias_states) {
+                return inhibit_del_ang_bias_states ? 9 : 12;
+            }
+            return 15;
+        }
+        return 21;
+    }
+    return 23;
+}
+
+// upstream: NavEKF3_core::ForceSymmetry(), AP_NavEKF3_core.cpp ~line
+// 1862 - verbatim (`0.5*(P[i][j]+P[j][i])` averaging), bounded to `lim`
+// exactly as upstream bounds it to stateIndexLim.
+void EkfCore::force_symmetry(int lim) {
+    for (int i = 1; i <= lim; ++i) {
+        for (int j = 0; j <= i - 1; ++j) {
+            const auto ii = static_cast<std::size_t>(i);
+            const auto jj = static_cast<std::size_t>(j);
+            const ftype temp = ftype(0.5) * (P[ii][jj] + P[jj][ii]);
+            P[ii][jj] = temp;
+            P[jj][ii] = temp;
+        }
+    }
+}
+
+// See ekf_core.hpp's declaration comment for why this exists (structured
+// StateVector vs. upstream's flat statesArray alias) and why looping over
+// all 24 conceptual slots unconditionally is provably identical to
+// bounding at state_index_lim().
+void EkfCore::apply_state_correction(const std::array<ftype, 24>& kfusion, ftype innovation) {
+    std::array<ftype, 24> delta{};
+    for (int i = 0; i < 24; ++i) {
+        delta[static_cast<std::size_t>(i)] = kfusion[static_cast<std::size_t>(i)] * innovation;
+    }
+    state.quat[0] -= delta[0];
+    state.quat[1] -= delta[1];
+    state.quat[2] -= delta[2];
+    state.quat[3] -= delta[3];
+    state.velocity.x -= delta[4];
+    state.velocity.y -= delta[5];
+    state.velocity.z -= delta[6];
+    state.position.x -= delta[7];
+    state.position.y -= delta[8];
+    state.position.z -= delta[9];
+    state.gyro_bias.x -= delta[10];
+    state.gyro_bias.y -= delta[11];
+    state.gyro_bias.z -= delta[12];
+    state.accel_bias.x -= delta[13];
+    state.accel_bias.y -= delta[14];
+    state.accel_bias.z -= delta[15];
+    state.earth_magfield.x -= delta[16];
+    state.earth_magfield.y -= delta[17];
+    state.earth_magfield.z -= delta[18];
+    state.body_magfield.x -= delta[19];
+    state.body_magfield.y -= delta[20];
+    state.body_magfield.z -= delta[21];
+    state.wind_vel.x -= delta[22];
+    state.wind_vel.y -= delta[23];
+    // upstream: `stateStruct.quat.normalize()`, unconditional, right
+    // after the state update loop (~line 1131).
+    state.quat.normalize();
+}
+
+// upstream: FuseVelPosNED()'s obsIndex loop body, AP_NavEKF3_PosVelFusion.cpp
+// ~line 1024-1163. Verified line-by-line against that source (not
+// approximated) - see ekf_core.hpp's banner for exactly which upstream
+// sub-branches (poorObservability/horizInhibit/dvelBiasAxisInhibit/
+// badIMUdata/treatWindStatesAsTruth/gpsNoiseScaler) are real upstream
+// mechanisms this port's current feature set never exercises, and are
+// therefore correctly absent rather than approximated away.
+bool EkfCore::fuse_direct_state_observation(int state_index, ftype innovation, ftype obs_variance, ftype dt_ekf_avg) {
+    const auto si = static_cast<std::size_t>(state_index);
+    const int lim = state_index_lim();
+
+    // upstream: `varInnovVelPos[obsIndex] = P[stateIndex][stateIndex] +
+    // R_OBS[obsIndex]; SK = 1.0f/varInnovVelPos[obsIndex];` (~line
+    // 1029-1030).
+    const ftype var_innov = P[si][si] + obs_variance;
+    const ftype sk = ftype(1) / var_innov;
+
+    // upstream: `for (i=0;i<=9;i++) Kfusion[i] = P[i][stateIndex]*SK;`
+    // (~line 1031-1033) - always active, no inhibit flag gates the
+    // quaternion/velocity/position block.
+    std::array<ftype, 24> kfusion{};
+    for (int i = 0; i <= 9; ++i) {
+        const auto ii = static_cast<std::size_t>(i);
+        kfusion[ii] = P[ii][si] * sk;
+    }
+
+    // upstream: `if (!inhibitDelAngBiasStates) { for(i=10;i<=12;i++)
+    // Kfusion[i]=P[i][stateIndex]*SK; }` (~line 1036-1067), WITHOUT the
+    // nested `PV_AidingMode == AID_NONE` poorObservability narrowing -
+    // see hpp banner for why that narrowing does not apply here.
+    if (!inhibit_del_ang_bias_states) {
+        for (int i = 10; i <= 12; ++i) {
+            const auto ii = static_cast<std::size_t>(i);
+            kfusion[ii] = P[ii][si] * sk;
+        }
+    }
+
+    // upstream: `if (!horizInhibit && !inhibitDelVelBiasStates &&
+    // !badIMUdata) { for(i=13;i<=15;i++) if(!dvelBiasAxisInhibit[i-13])
+    // Kfusion[i]=P[i][stateIndex]*SK; }` (~line 1073-1084) - horizInhibit
+    // is PV_AidingMode==AID_NONE-only (does not apply here), badIMUdata
+    // is permanently false (phase-1 simplification 3), and
+    // dvelBiasAxisInhibit[] is an already-named phase-1 gap (no
+    // ground-alignment axis narrowing modeled) - so this reduces to the
+    // single inhibit_del_vel_bias_states gate.
+    if (!inhibit_del_vel_bias_states) {
+        for (int i = 13; i <= 15; ++i) {
+            const auto ii = static_cast<std::size_t>(i);
+            kfusion[ii] = P[ii][si] * sk;
+        }
+    }
+
+    // upstream: `if (!inhibitMagStates) { for(i=16;i<=21;i++)
+    // Kfusion[i]=P[i][stateIndex]*SK; }` (~line 1087-1092).
+    if (!inhibit_mag_states) {
+        for (int i = 16; i <= 21; ++i) {
+            const auto ii = static_cast<std::size_t>(i);
+            kfusion[ii] = P[ii][si] * sk;
+        }
+    }
+
+    // upstream: `if (!inhibitWindStates && !treatWindStatesAsTruth) {
+    // Kfusion[22]=P[22][stateIndex]*SK; Kfusion[23]=P[23][stateIndex]*SK;
+    // }` (~line 1095-1100) - treatWindStatesAsTruth has no equivalent in
+    // this port (see hpp banner); moot since inhibit_wind_states is
+    // permanently true in this phase regardless.
+    if (!inhibit_wind_states) {
+        kfusion[22] = P[22][si] * sk;
+        kfusion[23] = P[23][si] * sk;
+    }
+
+    // upstream: `for(i=0;i<=stateIndexLim;i++) for(j=0;j<=stateIndexLim;j++)
+    // KHP[i][j] = Kfusion[i]*P[stateIndex][j];` (~line 1103-1108), then
+    // the healthyFusion negative-variance guard (~line 1109-1115) - the
+    // ONLY fusion-health check in this phase's scope (see hpp banner: no
+    // innovation-consistency gating).
+    Matrix24 khp{};
+    for (int i = 0; i <= lim; ++i) {
+        const auto ii = static_cast<std::size_t>(i);
+        for (int j = 0; j <= lim; ++j) {
+            const auto jj = static_cast<std::size_t>(j);
+            khp[ii][jj] = kfusion[ii] * P[si][jj];
+        }
+    }
+    for (int i = 0; i <= lim; ++i) {
+        const auto ii = static_cast<std::size_t>(i);
+        if (khp[ii][ii] > P[ii][ii]) {
+            // upstream: `healthyFusion = false;` -> skip the update
+            // entirely, P and state are left untouched (~line 1163's
+            // else branch, minus the faultStatus bookkeeping this port
+            // doesn't model).
+            return false;
+        }
+    }
+
+    // upstream: `P[i][j] = P[i][j] - KHP[i][j];` (~line 1116-1121), then
+    // ForceSymmetry() + ConstrainVariances() (~line 1123-1124).
+    for (int i = 0; i <= lim; ++i) {
+        const auto ii = static_cast<std::size_t>(i);
+        for (int j = 0; j <= lim; ++j) {
+            const auto jj = static_cast<std::size_t>(j);
+            P[ii][jj] -= khp[ii][jj];
+        }
+    }
+    force_symmetry(lim);
+    constrain_variances(dt_ekf_avg);
+
+    // upstream: `for(i=0;i<=stateIndexLim;i++) statesArray[i] -=
+    // Kfusion[i]*innovVelPos[obsIndex]; stateStruct.quat.normalize();`
+    // (~line 1127-1131) - see apply_state_correction()'s own comment for
+    // why this port applies it across all 24 conceptual slots rather
+    // than bounding at `lim`.
+    apply_state_correction(kfusion, innovation);
+    return true;
+}
+
+// upstream: FuseVelPosNED()'s R_OBS[0]/[1] "no reported accuracy" branch,
+// AP_NavEKF3_PosVelFusion.cpp ~line 740-741: `R_OBS[0] =
+// sq(constrain_ftype(frontend->_gpsHorizVelNoise, 0.05f, 5.0f)) +
+// sq(frontend->gpsNEVelVarAccScale * accNavMag); R_OBS[1] = R_OBS[0];`
+ftype EkfCore::gps_horiz_vel_obs_variance() const {
+    const ftype acc_nav_mag = vel_dot_ned_filt.length();
+    return sq(clamp(gps_horiz_vel_noise, ftype(0.05), ftype(5.0))) + sq(kGpsNeVelVarAccScale * acc_nav_mag);
+}
+
+// upstream: R_OBS[2], ~line 742: `R_OBS[2] =
+// sq(constrain_ftype(frontend->_gpsVertVelNoise, 0.05f, 5.0f)) +
+// sq(frontend->gpsDVelVarAccScale * accNavMag);`
+ftype EkfCore::gps_vert_vel_obs_variance() const {
+    const ftype acc_nav_mag = vel_dot_ned_filt.length();
+    return sq(clamp(gps_vert_vel_noise, ftype(0.05), ftype(5.0))) + sq(kGpsDVelVarAccScale * acc_nav_mag);
+}
+
+// upstream: R_OBS[3]/[4] "no reported accuracy" branch, ~line 754-757:
+// `const ftype posErr = frontend->gpsPosVarAccScale * accNavMag; R_OBS[3]
+// = sq(constrain_ftype(frontend->_gpsHorizPosNoise, 0.1f, 10.0f)) +
+// sq(posErr); R_OBS[4] = R_OBS[3];`
+ftype EkfCore::gps_horiz_pos_obs_variance() const {
+    const ftype acc_nav_mag = vel_dot_ned_filt.length();
+    const ftype pos_err = kGpsPosVarAccScale * acc_nav_mag;
+    return sq(clamp(gps_horiz_pos_noise, ftype(0.1), ftype(10.0))) + sq(pos_err);
+}
+
+// upstream: FuseVelPosNED()'s obsIndex 0-2 path. Innovation formula
+// (~line 1011): `innovVelPos[obsIndex] = stateStruct.velocity[obsIndex] -
+// velPosObs[obsIndex];` - recomputed fresh before each axis's fusion
+// call so a correlated correction from an earlier axis in this same call
+// is reflected, exactly matching upstream's sequential-fusion loop
+// (state is not a snapshot taken once at the top of the loop).
+int EkfCore::fuse_gps_velocity(const GpsSample& gps, ftype dt_ekf_avg) {
+    int n_fused = 0;
+    const ftype r_obs_horiz = gps_horiz_vel_obs_variance();
+    const ftype r_obs_vert = gps_vert_vel_obs_variance();
+
+    if (fuse_direct_state_observation(4, state.velocity.x - gps.velocity_ned.x, r_obs_horiz, dt_ekf_avg)) {
+        ++n_fused;
+    }
+    if (fuse_direct_state_observation(5, state.velocity.y - gps.velocity_ned.y, r_obs_horiz, dt_ekf_avg)) {
+        ++n_fused;
+    }
+    if (fuse_direct_state_observation(6, state.velocity.z - gps.velocity_ned.z, r_obs_vert, dt_ekf_avg)) {
+        ++n_fused;
+    }
+    return n_fused;
+}
+
+// upstream: FuseVelPosNED()'s obsIndex 3-4 path. Innovation formula
+// (~line 1016): `innovVelPos[obsIndex] = stateStruct.position[obsIndex-3]
+// - velPosObs[obsIndex];`.
+int EkfCore::fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg) {
+    int n_fused = 0;
+    const ftype r_obs = gps_horiz_pos_obs_variance();
+
+    if (fuse_direct_state_observation(7, state.position.x - gps.position_ne.x, r_obs, dt_ekf_avg)) {
+        ++n_fused;
+    }
+    if (fuse_direct_state_observation(8, state.position.y - gps.position_ne.y, r_obs, dt_ekf_avg)) {
+        ++n_fused;
+    }
+    return n_fused;
 }
 
 } // namespace fwcpp::ekf
