@@ -191,7 +191,13 @@ target_link_libraries(tecs_test PRIVATE ap-tecs Catch2::Catch2WithMain)
 catch_discover_tests(tecs_test)
 
 add_executable(fw_control_test fw_control_test.cpp)
-target_link_libraries(fw_control_test PRIVATE ap-fw-control Catch2::Catch2WithMain)
+# ap-param: CPP-044 added real AP_Param Info-table support directly to
+# roll_controller.hpp (included here), which now unconditionally
+# #includes fwcpp/param/* headers - ap-fw-control itself doesn't link
+# ap-param (see roll_controller_param_test's own link line below for why
+# that dependency isn't added to the module's own CMakeLists), so this
+# test target needs the include path directly.
+target_link_libraries(fw_control_test PRIVATE ap-fw-control ap-param Catch2::Catch2WithMain)
 catch_discover_tests(fw_control_test)
 
 # ap-sim is a TEST-ONLY dependency here (CPP-031's closed-loop
@@ -208,6 +214,15 @@ catch_discover_tests(vehicle_test)
 add_executable(plane_aparm_param_test plane_aparm_param_test.cpp)
 target_link_libraries(plane_aparm_param_test PRIVATE ap-vehicle Catch2::Catch2WithMain)
 catch_discover_tests(plane_aparm_param_test)
+
+# CPP-044: storage/persistence integration test for
+# fw_control::RollController::Gains - no ap-sim needed (not a closed-loop
+# test, matching CPP-043's own plane_aparm_param_test above). Links
+# ap-param directly (in addition to ap-fw-control) for the same reason
+# fw_control_test does above.
+add_executable(roll_controller_param_test roll_controller_param_test.cpp)
+target_link_libraries(roll_controller_param_test PRIVATE ap-fw-control ap-param Catch2::Catch2WithMain)
+catch_discover_tests(roll_controller_param_test)
 
 add_executable(gps_test gps_test.cpp)
 target_link_libraries(gps_test PRIVATE ap-gps Catch2::Catch2WithMain)
