@@ -121,6 +121,7 @@
 //     scope).
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 
@@ -699,4 +700,378 @@ TEST_CASE("EkfCore's fused pipeline measurably outperforms pure dead-reckoning p
     REQUIRE(r.fused.max_horiz_pos_err_m < r.unfused.max_horiz_pos_err_m / 3.0);
     REQUIRE(r.fused.max_vel_err_mps < r.unfused.max_vel_err_mps / 3.0);
     REQUIRE(r.fused.max_att_err_deg < r.unfused.max_att_err_deg / 3.0);
+}
+
+// ============================================================================
+// CPP-064, PHASE 10 (this ticket): closed-loop wind-state estimation
+// validation. verification: sitl-diff - a VALIDATION round, like CPP-061
+// (phase 7) above, NOT new upstream porting work. This file adds ZERO
+// changes to EkfCore/SimPlane production code - the finding below was
+// confirmed to be the SAME already-disclosed, already-named limitation
+// phases 2/5/9 each independently re-confirmed (constrain_variances()
+// unconditionally zeroing P[16..23] every call), not a new bug.
+//
+// THE QUESTION THIS FILE ANSWERS: CPP-063 (phase 9, immediately above)
+// deliberately left inhibit_wind_states at its real default (true) and
+// SimPlane's wind_config at its own all-zero default in the main
+// closed-loop run - so nothing in this file, until now, has ever exercised
+// wind-STATE LEARNING (as opposed to airspeed fusion's always-active
+// velocity/attitude correction, bits 0-9, which phase 9 already exercises)
+// in a realistic, extended, closed-loop setting. The isolated unit test
+// (ekf_airspeed_fusion_test.cpp, "with inhibit_wind_states cleared, one
+// fusion call measurably moves wind_vel - but a real, disclosed gap caps it
+// at one call's worth") already demonstrated the SAME constrain_variances()
+// gap phase 5's mag-fusion test found for earth_magfield - but that test
+// ENGINEERS a nonzero P[22][4] cross term by hand, with its own comment
+// explicitly noting real upstream covariance_init() actually sets
+// P[22][22]=P[23][23]=0 exactly (AP_NavEKF3_core.cpp ~line 610-611,
+// verified directly and already reproduced verbatim by this port's own
+// covariance_init() - not a port simplification), so an UN-engineered
+// fixture has no nonzero diagonal for a first call to learn from either -
+// unlike earth_magfield's own P[16][16]=sq(mag_noise) initial diagonal,
+// which is what gives mag fusion its "one real call" in the first place.
+// This ticket's central, real question: in an ACTUAL closed-loop run - no
+// hand-engineered P entries, just covariance_prediction()'s own real
+// per-tick propagation plus GPS/mag/baro/airspeed fusion exactly as
+// CPP-061/062/063 already established, over a realistic nonzero SimPlane
+// wind - does wind estimation get a first free call the way earth_magfield
+// did, or does the fully realistic answer turn out to be even more
+// restrictive than the unit test's hand-engineered scenario suggested?
+// Answered empirically below, not assumed - see this ticket's own commit
+// message for the exact measured trajectory this test produces.
+//
+// REAL, EMPIRICALLY-CONFIRMED FINDING (see commit message for the actual
+// run's numbers): wind_vel does NOT "move once, then plateau" - it NEVER
+// moves AT ALL, over the full run, to within exact floating-point equality.
+// This is a real, structural consequence of three independently-verified
+// facts in ekf_core.cpp, read together: (1) covariance_init() sets
+// P[22][22]=P[23][23]=0 exactly, with every OTHER P[22][j]/P[23][j] cross
+// term also starting at 0 (P is value-initialized to all-zero at the top of
+// covariance_init(), and nothing after that touches row/col 22 or 23 except
+// those two explicit `=0` assignments); (2) covariance_prediction()'s own
+// F*P*F'+Q propagation only ever writes back rows/columns 0..15 of P (see
+// its own "Symmetric copy-back, states 0..15" comment in ekf_core.cpp) -
+// rows/columns 16..23 are NEVER populated by the real per-tick prediction
+// step; (3) constrain_variances() unconditionally re-zeros rows/columns
+// 16..23 at the end of EVERY covariance_prediction() call AND every fusion
+// call (the already-disclosed phase-2/5/9 gap this ticket was commissioned
+// to measure in a realistic setting). Put together: P[22][*] and P[*][22]
+// (identically for 23) are EXACTLY zero at the start of every single
+// fuse_airspeed() call across the whole run - so fuse_airspeed()'s own
+// kfusion[22]/kfusion[23] (ekf_core.cpp: `kfusion[ii] = sk_tas0 *
+// (P[ii][4]*sh_tas2 - P[ii][22]*sh_tas2 + P[ii][5]*sk_tas1 -
+// P[ii][23]*sk_tas1 + P[ii][6]*vd*sh_tas0)`, every P[ii][22]/P[ii][23] term
+// forced to 0 by point 1/2/3 above) are EXACTLY 0 on every call - not
+// approximately small, bit-for-bit 0 - so apply_state_correction()'s
+// `wind_vel -= Kfusion*innovation` leaves wind_vel bit-identical to its
+// zero-initialized value for the ENTIRE run, independent of run duration,
+// independent of how many times fuse_airspeed() is called, and independent
+// of whether GPS/mag/baro's OWN covariance_init() reset paths ever trigger
+// mid-run - because covariance_init() ALSO always re-zeros P[22][22]/
+// P[23][23] to exactly 0 unconditionally (point 1), so a reset from ANY
+// OTHER fusion type can never "reopen the door" the way the ticket's own
+// central question speculated it plausibly might. This is a SHARPER, more
+// severe finding than "moves once, then capped": in a real closed-loop run
+// with no hand-engineered covariance entries, wind estimation does not get
+// capped after one correction - it never receives one in the first place.
+//
+// RECOMMENDATION FOR A FUTURE TICKET (NOT attempted here - out of this
+// ticket's explicit scope): ekf_core.hpp's own phase-2 banner already
+// anticipated that "a future phase that actually wants to flip
+// inhibit_mag_states at runtime must also wire it into [constrain_
+// variances()/covariance_prediction()]'s currently-hardcoded branches" -
+// this run confirms that requirement is not merely theoretical for wind:
+// making wind estimation practically useful would require BOTH (a) gating
+// constrain_variances()'s zeroing of P[22..23] on the runtime value of
+// inhibit_wind_states (mirroring point 3 above), AND (b) giving wind states
+// a real, nonzero process-noise term in covariance_prediction() (upstream's
+// own wind-state process noise, not currently transcribed at all in this
+// port - point 2 above) so that a nonzero P[22][22]/cross-term diagonal
+// actually has something to grow from between fusion calls once (a) stops
+// erasing it. Neither is attempted in this ticket.
+// ============================================================================
+
+namespace {
+
+// Sample checkpoints: 10s, 30s, 60s, 90s, 120s (ticket item 3: "sampled at
+// several points across the run"), reported as real numbers in the commit
+// message rather than only a final snapshot - exactly what would hide a
+// "moves once then flatlines" pattern if this run's real answer had turned
+// out to be that instead of the even-more-restrictive "never moves" finding
+// above.
+constexpr std::array<int, 5> kWindSampleTicks = {10 * kTicksPerSecond, 30 * kTicksPerSecond, 60 * kTicksPerSecond,
+                                                   90 * kTicksPerSecond, 120 * kTicksPerSecond};
+
+struct WindClosedLoopSample {
+    double t_s = 0.0;
+    double wind_n_est = 0.0;
+    double wind_e_est = 0.0;
+    double wind_err_mag = 0.0;
+};
+
+struct WindClosedLoopResult {
+    std::array<WindClosedLoopSample, kWindSampleTicks.size()> samples{};
+    // The wind_vel value immediately after the FIRST successful
+    // fuse_airspeed() call - directly answers "does even one call move it".
+    double wind_n_after_first_call = 0.0;
+    double wind_e_after_first_call = 0.0;
+    bool had_first_call = false;
+    // Set true if state.wind_vel is EVER observed to differ, by any
+    // nonzero amount, from its previous-tick value, anywhere in the run -
+    // an independent, blunt cross-check of the "never moves" finding above
+    // that does not rely on the sample checkpoints happening to land on
+    // the right ticks.
+    bool wind_vel_ever_changed = false;
+    int n_airspeed_attempts = 0;
+    int n_airspeed_fused_count = 0;
+    double true_wind_n = 0.0;
+    double true_wind_e = 0.0;
+    double true_wind_mag = 0.0;
+    // Sanity metrics (not this test's main point, but confirms the rest of
+    // the pipeline is still behaving normally under a real nonzero wind,
+    // i.e. this isn't a vacuous run where something else silently broke).
+    double final_horiz_pos_err_m = 0.0;
+    double final_att_err_deg = 0.0;
+};
+
+// Runs the SAME 120s multi-phase closed-loop flight profile as
+// run_closed_loop_comparison() above (level cruise / right turn / climbing
+// left turn / descending right turn - see that function's own comment for
+// the full rationale), with two real, deliberate differences for this
+// ticket:
+//   1. SimPlane's wind_config carries a real, nonzero STEADY wind (6 m/s
+//      from due east - within the 5-8 m/s range this codebase's own
+//      sim_plane_test.cpp already establishes as its "realistic" precedent
+//      for wind-effect tests, e.g. its own "wind_config.speed = 6.0f;
+//      wind_config.direction = 90.0f" crosswind case). Turbulence is left
+//      at 0 (deterministic) - isolating the steady-wind-learning question
+//      this ticket asks, matching sim_plane_test.cpp's own established
+//      "turbulence = 0.0f - deterministic - isolates the steady-wind
+//      effect" precedent, rather than adding stochastic gust noise on top
+//      of the specific mechanism under test.
+//   2. inhibit_wind_states is explicitly cleared (false) for the whole run
+//      on the one EkfCore instance under test - the real condition this
+//      ticket exists to validate.
+// GPS velocity/position (5Hz), magnetometer (10Hz), baro height (10Hz), and
+// airspeed (10Hz) fusion all run exactly as CPP-061/062/063 already
+// established - this is the SAME fully-assembled pipeline, not a
+// specially-simplified wind-only harness.
+WindClosedLoopResult run_wind_closed_loop() {
+    Plane plane;
+    ModeFBWA fbwa(plane);
+    plane.control_mode = &fbwa;
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+
+    fwcpp::sim::SimPlane sim_plane;
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 0.0f, -kStartAltitudeAglM);
+    sim_plane.dcm.identity();
+    sim_plane.velocity_ef = fwcpp::math::Vector3f(kCruiseAirspeedMps, 0.0f, 0.0f);
+    sim_plane.velocity_air_ef = sim_plane.velocity_ef;
+    sim_plane.velocity_air_bf = sim_plane.velocity_ef;
+    sim_plane.airspeed = kCruiseAirspeedMps;
+
+    // Real, nonzero steady wind - see this function's own banner for the
+    // magnitude/precedent rationale. direction=90 (wind FROM due east,
+    // meteorological convention per WindConfig's own field comment) blows
+    // toward due west, i.e. wind_ef.y < 0 (NED, +y East) - a steady
+    // crosswind relative to this profile's initial due-north heading, the
+    // same convention sim_plane_test.cpp's own crosswind case already uses.
+    sim_plane.wind_config.speed = 6.0f;
+    sim_plane.wind_config.direction = 90.0f;
+    sim_plane.wind_config.turbulence = 0.0f;
+    sim_plane.update_wind();
+
+    fwcpp::compass::Compass compass;
+
+    fwcpp::ekf::EkfCore ekf;
+    ekf.state.quat =
+        fwcpp::ekf::QuaternionF(fwcpp::ekf::ftype(1), fwcpp::ekf::ftype(0), fwcpp::ekf::ftype(0), fwcpp::ekf::ftype(0));
+    ekf.state.velocity = to_ekf_vec3(sim_plane.velocity_ef);
+    ekf.state.position = to_ekf_vec3(sim_plane.position);
+    ekf.state.earth_magfield = to_ekf_vec3(compass.earth_field()) * (fwcpp::ekf::ftype(1) / fwcpp::ekf::ftype(1000));
+    // THE condition under test - real wind-state learning is unlocked for
+    // this instance's whole run, unlike CPP-061/062/063's own `fused`
+    // instance above which leaves this at its real default (true).
+    ekf.inhibit_wind_states = false;
+    ekf.covariance_init(kDtEkf);
+
+    WindClosedLoopResult result;
+    result.true_wind_n = static_cast<double>(sim_plane.wind_ef.x);
+    result.true_wind_e = static_cast<double>(sim_plane.wind_ef.y);
+    result.true_wind_mag = std::sqrt(result.true_wind_n * result.true_wind_n + result.true_wind_e * result.true_wind_e);
+
+    fwcpp::math::Vector2f prev_wind_vel(0.0f, 0.0f);
+    std::size_t next_sample = 0;
+
+    StabilizeInputs in;
+    in.dt = kDt;
+    std::uint32_t now_ms = 0;
+
+    for (int tick_index = 1; tick_index <= kTotalTicks; ++tick_index) {
+        now_ms += 20;
+        in.now_ms = now_ms;
+        set_phase_sticks(plane, tick_index);
+
+        fwcpp::ahrs::GyroSample plane_gyro;
+        plane_gyro.gyro = sim_plane.gyro;
+        plane_gyro.delta_angle = sim_plane.gyro * kDt;
+        plane_gyro.dangle_dt = kDt;
+        tick(plane, plane_gyro, in);
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+
+        const fwcpp::math::Vector3f measured_gyro = sim_plane.gyro + kGyroBiasRadS;
+        const fwcpp::math::Vector3f measured_accel = sim_plane.accel_body + kAccelBiasMps2;
+
+        fwcpp::ekf::GyroSample ekf_gyro;
+        ekf_gyro.delta_angle = to_ekf_vec3(measured_gyro) * kDtEkf;
+        ekf_gyro.delta_angle_dt = kDtEkf;
+        fwcpp::ekf::AccelSample ekf_accel;
+        ekf_accel.delta_velocity = to_ekf_vec3(measured_accel) * kDtEkf;
+        ekf_accel.delta_velocity_dt = kDtEkf;
+
+        ekf.update_strapdown_equations_ned(ekf_gyro, ekf_accel, kDtEkf);
+        ekf.covariance_prediction(ekf_gyro, ekf_accel, kDtEkf);
+
+        const fwcpp::ekf::ftype now_s = static_cast<fwcpp::ekf::ftype>(tick_index) * kDtEkf;
+
+        if (tick_index % kGpsPeriodTicks == 0) {
+            fwcpp::ekf::GpsSample gps;
+            gps.velocity_ned = to_ekf_vec3(sim_plane.velocity_ef);
+            gps.position_ne = fwcpp::ekf::Vector2F(static_cast<fwcpp::ekf::ftype>(sim_plane.position.x),
+                                                     static_cast<fwcpp::ekf::ftype>(sim_plane.position.y));
+            ekf.fuse_gps_velocity(gps, kDtEkf, now_s);
+            ekf.fuse_gps_position(gps, kDtEkf, now_s);
+        }
+
+        if (tick_index % kMagPeriodTicks == 0) {
+            fwcpp::ekf::MagSample mag;
+            mag.mag = to_ekf_vec3(compass.rotate_earth_field_to_body(sim_plane.dcm))
+                    * (fwcpp::ekf::ftype(1) / fwcpp::ekf::ftype(1000));
+            ekf.fuse_magnetometer(mag, ekf_gyro, kDtEkf);
+        }
+
+        if (tick_index % kBaroPeriodTicks == 0) {
+            const fwcpp::ekf::ftype baro_altitude_m = -static_cast<fwcpp::ekf::ftype>(sim_plane.position.z);
+            ekf.fuse_baro_height(baro_altitude_m, kDtEkf, now_s);
+        }
+
+        if (tick_index % kAirspeedPeriodTicks == 0) {
+            const fwcpp::ekf::ftype true_airspeed_m_s = static_cast<fwcpp::ekf::ftype>(sim_plane.airspeed);
+            ++result.n_airspeed_attempts;
+            const bool fused_now = ekf.fuse_airspeed(true_airspeed_m_s, kDtEkf);
+            if (fused_now) {
+                ++result.n_airspeed_fused_count;
+                if (!result.had_first_call) {
+                    result.had_first_call = true;
+                    result.wind_n_after_first_call = static_cast<double>(ekf.state.wind_vel.x);
+                    result.wind_e_after_first_call = static_cast<double>(ekf.state.wind_vel.y);
+                }
+            }
+        }
+
+        // Blunt, sample-independent change detector (see struct comment).
+        if (ekf.state.wind_vel.x != prev_wind_vel.x || ekf.state.wind_vel.y != prev_wind_vel.y) {
+            result.wind_vel_ever_changed = true;
+        }
+        prev_wind_vel = fwcpp::math::Vector2f(static_cast<float>(ekf.state.wind_vel.x),
+                                               static_cast<float>(ekf.state.wind_vel.y));
+
+        if (next_sample < kWindSampleTicks.size() && tick_index == kWindSampleTicks[next_sample]) {
+            WindClosedLoopSample s;
+            s.t_s = static_cast<double>(tick_index) / static_cast<double>(kTicksPerSecond);
+            s.wind_n_est = static_cast<double>(ekf.state.wind_vel.x);
+            s.wind_e_est = static_cast<double>(ekf.state.wind_vel.y);
+            const double dn = s.wind_n_est - result.true_wind_n;
+            const double de = s.wind_e_est - result.true_wind_e;
+            s.wind_err_mag = std::sqrt(dn * dn + de * de);
+            result.samples[next_sample] = s;
+            ++next_sample;
+        }
+
+        if (tick_index == kTotalTicks) {
+            const double dn = static_cast<double>(ekf.state.position.x) - static_cast<double>(sim_plane.position.x);
+            const double de = static_cast<double>(ekf.state.position.y) - static_cast<double>(sim_plane.position.y);
+            result.final_horiz_pos_err_m = std::sqrt(dn * dn + de * de);
+
+            float true_roll = 0.0f, true_pitch = 0.0f, true_yaw = 0.0f;
+            sim_plane.dcm.to_euler(&true_roll, &true_pitch, &true_yaw);
+            const double est_yaw_deg = to_deg(static_cast<double>(ekf.state.quat.get_euler_yaw()));
+            result.final_att_err_deg = std::abs(fwcpp::math::wrap_180(est_yaw_deg - to_deg(static_cast<double>(true_yaw))));
+        }
+    }
+
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("CPP-064 phase 10: closed-loop wind-state estimation, with inhibit_wind_states cleared and a real "
+          "nonzero SimPlane wind, NEVER moves state.wind_vel away from zero over a full 120s flight - a sharper, "
+          "empirically-confirmed version of the already-disclosed constrain_variances() capping gap",
+          "[ekf_core][integration][wind]") {
+    const WindClosedLoopResult r = run_wind_closed_loop();
+
+    INFO("true wind (N,E) = (" << r.true_wind_n << ", " << r.true_wind_e << ") m/s, magnitude = " << r.true_wind_mag << " m/s");
+    INFO("airspeed fused " << r.n_airspeed_fused_count << "/" << r.n_airspeed_attempts << " attempts");
+    for (const auto& s : r.samples) {
+        INFO("t=" << s.t_s << "s: wind_vel est (N,E) = (" << s.wind_n_est << ", " << s.wind_e_est
+             << "), error magnitude = " << s.wind_err_mag << " m/s");
+    }
+    if (r.had_first_call) {
+        INFO("wind_vel immediately after FIRST successful fuse_airspeed() call: ("
+             << r.wind_n_after_first_call << ", " << r.wind_e_after_first_call << ")");
+    }
+    INFO("final horiz pos err (m) = " << r.final_horiz_pos_err_m << ", final att (yaw) err (deg) = " << r.final_att_err_deg);
+
+    // Sanity: this run is a genuine exercise of the mechanism under test,
+    // not a vacuous one where airspeed fusion silently never engaged, and
+    // the wind itself is really nonzero (otherwise "wind_vel stays at 0"
+    // would trivially match a zero true wind too).
+    REQUIRE(r.n_airspeed_fused_count > static_cast<int>(0.8 * r.n_airspeed_attempts));
+    REQUIRE(r.true_wind_mag > 5.0);
+    REQUIRE(r.had_first_call);
+
+    // THE CENTRAL FINDING: wind_vel is bit-for-bit zero at every single
+    // sample checkpoint, including immediately after the very first
+    // successful fuse_airspeed() call - not merely "close to zero", exactly
+    // zero, confirming the structural derivation in this file's own banner
+    // above (Kfusion[22]/Kfusion[23] are exactly 0 on every call because
+    // P[22][*]/P[*][22]/P[23][*]/P[*][23] are exactly 0 at the start of
+    // every call, with no code path in this port's real covariance_init()/
+    // covariance_prediction()/constrain_variances() ever making them
+    // otherwise). This is checked BOTH via the explicit sample checkpoints
+    // (answering the ticket's own "trajectory over time" requirement) AND
+    // via the independent, blunt per-tick change detector.
+    REQUIRE_FALSE(r.wind_vel_ever_changed);
+    REQUIRE(r.wind_n_after_first_call == 0.0);
+    REQUIRE(r.wind_e_after_first_call == 0.0);
+    for (const auto& s : r.samples) {
+        REQUIRE(s.wind_n_est == 0.0);
+        REQUIRE(s.wind_e_est == 0.0);
+        // Error therefore sits at exactly the true wind's own magnitude,
+        // constant across every checkpoint - the "flatline at the WORST
+        // possible value from tick 1 onward" pattern, not "converges" and
+        // not even "moves once then plateaus at a partially-corrected
+        // value" - see this test's own banner for the real numbers this
+        // run measured and the ticket's commit message for the full
+        // discussion.
+        REQUIRE(s.wind_err_mag == Catch::Approx(r.true_wind_mag).margin(1e-9));
+    }
+
+    // Sanity: the REST of the pipeline (GPS/mag/baro fusion, unaffected by
+    // inhibit_wind_states) is still behaving completely normally under a
+    // real nonzero wind - this run is not silently broken in some other
+    // way that would make the wind finding above meaningless. Bounds here
+    // are deliberately loose (this test's point is the wind finding, not a
+    // tight re-verification of CPP-061/062's own already-established
+    // bounds) - see this ticket's own commit message for the actual
+    // measured values.
+    REQUIRE(r.final_horiz_pos_err_m < 5.0);
+    REQUIRE(r.final_att_err_deg < 5.0);
 }
