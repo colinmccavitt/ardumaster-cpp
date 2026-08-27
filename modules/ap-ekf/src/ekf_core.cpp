@@ -94,6 +94,15 @@ constexpr ftype kGpsNeVelVarAccScale = static_cast<ftype>(0.05f);  // AP_NavEKF3
 constexpr ftype kGpsDVelVarAccScale = static_cast<ftype>(0.07f);   // AP_NavEKF3.h gpsDVelVarAccScale
 constexpr ftype kGpsPosVarAccScale = static_cast<ftype>(0.05f);    // AP_NavEKF3.h gpsPosVarAccScale
 
+// CPP-058 phase 4. upstream: AP_NavEKF3.h:493 - `const uint16_t
+// posRetryTimeUseVel_ms = 10000;`, a real, hardcoded upstream constant
+// (NOT an AP_Param), verified directly. Same "not user-tunable"
+// treatment as kGpsNeVelVarAccScale etc. above - a file-local constant,
+// not a public field. See ekf_core.hpp's "CPP-058, PHASE 4" banner for
+// why this single threshold is applied to both position and velocity
+// timeout in this port.
+constexpr ftype kGpsFusionTimeoutS = static_cast<ftype>(10.0);  // posRetryTimeUseVel_ms
+
 [[nodiscard]] ftype clamp(ftype v, ftype lo, ftype hi) {
     return fwcpp::math::constrain_value(v, lo, hi);
 }
@@ -1030,6 +1039,63 @@ ftype EkfCore::gps_pos_test_ratio(const GpsSample& gps) const {
     return innov_sum_sq / (var_sum * sq(gate));
 }
 
+// CPP-058 phase 4. upstream: NavEKF3_core::ResetVelocity(resetDataSource),
+// AP_NavEKF3_PosVelFusion.cpp lines 14-89 - reduced to the state+
+// covariance portion of the real AID_ABSOLUTE/GPS-source branch (see
+// ekf_core.hpp's "CPP-058, PHASE 4" banner for the full scope reduction
+// and what's excluded). Directly overwrites state.velocity.x/y from the
+// GpsSample (upstream: `stateStruct.velocity.x  = gps_corrected.vel.x;
+// stateStruct.velocity.y  = gps_corrected.vel.y;`, ~line 54-55, minus the
+// antenna-offset correction - GpsSample is already-corrected per
+// CPP-056's convention) and re-seeds P[4][4]/P[5][5] (upstream: `P[5][5]
+// = P[4][4] = sq(MAX(frontend->_gpsHorizVelNoise,gpsSpdAccuracy));`,
+// ~line 57 - degenerates to sq(gps_horiz_vel_noise) once the
+// gpsSpdAccuracy reported-accuracy term is excluded, per CPP-056's own
+// established exclusion of that branch, verified directly by reading the
+// real MAX() call, not assumed). Stamps last_vel_pass_time_s = now_s,
+// matching upstream's own `lastVelPassTime_ms = imuSampleTime_ms;` at
+// ResetVelocity()'s end (~line 74) - a reset counts as "just passed", so
+// the timeout clock restarts from here.
+void EkfCore::reset_velocity(const GpsSample& gps, ftype now_s) {
+    zero_rows_cols(P, 4, 5);  // upstream: zeroRows(P,4,5); zeroCols(P,4,5);
+    state.velocity.x = gps.velocity_ned.x;
+    state.velocity.y = gps.velocity_ned.y;
+    P[4][4] = P[5][5] = sq(gps_horiz_vel_noise);
+    last_vel_pass_time_s = now_s;
+}
+
+// CPP-058 phase 4. upstream: NavEKF3_core::ResetPosition(resetDataSource),
+// AP_NavEKF3_PosVelFusion.cpp lines 94-186 - same reduction as
+// reset_velocity() above, but see ekf_core.hpp's "CPP-058, PHASE 4"
+// banner "CORRECTIONS/FINDINGS" #1 for a real divergence found and
+// deliberately NOT followed here: upstream's actual timeout-triggered
+// call site (FuseVelPosNED(), ~line 844-856) immediately re-overrides
+// ResetPosition()'s own P[7][7]/P[8][8] value with
+// sq(0.5*_gpsGlitchRadiusMax) right after calling it. This function
+// intentionally reproduces ResetPosition() ITSELF in isolation (this
+// ticket's literal, narrower scope, per its own "lines ~14-183"
+// pointer), not that further caller-side override, which belongs to the
+// still-excluded full "reset-on-timeout sequence" orchestration named
+// since CPP-057. Overwrites state.position.x/y directly from the
+// GpsSample's already-projected local-NE position (upstream:
+// `stateStruct.position.xy() = EKF_origin.get_distance_NE_ftype
+// (gpsloc);` plus a velocity*tdiff time-alignment correction, ~line
+// 139-143 - both excluded, see banner) and re-seeds P[7][7]/P[8][8]
+// (upstream: `P[7][7] = P[8][8] =
+// sq(MAX(gpsPosAccuracy,frontend->_gpsHorizPosNoise));`, ~line 146 -
+// degenerates to sq(gps_horiz_pos_noise) once gpsPosAccuracy is
+// excluded, same reasoning as reset_velocity() above). Stamps
+// last_pos_pass_time_s = now_s, matching upstream's own
+// `lastGpsPosPassTime_ms = imuSampleTime_ms;` at ResetPosition()'s end
+// (~line 184).
+void EkfCore::reset_position(const GpsSample& gps, ftype now_s) {
+    zero_rows_cols(P, 7, 8);  // upstream: zeroRows(P,7,8); zeroCols(P,7,8);
+    state.position.x = gps.position_ne.x;
+    state.position.y = gps.position_ne.y;
+    P[7][7] = P[8][8] = sq(gps_horiz_pos_noise);
+    last_pos_pass_time_s = now_s;
+}
+
 // upstream: FuseVelPosNED()'s obsIndex 0-2 path. Innovation formula
 // (~line 1011): `innovVelPos[obsIndex] = stateStruct.velocity[obsIndex] -
 // velPosObs[obsIndex];` - recomputed fresh before each axis's fusion
@@ -1044,8 +1110,25 @@ ftype EkfCore::gps_pos_test_ratio(const GpsSample& gps) const {
 // (ratio >= 1.0) skips the WHOLE velocity vector for this cycle: no axis
 // is fused, P/state are left completely untouched, matching upstream's
 // own `else { fuseVelData = false; }` (~line 928).
-int EkfCore::fuse_gps_velocity(const GpsSample& gps, ftype dt_ekf_avg) {
+//
+// CPP-058 phase 4: on a gate failure, checks the elapsed time since
+// last_vel_pass_time_s against kGpsFusionTimeoutS (posRetryTimeUseVel_ms
+// = 10.0s) BEFORE returning 0 - if timed out, calls reset_velocity()
+// instead of simply skipping (upstream: `if (PV_AidingMode ==
+// AID_ABSOLUTE && velTimeout) { ResetVelocity(...); fuseVelData = false;
+// ...}`, ~line 917-924 - this port has no aiding-mode state machine, so
+// AID_ABSOLUTE is unconditionally this port's only mode, see banner). A
+// reset is NOT a fusion (matches upstream's own `fuseVelData = false`
+// right after the reset call, ~line 921), so this still returns 0 either
+// way on the failing branch. On a passing gate, last_vel_pass_time_s is
+// only stamped when n_fused > 0 - see this file's ekf_core.hpp banner
+// "CPP-058, PHASE 4" section "A REAL, NAMED DIVERGENCE" for why that is
+// slightly stricter than upstream's own gate-pass-only condition.
+int EkfCore::fuse_gps_velocity(const GpsSample& gps, ftype dt_ekf_avg, ftype now_s) {
     if (gps_vel_test_ratio(gps) >= ftype(1.0)) {
+        if ((now_s - last_vel_pass_time_s) >= kGpsFusionTimeoutS) {
+            reset_velocity(gps, now_s);
+        }
         return 0;
     }
 
@@ -1062,6 +1145,9 @@ int EkfCore::fuse_gps_velocity(const GpsSample& gps, ftype dt_ekf_avg) {
     if (fuse_direct_state_observation(6, state.velocity.z - gps.velocity_ned.z, r_obs_vert, dt_ekf_avg)) {
         ++n_fused;
     }
+    if (n_fused > 0) {
+        last_vel_pass_time_s = now_s;
+    }
     return n_fused;
 }
 
@@ -1074,8 +1160,21 @@ int EkfCore::fuse_gps_velocity(const GpsSample& gps, ftype dt_ekf_avg) {
 // fuse_gps_velocity() above. Failing the gate (ratio >= 1.0) skips both
 // position axes for this cycle, P/state left completely untouched,
 // matching upstream's own `else { fusePosData = false; }` (~line 859).
-int EkfCore::fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg) {
+//
+// CPP-058 phase 4: same timeout/reset wiring as fuse_gps_velocity()
+// above, using reset_position()/last_pos_pass_time_s instead - see that
+// function's doc comment for the full detail. Upstream's real
+// timeout-triggered call site for position (~line 845-865) additionally
+// requires `(!velAiding || gpsGoodToAlign)` and offers a second,
+// independent `posVarianceIsTooLarge` trigger - neither is modeled here,
+// named explicitly in this file's ekf_core.hpp "CPP-058, PHASE 4" banner
+// (CORRECTIONS/FINDINGS #2): this port's reset fires on elapsed-time
+// timeout alone.
+int EkfCore::fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg, ftype now_s) {
     if (gps_pos_test_ratio(gps) >= ftype(1.0)) {
+        if ((now_s - last_pos_pass_time_s) >= kGpsFusionTimeoutS) {
+            reset_position(gps, now_s);
+        }
         return 0;
     }
 
@@ -1087,6 +1186,9 @@ int EkfCore::fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg) {
     }
     if (fuse_direct_state_observation(8, state.position.y - gps.position_ne.y, r_obs, dt_ekf_avg)) {
         ++n_fused;
+    }
+    if (n_fused > 0) {
+        last_pos_pass_time_s = now_s;
     }
     return n_fused;
 }

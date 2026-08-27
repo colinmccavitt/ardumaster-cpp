@@ -45,6 +45,30 @@
 //      demonstrable point of the whole ticket: the gated instance's
 //      estimate does not jump toward the glitch while the ungated one's
 //      does, side by side, not merely asserted in isolation.
+//
+// CPP-058 phase 4 adds (see ekf_core.hpp's "CPP-058, PHASE 4" banner for
+// the full scope/exclusions/corrections discussion):
+//   10. Regression coverage: a gate-failing sample within the 10.0s
+//       posRetryTimeUseVel_ms window still behaves exactly like #7 above
+//       - P/state byte-for-byte untouched, no reset - confirming the new
+//       `now_s`/timeout wiring does not change phase-3 behavior when the
+//       timeout hasn't elapsed.
+//   11. The real acceptance-criterion scenario: a closed-loop run under
+//       CLEAN dynamics (no unmodeled bias - state stays accurate, P
+//       grows only through ordinary process noise) is periodically
+//       checked against a GPS receiver stuck reporting one fixed, wildly
+//       wrong fix (the same magnitude as the wild-glitch tests above)
+//       across a >10s span. Every check before the 10.0s mark must leave
+//       P/state untouched (matching #10 and phase 3). The first check
+//       at/after the 10.0s mark must instead produce a HARD reset: state
+//       jumps directly to the (still-wrong-looking, now-trusted) GPS
+//       sample (not a gradual blend) and P is re-seeded to the real
+//       reduced-scope formula (sq(gps_horiz_vel_noise)/
+//       sq(gps_horiz_pos_noise)) - verified as exact values, not just
+//       "moved in the right direction". One further check afterward,
+//       once GPS reports a value matching where the vehicle actually is,
+//       confirms normal CPP-057 gated fusion resumes (n_fused > 0
+//       again).
 
 #include <array>
 #include <cmath>
@@ -533,4 +557,216 @@ TEST_CASE("EkfCore: an injected GPS glitch mid-run is rejected without corruptin
     REQUIRE(gated_final_pos_err < 3.0);
     REQUIRE(gated_final_vel_err < ungated_final_vel_err);
     REQUIRE(gated_final_pos_err < ungated_final_pos_err);
+}
+
+TEST_CASE("fuse_gps_velocity/fuse_gps_position: a gap under the 10.0s posRetryTimeUseVel_ms timeout "
+          "does not trigger a reset (regression)",
+          "[ekf_core][fusion][cpp058]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.covariance_init(ftype(0.01));
+
+    GpsSample good_gps;
+    good_gps.velocity_ned = Vector3F(ftype(5.0), ftype(0.0), ftype(0.0));
+    good_gps.position_ne = Vector2F(ftype(0.0), ftype(0.0));
+    ekf.state.velocity = good_gps.velocity_ned;
+
+    // Establish a successful pass at now_s = 0 - this anchors
+    // last_vel_pass_time_s/last_pos_pass_time_s = 0.
+    REQUIRE(ekf.fuse_gps_velocity(good_gps, ftype(0.01), ftype(0.0)) == 3);
+    REQUIRE(ekf.fuse_gps_position(good_gps, ftype(0.01), ftype(0.0)) == 2);
+
+    // The same wild-glitch magnitude as the CPP-057 gate tests above,
+    // genuinely failing gps_vel_test_ratio()/gps_pos_test_ratio() - but
+    // at now_s = 9.0, i.e. elapsed = 9.0 - 0 = 9.0s, still inside the
+    // 10.0s posRetryTimeUseVel_ms window.
+    GpsSample glitch;
+    glitch.velocity_ned = Vector3F(ftype(50.0), ftype(0.0), ftype(0.0));
+    glitch.position_ne = Vector2F(ftype(50.0), ftype(0.0));
+    REQUIRE(static_cast<double>(ekf.gps_vel_test_ratio(glitch)) > 1.0);
+    REQUIRE(static_cast<double>(ekf.gps_pos_test_ratio(glitch)) > 1.0);
+
+    const Matrix24 p_before = ekf.P;
+    const StateVector state_before = ekf.state;
+
+    REQUIRE(ekf.fuse_gps_velocity(glitch, ftype(0.01), ftype(9.0)) == 0);
+    REQUIRE(ekf.fuse_gps_position(glitch, ftype(0.01), ftype(9.0)) == 0);
+
+    // No reset: P/state byte-for-byte untouched, exactly matching
+    // CPP-057's existing gate-rejection behavior - the timeout window
+    // has not yet elapsed, so the gate failure alone (not a timeout) is
+    // still the only thing that happened.
+    for (int i = 0; i < 24; ++i) {
+        for (int j = 0; j < 24; ++j) {
+            REQUIRE(ekf.P[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] ==
+                    p_before[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]);
+        }
+    }
+    REQUIRE(ekf.state.velocity.x == state_before.velocity.x);
+    REQUIRE(ekf.state.velocity.y == state_before.velocity.y);
+    REQUIRE(ekf.state.position.x == state_before.position.x);
+    REQUIRE(ekf.state.position.y == state_before.position.y);
+}
+
+TEST_CASE("EkfCore: a sustained GPS outage past the 10.0s timeout triggers a hard reset to the resumed sample, "
+          "and gated fusion resumes normally afterward",
+          "[ekf_core][fusion][cpp058]") {
+    // Simulates a GPS receiver stuck reporting one fixed, wildly wrong
+    // fix throughout the outage - the same order of magnitude already
+    // proven above to fail the real gate (the "wild GPS glitch" tests),
+    // just sustained repeatedly instead of injected once. Strapdown
+    // dynamics are kept CLEAN (no unmodeled bias) so the EKF's own state
+    // stays accurate and P grows only through ordinary process noise -
+    // this isolates the thing actually under test (the timeout/reset
+    // wiring) from the already-covered drift-vs-fusion behavior of
+    // tests #5/#9 above. An earlier version of this test tried to force
+    // the gate failure by injecting a huge (50 m/s^2) unmodeled accel
+    // bias instead of a fixed bad GPS value - that backfired: upstream's
+    // own (correctly transcribed) covariance-prediction Jacobian grows
+    // velocity variance proportionally to the SQUARE of the actual
+    // specific force being integrated (real physics: attitude
+    // uncertainty converts to velocity error proportional to specific
+    // force), so a 50 m/s^2 fake accel made P explode even faster than
+    // the deterministic bias-driven error, and the gate never actually
+    // failed. A fixed bad GPS value against small, stable P has no such
+    // self-defeating feedback loop.
+    const ftype dt = ftype(0.01);
+    const ftype true_vx = ftype(5.0);
+    const ftype outage_duration_s = ftype(13.0);  // comfortably past the 10.0s posRetryTimeUseVel_ms threshold
+    const int total_steps = static_cast<int>(outage_duration_s / dt);
+    const int gps_check_period_steps = 100;  // attempt a GPS check every 1.0s throughout the outage
+
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.state.velocity = Vector3F(true_vx, ftype(0), ftype(0));
+    ekf.covariance_init(dt);
+
+    GyroSample gyro;
+    gyro.delta_angle_dt = dt;  // zero rotation throughout
+    AccelSample accel;
+    accel.delta_velocity = Vector3F(ftype(0), ftype(0), -kGravity * dt);  // clean: gravity-cancelling only
+    accel.delta_velocity_dt = dt;
+
+    // Establish a healthy pass at t = 0, right before the outage begins.
+    GpsSample gps0;
+    gps0.velocity_ned = Vector3F(true_vx, ftype(0), ftype(0));
+    gps0.position_ne = Vector2F(ftype(0), ftype(0));
+    REQUIRE(ekf.fuse_gps_velocity(gps0, dt, ftype(0.0)) == 3);
+    REQUIRE(ekf.fuse_gps_position(gps0, dt, ftype(0.0)) == 2);
+
+    // The "stuck receiver" fix - same magnitude as test #9's closed-loop
+    // glitch injection above (velocity off by 500 m/s, position off by
+    // 5000 m), reused rather than re-derived since it was already proven
+    // there to genuinely exceed the real VEL_I_GATE_DEFAULT/
+    // POS_I_GATE_DEFAULT=500 gate against covariance that had grown over
+    // a real multi-second closed-loop run (a plain +-50 offset, matching
+    // this file's earlier single-shot glitch tests, turned out to be too
+    // close to the real gate once P[7][7]/P[8][8] grow over this test's
+    // own 13s outage span - position variance grows faster under
+    // sustained pure prediction than those single-instant tests'
+    // manually-set P implied).
+    GpsSample stuck_gps;
+    stuck_gps.velocity_ned = Vector3F(true_vx + ftype(500.0), ftype(0.0), ftype(0.0));
+    stuck_gps.position_ne = Vector2F(ftype(5000.0), ftype(0.0));
+
+    ftype elapsed_s = ftype(0.0);
+    bool reset_seen = false;
+    ftype reset_at_s = ftype(0.0);
+
+    for (int step = 1; step <= total_steps; ++step) {
+        ekf.update_strapdown_equations_ned(gyro, accel, dt);
+        ekf.covariance_prediction(gyro, accel, dt);
+        elapsed_s += dt;
+
+        if (step % gps_check_period_steps != 0) {
+            continue;
+        }
+
+        if (!reset_seen) {
+            // Confirm this sample genuinely fails the real gate at every
+            // attempt throughout the outage - state/P stay small and
+            // stable under clean dynamics, so this fixed glitch keeps
+            // failing exactly like the one-shot version already proven
+            // above, not just on the first attempt.
+            REQUIRE(static_cast<double>(ekf.gps_vel_test_ratio(stuck_gps)) >= 1.0);
+            REQUIRE(static_cast<double>(ekf.gps_pos_test_ratio(stuck_gps)) >= 1.0);
+        }
+
+        const Matrix24 p_before = ekf.P;
+        const StateVector state_before = ekf.state;
+
+        const int n_vel = ekf.fuse_gps_velocity(stuck_gps, dt, elapsed_s);
+        const int n_pos = ekf.fuse_gps_position(stuck_gps, dt, elapsed_s);
+
+        if (!reset_seen && static_cast<double>(elapsed_s) < 10.0) {
+            // Still inside the timeout window: a gate failure alone,
+            // exactly CPP-057's existing behavior - P/state left
+            // completely untouched.
+            REQUIRE(n_vel == 0);
+            REQUIRE(n_pos == 0);
+            for (int i = 0; i < 24; ++i) {
+                for (int j = 0; j < 24; ++j) {
+                    REQUIRE(ekf.P[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] ==
+                            p_before[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]);
+                }
+            }
+            REQUIRE(ekf.state.velocity.x == state_before.velocity.x);
+            REQUIRE(ekf.state.position.x == state_before.position.x);
+        } else if (!reset_seen) {
+            // The 10.0s timeout has now elapsed: this call must be a
+            // HARD reset, not a gradual Kalman blend - state jumps
+            // DIRECTLY to the (still wrong-looking, but now-trusted)
+            // resumed GPS sample, and P is re-seeded to the real
+            // reduced-scope formula (exact values, not merely "moved in
+            // the right direction"). Upstream's real behavior at this
+            // point is exactly "trust whatever GPS is available now,
+            // right or wrong" (see ekf_core.hpp's "CPP-058, PHASE 4"
+            // banner) - this stuck_gps value stands in for "GPS finally
+            // reporting SOMETHING again", not necessarily truth.
+            reset_seen = true;
+            reset_at_s = elapsed_s;
+            REQUIRE(n_vel == 0);  // a reset does not count as a fusion
+            REQUIRE(n_pos == 0);
+            REQUIRE(static_cast<double>(ekf.state.velocity.x) ==
+                    Catch::Approx(static_cast<double>(stuck_gps.velocity_ned.x)).margin(1e-6));
+            REQUIRE(static_cast<double>(ekf.state.velocity.y) == Catch::Approx(0.0).margin(1e-9));
+            REQUIRE(static_cast<double>(ekf.state.position.x) ==
+                    Catch::Approx(static_cast<double>(stuck_gps.position_ne.x)).margin(1e-6));
+            REQUIRE(static_cast<double>(ekf.state.position.y) == Catch::Approx(0.0).margin(1e-9));
+            REQUIRE(static_cast<double>(ekf.P[4][4]) ==
+                    Catch::Approx(static_cast<double>(sq(ekf.gps_horiz_vel_noise))).margin(1e-9));
+            REQUIRE(static_cast<double>(ekf.P[5][5]) ==
+                    Catch::Approx(static_cast<double>(sq(ekf.gps_horiz_vel_noise))).margin(1e-9));
+            REQUIRE(static_cast<double>(ekf.P[7][7]) ==
+                    Catch::Approx(static_cast<double>(sq(ekf.gps_horiz_pos_noise))).margin(1e-9));
+            REQUIRE(static_cast<double>(ekf.P[8][8]) ==
+                    Catch::Approx(static_cast<double>(sq(ekf.gps_horiz_pos_noise))).margin(1e-9));
+            break;
+        }
+    }
+
+    REQUIRE(reset_seen);
+    REQUIRE(static_cast<double>(reset_at_s) >= 10.0);
+
+    // After the reset, normal CPP-057 gated fusion must resume working
+    // against the new baseline: one more second of clean dead reckoning
+    // from the just-reset state (unchanged dynamics - state tracks
+    // itself essentially exactly, since there is no unmodeled bias here
+    // to drift away from), followed by a GPS sample matching wherever
+    // the vehicle now actually is, should PASS the gate and fuse
+    // normally (n_fused > 0), not fail again immediately the way the
+    // stuck receiver's fixed bad value would.
+    for (int step = 0; step < gps_check_period_steps; ++step) {
+        ekf.update_strapdown_equations_ned(gyro, accel, dt);
+        ekf.covariance_prediction(gyro, accel, dt);
+        elapsed_s += dt;
+    }
+    GpsSample gps_after;
+    gps_after.velocity_ned = ekf.state.velocity;
+    gps_after.position_ne = Vector2F(ekf.state.position.x, ekf.state.position.y);
+
+    const int n_vel_after = ekf.fuse_gps_velocity(gps_after, dt, elapsed_s);
+    const int n_pos_after = ekf.fuse_gps_position(gps_after, dt, elapsed_s);
+    REQUIRE(n_vel_after > 0);
+    REQUIRE(n_pos_after > 0);
 }
