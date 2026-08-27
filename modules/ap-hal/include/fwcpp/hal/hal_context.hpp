@@ -52,6 +52,14 @@ public:
     AnalogIn analog_in;
     UartDriver<> console;
     storage::RawStorage storage;
+
+    // CPP-055: deliberately never called from Plane's production tick()
+    // path (fwcpp::vehicle::tick(), mode.hpp) - investigated and judged
+    // superseded by that function's own hand-sequenced ordering, not an
+    // unwired oversight. See scheduler.hpp's own CPP-055 note and
+    // CPP-026's final tracker note for the full reasoning. Exercised
+    // directly by this port's own tests only (scheduler_test.cpp,
+    // hal_context_test.cpp).
     scheduler::Scheduler scheduler;
 };
 

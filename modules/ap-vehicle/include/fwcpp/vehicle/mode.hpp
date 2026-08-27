@@ -809,6 +809,23 @@ inline void ModeTAKEOFF::navigate(const StabilizeInputs& in) {
 // reads k_aileron's just-written output back to mix into k_flaperon_
 // left/right, so it must observe THIS tick's value, not a stale one from
 // before mode.run() ran.
+//
+// CPP-055 NOTE (2026-08-27): a reader wondering why this is a single
+// hand-sequenced function rather than a runtime walk over a registered
+// task table (upstream's real AP_Scheduler/Plane::scheduler_tasks[]
+// design, and this port's own fwcpp::scheduler::Scheduler, ap-scheduler/
+// scheduler.hpp, CPP-026 slice 1) - see that header's own CPP-055 note:
+// investigated and decided SUPERSEDED by this function's own design, not
+// abandoned. Every SLICE/step NOTE above already cites the specific
+// upstream scheduler_tasks[] priority number it reproduces at that exact
+// point in this sequence - this function's accumulated ordering already
+// IS this port's answer to "in what relative order do these tasks run,"
+// verified through closed-loop tests slice by slice. A generic dispatcher
+// walking a table to call these same steps in this same order would add
+// indirection, not new behavior; CPP-026's own Scheduler class remains
+// available and independently verified (scheduler_test.cpp) for a future
+// caller that genuinely needs runtime-registered/variable-rate tasks,
+// which this vehicle does not today.
 inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const StabilizeInputs& in) {
     Mode& mode = *plane.control_mode; // see this function's own "CPP-031 SLICE 7 NOTE" above
 

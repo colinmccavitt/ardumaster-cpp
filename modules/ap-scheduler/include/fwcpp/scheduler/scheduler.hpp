@@ -53,6 +53,31 @@
 //
 // LITERAL SAFETY: no bare ambiguous double literals - every quantity
 // here is an integer tick/microsecond count.
+//
+// CPP-055 (2026-08-27): the vehicle-level integration this banner's own
+// "Deliberately NOT in this slice" list anticipated - a Scheduler::init()-
+// equivalent wiring this class into a real Plane task table - was
+// investigated and judged SUPERSEDED by this port's own main-loop design
+// (fwcpp::vehicle::tick(), mode.hpp), not simply incomplete. tick() is a
+// single, hand-sequenced function whose accumulated CPP-031-and-later
+// slices already reproduce upstream's real Plane::scheduler_tasks[]
+// relative priorities directly in code (every slice's own NOTE in
+// mode.hpp cites the specific upstream priority numbers it reproduces),
+// verified through this port's closed-loop tests. A runtime task table
+// walking this same Scheduler to call those same steps in that same
+// order would add indirection, not new behavior. PerfInfo/load_average
+// and AP_Param-backed _debug/_loop_rate_hz/_options were judged the same
+// way: this port has no console/GCS/log sink for scheduler diagnostics to
+// report through, and no runtime parameter-set path to make them
+// operator-tunable, so wiring them now would be configuration with no
+// live consumer - the kind of stub this port's own conventions reject.
+// This class - Scheduler::tick()/run(), the deterministic dispatch
+// algorithm itself - remains the real, reusable, verified deliverable
+// this ticket's slice 1 produced (see scheduler_test.cpp); it is
+// exercised directly by HalContext's own scheduler member and by this
+// module's own tests, not by Plane's production tick() path, by
+// deliberate decision rather than oversight. See CPP-026's final tracker
+// note for the full reasoning.
 
 #include <cstdint>
 #include <span>
