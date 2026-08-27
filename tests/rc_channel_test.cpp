@@ -258,3 +258,135 @@ TEST_CASE("read_6pos_switch: the debounce gate is real, not just a discretizatio
     REQUIRE_FALSE(ch.read_6pos_switch(position, 460));
     REQUIRE(position == 3); // untouched by the error path
 }
+
+// ---------------------------------------------------------------------
+// CPP-037: read_3pos_switch()/init_position_on_first_radio_read()/
+// read_aux() - the 3-position aux-switch decode mechanism. A SEPARATE
+// state machine from read_6pos_switch()/debounce_completed() above -
+// see rc_channel.hpp's own "CPP-037 ADDENDUM" file banner.
+// ---------------------------------------------------------------------
+
+TEST_CASE("read_3pos_switch rejects a pulsewidth at or beyond RC_MIN_LIMIT_PWM/RC_MAX_LIMIT_PWM",
+          "[rc_channel][aux]") {
+    RcChannel ch;
+    AuxSwitchPos pos = AuxSwitchPos::kMiddle;
+
+    ch.radio_in = 800; // at RC_MIN_LIMIT_PWM
+    REQUIRE_FALSE(ch.read_3pos_switch(pos));
+    ch.radio_in = 2200; // at RC_MAX_LIMIT_PWM
+    REQUIRE_FALSE(ch.read_3pos_switch(pos));
+}
+
+TEST_CASE("read_3pos_switch discretizes PWM into LOW/MIDDLE/HIGH at the exact upstream breakpoints (1200/1800)",
+          "[rc_channel][aux]") {
+    RcChannel ch;
+    AuxSwitchPos pos;
+
+    ch.radio_in = 1199;
+    REQUIRE(ch.read_3pos_switch(pos));
+    REQUIRE(pos == AuxSwitchPos::kLow);
+
+    ch.radio_in = 1200; // AUX_SWITCH_PWM_TRIGGER_LOW itself is NOT low (strict <)
+    REQUIRE(ch.read_3pos_switch(pos));
+    REQUIRE(pos == AuxSwitchPos::kMiddle);
+
+    ch.radio_in = 1500;
+    REQUIRE(ch.read_3pos_switch(pos));
+    REQUIRE(pos == AuxSwitchPos::kMiddle);
+
+    ch.radio_in = 1800; // AUX_SWITCH_PWM_TRIGGER_HIGH itself is NOT high (strict >)
+    REQUIRE(ch.read_3pos_switch(pos));
+    REQUIRE(pos == AuxSwitchPos::kMiddle);
+
+    ch.radio_in = 1801;
+    REQUIRE(ch.read_3pos_switch(pos));
+    REQUIRE(pos == AuxSwitchPos::kHigh);
+}
+
+TEST_CASE("init_position_on_first_radio_read: only ArmDisarm is suppressed - every other real AuxFunc this port "
+          "defines fires normally on its first stable read",
+          "[rc_channel][aux]") {
+    REQUIRE(RcChannel::init_position_on_first_radio_read(AuxFunc::ArmDisarm));
+
+    REQUIRE_FALSE(RcChannel::init_position_on_first_radio_read(AuxFunc::DoNothing));
+    REQUIRE_FALSE(RcChannel::init_position_on_first_radio_read(AuxFunc::Rtl));
+    REQUIRE_FALSE(RcChannel::init_position_on_first_radio_read(AuxFunc::Auto));
+    REQUIRE_FALSE(RcChannel::init_position_on_first_radio_read(AuxFunc::Manual));
+    REQUIRE_FALSE(RcChannel::init_position_on_first_radio_read(AuxFunc::Loiter));
+    REQUIRE_FALSE(RcChannel::init_position_on_first_radio_read(AuxFunc::Takeoff));
+    REQUIRE_FALSE(RcChannel::init_position_on_first_radio_read(AuxFunc::Fbwa));
+    REQUIRE_FALSE(RcChannel::init_position_on_first_radio_read(AuxFunc::ModeSwitchReset));
+    REQUIRE_FALSE(RcChannel::init_position_on_first_radio_read(AuxFunc::Cruise));
+    REQUIRE_FALSE(RcChannel::init_position_on_first_radio_read(AuxFunc::EmergencyLandingEn));
+}
+
+TEST_CASE("read_aux: a DoNothing-option channel never reports a change, however the PWM moves", "[rc_channel][aux]") {
+    RcChannel ch;
+    REQUIRE(ch.option == AuxFunc::DoNothing); // the documented default
+    ch.radio_in = 1900;
+    REQUIRE_FALSE(ch.read_aux(0).has_value());
+    REQUIRE_FALSE(ch.read_aux(1000000).has_value());
+}
+
+TEST_CASE("read_aux: a non-ARM-type function's STARTING position still requires the normal debounce window before "
+          "firing once - no first-read suppression for it",
+          "[rc_channel][aux]") {
+    RcChannel ch;
+    ch.option = AuxFunc::Fbwa;
+    ch.radio_in = 1900; // HIGH from the very first read
+
+    REQUIRE_FALSE(ch.read_aux(0).has_value());   // edge just established
+    REQUIRE_FALSE(ch.read_aux(199).has_value()); // 1ms short
+    const std::optional<AuxSwitchPos> pos = ch.read_aux(200);
+    REQUIRE(pos.has_value());
+    REQUIRE(*pos == AuxSwitchPos::kHigh);
+
+    // Not reported again while unchanged (a position-change EVENT, not a
+    // level query - same contract as read_6pos_switch() above).
+    REQUIRE_FALSE(ch.read_aux(500).has_value());
+}
+
+TEST_CASE("read_aux: an ARM-type function (ArmDisarm) starting HIGH on the very first read NEVER fires for that "
+          "starting position, even after the normal debounce window elapses - the real 'do not arm on power-up "
+          "with the switch already high' suppression",
+          "[rc_channel][aux]") {
+    RcChannel ch;
+    ch.option = AuxFunc::ArmDisarm;
+    ch.radio_in = 1900; // HIGH from the very first read
+
+    // Unlike the non-ARM-type test above, this must stay false forever
+    // at this position - the baseline was silently adopted, not merely
+    // delayed by debounce.
+    REQUIRE_FALSE(ch.read_aux(0).has_value());
+    REQUIRE_FALSE(ch.read_aux(200).has_value());
+    REQUIRE_FALSE(ch.read_aux(1000).has_value());
+    REQUIRE_FALSE(ch.read_aux(1000000).has_value());
+
+    // A genuine CHANGE away from that adopted baseline, once, DOES fire
+    // after the normal debounce window - the suppression only ever
+    // applies to the one starting position, not to the function forever.
+    ch.radio_in = 1000; // LOW
+    REQUIRE_FALSE(ch.read_aux(1000020).has_value());
+    const std::optional<AuxSwitchPos> pos = ch.read_aux(1000220);
+    REQUIRE(pos.has_value());
+    REQUIRE(*pos == AuxSwitchPos::kLow);
+}
+
+TEST_CASE("read_aux: an ARM-type function starting MIDDLE also adopts MIDDLE as its suppressed baseline, not just "
+          "HIGH - the suppression is keyed on 'the starting position', not a hardcoded HIGH",
+          "[rc_channel][aux]") {
+    RcChannel ch;
+    ch.option = AuxFunc::ArmDisarm;
+    ch.radio_in = 1500; // MIDDLE from the very first read
+    REQUIRE_FALSE(ch.read_aux(0).has_value());
+    REQUIRE_FALSE(ch.read_aux(1000).has_value());
+
+    // Moving to HIGH is a real change away from the adopted MIDDLE
+    // baseline and fires normally once debounced.
+    ch.radio_in = 1900;
+    REQUIRE_FALSE(ch.read_aux(1020).has_value());
+    const std::optional<AuxSwitchPos> pos = ch.read_aux(1220);
+    REQUIRE(pos.has_value());
+    REQUIRE(*pos == AuxSwitchPos::kHigh);
+}
+

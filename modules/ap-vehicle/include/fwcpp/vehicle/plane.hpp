@@ -1226,8 +1226,12 @@
 //   - Group 1 (MANUAL/STABILIZE/ACRO/FLY_BY_WIRE_A/AUTOTUNE/FLY_BY_WIRE_B/
 //     CRUISE/TRAINING): this port has 4 of those 8 modes (MANUAL/FBWA/
 //     FBWB/CRUISE) - all four apply fs_action_short (FBWA/FBWB/else-
-//     circle). The emergency_landing-overrides-to-FBWA branch is dropped
-//     (no emergency-landing subsystem).
+//     circle). The emergency_landing-overrides-to-FBWA branch was
+//     dropped when this slice was first written (no emergency-landing
+//     subsystem existed yet) - CPP-037 below adds the real
+//     EMERGENCY_LANDING_EN aux switch and wires this branch back in, see
+//     this file's own "CPP-037 ADDENDUM" for the full closed-loop
+//     verification.
 //   - Group 2 (QSTABILIZE/QLOITER/QHOVER/QAUTOTUNE/QACRO, entirely
 //     HAL_QUADPLANE_ENABLED): no quadplane modes exist in this port -
 //     dropped outright, not one line of it applicable.
@@ -1558,10 +1562,15 @@
 //   - AUTOLAND mode (FS_LONG_ACTN==5, MODE_AUTOLAND_ENABLED) - see same
 //     note for the real, disclosed RTL-fallback/no-op.
 //   - `plane.emergency_landing` override in both on/off-event bodies
-//     (events.cpp) - driven by an aux-function switch this port has never
-//     built (tracked separately as the "aux-function switches" gap, same
+//     (events.cpp) - WAS driven by an aux-function switch this port had
+//     never built (tracked as the "aux-function switches" gap, same
 //     exclusion CPP-031 slice 8's own rc_failsafe_short_on_event() note
-//     already made for its own emergency_landing branch).
+//     already made for its own emergency_landing branch). CLOSED by
+//     CPP-037 below, which adds the real EMERGENCY_LANDING_EN aux switch,
+//     the `emergency_landing` field itself, and both override branches -
+//     see this file's own "CPP-037 ADDENDUM" for the full design and the
+//     closed-loop test that actually exercises this method's own branch
+//     for the first time.
 //   - `failsafe_check()` (ArduPlane/failsafe.cpp) - a HAL timer-
 //     interrupt-driven main-loop-lockup passthrough, an entirely
 //     different failsafe concept (scheduler stall, not RC/GCS loss)
@@ -2291,6 +2300,198 @@
 // for the channel-level mechanics, and mode_switch_changed()/flight_modes
 // (Plane class body, below) plus mode.hpp's own new tick() step for the
 // vehicle-level dispatch.
+
+// =====================================================================
+// CPP-037 ADDENDUM: the 3-position aux-function switch mechanism (ARM/
+// DISARM, EMERGENCY_LANDING_EN, the mode-select functions, and
+// MODE_SWITCH_RESET) - a DIFFERENT decoder from CPP-031 slice 11's own
+// 6-position flight-mode-switch channel above; the two mechanisms share
+// only the debounce algorithm (debounce_completed(), ap-rc-channel
+// module) and, per-channel, its underlying switch_state storage - never
+// the same channel in practice (this port's own tests configure them on
+// distinct channel indices, matching how a real vehicle is wired: the
+// flight-mode-switch channel and any RCx_OPTION-configured aux channel
+// are always physically different switches).
+//
+// Upstream (Plane-4.7.0, read directly, in full where the ticket asked):
+// libraries/RC_Channel/RC_Channel.cpp's read_3pos_switch()/debounce_
+// completed()/init_position_on_first_radio_read()/read_aux()/do_aux_
+// function_armdisarm() and RC_Channel.h's AUX_SWITCH_PWM_TRIGGER_LOW/
+// _HIGH (1200/1800) and AUX_FUNC/AuxSwitchPos enums; libraries/RC_Channel/
+// RC_Channels.cpp's read_aux_all()/reset_mode_switch(); ArduPlane/
+// RC_Channel_Plane.cpp/.h in full (~500/~59 lines) - do_aux_function()'s
+// real switch, do_aux_function_change_mode(), and the ARMDISARM/
+// EMERGENCY_LANDING_EN/MODE_SWITCH_RESET case bodies.
+//
+// WHERE THE THREE-LAYER SPLIT LIVES (same shape CPP-031 slice 11 already
+// established for the flight-mode-switch channel, reused here): RcChannel
+// (ap-rc-channel module, rc_channel.hpp) gained the raw per-channel
+// primitives - read_3pos_switch()/init_position_on_first_radio_read()/
+// read_aux(), plus the `option` field and the AuxFunc/AuxSwitchPos enums
+// themselves; RcChannels (same module, rc_channels.hpp) gained the
+// orchestration - read_aux_all() (scans every configured channel, invokes
+// a templated callback per real change) and reset_mode_switch(); Plane
+// (here) owns the actual vehicle-specific dispatch - dispatch_aux_
+// function()/do_aux_function_armdisarm()/do_aux_function_change_mode()
+// (Plane class body, below), matching upstream's own RC_Channel ->
+// RC_Channels -> RC_Channel_Plane/RC_Channels_Plane three-layer split,
+// just without a subclass hierarchy to hang the vehicle-specific half off
+// of (ADR-0012). See rc_channel.hpp's and rc_channels.hpp's own "CPP-037
+// ADDENDUM" file banners for the full per-layer design.
+//
+// AuxFunc IS A NARROW, NAMED SUBSET OF UPSTREAM'S AUX_FUNC, NOT A FULL
+// PORT: upstream's real enum spans 300+ values across nearly every
+// ArduPilot vehicle type and optional subsystem. This port's AuxFunc
+// (rc_channel.hpp) keeps exactly 11 values, each at its REAL upstream
+// numeric value (RC_Channel.h, grepped directly): DoNothing(0), Rtl(4),
+// Auto(16), Manual(51), Loiter(56), Takeoff(77), Fbwa(92),
+// ModeSwitchReset(96), Cruise(150), ArmDisarm(153), EmergencyLandingEn
+// (157). Every other real, named AUX_FUNC value below is a DISCLOSED
+// EXCLUSION (verified by reading the actual upstream case body it would
+// have needed, not assumed from the ticket's own list) - none of it is
+// silently dropped or stubbed:
+//
+//   ARM/DISARM FAMILY:
+//   - ARMDISARM_AIRMODE(154) - quadplane-only (sets QuadPlane::air_mode
+//     on top of the same arm/disarm call this port's ArmDisarm(153) makes
+//     - RC_Channel_Plane.cpp ~line 394) - no quadplane subsystem.
+//   - ARM_EMERGENCY_STOP(165) - needs an AP_Notify-style "motor emergency
+//     stop" concept (RC_Channel.h's own do_aux_function_armdisarm()-
+//     adjacent path) this port has never built.
+//   - DISARM(81)/MOTOR_ESTOP(31) - separate single-purpose upstream
+//     values (unconditional disarm / unconditional e-stop) with no
+//     dispatch body in RC_Channel_Plane.cpp at all (handled entirely by
+//     the base RC_Channel::do_aux_function(), library-generic, not
+//     plane-specific) - out of scope for the same "not part of this
+//     ticket's named handful" reason as the rest of this list; this
+//     port's ArmDisarm(153) is the one real, ticket-named arm/disarm
+//     entry point.
+//
+//   MODE-SELECT FAMILY - CIRCLE AUX FUNCTION: EXCLUDED, NOT SUBSTITUTED
+//   (verified, per the ticket's own explicit instruction not to assume):
+//   upstream's do_aux_function() dispatches CIRCLE(72) through the
+//   IDENTICAL do_aux_function_change_mode(Mode::Number::CIRCLE, ch_flag)
+//   call every other mode-select function uses (RC_Channel_Plane.cpp
+//   ~line 243) - a real, deliberate PILOT action selecting a specific
+//   mode, not a coarse-grained emergency-fallback bucket. The RC-failsafe
+//   slice's own CIRCLE->RTL substitution (apply_fs_action_short(), CPP-
+//   031 slice 8) exists for a DIFFERENT reason: FS_ACTION_SHORT_BESTGUESS/
+//   CIRCLE/DISABLED are upstream's OWN generic "safe fallback, exact mode
+//   doesn't matter" bucket that happens to name CIRCLE as its
+//   implementation - substituting RTL there preserves that same "safe,
+//   autonomous fallback" INTENT. Silently sending a pilot's deliberate
+//   CIRCLE aux-switch engagement to RTL instead would not preserve any
+//   equivalent intent - RTL flies home, CIRCLE loiters in place at the
+//   current position, and a pilot who wired a physical switch expecting
+//   the latter would get materially different, surprising behavior. This
+//   port has no CIRCLE mode (not in CPP-031's six) - CIRCLE(72) is
+//   therefore EXCLUDED outright (absent from the AuxFunc enum, named
+//   here), not substituted with RTL - a real, deliberate scope decision,
+//   not an oversight.
+//   - ACRO(52), GUIDED(55), TRAINING(98): same do_aux_function_change_
+//     mode() call shape as CIRCLE (RC_Channel_Plane.cpp ~lines 247-260),
+//     each naming a Mode::Number this port has never built (no ACRO,
+//     GUIDED, or TRAINING mode among CPP-031's six) - excluded for the
+//     simple, undisputed reason of "no such mode exists here", unlike
+//     CIRCLE's own more nuanced "a mode exists upstream and a
+//     substitution precedent exists, but applying it here would be
+//     wrong" case just above.
+//
+//   REAL, NAMED, NON-MODE-SELECT EXCLUSIONS (RC_Channel_Plane.cpp read in
+//   full for every one of these; RC_Channel.cpp for the library-generic
+//   ones):
+//   - Camera (CAMERA_TRIGGER/CAM_MODE_TOGGLE/CAMERA_REC_VIDEO/CAMERA_ZOOM/
+//     CAMERA_MANUAL_FOCUS/CAMERA_AUTO_FOCUS/CAMERA_IMAGE_TRACKING/
+//     CAMERA_LENS), RunCam (RUNCAM_CONTROL/RUNCAM_OSD_CONTROL) - no
+//     AP_Camera/AP_RunCam subsystem.
+//   - GRIPPER - no AP_Gripper subsystem.
+//   - SPRAYER - no AC_Sprayer subsystem (Copter/Rover-only upstream
+//     anyway; not in RC_Channel_Plane.cpp's own switch at all).
+//   - GENERATOR, LOWEHEISER_STARTER/LOWEHEISER_THROTTLE - no AP_Generator
+//     subsystem.
+//   - RELAY/RELAY2..6 - no AP_ServoRelayEvents/AP_Relay subsystem.
+//   - FENCE - no AC_Fence subsystem.
+//   - CLEAR_WP/MISSION_RESET - this port's Mission class (ap-vehicle
+//     module) has no clear()/reset-to-first-command equivalent wired to
+//     an aux switch; a real, separate gap, not folded into this ticket.
+//   - RC_OVERRIDE_ENABLE - no MAVLink RC-override subsystem (long-
+//     standing exclusion, rc_channels.hpp's own banner).
+//   - FFT_NOTCH_TUNE - no AP_GyroFFT subsystem.
+//   - RETRACT_MOUNT1/RETRACT_MOUNT2/MOUNT_YAW_LOCK/MOUNT_RP_LOCK/
+//     MOUNT_POI_LOCK/MOUNT_LRF_ENABLE/MOUNT1_ROLL.../MOUNT2_YAW - no
+//     AP_Mount subsystem.
+//   - VTX_POWER - no AP_VideoTX subsystem (also excluded from read_aux()
+//     itself, rc_channel.hpp - it is the one AUX_FUNC value upstream's
+//     own read_aux() dispatches specially, via read_6pos_switch() instead
+//     of read_3pos_switch()).
+//   - INVERTED - no inverted-flight-capable airframe model in this port's
+//     AhrsDcm/SimPlane (a real, separate gap - not folded in here).
+//   - AVOID_ADSB/AVOID_PROXIMITY - no AP_Avoidance/proximity-sensor
+//     subsystem.
+//   - SOARING - no SoaringController subsystem.
+//   - WEATHER_VANE_ENABLE - quadplane-only (RC_Channel_Plane.cpp's own
+//     HAL_QUADPLANE_ENABLED guard around this case).
+//   - TER_DISABLE - no terrain-following subsystem (non_auto_terrain_
+//     disable has no consumer in this port's TECS/navigation code).
+//   - CROW_SELECT - no differential-spoiler/crow-flap SRV output mixing
+//     in this port's SrvChannels.
+//   - AIRBRAKE, FBWA_TAILDRAGGER - both are real upstream "input label,
+//     nothing to do" cases even in a real build (RC_Channel_Plane.cpp
+//     ~line 304-307's own `break; // input labels, nothing to do`) that
+//     exist purely so RC_Channels::duplicate_options_exist() can warn
+//     about a channel double-booked with FLAP/AIRBRAKE/steering inputs -
+//     no observable behavior difference from being entirely absent here.
+//   - FLAP - needs flaperon_update()/manual-flap SRV output wiring this
+//     port has never built - a real, separate gap, named here per the
+//     ticket's own instruction not to fold it into this one.
+//   - Q_ASSIST/ARMDISARM_AIRMODE/AIRMODE/QRTL/QSTABILIZE/VFWD_THR_
+//     OVERRIDE/FWD_THR - all HAL_QUADPLANE_ENABLED-gated upstream; no
+//     quadplane subsystem anywhere in this port.
+//   - ARSPD_CALIBRATE - no AP_Airspeed_AUTOCAL subsystem.
+//   - PLANE_AUTO_LANDING_ABORT - no landing-sequence subsystem (same
+//     "failsafe_in_landing_sequence() is always false" precedent CPP-031
+//     slice 8/CPP-036 already established).
+//   - TRIM_TO_CURRENT_SERVO_RC - plane.trim_radio() does not exist in
+//     this port.
+//   - FW_AUTOTUNE/AUTOTUNE_TEST_GAINS/QUICKTUNE - no autotune subsystem.
+//   - PRECISION_LOITER - upstream's own case is itself a no-op ("handled
+//     by lua scripting, just ignore here", RC_Channel_Plane.cpp ~line
+//     460) - no scripting subsystem either, so doubly inapplicable.
+//   - SYSTEMID - no AP_Plane systemid subsystem.
+//   - ICE_START_STOP - no AP_ICEngine subsystem.
+//   - REVERSE_THROTTLE - plane.reversed_throttle exists as a field
+//     (CPP-031-era) but the init_aux_function() range-mode setup
+//     (`channel_throttle->set_range(100)`) and the AUX_FUNC dispatch path
+//     itself are not wired to any RcChannel option here - a real, narrow
+//     gap, not folded into this ticket's own named scope.
+//   - AUTOLAND(183) mode-select - no AUTOLAND mode (MODE_AUTOLAND_ENABLED
+//     already assumed undefined throughout this port, CPP-036's own
+//     "PARACHUTE(3) AND AUTOLAND(5)" precedent for FsActionLong).
+//
+// EMERGENCY_LANDING_EN CLOSED-LOOP FINDING (per the ticket's own explicit
+// "do not just assume they're already correct" instruction): wiring this
+// aux function is what FIRST makes rc_failsafe_short_on_event()'s and
+// failsafe_long_on_event()'s own emergency_landing branches (both above)
+// reachable at all - both existed, before this ticket, only as comments
+// documenting them as "dropped entirely" (see each function's own doc
+// comment - a real, verified discrepancy from the ticket's own summary,
+// which assumed a field already existed and was merely unreachable; there
+// was no field at all). Verified end to end, not merely "compiles and
+// should work by inspection": tests/vehicle_test.cpp's closed-loop
+// EMERGENCY_LANDING_EN test drives the aux switch HIGH, then a real
+// sustained RC signal loss through BOTH the short and the long failsafe
+// escalation, confirming the vehicle reaches FBWA (not RTL, not CIRCLE -
+// this port has no CIRCLE mode to reach anyway) in both cases - the exact
+// scenario the ticket names. Both branches worked correctly on the first
+// try once wired exactly as upstream specifies (no bug found in the
+// PRE-EXISTING surrounding failsafe code itself); see that test's own
+// comments for the precise sequencing verified.
+//
+// See dispatch_aux_function()/do_aux_function_armdisarm()/do_aux_
+// function_change_mode() (Plane class body, below), rc_channel.hpp's
+// read_3pos_switch()/init_position_on_first_radio_read()/read_aux(), and
+// rc_channels.hpp's read_aux_all()/reset_mode_switch() for the concrete
+// code.
 
 // =====================================================================
 // GROUND STEERING ADDENDUM: real ground/taxi steering, replacing the
@@ -5376,6 +5577,28 @@ public:
     // this is cleared on every real mode change.
     bool long_failsafe_pending = false;
 
+    // CPP-037 - upstream: Plane::emergency_landing (Plane.h). Set by the
+    // real EMERGENCY_LANDING_EN aux function (dispatch_aux_function()
+    // below) and consulted by rc_failsafe_short_on_event()/failsafe_
+    // long_on_event() (both below) to override their normal fs_action_
+    // short/fs_action_long dispatch to FBWA.
+    //
+    // TICKET-PREMISE CORRECTION, VERIFIED BY READING THE ACTUAL CODE (not
+    // assumed from the ticket's own summary): CPP-037's ticket describes
+    // this as a field that already existed, "declared and referenced but
+    // never set to true by any real code path". That is NOT what this
+    // port's code actually contained before this slice - there was no
+    // `emergency_landing` field at all, and both event handlers' own
+    // doc comments explicitly said the override was "dropped entirely -
+    // ticket's own out-of-scope list (no aux-function-switch subsystem)"
+    // (CPP-031 slice 8 / CPP-036's real prior text, git-blameable). This
+    // is the FIRST slice to add the field and both override branches, not
+    // the first to give an existing-but-inert one a real driver - a real,
+    // narrow discrepancy from the ticket's own framing, disclosed here per
+    // this port's own "verify, don't assume" house rule rather than
+    // silently matching the ticket's wording.
+    bool emergency_landing = false;
+
     // upstream: Plane::set_mode(Mode& new_mode, const ModeReason reason)
     // (system.cpp, ~line 252-352) - see file banner's "SET_MODE()" note
     // for why the ModeReason parameter is dropped entirely (no GCS/
@@ -5488,6 +5711,149 @@ public:
         }
 
         set_mode(*flight_modes[static_cast<std::size_t>(new_pos)]);
+    }
+
+    // upstream: RC_Channel::do_aux_function_armdisarm(AuxSwitchPos)
+    // (RC_Channel.cpp ~line 1049, read in full) - CPP-037, see file
+    // banner's "CPP-037 ADDENDUM" for the full design. Upstream calls
+    // AP::arming().arm(AP_Arming::Method::AUXSWITCH, true) / .disarm(
+    // AP_Arming::Method::AUXSWITCH) - this port has no AP_Arming::Method
+    // enum or do_arming_checks concept (arm()/disarm()'s own file banner
+    // notes, "ARM()"/"DISARM()") so this calls this port's own real
+    // arm()/disarm() directly, unconditionally on the return value (an
+    // aux-switch-driven arm/disarm attempt that fails one of arm()'s own
+    // real checks - e.g. no RC input yet, already armed - is silently a
+    // no-op, matching upstream: AP_Arming::arm()'s own return value is
+    // similarly discarded by this exact call site).
+    void do_aux_function_armdisarm(rc::AuxSwitchPos pos) {
+        switch (pos) {
+        case rc::AuxSwitchPos::kHigh:
+            (void)arm();
+            break;
+        case rc::AuxSwitchPos::kMiddle:
+            // nothing - matches upstream's own empty MIDDLE case.
+            break;
+        case rc::AuxSwitchPos::kLow:
+            (void)disarm();
+            break;
+        }
+    }
+
+    // upstream: RC_Channel_Plane::do_aux_function_change_mode(Mode::
+    // Number, AuxSwitchPos) (RC_Channel_Plane.cpp ~line 41, read in full)
+    // - CPP-037. This port has no Mode::Number enum and no set_mode_by_
+    // number() (CPP-031 slice 7's own standing "no Mode::Number, no
+    // number-indexed lookup" precedent, reaffirmed by flight_modes' own
+    // std::array<Mode*,6> above) - takes the target Mode& directly
+    // instead, exactly like flight_modes/failsafe_saved_mode already do.
+    // ModeReason::AUX_FUNCTION is dropped, same "no consumer, no
+    // plumbing" rationale set_mode()'s own ModeReason parameter drop
+    // already established (CPP-031 slice 7) - set_mode() is called with
+    // its default from_failsafe=false, the correct "deliberate pilot
+    // action" path.
+    void do_aux_function_change_mode(Mode& target, rc::AuxSwitchPos pos, std::uint32_t now_ms) {
+        if (pos == rc::AuxSwitchPos::kHigh) {
+            // upstream: "engage mode (if not possible we remain in
+            // current flight mode)" - set_mode()'s own real enter()-fails
+            // rollback (above) already gives exactly this behavior.
+            set_mode(target);
+            return;
+        }
+        // upstream: default (non-HIGH, i.e. MIDDLE or LOW) - return to
+        // flight mode switch's flight mode if we are currently in this
+        // mode. rc().reset_mode_switch() -> this port's rc_channels.
+        // reset_mode_switch(now_ms) (rc_channels.hpp).
+        if (control_mode == &target) {
+            rc_channels.reset_mode_switch(now_ms);
+        }
+    }
+
+    // upstream: RC_Channel_Plane::do_aux_function() (RC_Channel_Plane.cpp
+    // ~line 224, read in full) - CPP-037, this port's vehicle-specific
+    // aux-function dispatch. The sole caller is mode.hpp's tick(), fed by
+    // plane.rc_channels.read_aux_all()'s own (AuxFunc, AuxSwitchPos)
+    // callback (rc_channels.hpp). Exhaustive over every AuxFunc value
+    // this port's enum defines (rc_channel.hpp) - see this file's own
+    // "CPP-037 ADDENDUM" banner below for the ticket-required list of
+    // every REAL upstream AUX_FUNC value this switch does NOT dispatch,
+    // named and traced against the actual upstream case body, not
+    // silently absent.
+    //
+    // MODE-SELECT EXCLUSIONS, VERIFIED BY READING RC_Channel_Plane.cpp
+    // DIRECTLY (not assumed): upstream's do_aux_function() also has real
+    // case labels for ACRO(52), GUIDED(55), CIRCLE(72), and TRAINING(98),
+    // each calling do_aux_function_change_mode() with a Mode::Number this
+    // port has no Mode for (ACRO/GUIDED/TRAINING: no such mode anywhere
+    // in this port's six; CIRCLE: see file banner's own "CIRCLE AUX
+    // FUNCTION - EXCLUDED, NOT SUBSTITUTED" note for why the RC-failsafe
+    // slice's CIRCLE->RTL substitution precedent does NOT apply here) -
+    // all four are consequently absent from the AuxFunc enum itself
+    // (rc_channel.hpp), so there is no case label for them to omit here
+    // either; a channel's `option` field simply cannot be set to a value
+    // this port has no enumerator for.
+    void dispatch_aux_function(rc::AuxFunc func, rc::AuxSwitchPos pos, std::uint32_t now_ms) {
+        switch (func) {
+        case rc::AuxFunc::DoNothing:
+            // upstream's read_aux() never even reaches run_aux_function()
+            // for DoNothing (rc_channel.hpp's own read_aux()) - this case
+            // exists only so the switch stays exhaustive over every
+            // AuxFunc enumerator.
+            break;
+
+        case rc::AuxFunc::ArmDisarm:
+            do_aux_function_armdisarm(pos);
+            break;
+
+        case rc::AuxFunc::EmergencyLandingEn:
+            // upstream: RC_Channel_Plane::do_aux_function()'s
+            // EMERGENCY_LANDING_EN case (RC_Channel_Plane.cpp ~line 437,
+            // read in full) - plane.emergency_landing = true/false on
+            // HIGH/LOW, nothing on MIDDLE. THIS is the real driver that
+            // closes the gap named on emergency_landing's own
+            // declaration comment above.
+            switch (pos) {
+            case rc::AuxSwitchPos::kHigh:
+                emergency_landing = true;
+                break;
+            case rc::AuxSwitchPos::kMiddle:
+                break;
+            case rc::AuxSwitchPos::kLow:
+                emergency_landing = false;
+                break;
+            }
+            break;
+
+        case rc::AuxFunc::Manual:
+            do_aux_function_change_mode(mode_manual, pos, now_ms);
+            break;
+        case rc::AuxFunc::Loiter:
+            do_aux_function_change_mode(mode_loiter, pos, now_ms);
+            break;
+        case rc::AuxFunc::Takeoff:
+            do_aux_function_change_mode(mode_takeoff, pos, now_ms);
+            break;
+        case rc::AuxFunc::Fbwa:
+            do_aux_function_change_mode(mode_fbwa, pos, now_ms);
+            break;
+        case rc::AuxFunc::Cruise:
+            do_aux_function_change_mode(mode_cruise, pos, now_ms);
+            break;
+        case rc::AuxFunc::Auto:
+            do_aux_function_change_mode(mode_auto, pos, now_ms);
+            break;
+        case rc::AuxFunc::Rtl:
+            do_aux_function_change_mode(mode_rtl, pos, now_ms);
+            break;
+
+        case rc::AuxFunc::ModeSwitchReset:
+            // upstream: RC_Channel_Plane::do_aux_function()'s
+            // MODE_SWITCH_RESET case (RC_Channel_Plane.cpp ~line 385) -
+            // rc().reset_mode_switch() directly, no HIGH/LOW gating (the
+            // upstream case body ignores AuxSwitchPos entirely - verified
+            // directly, not assumed).
+            rc_channels.reset_mode_switch(now_ms);
+            break;
+        }
     }
 
     // upstream: Plane::rc_throttle_value_ok() (radio.cpp ~line 333). See
@@ -5669,10 +6035,22 @@ public:
             control_mode == &mode_cruise) {
             // upstream's MANUAL/STABILIZE/ACRO/FLY_BY_WIRE_A/AUTOTUNE/
             // FLY_BY_WIRE_B/CRUISE/TRAINING case group - the four of
-            // those eight upstream modes this port has. The
-            // emergency_landing-overrides-to-FBWA branch is dropped (no
-            // emergency-landing subsystem, file banner).
-            apply_fs_action_short();
+            // those eight upstream modes this port has.
+            //
+            // CPP-037: the emergency_landing-overrides-to-FBWA branch is
+            // now real (events.cpp ~line 33, read directly: `if(plane.
+            // emergency_landing) { set_mode(mode_fbwa, ...); break; }`,
+            // checked and dispatched BEFORE the normal fs_action_short
+            // switch, unconditionally within this case group only - the
+            // AUTO/LOITER group below has no such check, verified by
+            // reading that group's own upstream case body, which goes
+            // straight to the `g.fs_action_short != BESTGUESS` gate with
+            // no emergency_landing mention at all).
+            if (emergency_landing) {
+                set_mode(mode_fbwa, /*from_failsafe=*/true);
+            } else {
+                apply_fs_action_short();
+            }
         } else if (control_mode == &mode_auto || control_mode == &mode_loiter) {
             // upstream's AUTO/AUTOLAND/AVOID_ADSB/GUIDED/LOITER/THERMAL
             // case group - AUTO and LOITER are the two of those six this
@@ -5864,9 +6242,19 @@ public:
                 return;
             }
 
-            // upstream's `plane.emergency_landing` override dropped
-            // entirely - ticket's own out-of-scope list (no aux-function-
-            // switch subsystem).
+            // CPP-037: the emergency_landing-overrides-to-FBWA branch is
+            // now real (events.cpp ~line 141, read directly: `if(plane.
+            // emergency_landing) { set_mode(mode_fbwa, reason); break; }`)
+            // - checked and dispatched AFTER the TAKEOFF climb-out defer
+            // above (matching upstream's real statement order: the defer
+            // can suppress this whole case body, including the
+            // emergency_landing check, exactly like it suppresses
+            // apply_fs_action_long() below) but BEFORE the normal
+            // fs_action_long dispatch.
+            if (emergency_landing) {
+                set_mode(mode_fbwa, /*from_failsafe=*/true);
+                return;
+            }
             apply_fs_action_long();
         } else if (control_mode == &mode_auto) {
             // Group B (events.cpp ~184-219) - failsafe_in_landing_

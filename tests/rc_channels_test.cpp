@@ -261,3 +261,155 @@ TEST_CASE("read_mode_switch honors a remapped mode-switch channel number, not al
     REQUIRE(pos.has_value());
     REQUIRE(*pos == 1);
 }
+
+// ---------------------------------------------------------------------
+// CPP-037: read_aux_all()/reset_mode_switch() - the RcChannels-level half
+// of the 3-position aux-function switch mechanism. See rc_channels.hpp's
+// own "CPP-037 ADDENDUM" file banner.
+// ---------------------------------------------------------------------
+
+using fwcpp::rc::AuxFunc;
+using fwcpp::rc::AuxSwitchPos;
+
+TEST_CASE("read_aux_all does nothing before any RC input has ever been seen", "[rc_channels][aux]") {
+    RcChannels rc;
+    rc.channel(9)->option = AuxFunc::ArmDisarm;
+    rc.channel(9)->radio_in = 1900;
+    int calls = 0;
+    rc.read_aux_all(0, [&](AuxFunc, AuxSwitchPos) { ++calls; });
+    REQUIRE(calls == 0);
+}
+
+TEST_CASE("read_aux_all skips every DoNothing-option channel, never invoking the handler for one",
+          "[rc_channels][aux]") {
+    RcChannels rc;
+    fwcpp::hal::RcInput rc_input;
+    for (std::uint8_t i = 0; i < kNumRcChannels; ++i) {
+        rc_input.set_channel(i, 1900); // every channel HIGH - would fire if any were configured
+    }
+    REQUIRE(rc.read_input(rc_input));
+
+    int calls = 0;
+    rc.read_aux_all(1000, [&](AuxFunc, AuxSwitchPos) { ++calls; });
+    REQUIRE(calls == 0); // no channel has a non-DoNothing option
+}
+
+TEST_CASE("read_aux_all dispatches exactly one (AuxFunc, AuxSwitchPos) event per configured channel that debounces "
+          "a real change, and requires the full debounce window first",
+          "[rc_channels][aux]") {
+    RcChannels rc;
+    rc.channel(9)->option = AuxFunc::Fbwa; // non-ARM-type: no first-read suppression to work around here
+    fwcpp::hal::RcInput rc_input;
+    rc_input.set_channel(9, 1900); // HIGH
+
+    REQUIRE(rc.read_input(rc_input));
+    int calls = 0;
+    rc.read_aux_all(0, [&](AuxFunc, AuxSwitchPos) { ++calls; });
+    REQUIRE(calls == 0); // debounce not complete yet
+
+    rc.read_aux_all(199, [&](AuxFunc, AuxSwitchPos) { ++calls; });
+    REQUIRE(calls == 0);
+
+    AuxFunc seen_func = AuxFunc::DoNothing;
+    AuxSwitchPos seen_pos = AuxSwitchPos::kMiddle;
+    rc.read_aux_all(200, [&](AuxFunc func, AuxSwitchPos pos) {
+        ++calls;
+        seen_func = func;
+        seen_pos = pos;
+    });
+    REQUIRE(calls == 1);
+    REQUIRE(seen_func == AuxFunc::Fbwa);
+    REQUIRE(seen_pos == AuxSwitchPos::kHigh);
+
+    // Settled - no repeat event for the unchanged position.
+    rc.read_aux_all(5000, [&](AuxFunc, AuxSwitchPos) { ++calls; });
+    REQUIRE(calls == 1);
+}
+
+TEST_CASE("read_aux_all dispatches MULTIPLE independently-configured channels in the same call, each exactly once",
+          "[rc_channels][aux]") {
+    RcChannels rc;
+    rc.channel(9)->option = AuxFunc::ArmDisarm;
+    rc.channel(10)->option = AuxFunc::EmergencyLandingEn;
+    fwcpp::hal::RcInput rc_input;
+    rc_input.set_channel(9, 1000);  // LOW - a real change for ArmDisarm (not its adopted-baseline HIGH)
+    rc_input.set_channel(10, 1900); // HIGH
+    REQUIRE(rc.read_input(rc_input));
+
+    // First observation of each: ArmDisarm adopts LOW as ITS OWN
+    // suppressed baseline (init_position_on_first_radio_read()), while
+    // EmergencyLandingEn (not an ARM-type function) just starts its
+    // normal debounce window - neither fires yet.
+    int calls = 0;
+    rc.read_aux_all(0, [&](AuxFunc, AuxSwitchPos) { ++calls; });
+    REQUIRE(calls == 0);
+
+    // EmergencyLandingEn's window completes at 200; move ArmDisarm to a
+    // real change (HIGH) at the same tick so both are pending together.
+    rc_input.set_channel(9, 1900);
+    REQUIRE(rc.read_input(rc_input));
+
+    std::array<AuxFunc, 2> seen_funcs{};
+    std::array<AuxSwitchPos, 2> seen_pos{};
+    calls = 0;
+    rc.read_aux_all(200, [&](AuxFunc func, AuxSwitchPos pos) {
+        seen_funcs[static_cast<std::size_t>(calls)] = func;
+        seen_pos[static_cast<std::size_t>(calls)] = pos;
+        ++calls;
+    });
+    // EmergencyLandingEn's own window (started at t=0) completes exactly
+    // at 200; ArmDisarm's NEW window (started at t=200, when it changed
+    // away from its adopted LOW baseline) has NOT yet - only one event.
+    REQUIRE(calls == 1);
+    REQUIRE(seen_funcs[0] == AuxFunc::EmergencyLandingEn);
+    REQUIRE(seen_pos[0] == AuxSwitchPos::kHigh);
+
+    calls = 0;
+    rc.read_aux_all(400, [&](AuxFunc func, AuxSwitchPos pos) {
+        seen_funcs[static_cast<std::size_t>(calls)] = func;
+        seen_pos[static_cast<std::size_t>(calls)] = pos;
+        ++calls;
+    });
+    REQUIRE(calls == 1);
+    REQUIRE(seen_funcs[0] == AuxFunc::ArmDisarm);
+    REQUIRE(seen_pos[0] == AuxSwitchPos::kHigh);
+}
+
+TEST_CASE("reset_mode_switch is a no-op when no mode-switch channel is configured", "[rc_channels][aux][mode_switch]") {
+    RcChannels rc;
+    rc.flight_mode_channel_number = 0;
+    rc.reset_mode_switch(1000); // must not crash
+}
+
+TEST_CASE("reset_mode_switch clears the flight-mode channel's debounce state, forcing a fresh full debounce window "
+          "before its CURRENT (unchanged) physical position is reported again",
+          "[rc_channels][aux][mode_switch]") {
+    RcChannels rc;
+    fwcpp::hal::RcInput rc_input;
+    rc_input.set_channel(7, 1500); // position 3, the default FLTMODE_CH=8 -> index 7
+    REQUIRE(rc.read_input(rc_input));
+
+    REQUIRE_FALSE(rc.read_mode_switch(0).has_value()); // edge established at t=0
+    const std::optional<std::int8_t> settled = rc.read_mode_switch(200);
+    REQUIRE(settled.has_value());
+    REQUIRE(*settled == 3);
+    REQUIRE_FALSE(rc.read_mode_switch(300).has_value()); // settled, no repeat event
+
+    // Reset at t=500, PWM unchanged - the position doesn't need to
+    // physically move for this to matter (MODE_SWITCH_RESET/aux-mode-
+    // release calls this with the switch never having moved).
+    rc.reset_mode_switch(500);
+
+    // Immediately after reset, nothing new (the debounce window for the
+    // re-adopted position has only just started, at t=500).
+    REQUIRE_FALSE(rc.read_mode_switch(500).has_value());
+    REQUIRE_FALSE(rc.read_mode_switch(699).has_value()); // 1ms short of 500+200
+
+    // A full fresh debounce window after the reset - the SAME position 3
+    // is reported as a "change" again, exactly like upstream's own
+    // reset_mode_switch() + read_mode_switch() sequence.
+    const std::optional<std::int8_t> reasserted = rc.read_mode_switch(700);
+    REQUIRE(reasserted.has_value());
+    REQUIRE(*reasserted == 3);
+}
+

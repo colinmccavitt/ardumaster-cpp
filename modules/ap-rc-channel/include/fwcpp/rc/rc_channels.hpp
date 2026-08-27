@@ -46,12 +46,30 @@
 //     is correspondingly absent from RcChannel::update() (see that
 //     file's banner) - only the receiver-read branch is reproduced.
 //   - Aux function dispatch (RC_Channel::AUX_FUNC, find_channel_for_option,
-//     init_aux_all/read_aux_all, duplicate_options_exist, convert_options).
-//     A large separate subsystem (RC-channel-to-auxiliary-switch-function
-//     mapping) with its own scope, not part of this slice. Still out of
-//     scope as of CPP-031 slice 11 below - see that slice's own note for
-//     exactly where the boundary between "flight-mode channel" and
-//     "aux-function channel" is drawn.
+//     init_aux_all, duplicate_options_exist, convert_options). A large
+//     separate subsystem (RC-channel-to-auxiliary-switch-function mapping)
+//     with its own scope. CPP-037 below ports read_aux_all() (and
+//     reset_mode_switch()) - the REST of this list (find_channel_for_
+//     option/init_aux_all/duplicate_options_exist/convert_options) is
+//     STILL out of scope: find_channel_for_option() has no caller in this
+//     port's own scope (nothing here needs to look UP from a function to
+//     its channel - dispatch is always driven the other direction, by
+//     scanning channels, exactly like read_aux_all() itself does);
+//     init_aux_all() exists purely to run each configured aux function
+//     ONCE at boot with its resting position (upstream: RC_Channel::
+//     init_aux(), which calls do_aux_function_armdisarm()/do_aux_function_
+//     change_mode() etc. immediately rather than waiting for read_aux()'s
+//     own debounce/first-read-suppression) - this port's own Plane starts
+//     from a fixed, known-good default state (control_mode = &mode_manual,
+//     armed = false) that a boot-time aux re-application would only ever
+//     reproduce or leave unchanged for every real function this ticket
+//     wires (ArmDisarm's own init_position_on_first_radio_read()
+//     suppression makes init_aux()'s boot-time call a no-op for it
+//     anyway), so there is no OBSERVABLE difference for this port's scope
+//     to actually test; duplicate_options_exist()/convert_options() are
+//     pure AP_Param/GCS-parameter-migration housekeeping with nothing to
+//     migrate (no AP_Param backing for `option` at all, matching radio_
+//     min/max/trim's own established precedent, rc_channel.hpp).
 //   - RSSI / link quality (get_receiver_rssi/get_receiver_link_quality).
 //     Hardware-telemetry-adjacent; no receiver-link modeling exists here.
 //   - The Option enum / option_is_enabled bitmask (CRSF/FPORT/arming-check
@@ -110,11 +128,71 @@
 // know about modes either), just expressed as a return value instead of a
 // virtual callback.
 //
-// flight_mode_channel_conflicts_with_rc_option() is NOT ported - it exists
-// purely to warn about a channel double-booked between the mode switch and
-// an aux function, and this port has no aux-function subsystem to conflict
-// with (this file's own long-standing exclusion, above) - nothing for this
-// method to meaningfully check.
+// flight_mode_channel_conflicts_with_rc_option() is STILL NOT ported, even
+// after CPP-037 added a real aux-function subsystem below - it exists
+// purely to WARN (a GCS-facing diagnostic, no GCS subsystem here) about a
+// channel double-booked between the mode switch and an aux function, and
+// checking that requires find_channel_for_option() (a function -> channel
+// reverse lookup), itself still out of scope (this file's own "Aux
+// function dispatch" exclusion note above) - nothing for this method to
+// meaningfully check without it.
+//
+// =====================================================================
+// CPP-037 ADDENDUM: the aux-function dispatch mechanism's RcChannels-level
+// half - read_aux_all() (scans every channel with a configured option,
+// invoking a caller-supplied handler once per real debounced change) and
+// reset_mode_switch() (forces the flight-mode channel's own debounce
+// state to restart, the real mechanism behind MODE_SWITCH_RESET and
+// do_aux_function_change_mode()'s "give control back to the flight-mode
+// switch" behavior). Upstream: RC_Channels::read_aux_all() (RC_Channels.
+// cpp ~line 173) and RC_Channels::reset_mode_switch()/RC_Channel::
+// reset_mode_switch() (RC_Channels.cpp ~line 223 / RC_Channel.cpp ~line
+// 588) - all read in full. The per-channel primitives (read_3pos_switch/
+// init_position_on_first_radio_read/read_aux, AuxFunc/AuxSwitchPos) live
+// in rc_channel.hpp (same module) - see that file's own "CPP-037
+// ADDENDUM" banner for the full design and every named exclusion in the
+// AuxFunc enum itself. Vehicle-specific dispatch (which AuxFunc values do
+// what) lives in fwcpp::vehicle::Plane::dispatch_aux_function() (plane.
+// hpp) - see ITS OWN file banner for the complete, ticket-required list
+// of every real upstream AUX_FUNC case this port disclaims rather than
+// stubs (camera/gripper/sprayer/generator/RunCam/quadplane/ADSB-avoidance/
+// soaring/terrain/relays/fence/mission-reset/RC-override-enable/FFT-tune/
+// mount/VTX/inverted/reverse-throttle/airbrake/flap/... and the excluded
+// mode-select values ACRO/GUIDED/CIRCLE/TRAINING).
+//
+// READ_AUX_ALL() USES A TEMPLATED CALLBACK, NOT A VIRTUAL do_aux_
+// function() OVERRIDE: same ADR-0012 rationale as read_mode_switch()'s
+// own std::optional return above (no vehicle-specific RC_Channel subclass
+// to hang a virtual method on), generalized here because MULTIPLE
+// channels can each have their own configured option and each
+// independently produce a real change in a single call - a single
+// std::optional return (read_mode_switch()'s own shape, correct for
+// exactly one flight-mode channel) cannot represent that. A template
+// avoids both a std::function's heap allocation/vtable indirection and a
+// fixed-capacity output buffer nothing in this port's scope needs.
+// AP::logger().Write_RCIN()'s need_log bookkeeping is dropped - no
+// logging subsystem (long-standing exclusion, this file's banner above).
+//
+// RESET_MODE_SWITCH() COLLAPSES TWO UPSTREAM METHODS INTO ONE, same
+// reasoning as read_mode_switch() above: upstream's RC_Channels::reset_
+// mode_switch() (channel resolution) calls RC_Channel::reset_mode_switch()
+// (the actual two-field reset + immediate re-read) - collapsed here since
+// this port's RcChannel has no reset_mode_switch() of its own (nothing
+// else needs one - see rc_channel.hpp's OLD note this replaces). The
+// immediate re-read's result is always discarded (see reset_mode_switch()
+// below for why it can never itself report an actionable change) -
+// matches upstream, whose own call is to a void-returning method for the
+// same "just seed last_edge_time_ms now" effect.
+//
+// TICK() WIRING: mode.hpp's tick() calls read_aux_all() as its own new
+// step (immediately after step 1c's mode-switch dispatch) - see that
+// file's own "CPP-037 NOTE" for why that relative order matters (a
+// pilot's TAKEOFF/etc. aux-engage or MODE_SWITCH_RESET can call THIS
+// tick's reset_mode_switch(), and the debounce timer it restarts must
+// not be read again until the FOLLOWING tick, matching upstream's own
+// real scheduler ordering: read_mode_switch() at priority 7 always runs
+// strictly before read_aux_all() at priority 10, both same-rate, Plane.
+// cpp's scheduler_tasks[]).
 
 #include <algorithm>
 #include <array>
@@ -268,6 +346,54 @@ public:
             return std::nullopt;
         }
         return position;
+    }
+
+    // upstream: RC_Channels::read_aux_all() (RC_Channels.cpp ~line 173,
+    // read in full) - CPP-037, see this file's own "CPP-037 ADDENDUM"
+    // banner for the full design. `handler` is invoked as
+    // `handler(AuxFunc, AuxSwitchPos)` once per channel that reports a
+    // real, debounced change this call - never for a DoNothing channel
+    // (skipped before ever calling read_aux(), same short-circuit
+    // upstream's own read_aux() does internally) and never more than once
+    // per channel per call.
+    template <typename Handler>
+    void read_aux_all(std::uint32_t now_ms, Handler&& handler) {
+        if (!has_valid_input()) {
+            // exit immediately when no RC input - upstream's own guard.
+            return;
+        }
+        for (std::uint8_t i = 0; i < kNumRcChannels; ++i) {
+            RcChannel& c = channels_[i];
+            if (c.option == AuxFunc::DoNothing) {
+                continue;
+            }
+            if (const std::optional<AuxSwitchPos> pos = c.read_aux(now_ms); pos.has_value()) {
+                handler(c.option, *pos);
+            }
+        }
+    }
+
+    // upstream: RC_Channels::reset_mode_switch() (RC_Channels.cpp ~line
+    // 223) + RC_Channel::reset_mode_switch() (RC_Channel.cpp ~line 588,
+    // read in full) - CPP-037, collapsed for the same reason read_mode_
+    // switch() above collapses two upstream methods (this file's own
+    // "CPP-037 ADDENDUM" banner). Resets the flight-mode channel's
+    // debounce state to "no position established" and immediately
+    // re-invokes read_mode_switch() purely to seed last_edge_time_ms at
+    // THIS instant (matching upstream's own trailing call) - that
+    // immediate re-read can never itself report an actionable change (a
+    // position cannot already have been stable for kSwitchDebounceTimeMs
+    // at the exact instant its own debounce state was just cleared), so
+    // its result is discarded, matching upstream discarding its own
+    // void-returning call.
+    void reset_mode_switch(std::uint32_t now_ms) {
+        RcChannel* c = flight_mode_channel();
+        if (c == nullptr) {
+            return;
+        }
+        c->switch_state.current_position = -1;
+        c->switch_state.debounce_position = -1;
+        (void)read_mode_switch(now_ms);
     }
 
 private:

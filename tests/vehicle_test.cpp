@@ -20,6 +20,8 @@
 #include <fwcpp/vehicle/plane.hpp>
 
 using namespace fwcpp::vehicle;
+using fwcpp::rc::AuxFunc;   // CPP-037
+using fwcpp::rc::AuxSwitchPos; // CPP-037
 
 namespace {
 
@@ -50,6 +52,23 @@ constexpr std::uint8_t kChannelFlightModeSwitch = 7;
 // re-state "index 7" at every call site.
 void set_mode_switch_pwm(Plane& plane, std::uint16_t pwm) {
     plane.hal.rc_input.set_channel(kChannelFlightModeSwitch, pwm);
+}
+
+// CPP-037: aux-function-switch channel indices used by the aux-switch
+// tests below - deliberately separate constants from kChannelRoll/Pitch/
+// Throttle/Rudder (0-3) AND from kChannelFlightModeSwitch (7), matching
+// how a real vehicle is wired (the flight-mode switch and any RCx_OPTION
+// aux switch are always distinct physical channels).
+constexpr std::uint8_t kChannelArmDisarm = 9;
+constexpr std::uint8_t kChannelEmergencyLandingEn = 10;
+constexpr std::uint8_t kChannelAuxModeSelect = 11;
+
+// Sets an aux-function channel's PWM and pulls it in - a caller still
+// calls set_sticks()/set_mode_switch_pwm() itself for the channels those
+// helpers own; this only exists so aux-switch-focused tests below don't
+// need to re-state a raw channel index at every call site.
+void set_aux_channel_pwm(Plane& plane, std::uint8_t channel_index, std::uint16_t pwm) {
+    plane.hal.rc_input.set_channel(channel_index, pwm);
 }
 
 } // namespace
@@ -4585,6 +4604,416 @@ TEST_CASE("Closed loop: the real RC mode-switch channel drives MANUAL -> FBWA ->
     REQUIRE(min_dist_to_home < dist_to_home_at_switch);
     REQUIRE(tail_dist_avg < 260.0f);
     REQUIRE(tail_dist_max - min_dist_to_home < 30.0f); // settled, not still drifting
+}
+
+// ---------------------------------------------------------------------
+// CPP-037: RC aux-function switches - the 3-position decode mechanism
+// plus real dispatch for ARMDISARM, EMERGENCY_LANDING_EN, the mode-select
+// functions, and MODE_SWITCH_RESET. See plane.hpp's own "CPP-037
+// ADDENDUM" file banner for the full design and the complete named
+// exclusion list.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Plane::do_aux_function_armdisarm: HIGH arms, MIDDLE is a no-op, LOW disarms - via this port's own real "
+          "arm()/disarm()",
+          "[vehicle][aux][arming]") {
+    Plane plane;
+    set_sticks(plane, 1500, 1500, 1500, 1500); // satisfies arm()'s own rc_received_if_enabled_check()
+
+    plane.do_aux_function_armdisarm(AuxSwitchPos::kMiddle);
+    REQUIRE_FALSE(plane.armed); // nothing - matches upstream's own empty MIDDLE case
+
+    plane.do_aux_function_armdisarm(AuxSwitchPos::kHigh);
+    REQUIRE(plane.armed);
+    REQUIRE(plane.hal.rc_output.safety_state() == fwcpp::hal::SafetyState::kArmed);
+
+    plane.do_aux_function_armdisarm(AuxSwitchPos::kMiddle);
+    REQUIRE(plane.armed); // unchanged
+
+    plane.do_aux_function_armdisarm(AuxSwitchPos::kLow);
+    REQUIRE_FALSE(plane.armed);
+    REQUIRE(plane.hal.rc_output.safety_state() == fwcpp::hal::SafetyState::kDisarmed);
+}
+
+TEST_CASE("Plane::do_aux_function_change_mode: HIGH engages the target mode via the real set_mode()",
+          "[vehicle][aux]") {
+    Plane plane;
+    REQUIRE(plane.control_mode == &plane.mode_manual);
+    plane.do_aux_function_change_mode(plane.mode_fbwa, AuxSwitchPos::kHigh, 0);
+    REQUIRE(plane.control_mode == &plane.mode_fbwa);
+}
+
+TEST_CASE("Plane::do_aux_function_change_mode: non-HIGH resets the flight-mode-switch channel's debounce state "
+          "ONLY when currently in the aux-engaged mode - upstream's own `if (control_mode->mode_number() == "
+          "number)` guard, ported as a direct Mode& pointer comparison",
+          "[vehicle][aux][mode_switch]") {
+    Plane plane;
+    REQUIRE(plane.set_mode(plane.mode_fbwa));
+    fwcpp::rc::RcChannel* fm_channel = plane.rc_channels.flight_mode_channel();
+    REQUIRE(fm_channel != nullptr);
+    fm_channel->switch_state.current_position = 2;
+    fm_channel->switch_state.debounce_position = 2;
+    fm_channel->switch_state.last_edge_time_ms = 500;
+
+    // NOT currently in the target mode (LOITER) - no reset, and non-HIGH
+    // never calls set_mode() either (matches upstream's own `default:`
+    // case body exactly - it has no "else" arm at all).
+    plane.do_aux_function_change_mode(plane.mode_loiter, AuxSwitchPos::kLow, 1000);
+    REQUIRE(fm_channel->switch_state.current_position == 2); // untouched
+    REQUIRE(plane.control_mode == &plane.mode_fbwa);
+
+    // Currently IN the target mode (FBWA) - resets for real.
+    plane.do_aux_function_change_mode(plane.mode_fbwa, AuxSwitchPos::kMiddle, 1000);
+    REQUIRE(fm_channel->switch_state.current_position == -1);
+    REQUIRE(fm_channel->switch_state.debounce_position == -1);
+    REQUIRE(plane.control_mode == &plane.mode_fbwa); // reset_mode_switch() itself never changes control_mode
+}
+
+TEST_CASE("Plane::dispatch_aux_function: DoNothing is a real no-op, not silently mis-dispatched",
+          "[vehicle][aux]") {
+    Plane plane;
+    plane.dispatch_aux_function(AuxFunc::DoNothing, AuxSwitchPos::kHigh, 0);
+    REQUIRE_FALSE(plane.armed);
+    REQUIRE(plane.control_mode == &plane.mode_manual);
+    REQUIRE_FALSE(plane.emergency_landing);
+}
+
+TEST_CASE("Plane::dispatch_aux_function: ArmDisarm dispatches to do_aux_function_armdisarm", "[vehicle][aux]") {
+    Plane plane;
+    set_sticks(plane, 1500, 1500, 1500, 1500);
+    plane.dispatch_aux_function(AuxFunc::ArmDisarm, AuxSwitchPos::kHigh, 0);
+    REQUIRE(plane.armed);
+    plane.dispatch_aux_function(AuxFunc::ArmDisarm, AuxSwitchPos::kLow, 0);
+    REQUIRE_FALSE(plane.armed);
+}
+
+TEST_CASE("Plane::dispatch_aux_function: EmergencyLandingEn sets/clears plane.emergency_landing on HIGH/LOW, "
+          "MIDDLE is a no-op - the real driver for the emergency_landing branches in rc_failsafe_short_on_event()/"
+          "failsafe_long_on_event()",
+          "[vehicle][aux]") {
+    Plane plane;
+    REQUIRE_FALSE(plane.emergency_landing);
+
+    plane.dispatch_aux_function(AuxFunc::EmergencyLandingEn, AuxSwitchPos::kHigh, 0);
+    REQUIRE(plane.emergency_landing);
+
+    plane.dispatch_aux_function(AuxFunc::EmergencyLandingEn, AuxSwitchPos::kMiddle, 0);
+    REQUIRE(plane.emergency_landing); // unchanged
+
+    plane.dispatch_aux_function(AuxFunc::EmergencyLandingEn, AuxSwitchPos::kLow, 0);
+    REQUIRE_FALSE(plane.emergency_landing);
+}
+
+TEST_CASE("Plane::dispatch_aux_function: every mode-select AuxFunc this port defines (Manual/Loiter/Takeoff/Fbwa/"
+          "Cruise/Auto/Rtl) engages its real mode on HIGH via do_aux_function_change_mode()",
+          "[vehicle][aux]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+
+    struct Case {
+        AuxFunc func;
+        Mode* target;
+    };
+    const std::array<Case, 7> cases{{
+        {AuxFunc::Manual, &plane.mode_manual},
+        {AuxFunc::Loiter, &plane.mode_loiter},
+        {AuxFunc::Takeoff, &plane.mode_takeoff},
+        {AuxFunc::Fbwa, &plane.mode_fbwa},
+        {AuxFunc::Cruise, &plane.mode_cruise},
+        {AuxFunc::Auto, &plane.mode_auto},
+        {AuxFunc::Rtl, &plane.mode_rtl},
+    }};
+    for (const Case& c : cases) {
+        plane.control_mode = &plane.mode_manual; // direct reset between cases - only dispatch() itself is under test
+        plane.dispatch_aux_function(c.func, AuxSwitchPos::kHigh, 0);
+        INFO("AuxFunc under test did not reach its target mode");
+        REQUIRE(plane.control_mode == c.target);
+    }
+}
+
+TEST_CASE("Plane::dispatch_aux_function: ModeSwitchReset calls reset_mode_switch() directly, ignoring "
+          "AuxSwitchPos entirely - upstream's own case body never gates on HIGH/LOW/MIDDLE at all",
+          "[vehicle][aux][mode_switch]") {
+    Plane plane;
+    fwcpp::rc::RcChannel* fm_channel = plane.rc_channels.flight_mode_channel();
+    REQUIRE(fm_channel != nullptr);
+
+    for (const AuxSwitchPos pos : {AuxSwitchPos::kLow, AuxSwitchPos::kMiddle, AuxSwitchPos::kHigh}) {
+        fm_channel->switch_state.current_position = 3;
+        fm_channel->switch_state.debounce_position = 3;
+        plane.dispatch_aux_function(AuxFunc::ModeSwitchReset, pos, 1000);
+        REQUIRE(fm_channel->switch_state.current_position == -1);
+        REQUIRE(fm_channel->switch_state.debounce_position == -1);
+    }
+}
+
+// ---------------------------------------------------------------------
+// CPP-037: emergency_landing closed-loop verification - see plane.hpp's
+// "CPP-037 ADDENDUM" for the full "ticket-premise correction" finding
+// (there was no pre-existing `emergency_landing` field or branch at all,
+// contrary to the ticket's own summary - this is the first slice to add
+// either).
+// ---------------------------------------------------------------------
+
+TEST_CASE("Plane::rc_failsafe_short_on_event: emergency_landing overrides fs_action_short to FBWA, taking "
+          "priority over both the real BestGuess default (->RTL) and an explicit Fbwb setting",
+          "[vehicle][failsafe][aux]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.control_mode == &plane.mode_manual);
+    plane.emergency_landing = true;
+
+    SECTION("overrides the real default (BestGuess -> RTL)") {
+        REQUIRE(plane.aparm.fs_action_short == FsActionShort::BestGuess);
+        plane.rc_failsafe_short_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_fbwa);
+    }
+    SECTION("overrides an explicit Fbwb setting too") {
+        plane.aparm.fs_action_short = FsActionShort::Fbwb;
+        plane.rc_failsafe_short_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_fbwa);
+    }
+}
+
+TEST_CASE("Plane::rc_failsafe_short_on_event: emergency_landing has NO effect on the AUTO/LOITER group - verified "
+          "by reading that group's own upstream case body directly, which has no emergency_landing check at all",
+          "[vehicle][failsafe][aux][loiter]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.set_mode(plane.mode_loiter));
+    plane.emergency_landing = true;
+    REQUIRE(plane.aparm.fs_action_short == FsActionShort::BestGuess); // this group's own real no-op value
+    plane.rc_failsafe_short_on_event();
+    REQUIRE(plane.control_mode == &plane.mode_loiter); // unaffected either way
+}
+
+TEST_CASE("Plane::failsafe_long_on_event: emergency_landing overrides fs_action_long to FBWA for Group A modes, "
+          "taking priority over both the real Continue default (->RTL) and an explicit Auto setting",
+          "[vehicle][failsafe][long][aux]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.set_mode(plane.mode_cruise));
+    plane.emergency_landing = true;
+
+    SECTION("overrides the real default (Continue -> RTL)") {
+        REQUIRE(plane.aparm.fs_action_long == FsActionLong::Continue);
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_fbwa);
+    }
+    SECTION("overrides an explicit Auto setting too") {
+        plane.aparm.fs_action_long = FsActionLong::Auto;
+        plane.failsafe_long_on_event();
+        REQUIRE(plane.control_mode == &plane.mode_fbwa);
+    }
+}
+
+TEST_CASE("Plane::failsafe_long_on_event: emergency_landing is checked AFTER the TAKEOFF climb-out defer, matching "
+          "upstream's own real statement order - a deferred TAKEOFF long failsafe still defers even with "
+          "emergency_landing engaged",
+          "[vehicle][failsafe][long][aux][takeoff]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    REQUIRE(plane.set_mode(plane.mode_takeoff));
+    plane.emergency_landing = true;
+    REQUIRE_FALSE(plane.mode_takeoff.climb_out_complete());
+
+    plane.failsafe_long_on_event();
+    REQUIRE(plane.long_failsafe_pending);
+    REQUIRE(plane.control_mode == &plane.mode_takeoff); // deferred - the emergency_landing check never even ran
+}
+
+// ---------------------------------------------------------------------
+// CPP-037: closed-loop tests, driven entirely through tick() - the
+// ticket's own required end-to-end verification.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Closed loop: aux-switch ARMDISARM arms/disarms the real armed/RcOutput-safety state end to end, and the "
+          "first-radio-read suppression genuinely holds - a transmitter powered on with the arm switch already "
+          "HIGH must not instantly arm, even long past the normal debounce window",
+          "[vehicle][integration][aux][arming]") {
+    Plane plane;
+    plane.rc_channels.channel(kChannelArmDisarm)->option = AuxFunc::ArmDisarm;
+
+    constexpr float kDt = 0.02f;
+    std::uint32_t now_ms = 0;
+    fwcpp::ahrs::GyroSample gyro_sample;
+
+    auto step = [&](std::uint16_t arm_pwm) {
+        now_ms += 20;
+        set_aux_channel_pwm(plane, kChannelArmDisarm, arm_pwm);
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.now_ms = now_ms;
+        tick(plane, gyro_sample, in);
+    };
+
+    // Phase 1: the switch starts HIGH from the very first tick. Even 600ms
+    // in (30 ticks - comfortably past the 200ms debounce window), this
+    // must NEVER arm - the real init_position_on_first_radio_read()
+    // suppression, not merely a slow debounce.
+    for (int i = 0; i < 30; ++i) {
+        step(1900);
+    }
+    REQUIRE_FALSE(plane.armed);
+    REQUIRE(plane.hal.rc_output.safety_state() == fwcpp::hal::SafetyState::kDisarmed);
+
+    // Phase 2: the switch moves LOW - a real change away from the
+    // adopted HIGH baseline, but disarming an already-disarmed vehicle is
+    // a real, harmless no-op (disarm()'s own idempotency) - armed stays
+    // false, unremarkably.
+    for (int i = 0; i < 15; ++i) {
+        step(1000);
+    }
+    REQUIRE_FALSE(plane.armed);
+
+    // Phase 3: the switch moves HIGH again - THIS is a genuine change
+    // (debounced LOW -> HIGH) and must arm for real this time.
+    bool armed_now = false;
+    for (int i = 0; i < 15 && !armed_now; ++i) {
+        step(1900);
+        if (plane.armed) {
+            armed_now = true;
+        }
+    }
+    REQUIRE(armed_now);
+    REQUIRE(plane.hal.rc_output.safety_state() == fwcpp::hal::SafetyState::kArmed);
+
+    // Phase 4: back LOW - disarms for real.
+    bool disarmed_now = false;
+    for (int i = 0; i < 15 && !disarmed_now; ++i) {
+        step(1000);
+        if (!plane.armed) {
+            disarmed_now = true;
+        }
+    }
+    REQUIRE(disarmed_now);
+    REQUIRE(plane.hal.rc_output.safety_state() == fwcpp::hal::SafetyState::kDisarmed);
+}
+
+TEST_CASE("Closed loop: EMERGENCY_LANDING_EN engaged via a real aux switch overrides BOTH the short and the long "
+          "RC failsafe's normal action to FBWA - the first real end-to-end exercise of the emergency_landing "
+          "branches in rc_failsafe_short_on_event()/failsafe_long_on_event(), per the ticket's own explicit "
+          "'do not just assume they're already correct' instruction",
+          "[vehicle][integration][aux][failsafe]") {
+    Plane plane;
+    plane.set_home(plane.current_loc);
+    plane.rc_channels.channel(kChannelEmergencyLandingEn)->option = AuxFunc::EmergencyLandingEn;
+    REQUIRE(plane.set_mode(plane.mode_fbwa));
+
+    // Real defaults, deliberately untouched: fs_action_short = BestGuess
+    // (-> RTL, the MANUAL group's own else-branch) and fs_action_long =
+    // Continue (-> RTL, Group A's own else-branch) - if the
+    // emergency_landing override were NOT actually wired end to end, this
+    // test would observe RTL (or, in principle, CIRCLE - this port has
+    // none), never FBWA, at either checkpoint below.
+
+    constexpr float kDt = 0.02f;
+    std::uint32_t now_ms = 0;
+    fwcpp::ahrs::GyroSample gyro_sample;
+
+    auto step = [&](std::uint16_t throttle_pwm) {
+        now_ms += 20;
+        set_aux_channel_pwm(plane, kChannelEmergencyLandingEn, 1900); // HIGH throughout
+        set_sticks(plane, 1500, 1500, throttle_pwm, 1500);
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.now_ms = now_ms;
+        tick(plane, gyro_sample, in);
+    };
+
+    // Phase 1: let the aux switch debounce for real while flying normally.
+    for (int i = 0; i < 20; ++i) {
+        step(1700);
+    }
+    REQUIRE(plane.emergency_landing); // the aux switch itself really engaged
+    REQUIRE(plane.control_mode == &plane.mode_fbwa);
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::None);
+
+    // Phase 2: RC signal loss - SHORT fires almost immediately (10-tick
+    // debounce). With emergency_landing engaged, this must land in FBWA -
+    // NOT the real default's own RTL substitute.
+    bool short_fired = false;
+    for (int i = 0; i < 40 && !short_fired; ++i) {
+        step(900);
+        if (plane.failsafe.state == Plane::FailsafeState::Level::Short) {
+            short_fired = true;
+        }
+    }
+    REQUIRE(short_fired);
+    REQUIRE(plane.control_mode == &plane.mode_fbwa); // NOT mode_rtl
+
+    // Phase 3: keep losing RC well past FS_LONG_TIMEOUT's real 5-second
+    // default - LONG escalation must ALSO land in FBWA, not RTL. This is
+    // the ticket's own named required scenario.
+    for (int i = 0; i < 400; ++i) { // 8 simulated seconds
+        step(900);
+    }
+    REQUIRE(plane.failsafe.state == Plane::FailsafeState::Level::Long);
+    REQUIRE(plane.control_mode == &plane.mode_fbwa); // NOT mode_rtl
+}
+
+TEST_CASE("Closed loop: aux-engaging TAKEOFF then releasing the switch correctly hands control back to the real "
+          "flight-mode-switch's CURRENT position, via a genuine reset_mode_switch() round trip through tick()",
+          "[vehicle][integration][aux][mode_switch]") {
+    Plane plane;
+    plane.set_home(fwcpp::Location());
+    plane.rc_channels.channel(kChannelAuxModeSelect)->option = AuxFunc::Takeoff;
+
+    constexpr float kDt = 0.02f;
+    std::uint32_t now_ms = 0;
+    fwcpp::ahrs::GyroSample gyro_sample;
+
+    auto step = [&](std::uint16_t aux_pwm) {
+        now_ms += 20;
+        set_mode_switch_pwm(plane, 1400); // position 2 -> FBWA (this port's real FLTMODE3 default) - never changes
+        set_aux_channel_pwm(plane, kChannelAuxModeSelect, aux_pwm);
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.now_ms = now_ms;
+        tick(plane, gyro_sample, in);
+    };
+
+    // Phase 1: aux channel LOW (not engaged) - let the real flight-mode
+    // switch settle to FBWA first, so there is a genuine "current
+    // position" to hand control back to later.
+    for (int i = 0; i < 20; ++i) {
+        step(1000);
+    }
+    REQUIRE(plane.control_mode == &plane.mode_fbwa);
+
+    // Phase 2: engage TAKEOFF via the aux switch.
+    bool switched_to_takeoff = false;
+    for (int i = 0; i < 20 && !switched_to_takeoff; ++i) {
+        step(1900);
+        if (plane.control_mode == &plane.mode_takeoff) {
+            switched_to_takeoff = true;
+        }
+    }
+    REQUIRE(switched_to_takeoff);
+
+    // Phase 3: release the aux switch (back to LOW). do_aux_function_
+    // change_mode()'s own non-HIGH branch only fires once the aux
+    // channel's OWN release debounces - so control_mode must NOT move on
+    // the very next tick.
+    step(1000);
+    REQUIRE(plane.control_mode == &plane.mode_takeoff);
+
+    // Once the aux release debounces, reset_mode_switch() clears the
+    // flight-mode-switch channel's own debounce state - its UNCHANGED
+    // PWM (still position 2/FBWA the whole time) must debounce all over
+    // again before it is genuinely re-applied. Two sequential ~200ms
+    // debounce windows (aux release, then mode-switch re-establishment)
+    // fit comfortably within 40 more ticks (800ms).
+    bool back_to_fbwa = false;
+    for (int i = 0; i < 40 && !back_to_fbwa; ++i) {
+        step(1000);
+        if (plane.control_mode == &plane.mode_fbwa) {
+            back_to_fbwa = true;
+        }
+    }
+    REQUIRE(back_to_fbwa);
 }
 
 // ---------------------------------------------------------------------

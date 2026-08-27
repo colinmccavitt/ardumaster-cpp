@@ -56,17 +56,90 @@
 // now_ms-taking method in this port) rather than upstream's own
 // AP_HAL::millis() singleton read inside debounce_completed().
 //
-// NOT PORTED HERE (documented, not silently dropped - see rc_channels.hpp's
-// own banner for the full exclusion list this slice inherits from CPP-027):
-// RC_Channel::reset_mode_switch() (RC_Channel.cpp) - resets switch_state to
-// {-1,-1} and immediately re-reads the mode switch. Upstream's own callers
-// are AUX_FUNC-triggered (a "re-read the mode switch now" aux function) and
-// RC_Channels::init() - both aux-function-dispatch-adjacent machinery this
-// port has never built (CPP-027's own exclusion list). A future aux-
-// function slice that needs to force a re-read can add this trivially: reset
-// switch_state's two fields to -1.
+// CPP-037: reset_mode_switch() (formerly "not ported here", see the OLD
+// note this replaces) is now ported - as RcChannels::reset_mode_switch()
+// (rc_channels.hpp, same module), not here. Upstream's own RC_Channel::
+// reset_mode_switch() (RC_Channel.cpp ~line 588, read in full) is a tiny
+// two-field reset plus an immediate re-read; the "re-read" half needs the
+// flight-mode-channel RESOLUTION step (RcChannels::flight_mode_channel())
+// this class doesn't have, so - exactly like read_mode_switch() above -
+// the whole thing collapsed one level up rather than being split across
+// two classes for no reason.
+//
+// CPP-037 ADDENDUM: the 3-position aux-switch decode mechanism - a
+// SEPARATE state machine from read_6pos_switch()/debounce_completed()
+// above, sharing only the debounce ALGORITHM (debounce_completed() is
+// reused as-is; a real RC channel is configured as either the flight-mode
+// switch OR an aux-function switch, never both, so switch_state's single
+// set of fields never actually double-books between the two callers -
+// verified directly against upstream, which draws exactly this same
+// distinction and also reuses one switch_state for both). Upstream:
+// RC_Channel::read_3pos_switch() (RC_Channel.cpp ~line 2031),
+// RC_Channel::init_position_on_first_radio_read() (~line 1030), and
+// RC_Channel::read_aux() (~line 976) - all three read in full. AUX_FUNC/
+// AuxSwitchPos: RC_Channel.h's real enums (~300+ values / 3 positions),
+// grepped directly.
+//
+// AuxFunc BELOW IS NOT A FULL PORT OF UPSTREAM'S AUX_FUNC (RC_Channel.h) -
+// that enum spans 300+ values across nearly every ArduPilot vehicle type
+// and optional subsystem (camera/gripper/sprayer/generator/RunCam/
+// quadplane/ADSB-avoidance/soaring/terrain/relays/fence/mission-reset/
+// RC-override-enable/FFT-tune/mount/VTX/inverted-flight/reverse-throttle/
+// airbrake/flap/EKF-source/compass-learn/... - all real, all absent from
+// this enum on purpose, none of their backing subsystems exist in this
+// port). This ticket ports ONLY the handful of values with a real
+// dispatch target today (see fwcpp::vehicle::Plane::dispatch_aux_
+// function()'s own file banner, plane.hpp, for the full named exclusion
+// list and per-value upstream trace) - each kept at its REAL upstream
+// numeric value (RC_Channel.h, grepped directly) so a value here never
+// silently means something different than it does upstream, even though
+// the enum itself is a small subset rather than an exhaustive mirror
+// (unlike the small, ~5-6-value FsActionShort/FsActionLong enums
+// elsewhere in this port, which ARE exhaustive - AUX_FUNC's real size
+// makes that impractical and the ticket does not ask for it).
+//
+// init_position_on_first_radio_read()'s REAL, NARROW suppression set:
+// upstream's own switch covers ARMDISARM_AIRMODE/ARMDISARM/ARM_EMERGENCY_
+// STOP (all AP_ARMING_ENABLED-gated) and PARACHUTE_RELEASE (HAL_
+// PARACHUTE_ENABLED-gated) - RC_Channel.cpp ~line 1030, read directly.
+// This port has none of ARMDISARM_AIRMODE (quadplane-only), ARM_
+// EMERGENCY_STOP (needs an AP_Notify-style emergency-stop concept this
+// port lacks), or PARACHUTE_RELEASE (no parachute subsystem) - only
+// AuxFunc::ArmDisarm is a real, in-scope member of this suppression set.
+// The REASON this suppression exists at all, ported faithfully: a
+// transmitter powered on with the arm switch already HIGH must not
+// instantly arm the vehicle - the first-ever successful read of an
+// ARM-type aux switch silently ADOPTS whatever position it finds as the
+// new baseline (switch_state.current_position AND debounce_position both
+// set to it immediately) rather than ever treating that starting position
+// as an actionable change, even after the normal debounce window would
+// otherwise have let it through. A non-ARM-type function gets NO such
+// adoption - its starting position still requires the normal
+// kSwitchDebounceTimeMs of stability before firing ONCE, same as any
+// later change.
+//
+// NOT PORTED: the AUX_PWM_TRIGGER_LOW/_HIGH constants (1300/1700,
+// RC_Channel.h) and read_aux()'s own AUX_FUNC::VTX_POWER special case
+// (upstream's own `else if` branch reading read_6pos_switch() instead of
+// read_3pos_switch() for that one function) - no AP_VideoTX subsystem,
+// named exclusion. The `reversed`/ALLOW_SWITCH_REV per-channel-reversed-
+// switch path inside read_3pos_switch() is also dropped - no RC_Channels::
+// Option bitmask subsystem exists in this port, the SAME class of
+// exclusion CPP-031 slice 11 already made for its own read_6pos_switch()
+// (that method never reads `reversed` either).
+//
+// Dispatch (upstream's run_aux_function()/do_aux_function()) is
+// DELIBERATELY NOT HERE: this port has no vehicle-specific RC_Channel
+// subclass to hang a virtual do_aux_function() override on (ADR-0012) -
+// read_aux() below returns the new debounced AuxSwitchPos (or nullopt)
+// and leaves dispatch to the caller, exactly the same three-layer split
+// (RcChannel raw primitive -> RcChannels resolution/orchestration ->
+// Plane vehicle-specific dispatch) CPP-031 slice 11 already established
+// for the flight-mode-switch channel. See rc_channels.hpp's read_aux_
+// all() and plane.hpp's dispatch_aux_function() for the other two layers.
 
 #include <cstdint>
+#include <optional>
 
 #include <fwcpp/math/scalar.hpp>
 
@@ -75,6 +148,35 @@ namespace fwcpp::rc {
 enum class ControlType : std::uint8_t {
     kAngle = 0,
     kRange = 1,
+};
+
+// upstream: RC_Channel::AuxSwitchPos (RC_Channel.h ~line 430) - the
+// decoded position of a 3-position aux switch. Ported field-for-field
+// (as an ordinary enum rather than the "2-bit" packed storage upstream's
+// own comment mentions - that packing is an upstream memory-layout
+// micro-optimization with no behavioral effect, not reproduced here).
+enum class AuxSwitchPos : std::uint8_t {
+    kLow,    // pwm < AUX_SWITCH_PWM_TRIGGER_LOW (1200)
+    kMiddle, // AUX_SWITCH_PWM_TRIGGER_LOW <= pwm <= AUX_SWITCH_PWM_TRIGGER_HIGH
+    kHigh,   // pwm > AUX_SWITCH_PWM_TRIGGER_HIGH (1800)
+};
+
+// upstream: RC_Channel::AUX_FUNC (RC_Channel.h) - see this file's own
+// "CPP-037 ADDENDUM" banner above for why this is a small, real SUBSET
+// of upstream's 300+-value enum rather than an exhaustive port, and for
+// the exact upstream numeric value of every member kept here.
+enum class AuxFunc : std::uint16_t {
+    DoNothing = 0,            // upstream: DO_NOTHING - aux switch disabled (the default)
+    Rtl = 4,                  // upstream: RTL - change to RTL flight mode
+    Auto = 16,                // upstream: AUTO - change to auto flight mode
+    Manual = 51,              // upstream: MANUAL - manual mode
+    Loiter = 56,              // upstream: LOITER - loiter mode
+    Takeoff = 77,             // upstream: TAKEOFF - takeoff
+    Fbwa = 92,                // upstream: FBWA - Fly-By-Wire-A
+    ModeSwitchReset = 96,     // upstream: MODE_SWITCH_RESET - trigger re-reading of mode switch
+    Cruise = 150,             // upstream: CRUISE mode
+    ArmDisarm = 153,          // upstream: ARMDISARM (4.2+ value - NOT the UNUSED(41) 4.1-and-lower one)
+    EmergencyLandingEn = 157, // upstream: EMERGENCY_LANDING_EN - force long FS action to FBWA for landing out of range
 };
 
 class RcChannel {
@@ -127,8 +229,21 @@ public:
         std::int8_t current_position = -1;
         std::int8_t debounce_position = -1;
         std::uint32_t last_edge_time_ms = 0;
+        // upstream: switch_state.initialised (RC_Channel.h) - CPP-037.
+        // Only read_aux() below consults this (read_6pos_switch() above
+        // never did upstream either) - see this file's own "CPP-037
+        // ADDENDUM" banner for the first-radio-read suppression this
+        // gates.
+        bool initialised = false;
     };
     SwitchState switch_state;
+
+    // upstream: RC_Channel::option (RC_Channel.h's AP_Int8, RC_Channel.cpp
+    // var_info's "OPTION" param) - CPP-037. Not AP_Param-backed (same
+    // established precedent as radio_min/max/trim above) - a plain
+    // settable field, default DoNothing, matching upstream's real
+    // default (0).
+    AuxFunc option = AuxFunc::DoNothing;
 
     // upstream: RC_Channel::RC_MIN_LIMIT_PWM / RC_MAX_LIMIT_PWM
     // (RC_Channel.h:465,467) - a pulsewidth at or outside these bounds is
@@ -198,6 +313,74 @@ public:
         }
 
         return false;
+    }
+
+    // upstream: RC_Channel::AUX_SWITCH_PWM_TRIGGER_LOW/_HIGH (RC_Channel.h
+    // :475,477) - CPP-037.
+    static constexpr std::uint16_t kAuxSwitchPwmTriggerLow = 1200;
+    static constexpr std::uint16_t kAuxSwitchPwmTriggerHigh = 1800;
+
+    // upstream: RC_Channel::read_3pos_switch(AuxSwitchPos&) (RC_Channel.cpp
+    // ~line 2031, read in full) - CPP-037. The `reversed`/ALLOW_SWITCH_REV
+    // branch is dropped - see this file's own "CPP-037 ADDENDUM" banner.
+    bool read_3pos_switch(AuxSwitchPos& ret) const {
+        const std::uint16_t in = static_cast<std::uint16_t>(radio_in);
+        if (in <= kRcMinLimitPwm || in >= kRcMaxLimitPwm) {
+            return false;
+        }
+        if (in < kAuxSwitchPwmTriggerLow) {
+            ret = AuxSwitchPos::kLow;
+        } else if (in > kAuxSwitchPwmTriggerHigh) {
+            ret = AuxSwitchPos::kHigh;
+        } else {
+            ret = AuxSwitchPos::kMiddle;
+        }
+        return true;
+    }
+
+    // upstream: RC_Channel::init_position_on_first_radio_read(AUX_FUNC)
+    // (RC_Channel.cpp ~line 1030, read in full) - CPP-037. See this file's
+    // own "CPP-037 ADDENDUM" banner for the real, narrow suppression set
+    // this port has (ArmDisarm only) versus upstream's real four-value one.
+    static bool init_position_on_first_radio_read(AuxFunc func) {
+        return func == AuxFunc::ArmDisarm;
+    }
+
+    // upstream: RC_Channel::read_aux() (RC_Channel.cpp ~line 976, read in
+    // full) - CPP-037. Returns the new debounced AuxSwitchPos exactly once
+    // per real, actionable switch change; nullopt otherwise (DoNothing
+    // option, invalid/out-of-range PWM, or debounce not yet settled - all
+    // of upstream's own "don't call run_aux_function()" cases collapse to
+    // nullopt here, same shape as RcChannels::read_mode_switch() in
+    // rc_channels.hpp). Dispatch itself (upstream's run_aux_function()/
+    // do_aux_function()) is the CALLER's job - see this file's own
+    // "CPP-037 ADDENDUM" banner for why.
+    std::optional<AuxSwitchPos> read_aux(std::uint32_t now_ms) {
+        if (option == AuxFunc::DoNothing) {
+            // upstream: "may wish to add special cases for other 'AUXSW'
+            // things here e.g. RCMAP_ROLL etc once they become options" -
+            // no such cases in this port.
+            return std::nullopt;
+        }
+
+        AuxSwitchPos new_position;
+        if (!read_3pos_switch(new_position)) {
+            return std::nullopt;
+        }
+
+        if (!switch_state.initialised) {
+            switch_state.initialised = true;
+            if (init_position_on_first_radio_read(option)) {
+                switch_state.current_position = static_cast<std::int8_t>(new_position);
+                switch_state.debounce_position = static_cast<std::int8_t>(new_position);
+            }
+        }
+
+        if (!debounce_completed(static_cast<std::int8_t>(new_position), now_ms)) {
+            return std::nullopt;
+        }
+
+        return new_position;
     }
 
     // Angle (centidegrees) from radio_in, using an explicit dead_zone and

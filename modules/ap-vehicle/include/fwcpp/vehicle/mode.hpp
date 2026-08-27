@@ -636,6 +636,16 @@ inline void ModeTAKEOFF::navigate(const StabilizeInputs& in) {
 // priority 96 - short always runs first), and before step 1c is
 // unaffected (1c's freshness guard reads last_valid_rc_ms, untouched by
 // either failsafe-tier check).
+//
+// CPP-037 NOTE: adds step 1d (the RC aux-function switch dispatch) - see
+// plane.hpp's own "CPP-037 ADDENDUM" file banner for the full design.
+// Placed immediately after step 1c (mode-switch dispatch), matching
+// upstream's own real relative scheduler ordering (RC_Channels::read_
+// mode_switch() priority 7 before RC_Channels::read_aux_all() priority
+// 10, both 50Hz, Plane.cpp's scheduler_tasks[]) - see step 1d's own
+// comment below for exactly why this ordering is required (a same-tick
+// MODE_SWITCH_RESET/aux-mode-release must not be read back by a mode-
+// switch dispatch that has already run this tick).
 inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const StabilizeInputs& in) {
     Mode& mode = *plane.control_mode; // see this function's own "CPP-031 SLICE 7 NOTE" above
 
@@ -685,6 +695,27 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
             plane.mode_switch_changed(*new_pos);
         }
     }
+
+    // 1d. RC aux-function switch dispatch - CPP-037, see this function's
+    //     own "CPP-037 NOTE" and plane.hpp's "CPP-037 ADDENDUM" file
+    //     banner for the full design. Placed immediately after step 1c
+    //     (mode-switch dispatch), matching upstream's own real relative
+    //     scheduler ordering (RC_Channels::read_mode_switch() at priority
+    //     7 always runs before RC_Channels::read_aux_all() at priority
+    //     10, both 50Hz, Plane.cpp's scheduler_tasks[]) - this ordering
+    //     matters because a MODE_SWITCH_RESET or aux-engaged-mode-release
+    //     dispatched THIS call can call RcChannels::reset_mode_switch(),
+    //     which must not be read back by THIS SAME tick's already-
+    //     finished step 1c (it isn't - step 1c already ran). Unlike step
+    //     1c, read_aux_all() has no extra "signal freshness" guard of its
+    //     own to reproduce - upstream's real RC_Channels::read_aux_all()
+    //     is the UNMODIFIED base-class version (RC_Channels_Plane never
+    //     overrides it, unlike read_mode_switch()), gated only by has_
+    //     valid_input() internally (rc_channels.hpp's own read_aux_all()).
+    plane.rc_channels.read_aux_all(
+        in.now_ms, [&plane, &in](fwcpp::rc::AuxFunc func, fwcpp::rc::AuxSwitchPos pos) {
+            plane.dispatch_aux_function(func, pos, in.now_ms);
+        });
 
     // 2. GPS update (upstream: AP_GPS::update(), a separate, earlier
     //    scheduled task feeding the AHRS update that follows it - see
