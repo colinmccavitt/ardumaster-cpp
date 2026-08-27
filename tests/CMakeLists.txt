@@ -314,3 +314,10 @@ catch_discover_tests(ekf_core_test)
 add_executable(ekf_fusion_test ekf_fusion_test.cpp)
 target_link_libraries(ekf_fusion_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_fusion_test)
+
+# CPP-059 phase 5: 3-axis magnetometer fusion (fuse_magnetometer()) unit
+# tests (see fwcpp/ekf/ekf_core.hpp's "CPP-059, PHASE 5" scope banner
+# section).
+add_executable(ekf_mag_fusion_test ekf_mag_fusion_test.cpp)
+target_link_libraries(ekf_mag_fusion_test PRIVATE ap-ekf Catch2::Catch2WithMain)
+catch_discover_tests(ekf_mag_fusion_test)

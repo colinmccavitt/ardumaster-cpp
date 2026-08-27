@@ -103,6 +103,13 @@ constexpr ftype kGpsPosVarAccScale = static_cast<ftype>(0.05f);    // AP_NavEKF3
 // timeout in this port.
 constexpr ftype kGpsFusionTimeoutS = static_cast<ftype>(10.0);  // posRetryTimeUseVel_ms
 
+// CPP-059 phase 5. upstream: AP_NavEKF3.h:500 - `const float
+// magVarRateScale = 0.005f;`, a real, hardcoded upstream constant (NOT an
+// AP_Param), verified directly. Same "not user-tunable" treatment as
+// kGpsFusionTimeoutS etc. above - a file-local constant, not a public
+// field.
+constexpr ftype kMagVarRateScale = static_cast<ftype>(0.005f);  // magVarRateScale
+
 [[nodiscard]] ftype clamp(ftype v, ftype lo, ftype hi) {
     return fwcpp::math::constrain_value(v, lo, hi);
 }
@@ -1191,6 +1198,357 @@ int EkfCore::fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg, ftype now
         last_pos_pass_time_s = now_s;
     }
     return n_fused;
+}
+
+// ============================================================================
+// CPP-059 PHASE 5: 3-axis magnetometer fusion. See ekf_core.hpp's
+// "CPP-059, PHASE 5" banner for the full scope/exclusions/corrections
+// discussion - only implementation-level transcription notes live here.
+//
+// VERBATIM TRANSCRIPTION NOTE (same deliberate exception as
+// covariance_prediction()'s PS0..PS222 block, see this file's own top
+// banner): SH_MAG/var_innov_mag/H_MAG/SK_MX/SK_MY/SK_MZ below are dense,
+// auto-generated (Matlab symbolic toolbox, per upstream's own
+// FuseMagnetometer() doc comment) Jacobian/Kalman-gain algebra, transcribed
+// verbatim from AP_NavEKF3_MagFusion.cpp ~line 473-836. Names are kept as
+// close to upstream as this port's member-vs-local split allows (SH_MAG,
+// H_MAG, SK_MX/SK_MY/SK_MZ, magN/magE/magD/magXbias/magYbias/magZbias) for
+// the same mechanical-diffability reason covariance_prediction() gives -
+// NOT "cleaned up" into this port's usual naming style. Literal precision
+// follows this file's own "LITERAL PRECISION NOTE" (top of file): every
+// literal is written as an explicit ftype(...) rather than reproducing
+// upstream's bare 2.0f-style literals - bit-identical to upstream for
+// every literal in this block (all are exactly representable in IEEE-754
+// float: 1, 2).
+//
+// One implementation-only (non-behavioral) simplification versus the
+// unrolled upstream source: upstream declares H_MAG once outside the
+// obsIndex loop and explicitly zeros indices 0..stateIndexLim at the top
+// of each axis's branch before setting the ones it needs (~line 591,
+// 651, 713). This port instead value-initializes a fresh
+// std::array<ftype,24> H_MAG{} inside the loop body each iteration -
+// provably identical, since every index upstream's code ever READS
+// (0,1,2,3,16,17,18, and the per-axis H_MAG_unit_index) is unconditionally
+// WRITTEN in every branch below, including the explicit `= 0.0f`/`=
+// ftype(0)` assignments upstream makes for the two mag-bias slots that
+// don't apply to the current axis (e.g. H_MAG[20]/H_MAG[21] = 0 in the X
+// branch) - so which indices happen to hold stale values from a previous
+// iteration is never observable either way.
+bool EkfCore::fuse_magnetometer(const MagSample& mag, const GyroSample& gyro, ftype dt_ekf_avg) {
+    // create aliases for state to make code easier to read (upstream:
+    // identical aliases, ~line 481-490).
+    const ftype q0 = state.quat[0];
+    const ftype q1 = state.quat[1];
+    const ftype q2 = state.quat[2];
+    const ftype q3 = state.quat[3];
+    const ftype magN = state.earth_magfield.x;
+    const ftype magE = state.earth_magfield.y;
+    const ftype magD = state.earth_magfield.z;
+    const ftype magXbias = state.body_magfield.x;
+    const ftype magYbias = state.body_magfield.y;
+    const ftype magZbias = state.body_magfield.z;
+
+    // rotate predicted earth components into body axes and calculate
+    // predicted measurements (upstream ~line 492-511 - verified this
+    // round to build the DCM in the same form as any other DCM
+    // construction in this port, per the ticket's own instruction; it is
+    // NOT bit-for-bit the same expression as, e.g., Matrix3::
+    // from_quaternion() would produce because upstream hand-expands it
+    // here rather than calling a shared helper - transcribed exactly as
+    // upstream writes it, not substituted for an existing DCM helper).
+    const Matrix3F DCM(q0 * q0 + q1 * q1 - q2 * q2 - q3 * q3, ftype(2) * (q1 * q2 + q0 * q3),
+                        ftype(2) * (q1 * q3 - q0 * q2), ftype(2) * (q1 * q2 - q0 * q3),
+                        q0 * q0 - q1 * q1 + q2 * q2 - q3 * q3, ftype(2) * (q2 * q3 + q0 * q1),
+                        ftype(2) * (q1 * q3 + q0 * q2), ftype(2) * (q2 * q3 - q0 * q1),
+                        q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3);
+
+    const Vector3F mag_pred(DCM[0][0] * magN + DCM[0][1] * magE + DCM[0][2] * magD + magXbias,
+                             DCM[1][0] * magN + DCM[1][1] * magE + DCM[1][2] * magD + magYbias,
+                             DCM[2][0] * magN + DCM[2][1] * magE + DCM[2][2] * magD + magZbias);
+
+    // upstream: `innovMag = MagPred - magDataDelayed.mag;` (~line 514).
+    innov_mag = mag_pred - mag.mag;
+
+    // scale magnetometer observation error with total angular rate to
+    // allow for timing errors (upstream ~line 517, `frontend->_magNoise`/
+    // `frontend->magVarRateScale` - this port's mag_noise field/
+    // kMagVarRateScale constant, see ekf_core.hpp banner and this file's
+    // anonymous namespace above).
+    const ftype R_MAG = sq(clamp(mag_noise, ftype(0.01), ftype(0.5))) +
+                         sq(kMagVarRateScale * gyro.delta_angle.length() / gyro.delta_angle_dt);
+
+    // calculate common expressions used to calculate observation jacobians
+    // and innovation variance for each component (upstream ~line 520-529).
+    const std::array<ftype, 9> SH_MAG{
+        ftype(2) * magD * q3 + ftype(2) * magE * q2 + ftype(2) * magN * q1,
+        ftype(2) * magD * q0 - ftype(2) * magE * q1 + ftype(2) * magN * q2,
+        ftype(2) * magD * q1 + ftype(2) * magE * q0 - ftype(2) * magN * q3,
+        sq(q3),
+        sq(q2),
+        sq(q1),
+        sq(q0),
+        ftype(2) * magN * q0,
+        ftype(2) * magE * q3,
+    };
+
+    // Calculate the innovation variance for each axis (upstream ~line
+    // 532-546 X, 548-558 Y, 560-570 Z) - verbatim transcription, see this
+    // function's own banner. Each axis's "badly conditioned" check aborts
+    // the WHOLE fusion call immediately (upstream: CovarianceInit() then
+    // an early `return;`) - see ekf_core.hpp banner for why this is a
+    // real, distinctive divergence from GPS fusion's simple per-axis skip.
+    var_innov_mag.x = (P[19][19] + R_MAG + P[1][19]*SH_MAG[0] - P[2][19]*SH_MAG[1] + P[3][19]*SH_MAG[2] - P[16][19]*(SH_MAG[3] + SH_MAG[4] - SH_MAG[5] - SH_MAG[6]) + (ftype(2)*q0*q3 + ftype(2)*q1*q2)*(P[19][17] + P[1][17]*SH_MAG[0] - P[2][17]*SH_MAG[1] + P[3][17]*SH_MAG[2] - P[16][17]*(SH_MAG[3] + SH_MAG[4] - SH_MAG[5] - SH_MAG[6]) + P[17][17]*(ftype(2)*q0*q3 + ftype(2)*q1*q2) - P[18][17]*(ftype(2)*q0*q2 - ftype(2)*q1*q3) + P[0][17]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) - (ftype(2)*q0*q2 - ftype(2)*q1*q3)*(P[19][18] + P[1][18]*SH_MAG[0] - P[2][18]*SH_MAG[1] + P[3][18]*SH_MAG[2] - P[16][18]*(SH_MAG[3] + SH_MAG[4] - SH_MAG[5] - SH_MAG[6]) + P[17][18]*(ftype(2)*q0*q3 + ftype(2)*q1*q2) - P[18][18]*(ftype(2)*q0*q2 - ftype(2)*q1*q3) + P[0][18]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + (SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)*(P[19][0] + P[1][0]*SH_MAG[0] - P[2][0]*SH_MAG[1] + P[3][0]*SH_MAG[2] - P[16][0]*(SH_MAG[3] + SH_MAG[4] - SH_MAG[5] - SH_MAG[6]) + P[17][0]*(ftype(2)*q0*q3 + ftype(2)*q1*q2) - P[18][0]*(ftype(2)*q0*q2 - ftype(2)*q1*q3) + P[0][0]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + P[17][19]*(ftype(2)*q0*q3 + ftype(2)*q1*q2) - P[18][19]*(ftype(2)*q0*q2 - ftype(2)*q1*q3) + SH_MAG[0]*(P[19][1] + P[1][1]*SH_MAG[0] - P[2][1]*SH_MAG[1] + P[3][1]*SH_MAG[2] - P[16][1]*(SH_MAG[3] + SH_MAG[4] - SH_MAG[5] - SH_MAG[6]) + P[17][1]*(ftype(2)*q0*q3 + ftype(2)*q1*q2) - P[18][1]*(ftype(2)*q0*q2 - ftype(2)*q1*q3) + P[0][1]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) - SH_MAG[1]*(P[19][2] + P[1][2]*SH_MAG[0] - P[2][2]*SH_MAG[1] + P[3][2]*SH_MAG[2] - P[16][2]*(SH_MAG[3] + SH_MAG[4] - SH_MAG[5] - SH_MAG[6]) + P[17][2]*(ftype(2)*q0*q3 + ftype(2)*q1*q2) - P[18][2]*(ftype(2)*q0*q2 - ftype(2)*q1*q3) + P[0][2]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + SH_MAG[2]*(P[19][3] + P[1][3]*SH_MAG[0] - P[2][3]*SH_MAG[1] + P[3][3]*SH_MAG[2] - P[16][3]*(SH_MAG[3] + SH_MAG[4] - SH_MAG[5] - SH_MAG[6]) + P[17][3]*(ftype(2)*q0*q3 + ftype(2)*q1*q2) - P[18][3]*(ftype(2)*q0*q2 - ftype(2)*q1*q3) + P[0][3]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) - (SH_MAG[3] + SH_MAG[4] - SH_MAG[5] - SH_MAG[6])*(P[19][16] + P[1][16]*SH_MAG[0] - P[2][16]*SH_MAG[1] + P[3][16]*SH_MAG[2] - P[16][16]*(SH_MAG[3] + SH_MAG[4] - SH_MAG[5] - SH_MAG[6]) + P[17][16]*(ftype(2)*q0*q3 + ftype(2)*q1*q2) - P[18][16]*(ftype(2)*q0*q2 - ftype(2)*q1*q3) + P[0][16]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + P[0][19]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2));
+    if (var_innov_mag.x < R_MAG) {
+        // upstream: "the calculation is badly conditioned, so we cannot
+        // perform fusion on this step - we reset the covariance matrix
+        // and try again next measurement" (~line 542-546).
+        covariance_init(dt_ekf_avg);
+        return false;
+    }
+
+    var_innov_mag.y = (P[20][20] + R_MAG + P[0][20]*SH_MAG[2] + P[1][20]*SH_MAG[1] + P[2][20]*SH_MAG[0] - P[17][20]*(SH_MAG[3] - SH_MAG[4] + SH_MAG[5] - SH_MAG[6]) - (ftype(2)*q0*q3 - ftype(2)*q1*q2)*(P[20][16] + P[0][16]*SH_MAG[2] + P[1][16]*SH_MAG[1] + P[2][16]*SH_MAG[0] - P[17][16]*(SH_MAG[3] - SH_MAG[4] + SH_MAG[5] - SH_MAG[6]) - P[16][16]*(ftype(2)*q0*q3 - ftype(2)*q1*q2) + P[18][16]*(ftype(2)*q0*q1 + ftype(2)*q2*q3) - P[3][16]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + (ftype(2)*q0*q1 + ftype(2)*q2*q3)*(P[20][18] + P[0][18]*SH_MAG[2] + P[1][18]*SH_MAG[1] + P[2][18]*SH_MAG[0] - P[17][18]*(SH_MAG[3] - SH_MAG[4] + SH_MAG[5] - SH_MAG[6]) - P[16][18]*(ftype(2)*q0*q3 - ftype(2)*q1*q2) + P[18][18]*(ftype(2)*q0*q1 + ftype(2)*q2*q3) - P[3][18]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) - (SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)*(P[20][3] + P[0][3]*SH_MAG[2] + P[1][3]*SH_MAG[1] + P[2][3]*SH_MAG[0] - P[17][3]*(SH_MAG[3] - SH_MAG[4] + SH_MAG[5] - SH_MAG[6]) - P[16][3]*(ftype(2)*q0*q3 - ftype(2)*q1*q2) + P[18][3]*(ftype(2)*q0*q1 + ftype(2)*q2*q3) - P[3][3]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) - P[16][20]*(ftype(2)*q0*q3 - ftype(2)*q1*q2) + P[18][20]*(ftype(2)*q0*q1 + ftype(2)*q2*q3) + SH_MAG[2]*(P[20][0] + P[0][0]*SH_MAG[2] + P[1][0]*SH_MAG[1] + P[2][0]*SH_MAG[0] - P[17][0]*(SH_MAG[3] - SH_MAG[4] + SH_MAG[5] - SH_MAG[6]) - P[16][0]*(ftype(2)*q0*q3 - ftype(2)*q1*q2) + P[18][0]*(ftype(2)*q0*q1 + ftype(2)*q2*q3) - P[3][0]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + SH_MAG[1]*(P[20][1] + P[0][1]*SH_MAG[2] + P[1][1]*SH_MAG[1] + P[2][1]*SH_MAG[0] - P[17][1]*(SH_MAG[3] - SH_MAG[4] + SH_MAG[5] - SH_MAG[6]) - P[16][1]*(ftype(2)*q0*q3 - ftype(2)*q1*q2) + P[18][1]*(ftype(2)*q0*q1 + ftype(2)*q2*q3) - P[3][1]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + SH_MAG[0]*(P[20][2] + P[0][2]*SH_MAG[2] + P[1][2]*SH_MAG[1] + P[2][2]*SH_MAG[0] - P[17][2]*(SH_MAG[3] - SH_MAG[4] + SH_MAG[5] - SH_MAG[6]) - P[16][2]*(ftype(2)*q0*q3 - ftype(2)*q1*q2) + P[18][2]*(ftype(2)*q0*q1 + ftype(2)*q2*q3) - P[3][2]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) - (SH_MAG[3] - SH_MAG[4] + SH_MAG[5] - SH_MAG[6])*(P[20][17] + P[0][17]*SH_MAG[2] + P[1][17]*SH_MAG[1] + P[2][17]*SH_MAG[0] - P[17][17]*(SH_MAG[3] - SH_MAG[4] + SH_MAG[5] - SH_MAG[6]) - P[16][17]*(ftype(2)*q0*q3 - ftype(2)*q1*q2) + P[18][17]*(ftype(2)*q0*q1 + ftype(2)*q2*q3) - P[3][17]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) - P[3][20]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2));
+    if (var_innov_mag.y < R_MAG) {
+        covariance_init(dt_ekf_avg);
+        return false;
+    }
+
+    var_innov_mag.z = (P[21][21] + R_MAG + P[0][21]*SH_MAG[1] - P[1][21]*SH_MAG[2] + P[3][21]*SH_MAG[0] + P[18][21]*(SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6]) + (ftype(2)*q0*q2 + ftype(2)*q1*q3)*(P[21][16] + P[0][16]*SH_MAG[1] - P[1][16]*SH_MAG[2] + P[3][16]*SH_MAG[0] + P[18][16]*(SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6]) + P[16][16]*(ftype(2)*q0*q2 + ftype(2)*q1*q3) - P[17][16]*(ftype(2)*q0*q1 - ftype(2)*q2*q3) + P[2][16]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) - (ftype(2)*q0*q1 - ftype(2)*q2*q3)*(P[21][17] + P[0][17]*SH_MAG[1] - P[1][17]*SH_MAG[2] + P[3][17]*SH_MAG[0] + P[18][17]*(SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6]) + P[16][17]*(ftype(2)*q0*q2 + ftype(2)*q1*q3) - P[17][17]*(ftype(2)*q0*q1 - ftype(2)*q2*q3) + P[2][17]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + (SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)*(P[21][2] + P[0][2]*SH_MAG[1] - P[1][2]*SH_MAG[2] + P[3][2]*SH_MAG[0] + P[18][2]*(SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6]) + P[16][2]*(ftype(2)*q0*q2 + ftype(2)*q1*q3) - P[17][2]*(ftype(2)*q0*q1 - ftype(2)*q2*q3) + P[2][2]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + P[16][21]*(ftype(2)*q0*q2 + ftype(2)*q1*q3) - P[17][21]*(ftype(2)*q0*q1 - ftype(2)*q2*q3) + SH_MAG[1]*(P[21][0] + P[0][0]*SH_MAG[1] - P[1][0]*SH_MAG[2] + P[3][0]*SH_MAG[0] + P[18][0]*(SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6]) + P[16][0]*(ftype(2)*q0*q2 + ftype(2)*q1*q3) - P[17][0]*(ftype(2)*q0*q1 - ftype(2)*q2*q3) + P[2][0]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) - SH_MAG[2]*(P[21][1] + P[0][1]*SH_MAG[1] - P[1][1]*SH_MAG[2] + P[3][1]*SH_MAG[0] + P[18][1]*(SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6]) + P[16][1]*(ftype(2)*q0*q2 + ftype(2)*q1*q3) - P[17][1]*(ftype(2)*q0*q1 - ftype(2)*q2*q3) + P[2][1]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + SH_MAG[0]*(P[21][3] + P[0][3]*SH_MAG[1] - P[1][3]*SH_MAG[2] + P[3][3]*SH_MAG[0] + P[18][3]*(SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6]) + P[16][3]*(ftype(2)*q0*q2 + ftype(2)*q1*q3) - P[17][3]*(ftype(2)*q0*q1 - ftype(2)*q2*q3) + P[2][3]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + (SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6])*(P[21][18] + P[0][18]*SH_MAG[1] - P[1][18]*SH_MAG[2] + P[3][18]*SH_MAG[0] + P[18][18]*(SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6]) + P[16][18]*(ftype(2)*q0*q2 + ftype(2)*q1*q3) - P[17][18]*(ftype(2)*q0*q1 - ftype(2)*q2*q3) + P[2][18]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2)) + P[2][21]*(SH_MAG[7] + SH_MAG[8] - ftype(2)*magD*q2));
+    if (var_innov_mag.z < R_MAG) {
+        covariance_init(dt_ekf_avg);
+        return false;
+    }
+
+    // EXCLUDED: the real magTestRatio/magHealth innovation-consistency
+    // gate (upstream ~line 606-616, `frontend->_magInnovGate`) - see
+    // ekf_core.hpp's "CPP-059, PHASE 5" banner "CORRECTION /
+    // CLARIFICATION" section for exactly what this is, where it really
+    // lives in upstream's source, and why it is deliberately not
+    // reproduced here.
+
+    const int lim = state_index_lim();
+
+    for (int obs_index = 0; obs_index <= 2; ++obs_index) {
+        std::array<ftype, 24> H_MAG{};  // see this function's own banner for why value-init replaces upstream's explicit per-axis zeroing
+        int H_MAG_unit_index = 0;
+        std::array<ftype, 24> kfusion{};
+        ftype innovation = 0;
+
+        if (obs_index == 0) {
+            // upstream ~line 591-644.
+            H_MAG[0] = SH_MAG[7] + SH_MAG[8] - ftype(2) * magD * q2;
+            H_MAG[1] = SH_MAG[0];
+            H_MAG[2] = -SH_MAG[1];
+            H_MAG[3] = SH_MAG[2];
+            H_MAG[16] = SH_MAG[5] - SH_MAG[4] - SH_MAG[3] + SH_MAG[6];
+            H_MAG[17] = ftype(2) * q0 * q3 + ftype(2) * q1 * q2;
+            H_MAG[18] = ftype(2) * q1 * q3 - ftype(2) * q0 * q2;
+            H_MAG[19] = ftype(1);
+            H_MAG_unit_index = 19;
+            innovation = innov_mag.x;
+
+            const std::array<ftype, 5> SK_MX{
+                ftype(1) / var_innov_mag.x,
+                SH_MAG[3] + SH_MAG[4] - SH_MAG[5] - SH_MAG[6],
+                SH_MAG[7] + SH_MAG[8] - ftype(2) * magD * q2,
+                ftype(2) * q0 * q2 - ftype(2) * q1 * q3,
+                ftype(2) * q0 * q3 + ftype(2) * q1 * q2,
+            };
+
+            // upstream: kalman_mask construction (~line 613-631) - see
+            // ekf_core.hpp banner for the dvelBiasAxisInhibit[] exclusion
+            // (this port sets bits 13-15 together, gated by the single
+            // existing inhibit_del_vel_bias_states flag).
+            std::uint32_t kalman_mask = (1u << 10) - 1;
+            if (!inhibit_del_ang_bias_states) {
+                kalman_mask |= (1u << 10) | (1u << 11) | (1u << 12);
+            }
+            if (!inhibit_del_vel_bias_states) {
+                kalman_mask |= (1u << 13) | (1u << 14) | (1u << 15);
+            }
+            if (!inhibit_mag_states) {
+                kalman_mask |= (1u << 16) | (1u << 17) | (1u << 18) | (1u << 19) | (1u << 20) | (1u << 21);
+            }
+            if (!inhibit_wind_states) {
+                kalman_mask |= (1u << 22) | (1u << 23);
+            }
+
+            // upstream ~line 637-642 - NOT bounded at stateIndexLim, see
+            // this file's ekf_core.hpp banner for why that's exact, not a
+            // divergence.
+            for (int i = 0; i < 24; ++i) {
+                if ((kalman_mask & (1u << i)) == 0) {
+                    continue;
+                }
+                const auto ii = static_cast<std::size_t>(i);
+                kfusion[ii] = SK_MX[0] * (P[ii][19] + P[ii][1] * SH_MAG[0] - P[ii][2] * SH_MAG[1] +
+                                           P[ii][3] * SH_MAG[2] + P[ii][0] * SK_MX[2] - P[ii][16] * SK_MX[1] +
+                                           P[ii][17] * SK_MX[4] - P[ii][18] * SK_MX[3]);
+            }
+        } else if (obs_index == 1) {
+            // upstream ~line 652-705.
+            H_MAG[0] = SH_MAG[2];
+            H_MAG[1] = SH_MAG[1];
+            H_MAG[2] = SH_MAG[0];
+            H_MAG[3] = ftype(2) * magD * q2 - SH_MAG[8] - SH_MAG[7];
+            H_MAG[16] = ftype(2) * q1 * q2 - ftype(2) * q0 * q3;
+            H_MAG[17] = SH_MAG[4] - SH_MAG[3] - SH_MAG[5] + SH_MAG[6];
+            H_MAG[18] = ftype(2) * q0 * q1 + ftype(2) * q2 * q3;
+            H_MAG[20] = ftype(1);
+            H_MAG_unit_index = 20;
+            innovation = innov_mag.y;
+
+            const std::array<ftype, 5> SK_MY{
+                ftype(1) / var_innov_mag.y,
+                SH_MAG[3] - SH_MAG[4] + SH_MAG[5] - SH_MAG[6],
+                SH_MAG[7] + SH_MAG[8] - ftype(2) * magD * q2,
+                ftype(2) * q0 * q3 - ftype(2) * q1 * q2,
+                ftype(2) * q0 * q1 + ftype(2) * q2 * q3,
+            };
+
+            std::uint32_t kalman_mask = (1u << 10) - 1;
+            if (!inhibit_del_ang_bias_states) {
+                kalman_mask |= (1u << 10) | (1u << 11) | (1u << 12);
+            }
+            if (!inhibit_del_vel_bias_states) {
+                kalman_mask |= (1u << 13) | (1u << 14) | (1u << 15);
+            }
+            if (!inhibit_mag_states) {
+                kalman_mask |= (1u << 16) | (1u << 17) | (1u << 18) | (1u << 19) | (1u << 20) | (1u << 21);
+            }
+            if (!inhibit_wind_states) {
+                kalman_mask |= (1u << 22) | (1u << 23);
+            }
+
+            // upstream ~line 698-703.
+            for (int i = 0; i < 24; ++i) {
+                if ((kalman_mask & (1u << i)) == 0) {
+                    continue;
+                }
+                const auto ii = static_cast<std::size_t>(i);
+                kfusion[ii] = SK_MY[0] * (P[ii][20] + P[ii][0] * SH_MAG[2] + P[ii][1] * SH_MAG[1] +
+                                           P[ii][2] * SH_MAG[0] - P[ii][3] * SK_MY[2] - P[ii][17] * SK_MY[1] -
+                                           P[ii][16] * SK_MY[3] + P[ii][18] * SK_MY[4]);
+            }
+        } else {
+            // upstream ~line 714-765.
+            H_MAG[0] = SH_MAG[1];
+            H_MAG[1] = -SH_MAG[2];
+            H_MAG[2] = SH_MAG[7] + SH_MAG[8] - ftype(2) * magD * q2;
+            H_MAG[3] = SH_MAG[0];
+            H_MAG[16] = ftype(2) * q0 * q2 + ftype(2) * q1 * q3;
+            H_MAG[17] = ftype(2) * q2 * q3 - ftype(2) * q0 * q1;
+            H_MAG[18] = SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6];
+            H_MAG[21] = ftype(1);
+            H_MAG_unit_index = 21;
+            innovation = innov_mag.z;
+
+            const std::array<ftype, 5> SK_MZ{
+                ftype(1) / var_innov_mag.z,
+                SH_MAG[3] - SH_MAG[4] - SH_MAG[5] + SH_MAG[6],
+                SH_MAG[7] + SH_MAG[8] - ftype(2) * magD * q2,
+                ftype(2) * q0 * q1 - ftype(2) * q2 * q3,
+                ftype(2) * q0 * q2 + ftype(2) * q1 * q3,
+            };
+
+            std::uint32_t kalman_mask = (1u << 10) - 1;
+            if (!inhibit_del_ang_bias_states) {
+                kalman_mask |= (1u << 10) | (1u << 11) | (1u << 12);
+            }
+            if (!inhibit_del_vel_bias_states) {
+                kalman_mask |= (1u << 13) | (1u << 14) | (1u << 15);
+            }
+            if (!inhibit_mag_states) {
+                kalman_mask |= (1u << 16) | (1u << 17) | (1u << 18) | (1u << 19) | (1u << 20) | (1u << 21);
+            }
+            if (!inhibit_wind_states) {
+                kalman_mask |= (1u << 22) | (1u << 23);
+            }
+
+            // upstream ~line 760-765.
+            for (int i = 0; i < 24; ++i) {
+                if ((kalman_mask & (1u << i)) == 0) {
+                    continue;
+                }
+                const auto ii = static_cast<std::size_t>(i);
+                kfusion[ii] = SK_MZ[0] * (P[ii][21] + P[ii][0] * SH_MAG[1] - P[ii][1] * SH_MAG[2] +
+                                           P[ii][3] * SH_MAG[0] + P[ii][2] * SK_MZ[2] + P[ii][18] * SK_MZ[1] +
+                                           P[ii][16] * SK_MZ[4] - P[ii][17] * SK_MZ[3]);
+            }
+        }
+
+        // correct the covariance P = (I - K*H)*P = P - K*H*P, taking
+        // advantage of H_MAG's known-zero elements (upstream ~line
+        // 773-791) - shared across all 3 axes, matching upstream's own
+        // shared post-if/else-if block exactly.
+        Matrix24 khp{};
+        for (int i = 0; i <= lim; ++i) {
+            const auto ii = static_cast<std::size_t>(i);
+            for (int j = 0; j <= lim; ++j) {
+                const auto jj = static_cast<std::size_t>(j);
+                ftype res = 0;
+                res += (kfusion[ii] * H_MAG[0]) * P[0][jj];
+                res += (kfusion[ii] * H_MAG[1]) * P[1][jj];
+                res += (kfusion[ii] * H_MAG[2]) * P[2][jj];
+                res += (kfusion[ii] * H_MAG[3]) * P[3][jj];
+                res += (kfusion[ii] * H_MAG[16]) * P[16][jj];
+                res += (kfusion[ii] * H_MAG[17]) * P[17][jj];
+                res += (kfusion[ii] * H_MAG[18]) * P[18][jj];
+                // one value in H is always 1, and the others not
+                // mentioned here are zero, so we can skip that H product.
+                res += kfusion[ii] * P[static_cast<std::size_t>(H_MAG_unit_index)][jj];
+                khp[ii][jj] = res;
+            }
+        }
+
+        // Check that we are not going to drive any variances negative and
+        // skip the update if so (upstream ~line 793-798).
+        bool healthy_fusion = true;
+        for (int i = 0; i <= lim; ++i) {
+            const auto ii = static_cast<std::size_t>(i);
+            if (khp[ii][ii] > P[ii][ii]) {
+                healthy_fusion = false;
+            }
+        }
+
+        if (!healthy_fusion) {
+            // upstream ~line 824-830: record the bad axis (faultStatus -
+            // not modeled in this port, see banner), then CovarianceInit()
+            // and an early return - the SAME real, distinctive
+            // full-covariance-reset-and-abort behavior as the
+            // badly-conditioned checks above, not GPS fusion's simple
+            // per-axis skip.
+            covariance_init(dt_ekf_avg);
+            return false;
+        }
+
+        // update the covariance matrix (upstream ~line 800-801).
+        for (int i = 0; i <= lim; ++i) {
+            const auto ii = static_cast<std::size_t>(i);
+            for (int j = 0; j <= lim; ++j) {
+                const auto jj = static_cast<std::size_t>(j);
+                P[ii][jj] -= khp[ii][jj];
+            }
+        }
+
+        // force the covariance matrix to be symmetrical and limit the
+        // variances to prevent ill-conditioning (upstream ~line 804-805).
+        force_symmetry(lim);
+        constrain_variances(dt_ekf_avg);
+
+        // correct the state vector (upstream ~line 807-810,
+        // `statesArray[j] -= Kfusion[j]*innovMag[obsIndex];
+        // stateStruct.quat.normalize();` - see apply_state_correction()'s
+        // own comment for why this port applies it across all 24
+        // conceptual slots rather than bounding at `lim`, same reasoning
+        // as fuse_direct_state_observation() above).
+        //
+        // EXCLUDED: `if (have_table_earth_field && frontend->
+        // _mag_ef_limit > 0) MagTableConstrain();` (upstream ~line
+        // 812-815) - see ekf_core.hpp banner, no WMM table in this port.
+        apply_state_correction(kfusion, innovation);
+    }
+
+    return true;
 }
 
 } // namespace fwcpp::ekf

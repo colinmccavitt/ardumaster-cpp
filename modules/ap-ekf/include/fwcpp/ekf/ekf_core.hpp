@@ -636,6 +636,170 @@
 // updated. Worth revisiting only if a future phase's
 // fuse_direct_state_observation() behavior changes enough to make that
 // edge case not vanishingly rare.
+//
+// ============================================================================
+// CPP-059, PHASE 5 (this ticket): 3-axis magnetometer fusion. Everything
+// above this point is phase 1 (CPP-052) through phase 4 (CPP-058),
+// unmodified. Read NavEKF3_core::FuseMagnetometer() in full
+// (AP_NavEKF3_MagFusion.cpp ~line 473-843, ~370 lines) before extending
+// anything below - it was read in full for this phase, not skimmed from
+// the ticket's own summary of it.
+// ============================================================================
+//
+// WHAT THIS PHASE IS: a genuinely different, independent capability from
+// phases 2-4's GPS work - NOT built on fuse_direct_state_observation().
+// GPS fusion observes a single state element directly (H has exactly one
+// nonzero entry). Magnetometer fusion observes a nonlinear function of the
+// attitude quaternion (states 0-3) AND both magnetic-field state blocks
+// (earth_magfield 16-18, body_magfield 19-21) simultaneously - H_MAG below
+// has up to 8 nonzero entries per axis, and its own dense, auto-generated
+// varInnovMag/SK_MX/SK_MY/SK_MZ coefficient algebra. This was flagged
+// during CPP-056's own investigation and independently re-confirmed this
+// round by reading the real function - verbatim transcription (see below)
+// is the only responsible way to port it, exactly as CPP-052 phase 1 did
+// for CovariancePrediction()'s PS0..PS222 block.
+//
+// WHAT THIS PHASE BUILDS:
+//   - MagSample: new explicit input (see struct comment above).
+//   - fuse_magnetometer(mag, gyro, dt_ekf_avg): ports FuseMagnetometer()'s
+//     real body - predicted-field DCM rotation, innovMag, R_MAG, the
+//     SH_MAG common-subexpression array, per-axis varInnovMag/H_MAG/
+//     SK_MX/SK_MY/SK_MZ, the kalman_mask-gated Kalman gain, the KHP
+//     covariance update, and state correction - X, Y, Z axes fused
+//     sequentially (obsIndex 0/1/2), matching upstream's own per-axis loop
+//     structure directly.
+//   - innov_mag / var_innov_mag: public Vector3F members (upstream:
+//     innovMag/varInnovMag) so tests can verify the dense per-axis
+//     formulas independently, per the ticket's own verification standard
+//     (same treatment as gps_vel_test_ratio()/gps_pos_test_ratio() above).
+//   - GyroSample (phase 1's existing struct) reused, not duplicated, as
+//     fuse_magnetometer()'s second parameter: R_MAG's real
+//     `imuDataDelayed.delAng.length()/delAngDT` term needs exactly the two
+//     fields GyroSample already carries - no new type needed for this
+//     input.
+//
+// THE REAL, DISTINCTIVE FAILURE-BEHAVIOR THIS PHASE PORTS (verified
+// directly, matches the ticket): unlike GPS fusion's fuse_direct_state_
+// observation(), which just returns false and leaves P/state untouched
+// when its healthyFusion guard fails, FuseMagnetometer() calls
+// CovarianceInit() - a FULL covariance re-initialization, this port's
+// existing covariance_init() - and unconditionally aborts the ENTIRE
+// 3-axis fusion call on EITHER of two failure modes:
+//   1. `varInnovMag[i] < R_MAG` ("badly conditioned") on any single axis -
+//      checked BEFORE that axis's Kalman gain is even computed. Verified:
+//      the three varInnovMag checks for X/Y/Z all happen up front,
+//      sequentially, each with its own early return - not one combined
+//      check across all three.
+//   2. The same per-axis healthyFusion `KHP[i][i] > P[i][i]` guard GPS
+//      fusion also has - but here, failing it triggers CovarianceInit() +
+//      abort instead of GPS's simple "skip this axis, keep going".
+// fuse_magnetometer() returns a fresh bool (neither fuse_gps_*()'s
+// axes-fused int count nor fuse_direct_state_observation()'s single-axis
+// bool fits a 3-state all-or-nothing collapse cleanly): true only if all 3
+// axes completed without either abort path firing. A false return means P
+// has ALREADY been reset via covariance_init() by the time control returns
+// - callers should treat it as "the filter recovered by resetting P", not
+// "an update was merely skipped".
+//
+// CORRECTION / CLARIFICATION vs. THE TICKET'S OWN FRAMING: the ticket
+// describes the excluded magInnovGate test-ratio check (see below) as
+// analogous to "a separate outer gate" the way CPP-057's GPS gating wraps
+// around fuse_direct_state_observation() from outside. Verified directly
+// this round: that framing is not quite accurate. Upstream's real
+// magTestRatio/magHealth check (~line 606-616: `magTestRatio[i] =
+// sq(innovMag[i]) / (...); magHealth = (...); if (!magHealth) return;`) is
+// NOT a separate function at all - it lives INSIDE FuseMagnetometer()
+// itself, textually between the three varInnovMag checks and the per-axis
+// H_MAG/Kalman-gain loop. This ticket's own scope instruction to exclude
+// "innovation-consistency gating analogous to CPP-057" is followed
+// literally here regardless of that framing difference - the
+// magTestRatio/magHealth block is skipped entirely below, not reproduced -
+// but it means this phase omits a check that is textually inside the real
+// FuseMagnetometer() body, not a separate outer wrapper the ticket's
+// phrasing implied. Named here as a real, disclosed correction to the
+// ticket's own premise, per the ticket's own instruction to say so clearly
+// when something doesn't check out. Practical, real consequence: this
+// port's fuse_magnetometer() will proceed to fuse an axis with a
+// genuinely large normalized innovation - one that upstream's real
+// MAG_I_GATE_DEFAULT=300 would have rejected (verified: AP_NavEKF3.cpp
+// #define MAG_I_GATE_DEFAULT 300, all four APM_BUILD_TYPE blocks) - as
+// long as it clears the much coarser bad-conditioning/healthyFusion
+// checks. A real, named gap for a future phase, same spirit as CPP-057
+// already closed for GPS.
+//
+// EXPLICITLY OUT OF SCOPE (each named with its real upstream trigger, per
+// the ticket's own acceptance criterion):
+//   - `dvelBiasAxisInhibit[]` per-axis accel-bias-state narrowing inside
+//     kalman_mask (real trigger: `if (!dvelBiasAxisInhibit[index])
+//     kalman_mask |= (1<<stateIndex);`, appears identically x3, once per
+//     axis) - already a named phase-1/2 gap (this port has one
+//     inhibit_del_vel_bias_states bool covering all 3 accel-bias states,
+//     not a per-axis array). The kalman_mask construction below sets bits
+//     13-15 together, gated only by that single existing flag.
+//   - `MagTableConstrain()`/`have_table_earth_field`/`_mag_ef_limit` (real
+//     trigger: `if (have_table_earth_field && frontend->_mag_ef_limit >
+//     0) MagTableConstrain();`, run once per successfully-fused axis) -
+//     World Magnetic Model table lookup; no such table exists in this
+//     port (already a named phase-1 exclusion for ConstrainStates()'s
+//     alternate earth-magfield clamp branch - this is that same
+//     mechanism's second real upstream call site).
+//   - `magFusePerformed` (real trigger: set true once per axis, inside
+//     each of the three obsIndex branches) - a cross-process flag that
+//     exists solely to coordinate with `fuseEulerYaw()` (a separate
+//     yaw-only fusion path) so the two don't double-fuse yaw information
+//     in the same frame; moot with no fuseEulerYaw() in this port.
+//   - `controlMagYawReset()`/`realignYawGPS()`/`alignYawAngle()` (the
+//     whole yaw-reset/realignment state machine), `fuseEulerYaw()`,
+//     `FuseDeclination()`, and the EKFGSF_* (Gaussian Sum Filter yaw
+//     estimator) functions - all real, separate mechanisms elsewhere in
+//     AP_NavEKF3_MagFusion.cpp (verified: none of them are called from
+//     inside FuseMagnetometer() itself), none ported. This ticket is
+//     FuseMagnetometer() ONLY, matching its own stated scope.
+//   - The `magTestRatio`/`magHealth` innovation-consistency gate (real
+//     trigger: `frontend->_magInnovGate`, MAG_I_GATE_DEFAULT=300,
+//     AP_NavEKF3.cpp) - see the correction note above for exactly what/
+//     where this is and why it's excluded per the ticket's own
+//     instruction; a real, named gap, not silently absorbed.
+//   - `learnMagBiasFromGPS()` - a separate, unrelated mag-bias learning
+//     mechanism (verified: a distinct function, not called from within
+//     FuseMagnetometer()), not part of this ticket.
+//   - `faultStatus.bad_xmag`/`bad_ymag`/`bad_zmag` bookkeeping (real
+//     trigger: set on each of the abort paths and the per-axis
+//     healthyFusion-false branch) - write-only diagnostic flags; no
+//     faultStatus struct exists in this port (already the established
+//     GPS-fusion precedent - see fuse_gps_velocity()'s own doc comment
+//     above: "no faultStatus.bad_nvel/bad_evel/bad_dvel bookkeeping").
+//     fuse_magnetometer()'s bool return value is this port's only fault
+//     signal, same treatment.
+//   - `stateIndexLim` bounding of the Kfusion-computation loop itself
+//     (real trigger: upstream's own `for (auto i=0; i<24; i++)`, ~line
+//     668/728/788 - unlike the KHP/healthyFusion/P-update loops right
+//     after it, which upstream DOES bound at stateIndexLim, this
+//     particular loop is NOT bounded upstream; it instead relies on
+//     kalman_mask's bits being unset for any index the inhibit flags
+//     would otherwise exclude). Verified algebraically equal to bounding
+//     at state_index_lim() for every inhibit-flag combination this port's
+//     state_index_lim() and this phase's kalman_mask construction can
+//     produce - both are built from the same four inhibit flags in the
+//     same nesting order. Reproduced literally as upstream's own
+//     unbounded 0..23 loop with the mask check inside, NOT "corrected" to
+//     bound at lim - matching upstream exactly, not a divergence from it.
+//
+// A REAL, NOTABLE CONSEQUENCE OF inhibit_mag_states DEFAULTING TO true
+// (unchanged since phase 2 - see that banner's own "CORRECTION" section
+// above): H_MAG[16..18] (earth-field Jacobian entries) are still computed
+// and used inside the KHP covariance-coupling sum on every call, but
+// kalman_mask never sets bits 16-21 while inhibit_mag_states is true, so
+// Kfusion[16..21] is exactly 0 in that configuration - meaning
+// earth_magfield/body_magfield themselves are never actually updated by
+// fuse_magnetometer() at today's default settings, EXACTLY matching GPS
+// fusion's own already-documented mag/wind-permanently-inhibited behavior
+// (phase 1 banner, simplification 1). Attitude/velocity/position
+// (H_MAG[0..3], bits 0-9, unconditionally unmasked) and gyro/accel-bias
+// (bits 10-12/13-15, unmasked by default too) ARE corrected regardless -
+// so mag fusion has real, useful effect on attitude even with the
+// mag-field states still inhibited, verified by this phase's own tests.
+// ============================================================================
 
 #include <array>
 #include <cmath>
@@ -707,6 +871,20 @@ struct AccelSample {
 struct GpsSample {
     Vector3F velocity_ned;  // upstream: gpsDataDelayed.vel, NED m/s
     Vector2F position_ne;   // upstream: velPosObs[3]/[4] source value, local NE metres
+};
+
+// CPP-059 phase 5. upstream: mag_elements' `mag` field (AP_NavEKF3_core.h),
+// the one field FuseMagnetometer() actually reads via magDataDelayed.mag -
+// see this file's "CPP-059, PHASE 5" banner below for the full discussion.
+// Checked directly, per the ticket's own instruction, before adding this:
+// ap-compass's Compass class (modules/ap-compass/include/fwcpp/compass/
+// compass.hpp) takes a raw body-frame Vector3f via update(), with no
+// dedicated sample struct of its own to reuse - so this is a genuinely new
+// explicit input (ADR-0012), not a duplicate of an existing one, same
+// reasoning CPP-056's own GpsSample-vs-ahrs::GpsSample discussion above
+// already established for GPS.
+struct MagSample {
+    Vector3F mag;  // upstream: magDataDelayed.mag, body-frame gauss
 };
 
 // upstream: state_elements, AP_NavEKF3_core.h:566-575. Field order and
@@ -794,6 +972,14 @@ public:
     // (`lastVelPassTime_ms = 0; lastGpsPosPassTime_ms = 0;`).
     ftype last_vel_pass_time_s = 0;  // upstream: lastVelPassTime_ms
     ftype last_pos_pass_time_s = 0;  // upstream: lastGpsPosPassTime_ms
+
+    // CPP-059 phase 5. upstream: innovMag/varInnovMag (NavEKF3_core
+    // members) - see this file's "CPP-059, PHASE 5" banner. Public so
+    // tests can verify the dense per-axis formulas independently, per the
+    // ticket's own verification standard (same treatment as gps_vel_test_
+    // ratio()/gps_pos_test_ratio() above).
+    Vector3F innov_mag{};      // upstream: innovMag
+    Vector3F var_innov_mag{};  // upstream: varInnovMag
 
     // --- Noise/limit parameters. Defaults are upstream's real
     // Plane-4.7.0 AP_NavEKF3.cpp APM_BUILD_ArduPlane parameter-default
@@ -977,6 +1163,21 @@ public:
     // `sq(constrain_ftype(_gpsHorizPosNoise, 0.1f, 10.0f)) +
     // sq(gpsPosVarAccScale*accNavMag)`.
     [[nodiscard]] ftype gps_horiz_pos_obs_variance() const;
+
+    // CPP-059 phase 5. upstream: NavEKF3_core::FuseMagnetometer(),
+    // AP_NavEKF3_MagFusion.cpp ~line 473-843 - see this file's "CPP-059,
+    // PHASE 5" banner for the full scope, the verbatim-transcription
+    // rationale, and the CovarianceInit()-on-failure behavior this
+    // reproduces. `gyro` supplies R_MAG's angular-rate-scaling term
+    // (upstream: imuDataDelayed.delAng/delAngDT - this port's existing
+    // GyroSample already carries exactly those two fields, no new type
+    // needed). Returns false if EITHER upstream abort path fired (a
+    // badly-conditioned axis, or a failed healthyFusion guard) - P has
+    // already been reset via covariance_init() by the time this returns
+    // false, matching upstream's real CovarianceInit()-then-return
+    // behavior exactly. Returns true only if all 3 axes (X, Y, Z, fused
+    // sequentially) completed without either abort path firing.
+    bool fuse_magnetometer(const MagSample& mag, const GyroSample& gyro, ftype dt_ekf_avg);
 
 private:
     void constrain_states(ftype dt_ekf_avg);   // upstream: NavEKF3_core::ConstrainStates()
