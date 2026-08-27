@@ -225,6 +225,13 @@ inline bool ModeAUTO::enter() {
     if (first_item != nullptr) {
         if (first_item->command == MissionCommand::Takeoff) {
             plane_.do_takeoff();
+        } else if (first_item->command == MissionCommand::Land) {
+            // CPP-041 - upstream: start_command()'s NAV_LAND case
+            // (commands_logic.cpp) dispatching to Plane::do_land(). A
+            // mission that starts directly on a Land item is an edge case
+            // upstream itself supports (no ordering requirement on
+            // start_or_resume()'s own dispatch) - reproduced the same way.
+            plane_.do_land();
         } else {
             plane_.do_nav_wp();
         }
@@ -258,6 +265,25 @@ inline void ModeAUTO::update(const StabilizeInputs& in) {
         plane_.takeoff_calc_roll(in);
         plane_.takeoff_calc_pitch(in);
         plane_.takeoff_calc_throttle();
+    } else if (item != nullptr && item->command == MissionCommand::Land) {
+        // CPP-041 - upstream: mode_auto.cpp's own `else if (nav_cmd_id ==
+        // MAV_CMD_NAV_LAND) { calc_nav_roll(); calc_nav_pitch();
+        // nav_roll_cd = landing.constrain_roll(nav_roll_cd,
+        // g.level_roll_limit*100UL); if (landing.is_throttle_suppressed())
+        // { SRV_Channels::set_output_scaled(k_throttle, 0.0); } else {
+        // calc_throttle(); } }`, verified directly, reproduced in full
+        // (minus the ABORT_LANDING/quadplane branches - excluded, see
+        // plane.hpp's own "CPP-041 ADDENDUM").
+        plane_.calc_nav_roll(in);
+        plane_.calc_nav_pitch();
+        plane_.nav_roll_cd = plane_.constrain_landing_roll(plane_.nav_roll_cd);
+        if (plane_.is_landing_final_flare()) {
+            // if landing is considered complete throttle is never allowed,
+            // regardless of landing type (upstream's own comment).
+            plane_.srv_channels.set_output_scaled(srv::Function::kThrottle, 0.0f);
+        } else {
+            plane_.calc_throttle();
+        }
     } else {
         plane_.calc_nav_roll(in);
         plane_.calc_nav_pitch();
@@ -272,23 +298,37 @@ inline void ModeAUTO::navigate(const StabilizeInputs& in) {
     }
     const nav::L1Inputs l1_in = plane_.build_l1_inputs(in);
 
-    // CPP-039 - upstream: Plane::verify_command()'s own `switch(cmd.id)`
-    // dispatch (commands_logic.cpp) - `case MAV_CMD_NAV_TAKEOFF: return
-    // verify_takeoff(); case MAV_CMD_NAV_WAYPOINT: return verify_nav_wp
-    // (cmd);` - restricted to this port's two-command vocabulary, same
-    // reasoning as ModeAUTO::enter() above.
-    const bool item_complete =
-        (item->command == MissionCommand::Takeoff) ? plane_.verify_takeoff(l1_in) : plane_.verify_nav_wp(l1_in);
+    // CPP-039/CPP-041 - upstream: Plane::verify_command()'s own
+    // `switch(cmd.id)` dispatch (commands_logic.cpp) - `case
+    // MAV_CMD_NAV_TAKEOFF: return verify_takeoff(); case MAV_CMD_NAV_WAYPOINT:
+    // return verify_nav_wp(cmd); case MAV_CMD_NAV_LAND: return
+    // landing.verify_land(...);` - restricted to this port's three-command
+    // vocabulary, same reasoning as ModeAUTO::enter() above. verify_land()
+    // always returns false (see plane.hpp's own verify_land() doc comment),
+    // so item_complete is always false while the current item is Land - the
+    // mission simply never advances off it, matching upstream's real
+    // continue_after_land()-defaults-false behavior (see plane.hpp's "CPP-041
+    // ADDENDUM").
+    bool item_complete;
+    if (item->command == MissionCommand::Takeoff) {
+        item_complete = plane_.verify_takeoff(l1_in);
+    } else if (item->command == MissionCommand::Land) {
+        item_complete = plane_.verify_land(l1_in);
+    } else {
+        item_complete = plane_.verify_nav_wp(l1_in);
+    }
 
     if (item_complete) {
         if (plane_.mission.advance()) {
             // upstream: AP_Mission::update()'s own advance-then-dispatch-
             // start_command() sequence - the newly-current item's REAL
-            // command type decides do_takeoff() vs do_nav_wp(), not
+            // command type decides do_takeoff()/do_land()/do_nav_wp(), not
             // whichever one just completed.
             const MissionItem* next_item = plane_.mission.current();
             if (next_item != nullptr && next_item->command == MissionCommand::Takeoff) {
                 plane_.do_takeoff();
+            } else if (next_item != nullptr && next_item->command == MissionCommand::Land) {
+                plane_.do_land();
             } else {
                 plane_.do_nav_wp();
             }

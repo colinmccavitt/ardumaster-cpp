@@ -5978,6 +5978,241 @@ TEST_CASE("Closed loop: AUTO flies a 2-item mission (Takeoff, then Waypoint), au
 }
 
 // ---------------------------------------------------------------------
+// CPP-041: AUTO's real MAV_CMD_NAV_LAND mission command (phase 2 of the
+// MAV_CMD_NAV_LAND effort; phase 1, CPP-040, ported TECS's flare
+// height-rate-demand blend). Extends CPP-039's own 2-item (Takeoff,
+// Waypoint) closed-loop test above to a real 3-item mission (Takeoff,
+// Waypoint, Land), reusing the same collinear-leg design (all three
+// points share one bearing, due north) so the NORMAL->APPROACH heading/
+// crosstrack checks (Plane::verify_land(), plane.hpp) are satisfied
+// immediately on entering the Land leg, isolating the stage-machine/
+// flare-blend/throttle-suppression behavior this ticket actually adds
+// from unrelated L1 turn-in dynamics.
+//
+// The ticket's own required proof points, each checked directly against
+// real SimPlane ground truth / real Tecs/Plane state, never inferred from
+// a flag alone:
+//   1. Automatic Takeoff -> cruise (Waypoint) -> APPROACH -> FINAL flare
+//      transition, with no manual mode-switching or mission-index forcing
+//      anywhere in this test.
+//   2. Once FINAL, throttle output is a genuine, exact zero every single
+//      tick (Plane::is_landing_final_flare()'s hard-zero branch,
+//      mode.hpp's ModeAUTO::update() Land dispatch) - not merely near
+//      zero from a converged throttle law.
+//   3. TECS's CPP-040 flare blend is GENUINELY engaged: the height-RATE
+//      demand (Tecs::get_height_rate_demand()) is captured once shortly
+//      before FINAL (still tracking the glide slope, a real ongoing
+//      descent-rate demand of some magnitude) and again well after FINAL
+//      has been active - and the LATE value has visibly moved toward
+//      -Tecs::get_land_sinkrate() (LAND_SINK, real default 0.25 m/s),
+//      distinctly different from the pre-FINAL demand - proving the
+//      demand's own SHAPE changed, not just that a bool flipped.
+//   4. Real altitude convergence: SimPlane's TRUE altitude (ground truth,
+//      not any estimate) is tracked to a real minimum near ground level,
+//      and TRUE horizontal distance to the LAND point is tracked to a
+//      real minimum close to it - the vehicle actually descends onto the
+//      approach and closes on the LAND point, it does not merely continue
+//      cruising.
+// ---------------------------------------------------------------------
+
+TEST_CASE("Closed loop: AUTO flies a 3-item mission (Takeoff, Waypoint, Land), automatically descending the real "
+          "NORMAL->APPROACH->FINAL glide slope and flare, with genuine throttle suppression and TECS flare-blend "
+          "engagement, in SimPlane's ground truth",
+          "[vehicle][integration][auto][land]") {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    sim_plane.position = fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f);
+
+    // Ground steering must be explicitly enabled - see the Takeoff/Waypoint
+    // closed-loop test's own comment above.
+    plane.aparm.ground_steer_alt = 5.0f;
+
+    // A real 3-item mission, all three points COLLINEAR (due north) - see
+    // this test's own banner comment above for why: it isolates the
+    // NORMAL->APPROACH/FINAL stage machine and flare blend from unrelated
+    // L1 turn-in dynamics. Climb to 50m, cruise 500m north at 50m, then
+    // glide down a real 50m-over-400m slope (~7 degrees) to a LAND point
+    // at ground level.
+    std::array<MissionItem, 3> items;
+    items[0].command = MissionCommand::Takeoff;
+    items[0].loc = make_loc(50.0f, 0.0f, 50.0f);
+    items[0].takeoff_pitch_deg = 15.0f;
+    items[1].command = MissionCommand::Waypoint;
+    items[1].loc = make_loc(500.0f, 0.0f, 50.0f);
+    items[2].command = MissionCommand::Land;
+    items[2].loc = make_loc(900.0f, 0.0f, 0.0f); // the real LAND point - ground level
+    REQUIRE(plane.mission.load(items));
+
+    REQUIRE(plane.set_mode(plane.mode_auto));
+    REQUIRE(plane.control_mode == &plane.mode_auto);
+    REQUIRE(plane.mission.current() != nullptr);
+    REQUIRE(plane.mission.current()->command == MissionCommand::Takeoff);
+
+    constexpr float kDt = 0.02f; // 50Hz
+    std::uint64_t now_us = 0;
+    std::uint32_t now_ms = 0;
+
+    bool saw_takeoff_item = false;
+    bool saw_waypoint_item = false;
+    bool saw_land_item = false;
+    bool saw_approach_stage = false;
+    bool saw_final_stage = false;
+    int final_first_tick = -1;
+    bool throttle_always_zero_in_final = true;
+    float hgt_rate_dem_before_final = 0.0f;
+    bool have_pre_final_sample = false;
+    float hgt_rate_dem_late_final = 0.0f;
+    bool have_late_final_sample = false;
+    float min_altitude_m = std::numeric_limits<float>::max();
+    float min_dist_to_land_point = std::numeric_limits<float>::max();
+
+    // Generous headroom: climb (~10s) + 500m cruise at AIRSPEED_CRUISE's
+    // real 12 m/s default (~45s) + 400m final glide-slope leg (~35s) +
+    // enough extra ticks after FINAL first engages to observe the flare
+    // blend's own shape genuinely change (a few more seconds) - see this
+    // test's own banner for why the mission never advances off the Land
+    // item (verify_land() always returns false), so there is no
+    // mission-complete-to-RTL confound to worry about here, unlike the
+    // Takeoff/Waypoint test above.
+    constexpr int kTotalTicks = 9000; // 180 simulated seconds
+
+    for (int i = 0; i < kTotalTicks; ++i) {
+        now_us += 20000;
+        now_ms += 20;
+
+        set_sticks(plane, 1500, 1500, 1500, 1500);
+
+        fwcpp::ahrs::GyroSample gyro_sample;
+        gyro_sample.gyro = sim_plane.gyro;
+        gyro_sample.delta_angle = sim_plane.gyro * kDt;
+        gyro_sample.dangle_dt = kDt;
+
+        StabilizeInputs in;
+        in.dt = kDt;
+        in.now_ms = now_ms;
+        in.now_us = now_us;
+        plane.armed = true;
+        plane.hal.rc_output.force_safety_off();
+        in.position_ned = sim_plane.position;
+        in.current_altitude_m = -sim_plane.position.z;
+        in.true_velocity_ned = sim_plane.velocity_ef;
+        in.gps_use_enabled = true;
+        in.airspeed_valid = true;
+        in.airspeed_eas = sim_plane.airspeed;
+
+        // Capture the pre-tick height-rate demand BEFORE this tick's
+        // tick() call can change it - used only to grab one "still
+        // tracking the approach, not yet FINAL" sample below.
+        const bool was_final_before_tick = plane.is_landing_final_flare();
+        const float hgt_rate_dem_pre_tick = plane.tecs.get_height_rate_demand();
+
+        tick(plane, gyro_sample, in);
+
+        const float aileron = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kAileron) / fwcpp::vehicle::kServoMax;
+        const float elevator = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kElevator) / fwcpp::vehicle::kServoMax;
+        const float rudder = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kRudder) / fwcpp::vehicle::kServoMax;
+        const float throttle = plane.srv_channels.get_output_scaled(fwcpp::srv::Function::kThrottle) / 100.0f;
+        sim_plane.update(aileron, elevator, rudder, throttle, kDt);
+
+        if (plane.mission.current() != nullptr) {
+            const MissionCommand cmd = plane.mission.current()->command;
+            if (cmd == MissionCommand::Takeoff) {
+                saw_takeoff_item = true;
+            } else if (cmd == MissionCommand::Waypoint) {
+                saw_waypoint_item = true;
+            } else if (cmd == MissionCommand::Land) {
+                saw_land_item = true;
+
+                if (plane.landing_stage == Plane::LandingStage::Approach) {
+                    saw_approach_stage = true;
+                }
+
+                const bool is_final_now = plane.is_landing_final_flare();
+                if (is_final_now) {
+                    if (!saw_final_stage) {
+                        final_first_tick = i;
+                        // This is the FIRST tick FINAL is observed - the
+                        // pre-tick sample (captured above, before tick()
+                        // ran) is therefore a genuine "still APPROACH,
+                        // still tracking the glide slope" height-rate
+                        // demand, not a FINAL one.
+                        if (!was_final_before_tick && !have_pre_final_sample) {
+                            hgt_rate_dem_before_final = hgt_rate_dem_pre_tick;
+                            have_pre_final_sample = true;
+                        }
+                    }
+                    saw_final_stage = true;
+
+                    // Proof point 2: genuine, exact throttle-zero, every
+                    // single tick while FINAL - not merely near zero.
+                    if (throttle != 0.0f) {
+                        throttle_always_zero_in_final = false;
+                    }
+
+                    // Proof point 3 (late sample): captured a couple of
+                    // seconds (100 ticks) after FINAL first engaged, so
+                    // the blend has had real time to move the demand.
+                    if (final_first_tick >= 0 && i >= final_first_tick + 100 && !have_late_final_sample) {
+                        hgt_rate_dem_late_final = plane.tecs.get_height_rate_demand();
+                        have_late_final_sample = true;
+                    }
+                }
+
+                const float dist_to_land = plane.current_loc.get_distance(items[2].loc);
+                min_dist_to_land_point = std::min(min_dist_to_land_point, dist_to_land);
+            }
+        }
+
+        min_altitude_m = std::min(min_altitude_m, -sim_plane.position.z);
+    }
+
+    INFO("saw_takeoff_item=" << saw_takeoff_item << ", saw_waypoint_item=" << saw_waypoint_item
+                              << ", saw_land_item=" << saw_land_item << ", saw_approach_stage=" << saw_approach_stage
+                              << ", saw_final_stage=" << saw_final_stage << ", final_first_tick=" << final_first_tick
+                              << ", throttle_always_zero_in_final=" << throttle_always_zero_in_final
+                              << ", have_pre_final_sample=" << have_pre_final_sample
+                              << ", hgt_rate_dem_before_final=" << hgt_rate_dem_before_final
+                              << ", have_late_final_sample=" << have_late_final_sample
+                              << ", hgt_rate_dem_late_final=" << hgt_rate_dem_late_final
+                              << ", land_sinkrate=" << plane.tecs.get_land_sinkrate()
+                              << ", min_altitude_m=" << min_altitude_m
+                              << ", min_dist_to_land_point=" << min_dist_to_land_point);
+
+    // Proof point 1: genuinely flew all three items, in order, with the
+    // full NORMAL->APPROACH->FINAL stage machine engaging - not a mission-
+    // index skip.
+    REQUIRE(saw_takeoff_item);
+    REQUIRE(saw_waypoint_item);
+    REQUIRE(saw_land_item);
+    REQUIRE(saw_approach_stage);
+    REQUIRE(saw_final_stage);
+    REQUIRE(final_first_tick >= 0);
+
+    // Proof point 2.
+    REQUIRE(throttle_always_zero_in_final);
+
+    // Proof point 3: the flare blend's own height-rate demand genuinely
+    // changed SHAPE, not just a flag - the late-FINAL sample has moved
+    // substantially closer to -LAND_SINK than the pre-FINAL sample was,
+    // and the pre-FINAL sample was a real, non-trivial descent-rate
+    // demand (still actively tracking the glide slope), not already
+    // sitting near -LAND_SINK by coincidence.
+    REQUIRE(have_pre_final_sample);
+    REQUIRE(have_late_final_sample);
+    const float land_sink = plane.tecs.get_land_sinkrate();
+    INFO("pre-final |hgt_rate_dem - (-land_sink)| = " << std::fabs(hgt_rate_dem_before_final - (-land_sink))
+                                                        << ", late-final |hgt_rate_dem - (-land_sink)| = "
+                                                        << std::fabs(hgt_rate_dem_late_final - (-land_sink)));
+    REQUIRE(std::fabs(hgt_rate_dem_before_final - (-land_sink)) > 0.3f);
+    REQUIRE(std::fabs(hgt_rate_dem_late_final - (-land_sink)) < 0.2f);
+
+    // Proof point 4: real descent toward the ground, close to the LAND
+    // point - not merely continuing to fly.
+    REQUIRE(min_altitude_m < 5.0f);
+    REQUIRE(min_dist_to_land_point < 100.0f);
+}
+
+// ---------------------------------------------------------------------
 // CPP-038: closed-loop flap servo output tests, driven entirely through
 // tick() - the ticket's own required end-to-end verification.
 // ---------------------------------------------------------------------

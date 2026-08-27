@@ -107,18 +107,20 @@
 //     build-time flags, and both ARE ported (see Gains::option_glider_only/
 //     option_descent_speedup below) since neither is landing-specific.
 //
-//   - get_land_sinkrate()/get_land_airspeed()/set_path_proportion()
-//     accessors - STILL excluded as of CPP-040 (verified: grepped every
-//     call site of all three in AP_TECS.cpp/.h and ArduPlane, none is the
-//     flare height-rate blend CPP-040 ported). _landAirspeed and
-//     _path_proportion (and the AP_Landing-derived state
+//   - get_land_airspeed()/set_path_proportion() accessors - STILL excluded
+//     as of CPP-041 (verified: grepped every call site of both in
+//     AP_TECS.cpp/.h and ArduPlane, neither is the flare height-rate blend
+//     CPP-040 ported nor CPP-041's glide-slope aim-point math). _landAirspeed
+//     and _path_proportion (and the AP_Landing-derived state
 //     set_path_proportion() feeds) likewise stay unported - no caller in
-//     this slice's scope needs them. _land_sink itself, however, is NOW
-//     ported as Gains::land_sink (CPP-040, LAND_SINK) because the flare
-//     blend's own arithmetic reads it directly - only the public
-//     get_land_sinkrate() accessor wrapper remains unported, since this
-//     slice has no external caller (e.g. a future AP_Landing-equivalent)
-//     that would call it instead of reading gains_.land_sink.
+//     this port's scope needs them (CPP-041's own "CPP-041 ADDENDUM",
+//     plane.hpp, traces get_land_airspeed()'s real disabled-sentinel (-1)
+//     default explicitly). get_land_sinkrate() itself IS now ported
+//     (CPP-041) - see this class's own doc comment on that accessor, right
+//     next to get_max_sinkrate() below - because CPP-041's real caller
+//     (Plane::setup_landing_glide_slope(), plane.hpp) needed it directly,
+//     exactly the "future AP_Landing-equivalent" this note originally
+//     anticipated.
 //
 // UPSTREAM DEAD CODE FOUND, not ported (a fact about upstream, not a
 // judgment call about scope): `AP_Float _accel_gf;` is declared in
@@ -668,6 +670,18 @@ public:
 
     [[nodiscard]] float get_max_climbrate() const { return gains_.max_climb_rate; }
     [[nodiscard]] float get_max_sinkrate() const { return gains_.max_sink_rate; }
+
+    // upstream: AP_TECS::get_land_sinkrate() (AP_TECS.h) - `return
+    // _land_sink;`. CPP-040 ported the underlying LAND_SINK field
+    // (Gains::land_sink) but left this public accessor unported, noting
+    // "no external caller (e.g. a future AP_Landing-equivalent) that would
+    // call it instead of reading gains_.land_sink" - CPP-041 (fwcpp::
+    // vehicle::Plane::setup_landing_glide_slope(), plane.hpp) is exactly
+    // that future caller: the real glide-slope aim-point math
+    // (type_slope_setup_landing_glide_slope(), AP_Landing_Slope.cpp) reads
+    // tecs_Controller->get_land_sinkrate() directly, and gains_ is private
+    // to this class, so a real caller outside Tecs needs this accessor.
+    [[nodiscard]] float get_land_sinkrate() const { return gains_.land_sink; }
 
     // Added to let SoaringController reset pitch integrator to zero.
     void reset_pitch_i() {

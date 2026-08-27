@@ -3081,6 +3081,13 @@ struct FixedWingTunables {
     float flap_2_percent = 0.0f; // FLAP_2_PERCNT / g.flap_2_percent, Parameters.cpp GSCALAR default FLAP_2_PERCENT (config.h: 0)
     float flap_2_speed = 0.0f;   // FLAP_2_SPEED / g.flap_2_speed, Parameters.cpp GSCALAR default FLAP_2_SPEED (config.h: 0), m/s
     float flap_slewrate = 75.0f; // FLAP_SLEWRATE / g.flap_slewrate, Parameters.cpp GSCALAR default 75, %/s
+
+    // --- CPP-041 (MAV_CMD_NAV_LAND) additions - see plane.hpp's own
+    // "CPP-041 ADDENDUM" file banner. All three defaults are AP_Landing.cpp's
+    // real AP_GROUPINFO defaults (read directly), not invented.
+    float flare_alt_m = 3.0f;  // LAND_FLARE_ALT / AP_Landing::flare_alt, m
+    float flare_sec = 2.0f;    // LAND_FLARE_SEC / AP_Landing::flare_sec, s
+    float flare_aim_pct = 50.0f; // LAND_FLARE_AIM / AP_Landing::flare_effectivness_pct, %
 };
 
 // CPP-038: a small, LOCAL port of upstream's SRV_Channels::set_slew_rate()/
@@ -3245,29 +3252,31 @@ struct StabilizeInputs {
 // slice's own tests and any realistic hand-authored test mission.
 inline constexpr std::size_t kMaxMissionItems = 32;
 
-// upstream: AP_Mission::Mission_Command::id (MAV_CMD_NAV_*) - CPP-039 adds
+// upstream: AP_Mission::Mission_Command::id (MAV_CMD_NAV_*) - CPP-039 added
 // the minimal real command-type discriminant this port's mission
-// vocabulary now needs, NOT a full ~80-value MAV_CMD_NAV_*/MAV_CMD_DO_*
-// port (per the ticket's own instruction). Only the two real command
-// types this port's Mode dispatch (ModeAUTO, mode.hpp) can act on today.
-// LAND/LOITER*/RTL/jump/do-commands/splines/VTOL/NAV_SCRIPT_TIME remain
+// vocabulary needed (Waypoint/Takeoff); CPP-041 adds a third,
+// MAV_CMD_NAV_LAND, reusing CPP-040's TECS flare blend - see this file's
+// own "CPP-041 ADDENDUM" (below ModeAUTO's class banner) for the full
+// design. Still NOT a full ~80-value MAV_CMD_NAV_*/MAV_CMD_DO_* port (per
+// both tickets' own instruction) - only the three real command types this
+// port's Mode dispatch (ModeAUTO, mode.hpp) can act on today.
+// LOITER*/RTL/jump/do-commands/splines/VTOL/NAV_SCRIPT_TIME remain
 // entirely absent from this vocabulary - see MissionItem's own banner
 // below and ModeAUTO's class banner (plane.hpp) for the full, still-
-// current exclusion list. MAV_CMD_NAV_LAND in particular is explicitly a
-// separate, larger, future ticket (needs a real AP_Landing-equivalent
-// subsystem this port has not built) - not attempted here.
+// current exclusion list.
 enum class MissionCommand : std::uint8_t {
     Waypoint, // upstream: MAV_CMD_NAV_WAYPOINT
     Takeoff,  // upstream: MAV_CMD_NAV_TAKEOFF
+    Land,     // upstream: MAV_CMD_NAV_LAND - see this file's "CPP-041 ADDENDUM"
 };
 
 // upstream: AP_Mission::Mission_Command, reduced to exactly what this
-// slice's vocabulary supports - see file banner. CPP-039: now tagged with
-// a real (minimal) command type - see MissionCommand above - rather than
-// the previous "every MissionItem IS a NAV_WAYPOINT" untagged design;
-// LOITER*/RTL/jump/do-commands/splines/VTOL/NAV_LAND/NAV_SCRIPT_TIME are
-// still all excluded (see file banner's exclusion list and MissionCommand's
-// own doc comment above for MAV_CMD_NAV_LAND's own separate-ticket status).
+// slice's vocabulary supports - see file banner. CPP-039 tagged this with
+// a real (minimal) command type - see MissionCommand above; CPP-041 adds
+// the Land tag (see this file's "CPP-041 ADDENDUM" note) - it needs NO new
+// field at all, just `loc` (the LAND point), already present below.
+// LOITER*/RTL/jump/do-commands/splines/VTOL/NAV_SCRIPT_TIME are still all
+// excluded (see file banner's exclusion list).
 struct MissionItem {
     // Defaults to Waypoint - EVERY PRE-CPP-039 CALLER'S EXACT BEHAVIOR IS
     // PRESERVED: a MissionItem constructed without setting `command`
@@ -3281,7 +3290,7 @@ struct MissionItem {
     // Plane::verify_nav_wp) exactly, as a plain float rather than a packed
     // LOWBYTE(p1) byte (which upstream itself caps at 255m - this field has
     // no such packing constraint to reproduce). MEANINGFUL ONLY FOR
-    // MissionCommand::Waypoint - a Takeoff item never reads this.
+    // MissionCommand::Waypoint - a Takeoff/Land item never reads this.
     float acceptance_radius_m = 0.0f;
     // upstream: cmd.p1 (uint16_t, whole degrees) - Plane::do_takeoff()
     // (commands_logic.cpp) reads it as `(int16_t)cmd.p1 * 100` to seed
@@ -3291,7 +3300,13 @@ struct MissionItem {
     // float degrees here rather than reproducing cmd.p1's packed uint16_t
     // shape - same "no packing constraint to reproduce" reasoning
     // acceptance_radius_m's own doc comment already gives. MEANINGFUL ONLY
-    // FOR MissionCommand::Takeoff - a Waypoint item never reads this.
+    // FOR MissionCommand::Takeoff - a Waypoint/Land item never reads this.
+    // MissionCommand::Land ALSO never reads this - see this file's "CPP-041
+    // ADDENDUM" for exactly why NAV_LAND's own cmd.p1 (abort altitude) and
+    // takeoff-pitch fallback are both real, but dead, in this port's scope
+    // (both exist upstream only to feed the abort-landing state machine,
+    // which is out of scope - see that addendum's own "ABORT-LANDING"
+    // exclusion note).
     float takeoff_pitch_deg = 0.0f;
 };
 
@@ -3763,11 +3778,10 @@ private:
 // not a re-implementation" that slice's own commit message anticipated.
 //
 // EXCLUDED (documented, not silently dropped):
-//   - MAV_CMD_NAV_LAND's own dispatch branch (`nav_cmd_id == MAV_CMD_
-//     NAV_LAND` in update(), `case MAV_CMD_NAV_LAND: return verify_land()`
-//     -equivalent in navigate()) - needs a real AP_Landing-equivalent
-//     subsystem this port has not built. Explicitly a SEPARATE, LARGER,
-//     FUTURE TICKET (CPP-039's own scope note) - not attempted here.
+//   - MAV_CMD_NAV_LAND's own dispatch branch - NO LONGER EXCLUDED AS OF
+//     CPP-041 (see this file's own "CPP-041 ADDENDUM", just below this
+//     class) - a real, but deliberately narrowed, glide-slope + flare
+//     landing, reusing CPP-040's TECS flare blend.
 //   - MAV_CMD_NAV_SCRIPT_TIME and the quadplane special-case branches in
 //     update() (`quadplane.in_vtol_auto()`, `is_vtol_takeoff()`/
 //     `do_vtol_takeoff()`, `is_vtol_land()`/`do_vtol_land()`/
@@ -3793,6 +3807,236 @@ private:
 //     RUNNING state machine, a landing subsystem - see plane.hpp's own
 //     Mission "EXCLUDED" note) - so ModeAUTO relies on the base class's
 //     default no-op exit(), a real, traced exclusion, not an oversight.
+//
+// =====================================================================
+// CPP-041 ADDENDUM - MAV_CMD_NAV_LAND (phase 2 of the MAV_CMD_NAV_LAND
+// effort; phase 1, CPP-040, ported TECS's flare height-rate-demand blend
+// as `Tecs::update_pitch_throttle()`'s optional `TecsLandingInputs`
+// parameter). Upstream sources read in full: libraries/AP_Landing/
+// AP_Landing_Slope.cpp (type_slope_do_land()/type_slope_verify_land()/
+// type_slope_setup_landing_glide_slope()/type_slope_is_flaring()/
+// type_slope_is_throttle_suppressed()/type_slope_constrain_roll()/
+// type_slope_get_target_airspeed_cm()), ArduPlane/mode_auto.cpp's real
+// MAV_CMD_NAV_LAND branch (ModeAuto::update()), ArduPlane/commands_logic.cpp
+// Plane::do_land()/Plane::verify_command()'s NAV_LAND case, ArduPlane/
+// navigation.cpp's calc_airspeed_errors() (the LAND-flight-stage airspeed-
+// target branch), ArduPlane/altitude.cpp (height_above_target()/
+// set_target_altitude_proportion()/set_offset_altitude_location()), and
+// ArduPlane/Parameters.cpp/libraries/AP_Landing/AP_Landing.cpp/libraries/
+// AP_TECS/AP_TECS.cpp for every real default cited below.
+//
+// SCOPE: only the real upstream NORMAL->APPROACH->FINAL slope-stage
+// machine (`enum class SlopeStage` upstream is NORMAL/APPROACH/PREFLARE/
+// FINAL - PREFLARE is excluded, see below, so it collapses to three
+// stages here, not four). `LandingStage` (this file, below) is this
+// port's equivalent enum.
+//
+// MISSIONITEM NEEDS NO NEW FIELD: upstream's Plane::do_land() reads
+// cmd.p1 (abort altitude, falling back to the last takeoff altitude or a
+// literal 30m) and conditionally seeds auto_state.takeoff_pitch_cd (a 10
+// degree fallback) - BOTH exist upstream ONLY to feed the abort-landing
+// state machine (ModeAuto::update()'s `flight_stage ==
+// AP_FixedWing::FlightStage::ABORT_LANDING` branch, which reuses
+// takeoff_calc_roll()/pitch()/throttle()) - itself entirely excluded (see
+// "ABORT-LANDING", below). With no abort-landing state machine to feed,
+// neither value has a real reader in this port's scope, so MissionItem
+// gains no new field for Land at all - a Land item is fully described by
+// the `loc` field Waypoint/Takeoff already share.
+//
+// LANDINGSTATE - MINIMAL BY DESIGN: upstream's AP_Landing also tracks
+// `slope`/`initial_slope` (real slope-angle bookkeeping) and
+// `type_slope_flags.post_stats` - traced directly against every real
+// reader: `slope`/`initial_slope` feed ONLY the one-time "Landing glide
+// slope %.1f degrees" GCS message and the rangefinder-bump slope
+// recalculation (both excluded - no GCS subsystem, no rangefinder
+// subsystem); `post_stats` feeds ONLY a GCS distance-from-LAND-point
+// message and disarm_if_autoland_complete_fn() (also excluded - no
+// is_flying()). None has a real reader left once those subsystems are
+// excluded, so this port's landing state is a single `LandingStage
+// landing_stage` field on Plane - not a struct - matching TakeoffState's
+// own precedent of "port only what this scope's functions actually
+// read/write" without the write-only fields.
+//
+// NORMAL -> APPROACH TRANSITION: verified directly against this port's
+// own L1Control (CPP-017, modules/ap-nav/include/fwcpp/nav/l1_control.hpp)
+// - bearing_error_cd()/crosstrack_error()/data_is_stale() ALL already
+// exist there, unchanged, exactly as the ticket predicted - no new
+// geometry or navigation primitive was needed. The
+// `mission.get_prev_nav_cmd_id() == MAV_CMD_NAV_LOITER_TO_ALT` disjunct
+// (upstream's type_slope_verify_land()) is excluded - no LOITER_TO_ALT
+// command in this port's MissionCommand vocabulary, so that disjunct can
+// never be true here (a real, structural non-applicability, not a
+// dropped feature).
+//
+// FLARE TRIGGER: `below_flare_alt` (height <= LAND_FLARE_ALT, real
+// default 3.0 - AP_Landing.cpp AP_GROUPINFO, verified directly) OR
+// `below_flare_sec` (LAND_FLARE_SEC > 0 && height <= sink_rate*
+// LAND_FLARE_SEC, real default 2.0 - AP_Landing.cpp AP_GROUPINFO, verified
+// directly), gated on `on_approach_stage` (upstream: type_slope_stage ==
+// APPROACH or PREFLARE; PREFLARE excluded here, so this collapses to
+// exactly `landing_stage == Approach`). Reproduced as
+// FixedWingTunables::flare_alt_m/flare_sec (below), real defaults, not
+// invented.
+//
+// HEIGHT SUBSTITUTION: upstream's `height` parameter to verify_land() is
+// Plane::get_landing_height() minus auto_state.terrain_correction and a
+// rangefinder correction - both zero in this port (no terrain subsystem,
+// no rangefinder subsystem, both already-established exclusions
+// throughout this file), collapsing get_landing_height() to plain
+// height_above_target(), which itself collapses (home.alt is
+// definitionally 0 in this port's one frame - file banner's own
+// "ALTITUDE REFERENCE FRAME" note) to `(current_loc.alt -
+// next_WP_loc.alt) * 0.01f` - computed inline in verify_land(), below, no
+// separate function needed.
+//
+// SINK-RATE SUBSTITUTION, A NAMED, DOCUMENTED DECISION: upstream's
+// `sink_rate` parameter to verify_land() is `auto_state.sink_rate`, a
+// LOW-PASS-FILTERED vertical velocity computed independently in
+// Plane::update_alt() (`0.8*old + 0.2*new`, fed from ahrs.get_velocity_NED
+// ()/GPS/baro climb rate, Plane.cpp, read directly) - a real, but
+// separate, filter this port has never built (see plane.hpp's own
+// pre-existing "GET_TAKEOFF_PITCH_MIN_CD()" note, which already names
+// this exact gap: "a Tecs::get_sink_rate()-style accessor this port's
+// Tecs has never exposed"). This port instead reuses Tecs's OWN internal
+// filtered climb-rate state, NOW exposed read-only as
+// `Tecs::get_climb_rate()` (ap-tecs/tecs.hpp, already public since that
+// module's own "TEST/OBSERVABILITY ACCESSORS" section - `_climb_rate`,
+// upstream's real update_50hz()/_update_speed() filtered estimate,
+// up-positive) - `sink_rate = -tecs.get_climb_rate()` (down-positive, to
+// match upstream's own sign convention). This is a REAL, physically
+// derived filtered vertical-speed estimate (driven by the same real
+// height/accelerometer inputs TECS already consumes every tick), not a
+// fabricated stand-in - a documented substitution matching this file's
+// own "BAROMETRIC ALTITUDE SUBSTITUTION" precedent (do_takeoff(), above),
+// not a new kind of shortcut.
+//
+// GROUNDSPEED SUBSTITUTION: `gps.sample().ground_speed_ms` for upstream's
+// `ahrs.groundspeed()` - the SAME already-established equivalence
+// build_l1_inputs() uses (this file, `sin.ground_speed_ms =
+// gps.sample().ground_speed_ms; // upstream: AP::ahrs().groundspeed()`).
+//
+// GLIDE-SLOPE ALTITUDE TARGET - REUSES CPP-011's Location::
+// linearly_interpolate_alt(), NOT A NEW PRIMITIVE: upstream's
+// type_slope_setup_landing_glide_slope() feeds its computed aim point
+// into Plane::set_target_altitude_proportion(loc, 1-land_proportion),
+// which (tracing both functions in full, altitude.cpp) reduces
+// algebraically to:
+//     target_altitude.amsl_cm = prev_WP_loc.alt +
+//         (loc.alt - prev_WP_loc.alt) * constrain(land_proportion, 0, 1)
+// where land_proportion = current_loc.line_path_proportion(prev_WP_loc,
+// loc) - EXACTLY Location::linearly_interpolate_alt(prev_WP_loc, loc)'s
+// own formula (location.hpp, CPP-011), evaluated on a probe Location at
+// current_loc's own position. setup_landing_glide_slope() (this file,
+// below) therefore computes the aim point with the same offset_bearing()/
+// get_distance()/get_bearing_to() primitives the ticket predicted were
+// already sufficient (verified, not assumed), then does:
+//     Location target_loc = current_loc;
+//     target_loc.linearly_interpolate_alt(prev_WP_loc, aim_loc);
+//     target_altitude_cm = target_loc.alt;
+// Upstream's own constrain_target_altitude_location() (a belt-and-
+// suspenders clamp to [prev_WP_loc.alt, loc.alt]) is REDUNDANT here, not
+// dropped: linearly_interpolate_alt() already constrains its own
+// proportion to [0,1] before interpolating, so the result can never
+// leave that range in the first place - verified algebraically, not
+// assumed.
+//
+// ALTITUDE-SLOPE REFINEMENTS EXCLUDED, INHERITED FROM AN ALREADY-
+// ESTABLISHED GAP: upstream's set_target_altitude_proportion() (which
+// setup_landing_glide_slope() calls into) also has a CLIMB_SLOPE_HGT
+// (g2.waypoint_climb_slope_height_min, real default 25m, Parameters.cpp)
+// early-return-at-full-climb-rate and an ALT_SLOPE_MAXHGT
+// (g.alt_slope_max_height, real default 5m, Parameters.cpp)
+// too-high-rebuild-the-slope refinement. BOTH live inside
+// set_target_altitude_proportion() itself - a GENERAL AUTO-waypoint
+// function this port has NEVER ported at all (see this file's own
+// "ALTITUDE SLOPE - DEFERRED" banner note, CPP-031 slice 5, which chose a
+// flat per-waypoint target instead) - landing inherits that same,
+// already-disclosed exclusion rather than reintroducing one piece of the
+// deferred general mechanism just for this one caller. (Practically
+// inert for a descending approach anyway: offset_cm = aim_loc.alt -
+// prev_WP_loc.alt is negative while descending, so CLIMB_SLOPE_HGT's
+// `offset_cm > 0` guard can't fire; ALT_SLOPE_MAXHGT only matters if the
+// aircraft is well above its own glide slope, a real but narrower case
+// than the general exclusion already covers.)
+//
+// LANDING AIRSPEED TARGET - A REAL, DISTINCT BEHAVIOR, PORTED: upstream's
+// calc_airspeed_errors() (navigation.cpp) checks `flight_stage == LAND`
+// BEFORE the `control_mode == &mode_auto` branch - landing gets its OWN
+// airspeed target (AP_Landing::type_slope_get_target_airspeed_cm()), not
+// mode_auto_target_airspeed_cm()'s plain cruise speed. Tracing
+// type_slope_get_target_airspeed_cm() in full: `tecs_Controller->
+// get_land_airspeed()` (TECS_LAND_ARSPD) is NOT ported anywhere in this
+// port (ap-tecs's own CPP-040 banner: "get_land_airspeed() accessor -
+// STILL excluded" - no _landAirspeed/TECS_LAND_ARSPD field exists), so it
+// is permanently at its real disabled sentinel (-1), and PREFLARE's own
+// pre_flare_airspeed override is excluded (see below) and real-defaults
+// to 0 (LAND_PF_ARSPD, disabled) - so the function's own switch collapses
+// to exactly TWO cases: NORMAL -> aparm.airspeed_cruise (unchanged from
+// AUTO's existing target), APPROACH/FINAL -> `0.5*(airspeed_cruise +
+// airspeed_min)`. The headwind-compensation tail
+// (`ahrs.head_wind()*wind_comp`) and `allow_max_airspeed_on_land()`'s
+// AIRSPEED_MAX ceiling are both real but OBSERVABLY INERT for this port:
+// no wind model exists anywhere in this port's AHRS (SITL inputs carry no
+// wind estimate consumed here), so head_wind() is always 0 and the
+// downstream `constrain_int32(target+0, target, max)` clamp is a
+// mathematical no-op regardless of allow_max_airspeed_on_land()'s value -
+// not reproduced as dead arithmetic. The final `constrain_int32(...,
+// airspeed_lower_bound*100, airspeed_max*100)` clamp calc_airspeed_errors()
+// applies AFTER every branch (including LAND) IS reproduced, in
+// update_auto_speed_height() below, matching this port's existing
+// non-landing airspeed-target line exactly (same clamp, different input).
+//
+// EXPLICITLY OUT OF SCOPE, DISCLOSED NOT SILENTLY DROPPED (every
+// condition below re-verified against real upstream source for this
+// ticket, not copied from the ticket text unchecked):
+//   - PREFLARE stage entirely (`pre_flare_alt`/`pre_flare_sec`/
+//     `pre_flare_airspeed`, LAND_PF_ALT/LAND_PF_SEC/LAND_PF_ARSPD, all
+//     real AP_Landing.cpp AP_GROUPINFOs, defaults 0/0/0 i.e. disabled out
+//     of the box) - needs a target-airspeed-override mechanism this port
+//     has not built for AUTO landing specifically; type_slope_stage's own
+//     SlopeStage::PREFLARE value is simply never used by LandingStage.
+//   - Abort-landing / go-around (type_slope_verify_abort_landing(),
+//     type_slope_request_go_around(), the ABORT_LANDING flight_stage
+//     branch in mode_auto.cpp's update(), the PLANE_AUTO_LANDING_ABORT aux
+//     function) - needs a real abort/retry state machine and a
+//     flight_stage concept this port has never built; a separate, future
+//     ticket, per the CPP-041 ticket's own scope note.
+//   - Rangefinder-bump slope adjustment
+//     (type_slope_adjust_landing_slope_for_rangefinder_bump(),
+//     `!rangefinder_state_in_range && wp_proportion >= 1`'s own flare
+//     trigger) - no rangefinder subsystem anywhere in this port.
+//   - Crash detection (`probably_crashed` in type_slope_verify_land(),
+//     `aparm.crash_detection_enable && fabsf(sink_rate) < 0.2f &&
+//     !is_flying`) - needs is_flying(), an ALREADY-disclosed gap since
+//     CPP-031 slice 9's own arm()/disarm() work ("no is_flying() concept
+//     exists") - not invented here either.
+//   - Auto-disarm on landing complete (disarm_if_autoland_complete_fn(),
+//     the GPS-ground-speed-based EEPROM parameter reload in
+//     type_slope_verify_land()'s flare branch) - also needs is_flying(),
+//     same disclosed gap; the parameter reload itself is additionally
+//     dead code for this port regardless (nothing here ever overrides
+//     aparm.airspeed_cruise/min_groundspeed/throttle_cruise for landing in
+//     the first place - no DO_CHANGE_SPEED, no PREFLARE - so there is
+//     nothing to "reload").
+//   - `mission.continue_after_land()` - real upstream default false, and
+//     this port's Mission has no equivalent concept at all; verify_land()
+//     (below) always returns false, so a landed AUTO mission simply stays
+//     on the LAND item forever - matching upstream's own real
+//     default-false behavior, not an invented shortcut. This is also why
+//     ModeAUTO::navigate()'s existing mission.advance()-on-completion path
+//     (CPP-031 slice 7) is never reached for a Land item: item_complete is
+//     always false while the current item is Land.
+//   - Landing gear (`AP_LANDINGGEAR_ENABLED`'s check_before_land() call in
+//     the flare-entry branch), quadplane VTOL land
+//     (`quadplane.is_vtol_land()` branches throughout mode_auto.cpp/
+//     commands_logic.cpp), GCS status/text messages (every
+//     GCS_SEND_TEXT() call in AP_Landing_Slope.cpp), logging
+//     (`AP_Landing::Log()`/type_slope_log()) - no such subsystems anywhere
+//     in this port (same exclusions this file documents throughout).
+//   - `type_slope_flags.post_stats` GCS statistics posting - see
+//     "LANDINGSTATE - MINIMAL BY DESIGN" above.
+// =====================================================================
+
 class ModeAUTO : public Mode {
 public:
     using Mode::Mode;
@@ -4429,6 +4673,15 @@ public:
         std::int32_t throttle_lim_min = 0;          // upstream: takeoff_state.throttle_lim_min, percent
     };
     TakeoffState takeoff_state;
+
+    // CPP-041 (MAV_CMD_NAV_LAND) - upstream: AP_Landing::SlopeStage
+    // (NORMAL/APPROACH/PREFLARE/FINAL) - PREFLARE excluded (see plane.hpp's
+    // own "CPP-041 ADDENDUM" file banner), collapsing to three stages. No
+    // wrapping struct (unlike TakeoffState): see that same addendum's
+    // "LANDINGSTATE - MINIMAL BY DESIGN" note for why a bare field is the
+    // real, traced equivalent, not a simplification.
+    enum class LandingStage : std::uint8_t { Normal, Approach, Final };
+    LandingStage landing_stage = LandingStage::Normal;
 
     // See file banner's "GROUND_MODE / REVERSED_THROTTLE" note.
     bool ground_mode = false;
@@ -5653,6 +5906,228 @@ public:
         return false;
     }
 
+    // =====================================================================
+    // CPP-041 (AUTO's MAV_CMD_NAV_LAND) - do_land()/verify_land()/
+    // setup_landing_glide_slope()/constrain_landing_roll(), all read in full
+    // from AP_Landing_Slope.cpp/commands_logic.cpp. See this file's own
+    // "CPP-041 ADDENDUM" (above ModeAUTO) for the full upstream-vs-port
+    // design rationale, every substitution decision, and every named
+    // exclusion.
+    // =====================================================================
+
+    // upstream: Plane::do_land() (commands_logic.cpp) + AP_Landing::
+    // type_slope_do_land() (AP_Landing_Slope.cpp), both read in full.
+    // DELIBERATE SIGNATURE DIFFERENCE from upstream (no Mission_Command
+    // parameter) - same reasoning as do_nav_wp()/do_takeoff() above. A
+    // no-op if no mission is loaded (defensive, same precedent as those
+    // two).
+    //
+    // EXCLUDED (named, not silently dropped - see "CPP-041 ADDENDUM"'s own
+    // "MISSIONITEM NEEDS NO NEW FIELD" note for the full trace):
+    //   - `auto_state.takeoff_altitude_rel_cm`/`auto_state.takeoff_pitch_cd`
+    //     abort-altitude/pitch seeding from cmd.p1 - feeds ONLY the
+    //     excluded abort-landing state machine.
+    //   - Rangefinder state zeroing (`memset(&rangefinder_state, ...)`) -
+    //     no rangefinder subsystem.
+    //   - `flight_stage == ABORT_LANDING` -> `set_flight_stage(LAND)`
+    //     transition - no flight_stage/abort-landing concept in this port.
+    //   - `type_slope_flags.post_stats = false;` - see "CPP-041 ADDENDUM"'s
+    //     "LANDINGSTATE - MINIMAL BY DESIGN" note (no field to reset).
+    void do_land() {
+        const MissionItem* item = mission.current();
+        if (item == nullptr) {
+            return;
+        }
+        set_next_WP(item->loc);
+        landing_stage = LandingStage::Normal;
+    }
+
+    // upstream: AP_Landing::type_slope_setup_landing_glide_slope()
+    // (AP_Landing_Slope.cpp), read in full. Called every tick while
+    // landing_stage == Approach (verify_land(), below) - upstream calls
+    // this from Mode::update_target_altitude()'s own is_on_approach()
+    // branch (APPROACH/PREFLARE; PREFLARE excluded here, so this port's
+    // caller gates on plain `landing_stage == Approach`). See "CPP-041
+    // ADDENDUM"'s own "GLIDE-SLOPE ALTITUDE TARGET" note for the full
+    // algebraic equivalence proof this reproduces, and "ALTITUDE-SLOPE
+    // REFINEMENTS EXCLUDED" for what upstream's set_target_altitude_
+    // proportion() does that this port's simpler assignment does not.
+    void setup_landing_glide_slope() {
+        float total_distance = prev_WP_loc.get_distance(next_WP_loc);
+        // upstream: "If someone mistakenly puts all 0's in their LAND
+        // command then total_distance will be calculated as 0 and cause a
+        // divide by 0 error below. Lets avoid that."
+        if (total_distance < 1.0f) {
+            total_distance = 1.0f;
+        }
+
+        // height we need to sink for this leg (upstream: loc_alt_AMSL_cm()
+        // collapses to a plain .alt read - see "CPP-041 ADDENDUM"'s own
+        // "HEIGHT SUBSTITUTION" note for the same one-frame reasoning).
+        const float sink_height = static_cast<float>(prev_WP_loc.alt - next_WP_loc.alt) * 0.01f;
+
+        // upstream: "CPP-041 ADDENDUM"'s own "GROUNDSPEED SUBSTITUTION" note.
+        float groundspeed = gps.sample().ground_speed_ms;
+        if (groundspeed < 0.5f) {
+            groundspeed = 0.5f;
+        }
+
+        float sink_time = total_distance / groundspeed;
+        if (sink_time < 0.5f) {
+            sink_time = 0.5f;
+        }
+        const float predicted_sink_rate = sink_height / sink_time;
+
+        // the height we aim for is the one to give us the right flare point
+        float aim_height = aparm.flare_sec * predicted_sink_rate;
+        if (aim_height <= 0.0f) {
+            aim_height = aparm.flare_alt_m;
+        }
+        // don't allow the aim height to be too far above LAND_FLARE_ALT
+        if (aparm.flare_alt_m > 0.0f && aim_height > aparm.flare_alt_m * 2.0f) {
+            aim_height = aparm.flare_alt_m * 2.0f;
+        }
+
+        // calculate time spent in flare assuming the sink rate reduces over
+        // time from predicted_sink_rate at aim_height to
+        // tecs.get_land_sinkrate() at touchdown.
+        const float weight = math::constrain_value(aparm.flare_aim_pct * 0.01f, 0.0f, 1.0f);
+        const float flare_sink_rate_avg =
+            std::max(weight * tecs.get_land_sinkrate() + (1.0f - weight) * predicted_sink_rate, 0.1f);
+        const float flare_time = aim_height / flare_sink_rate_avg;
+
+        // distance to flare is based on ground speed, adjusted as we get
+        // closer - takes into account the wind (upstream's own comment;
+        // this port has no wind model, so this is purely groundspeed-based).
+        float flare_distance = groundspeed * flare_time;
+        // don't allow the flare before half way along the final leg
+        if (flare_distance > total_distance * 0.5f) {
+            flare_distance = total_distance * 0.5f;
+        }
+
+        // project a point 500 meters past the landing point, passing
+        // through the landing point.
+        constexpr float kLandProjectionM = 500.0f;
+        const std::int32_t land_bearing_cd = prev_WP_loc.get_bearing_to(next_WP_loc);
+
+        // aim point: before the landing point and above it.
+        Location aim_loc = next_WP_loc;
+        aim_loc.offset_bearing(static_cast<float>(land_bearing_cd) * 0.01f, -flare_distance);
+        aim_loc.alt += static_cast<std::int32_t>(aim_height * 100.0f);
+
+        // slope to the landing point, used only to project the aim point
+        // 500m further along the same line (upstream also uses `slope` for
+        // a one-time GCS message and the excluded rangefinder-bump
+        // recalculation - neither reproduced, see "CPP-041 ADDENDUM").
+        const float slope = (sink_height - aim_height) / (total_distance - flare_distance);
+
+        // calculate point along that slope 500m ahead (upstream:
+        // `loc.offset_bearing(...); loc.offset_up_m(-slope *
+        // land_projection);` - offset_up_m(x) is `alt += x*100`, verified
+        // directly against AP_Common/Location.h, reproduced here as a
+        // direct .alt adjustment, matching this port's own established
+        // "no offset_up_m primitive needed for one caller" precedent
+        // (offset_bearing_and_pitch's own `alt += dalt` inline, location.hpp).
+        aim_loc.offset_bearing(static_cast<float>(land_bearing_cd) * 0.01f, kLandProjectionM);
+        aim_loc.alt -= static_cast<std::int32_t>(slope * kLandProjectionM * 100.0f);
+
+        // proportional blend from prev_WP_loc's altitude to the aim point's,
+        // using current_loc's own progress along that line - see "CPP-041
+        // ADDENDUM"'s "GLIDE-SLOPE ALTITUDE TARGET" note for the algebraic
+        // equivalence to upstream's set_target_altitude_proportion() call.
+        Location target_loc = current_loc;
+        target_loc.linearly_interpolate_alt(prev_WP_loc, aim_loc);
+        target_altitude_cm = target_loc.alt;
+    }
+
+    // upstream: AP_Landing::type_slope_constrain_roll() (AP_Landing_Slope.cpp)
+    // + mode_auto.cpp's own `plane.nav_roll_cd = plane.landing.constrain_roll
+    // (plane.nav_roll_cd, plane.g.level_roll_limit*100UL);` call site. Real
+    // body: clamp to +/-LEVEL_ROLL_LIMIT once FINAL, passthrough otherwise.
+    // aparm.level_roll_limit_deg already carries LEVEL_ROLL_LIMIT's real
+    // default (5 degrees, Parameters.cpp, verified directly) - no new
+    // tunable needed.
+    [[nodiscard]] std::int32_t constrain_landing_roll(std::int32_t desired_roll_cd) const {
+        if (landing_stage != LandingStage::Final) {
+            return desired_roll_cd;
+        }
+        const std::int32_t level_roll_limit_cd = static_cast<std::int32_t>(aparm.level_roll_limit_deg * 100.0f);
+        return math::constrain_value(desired_roll_cd, -level_roll_limit_cd, level_roll_limit_cd);
+    }
+
+    // upstream: AP_Landing::type_slope_is_flaring()/type_slope_is_throttle_
+    // suppressed() (AP_Landing_Slope.cpp) - VERIFIED IDENTICAL by reading
+    // both functions side by side: both are simply `type_slope_stage ==
+    // FINAL`, the SAME condition, not two independent flags (the ticket's
+    // own instruction to check this directly, confirmed). One function
+    // here serves both upstream call sites (mode_auto.cpp's `is_throttle_
+    // suppressed()` throttle-zero gate, and CPP-040's TecsLandingInputs::
+    // is_flaring feed - see verify_land()'s and update_auto_speed_height()'s
+    // own call sites, below).
+    [[nodiscard]] bool is_landing_final_flare() const { return landing_stage == LandingStage::Final; }
+
+    // upstream: AP_Landing::type_slope_verify_land() (AP_Landing_Slope.cpp),
+    // read in full - the in-scope subset only (NORMAL->APPROACH->FINAL,
+    // PREFLARE/abort/rangefinder/crash-detection/disarm/continue_after_land
+    // all excluded - see "CPP-041 ADDENDUM"). Called every tick while a Land
+    // mission item is current (ModeAUTO::navigate(), mode.hpp). ALWAYS
+    // returns false - upstream's own comment: "we return false as a landing
+    // mission item never completes" (continue_after_land() defaults false
+    // and has no port equivalent - see addendum).
+    [[nodiscard]] bool verify_land(const nav::L1Inputs& l1_in) {
+        const float wp_proportion = current_loc.line_path_proportion(prev_WP_loc, next_WP_loc);
+
+        // NORMAL -> APPROACH. `mission.get_prev_nav_cmd_id() ==
+        // MAV_CMD_NAV_LOITER_TO_ALT` disjunct excluded - no such command in
+        // this port's vocabulary (see "CPP-041 ADDENDUM").
+        if (landing_stage == LandingStage::Normal) {
+            const bool heading_lined_up =
+                std::abs(nav_controller.bearing_error_cd()) < 1000 && !nav_controller.data_is_stale();
+            const bool on_flight_line =
+                std::fabs(nav_controller.crosstrack_error()) < 5.0f && !nav_controller.data_is_stale();
+            const bool below_prev_wp = current_loc.alt < prev_WP_loc.alt;
+            if ((wp_proportion >= 0.0f && heading_lined_up && on_flight_line) ||
+                (wp_proportion > 0.15f && heading_lined_up && below_prev_wp) || (wp_proportion > 0.5f)) {
+                landing_stage = LandingStage::Approach;
+            }
+        }
+
+        // Flare trigger - see "CPP-041 ADDENDUM"'s "HEIGHT SUBSTITUTION"/
+        // "SINK-RATE SUBSTITUTION" notes for both substitutions below.
+        // `!rangefinder_state_in_range && wp_proportion >= 1` and
+        // `probably_crashed` disjuncts excluded (no rangefinder/is_flying()).
+        const float height_above_land_m = static_cast<float>(current_loc.alt - next_WP_loc.alt) * 0.01f;
+        const float sink_rate_mps = -tecs.get_climb_rate();
+        const bool on_approach_stage = (landing_stage == LandingStage::Approach);
+        const bool below_flare_alt = height_above_land_m <= aparm.flare_alt_m;
+        const bool below_flare_sec = aparm.flare_sec > 0.0f && height_above_land_m <= sink_rate_mps * aparm.flare_sec;
+        if ((on_approach_stage && below_flare_alt) || (on_approach_stage && below_flare_sec && wp_proportion > 0.5f)) {
+            landing_stage = LandingStage::Final;
+        }
+
+        // upstream: Mode::update_target_altitude()'s own `is_on_approach()`
+        // gate - PREFLARE excluded, collapsing to plain `== Approach`. Once
+        // FINAL, upstream "ignores the target altitude" (uses TECS_LAND_SINK
+        // via TecsLandingInputs::is_flaring instead - see
+        // update_auto_speed_height(), below) - target_altitude_cm is simply
+        // left at whatever the last APPROACH tick computed, matching that
+        // real "ignored" behavior without needing a special FINAL case here.
+        if (landing_stage == LandingStage::Approach) {
+            setup_landing_glide_slope();
+        }
+
+        // upstream: "when landing we keep the L1 navigation waypoint 200m
+        // ahead. This prevents sudden turns if we overshoot the landing
+        // point" - reproduced directly, unconditional every tick.
+        Location land_wp_loc = next_WP_loc;
+        const std::int32_t land_bearing_cd = prev_WP_loc.get_bearing_to(next_WP_loc);
+        land_wp_loc.offset_bearing(static_cast<float>(land_bearing_cd) * 0.01f,
+                                    prev_WP_loc.get_distance(current_loc) + 200.0f);
+        nav_controller.update_waypoint(prev_WP_loc, land_wp_loc, l1_in);
+
+        return false;
+    }
+
     // upstream: the "should_run_tecs" branch of Plane::update_alt()
     // (Plane.cpp) PLUS calc_airspeed_errors()'s AUTO airspeed-target branch
     // (mode_auto_target_airspeed_cm(), navigation.cpp) - see file banner's
@@ -5696,11 +6171,23 @@ public:
         const tecs::TecsInputs tecs_in = build_tecs_inputs(in);
         tecs.update_50hz(tecs_in);
 
+        // CPP-041: landing gets its OWN airspeed target once past NORMAL -
+        // see "CPP-041 ADDENDUM"'s own "LANDING AIRSPEED TARGET" note for
+        // the full trace of why this collapses to exactly these two real
+        // cases (TECS_LAND_ARSPD/pre_flare_airspeed both unported/disabled).
+        const MissionItem* current_item = mission.current();
+        const bool is_land_item = current_item != nullptr && current_item->command == MissionCommand::Land;
+
         // upstream: Plane::mode_auto_target_airspeed_cm()'s real fallback
         // (no DO_CHANGE_SPEED override in this slice - see above), then
-        // calc_airspeed_errors()'s own airspeed_lower_bound clamp.
+        // calc_airspeed_errors()'s own airspeed_lower_bound clamp - applied
+        // to BOTH the normal-AUTO and the landing target, matching upstream
+        // (the clamp is unconditional, after every branch).
         const float airspeed_lower_bound = aparm.airspeed_stall > 0.0f ? aparm.airspeed_stall : aparm.airspeed_min;
-        const float airspeed_target = math::constrain_value(aparm.airspeed_cruise, airspeed_lower_bound, aparm.airspeed_max);
+        const float raw_airspeed_target = (is_land_item && landing_stage != LandingStage::Normal)
+            ? 0.5f * (aparm.airspeed_cruise + aparm.airspeed_min)
+            : aparm.airspeed_cruise;
+        const float airspeed_target = math::constrain_value(raw_airspeed_target, airspeed_lower_bound, aparm.airspeed_max);
         const std::int32_t eas_dem_cm = static_cast<std::int32_t>(airspeed_target * 100.0f);
 
         // Same real per-loop necessity SLICE 2's own "SURPRISING UPSTREAM
@@ -5710,8 +6197,22 @@ public:
             tecs.set_throttle_min(0.0f);
         }
 
+        // CPP-041: feed CPP-040's flare blend once FINAL - upstream:
+        // Plane.cpp's own `distance_beyond_land_wp = flight_stage==LAND &&
+        // past_interval_finish_line(prev_WP_loc,next_WP_loc) ?
+        // current_loc.get_distance(next_WP_loc) : 0`, reproduced directly.
+        // A default-constructed TecsLandingInputs{} (is_flaring=false) for
+        // every non-Land-FINAL tick reproduces this function's own
+        // pre-CPP-041 behavior exactly (CPP-040's own "ZERO changes" note).
+        tecs::TecsLandingInputs landing_in;
+        if (is_land_item && is_landing_final_flare()) {
+            landing_in.is_flaring = true;
+            landing_in.distance_beyond_land_wp =
+                current_loc.past_interval_finish_line(prev_WP_loc, next_WP_loc) ? current_loc.get_distance(next_WP_loc) : 0.0f;
+        }
+
         tecs.update_pitch_throttle(relative_target_altitude_cm(), eas_dem_cm, in.current_altitude_m, aerodynamic_load_factor,
-                                    tecs_in);
+                                    tecs_in, landing_in);
     }
 
     // =====================================================================
