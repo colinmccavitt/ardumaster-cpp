@@ -8,11 +8,17 @@
 // L1Control class) for the full design rationale this test exercises:
 // all four of Gains' fields are genuinely upstream AP_Param-backed (no
 // exclusions, unlike CPP-043's aparm), the flat-top-level-table shape
-// decision despite upstream's real GOBJECT/GROUP registration, the
+// decision despite upstream's real GOBJECT/GROUP registration, and the
 // native-value bridge (not CPP-022 slice 6/7's ParamValue<T>-based
-// functions), and a pre-existing port bug this ticket found but did NOT
-// fix (Gains::l1_period's in-class default of 25.0f vs. the real
-// upstream default of 17.0f).
+// functions).
+//
+// CPP-048 found a pre-existing port bug here (Gains::l1_period's
+// in-class default was 25.0f vs. the real upstream default of 17.0f)
+// and deliberately did not fix it (out of its own narrow scope). CPP-050
+// fixed it - Gains::l1_period's in-class default now agrees with this
+// table's own def_value (both 17.0f) - so the divergence this file used
+// to document below no longer exists; see the first TEST_CASE's own
+// updated assertions and comment.
 
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/nav/l1_control.hpp>
@@ -32,24 +38,20 @@ TEST_CASE("l1_param_info's table carries the REAL upstream AP_GROUPINFO defaults
     const auto table = l1_param_info(gains);
 
     // Every value below is grepped directly from
-    // libraries/AP_L1_Control/AP_L1_Control.cpp's var_info[] for this
-    // ticket, NOT trusted from l1_control.hpp's own pre-existing
-    // Gains{} in-class initializers (which this ticket found to be
-    // WRONG for l1_period - see the addendum's own "PRE-EXISTING PORT
-    // BUG" note. l1_period's real upstream default is 17, not 25).
-    REQUIRE(table[0].def_value == 17.0f);   // NAVL1_PERIOD (real default 17, NOT Gains{}'s own 25.0f)
+    // libraries/AP_L1_Control/AP_L1_Control.cpp's var_info[] at the
+    // pinned plane-4.7.0 tag.
+    REQUIRE(table[0].def_value == 17.0f);   // NAVL1_PERIOD
     REQUIRE(table[1].def_value == 0.75f);   // NAVL1_DAMPING
     REQUIRE(table[2].def_value == 0.02f);   // NAVL1_XTRACK_I
     REQUIRE(table[3].def_value == 0.0f);    // NAVL1_LIM_BANK
 
-    // Documents, explicitly, that Gains{}'s own in-class default does
-    // NOT match the real upstream default for l1_period - the
-    // pre-existing divergence this ticket found and registered rather
-    // than silently fixed (fixing it would ripple into
-    // tests/vehicle_test.cpp's tuned numeric assertions, out of this
-    // ticket's touch-scope).
-    REQUIRE(gains.l1_period == 25.0f);
-    REQUIRE(gains.l1_period != table[0].def_value);
+    // CPP-050: Gains{}'s own in-class default for l1_period is now also
+    // 17.0f (it used to be a wrong 25.0f, since CPP-017 - CPP-048 found
+    // that pre-existing divergence but deliberately left it unfixed,
+    // out of its own narrow scope; CPP-050 fixed it), so it now agrees
+    // with this table's own def_value instead of diverging from it.
+    REQUIRE(gains.l1_period == 17.0f);
+    REQUIRE(gains.l1_period == table[0].def_value);
 }
 
 TEST_CASE("apply_l1_defaults (the explicit, AP_Param-table-sourced path) writes the REAL upstream defaults", "[l1][param][defaults]") {

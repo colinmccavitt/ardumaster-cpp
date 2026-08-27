@@ -51,9 +51,11 @@
 // CPP-048 ADDENDUM (bottom of this file, after the L1Control class): a
 // real top-level AP_Param Info[] table for L1Control::Gains, phase 2e of
 // the AP_Param vehicle-integration effort CPP-043 started. See that
-// addendum's own banner for the full design rationale, upstream
-// citations, and a pre-existing port bug it found (NOT fixed here) in
-// this file's own Gains::l1_period default.
+// addendum's own banner for the full design rationale and upstream
+// citations. CPP-048 also found a pre-existing port bug in this file's
+// own Gains::l1_period default (25.0f instead of upstream's real 17.0f)
+// - CPP-050 fixed it (see Gains::l1_period below and that addendum's own
+// updated note).
 
 #include <algorithm>
 #include <array>
@@ -90,7 +92,10 @@ struct L1Inputs {
 class L1Control {
 public:
     struct Gains {
-        float l1_period = 25.0f;    // upstream NAVL1_PERIOD default
+        float l1_period = 17.0f;    // upstream NAVL1_PERIOD default (CPP-050: was wrongly 25.0f
+                                     // since CPP-017; real default verified directly against
+                                     // AP_L1_Control.cpp's var_info[] AP_GROUPINFO("PERIOD", ...,
+                                     // 17) at the pinned plane-4.7.0 tag)
         float l1_damping = 0.75f;   // upstream NAVL1_DAMPING default
         float l1_xtrack_i_gain = 0.02f; // upstream NAVL1_XTRACK_I default (fixed-wing)
         float loiter_bank_limit = 0.0f; // upstream NAVL1_LIM_BANK default
@@ -529,9 +534,9 @@ private:
 // nested GroupInfo-based one without changing anything this ticket's
 // own round-trip test observes about VALUES.
 //
-// A SEPARATE, PRE-EXISTING PORT BUG FOUND HERE, DELIBERATELY NOT FIXED
-// BY THIS TICKET: Gains::l1_period's own in-class default above is
-// 25.0f, and that value is independently re-asserted by plane.hpp's
+// A SEPARATE, PRE-EXISTING PORT BUG FOUND HERE BY CPP-048, FIXED BY
+// CPP-050: Gains::l1_period's own in-class default used to be 25.0f,
+// independently (and also wrongly) re-asserted by plane.hpp's old
 // "CPP-043 ADDENDUM" comment as "upstream's real NAVL1_PERIOD ...
 // default" ("CHECKED, NOT RE-DERIVED"). Reading the REAL AP_GROUPINFO
 // line above directly shows the raw default is 17, not 25.
@@ -542,22 +547,20 @@ private:
 // genuinely ArduPlane's live shipped default. (ArduPlane/
 // ReleaseNotes.txt:5234's own "NAVL1_PERIOD from 20 to 17" entry
 // independently confirms 17, not 25 or 20, is this version's default.)
-// l1_param_info()'s own def_value for PERIOD below is the CORRECT
-// 17.0f, sourced from real upstream directly, per this ticket's own
-// requirement that Info-table defaults come from upstream (matching
-// CPP-043's "AP_Param table is the authoritative source" precedent) -
-// deliberately NOT reconciled with Gains' own (wrong) 25.0f in-class
-// default: retrofitting that would ripple into tests/vehicle_test.cpp's
-// already-tuned, numerically-sensitive crosstrack_error()/nav_roll_cd()
-// assertions (l1_period scales l1_dist_ directly in update_waypoint/
-// update_loiter/update_heading_hold above) - a file this ticket is
-// explicitly barred from touching, and a change disproportionate to
-// this ticket's own acceptance criteria (same disproportionality
-// reasoning as CPP-043 finding #3's declined width retrofit). Registered
-// here, not silently fixed nor silently ignored, per this port's "fix
-// bugs in the port, register every divergence" standard - left for a
-// future, appropriately-scoped ticket that can touch plane.hpp and
-// tests/vehicle_test.cpp together.
+// CPP-050 changed Gains::l1_period's in-class default above to 17.0f -
+// it now agrees with l1_param_info()'s own def_value for PERIOD below,
+// which was already correctly 17.0f even while Gains' own in-class
+// default was still wrong (see that entry) - and corrected plane.hpp's
+// stale "CHECKED, NOT RE-DERIVED" comment. CPP-050 re-ran the full
+// tests/vehicle_test.cpp suite by hand against the corrected period:
+// every closed-loop convergence assertion and every nav_roll_cd()/
+// crosstrack_error() check there already used generous, qualitative
+// margins (sign/direction, or "converges within N meters"), not exact
+// values tied to the specific 25.0f response shape, so NONE needed
+// re-tuning - only this file's own l1_control_param_test.cpp (which
+// explicitly asserted the bug's signature: Gains{}'s default diverging
+// from the table's real default) needed updating. See CPP-050's own
+// commit message for the full accounting.
 //
 // PLAIN NATIVE FIELDS, NOT ParamValue<T>: Gains' four fields are plain
 // `float` (this file's own pre-existing banner above: "AP_Float
@@ -613,11 +616,12 @@ enum class L1ParamKey : std::uint16_t {
 }
 
 // Applies every entry's own AP_Param-table default (the REAL upstream
-// values found above - notably 17.0f for PERIOD, not Gains' own
-// in-class 25.0f) directly into `gains`'s live fields. Explicit, not
-// implicit - matches CPP-043's apply_aparm_defaults (not called from
-// any constructor; L1Control's own constructor still reads whatever
-// Gains it's handed, unchanged by this addendum).
+// values found above, all matching Gains' own in-class defaults since
+// CPP-050 - notably 17.0f for PERIOD) directly into `gains`'s live
+// fields. Explicit, not implicit - matches CPP-043's
+// apply_aparm_defaults (not called from any constructor; L1Control's
+// own constructor still reads whatever Gains it's handed, unchanged by
+// this addendum).
 inline void apply_l1_defaults(L1Control::Gains& gains) {
     const std::array<param::Info, 5> table = l1_param_info(gains);
     for (const param::Info& info : table) {

@@ -503,15 +503,26 @@
 //     CRUISE (1km look-ahead) and its tests ever reach.
 //
 // NAV_CONTROLLER (L1Control): a `nav::L1Control nav_controller` member,
-// constructed with `nav::L1Control::Gains{}` - CHECKED, NOT RE-DERIVED:
-// l1_control.hpp's own Gains struct already carries upstream's real
-// NAVL1_PERIOD/NAVL1_DAMPING/NAVL1_XTRACK_I/NAVL1_LIM_BANK defaults
-// (25.0f/0.75f/0.02f/0.0f - see its own inline citations, ported by
-// CPP-017), so `Gains{}` IS the correct default-tuned controller, nothing
-// to re-derive here. No declaration-order constraint applies (unlike
-// aparm/the four controllers - see the pre-existing "DECLARATION-ORDER
-// CONSTRAINT" note above): L1Control's constructor reads only the Gains
-// struct passed to it, not any other Plane member.
+// constructed with `nav::L1Control::Gains{}`. l1_control.hpp's own Gains
+// struct carries upstream's real NAVL1_PERIOD/NAVL1_DAMPING/
+// NAVL1_XTRACK_I/NAVL1_LIM_BANK defaults - 17.0f/0.75f/0.02f/0.0f - so
+// `Gains{}` IS the correct default-tuned controller, nothing to
+// re-derive here. CPP-050 CORRECTION: this comment previously (and
+// wrongly) asserted the PERIOD default was 25.0f, marked "CHECKED, NOT
+// RE-DERIVED" - it had in fact never been checked against real upstream.
+// Reading libraries/AP_L1_Control/AP_L1_Control.cpp's real var_info[]
+// directly (AP_GROUPINFO("PERIOD", 0, AP_L1_Control, _L1_period, 17), at
+// the pinned plane-4.7.0 tag) shows the genuine raw default is 17, not
+// 25; AP_L1_Control::set_default_period() (AP_L1_Control.h:59-61) is the
+// only thing that could override that raw default at runtime and is
+// declared but never called anywhere in the pinned tree, and ArduPlane/
+// ReleaseNotes.txt:5234's own "NAVL1_PERIOD from 20 to 17" entry
+// independently confirms 17. l1_control.hpp's own Gains::l1_period
+// in-class default was fixed to match (was 25.0f since CPP-017). No
+// declaration-order constraint applies (unlike aparm/the four
+// controllers - see the pre-existing "DECLARATION-ORDER CONSTRAINT" note
+// above): L1Control's constructor reads only the Gains struct passed to
+// it, not any other Plane member.
 //
 // calc_nav_roll() TAKES StabilizeInputs, UNLIKE UPSTREAM'S ZERO-ARG
 // VERSION - a necessary, minor signature divergence, not a behavior
