@@ -1215,6 +1215,374 @@
 //     CPP-058's own precedent).
 // ============================================================================
 
+// ============================================================================
+// CPP-063, PHASE 9 (this ticket): true airspeed / wind velocity fusion.
+// Everything above this point is phase 1 (CPP-052) through phase 8 (CPP-062),
+// unmodified. Read NavEKF3_core::FuseAirspeed() in full (AP_NavEKF3_
+// AirDataFusion.cpp lines ~20-156, ~136 lines) directly before extending
+// anything below - it was read in full for this phase, not skimmed from the
+// ticket's own summary of it.
+// ============================================================================
+//
+// THE GAP THIS PHASE CLOSES: the 24-state vector's LAST two states, wind_vel
+// (states 22-23), have existed since phase 1 (CPP-052) but have never been
+// fused - inhibit_wind_states defaults true (phase 2, CPP-056) and nothing
+// has ever cleared it. This phase adds the one real upstream mechanism that
+// actually estimates wind from a direct sensor: true-airspeed fusion. Unlike
+// every prior fusion phase (GPS: a single direct state observation per axis;
+// mag/baro: reuse or extend existing primitives), this is a genuinely
+// independent, self-contained function with its own dense Jacobian spanning
+// FIVE state indices at once (velocity 4-6 AND wind 22-23) from a single
+// SCALAR observation (not 3-axis like mag, not "one axis per obsIndex" like
+// GPS/baro) - closer in spirit to phase 5's mag fusion (dense, auto-generated
+// algebra, verbatim transcription sanctioned) than to any of the
+// fuse_direct_state_observation()-based GPS/baro work.
+//
+// VERIFIED STRUCTURE (read directly from AP_NavEKF3_AirDataFusion.cpp lines
+// 20-156, not assumed from the ticket's own summary):
+//   - Predicted airspeed: `VtasPred = norm((ve-vwe), (vn-vwn), vd)` (~line
+//     33) - the ticket's own component-order summary is confirmed exact
+//     (E-component first, then N, then D; norm() is order-independent
+//     anyway, matching this port's Vector3F::length()).
+//   - The ENTIRE function body (Jacobian, Kalman gain, gate, state/
+//     covariance update, AND the trailing ForceSymmetry()/ConstrainVariances()
+//     calls) is wrapped in a single `if (VtasPred > 1.0f) { ... }` (~line 34,
+//     closing brace ~line 155) - confirmed by reading the real indentation/
+//     brace structure directly, not assumed. Below 1 m/s predicted airspeed
+//     (SH_TAS[0] = 1/VtasPred would be singular/ill-conditioned at VtasPred=0)
+//     NOTHING happens at all: no CovarianceInit(), no ForceSymmetry(), no
+//     ConstrainVariances() - a real, THIRD bail-out shape distinct from both
+//     of the ticket's named two failure outcomes (see "THE REAL, THREE-WAY
+//     OUTCOME SHAPE" below).
+//   - `innovVtas = VtasPred - tasDataDelayed.tas` (~line 37) - a scalar
+//     innovation, state-minus-observation, matching this file's established
+//     sign convention (innov_mag's own `mag_pred - mag.mag`).
+//   - The badly-conditioned check (~line 54-60): `temp >= tasDataDelayed.
+//     tasVariance` passes (SK_TAS[0] = 1/temp), else CovarianceInit() +
+//     early return - mirrors phase 5's mag-fusion badly-conditioned-axis
+//     failure mode exactly (same "reset the whole covariance and abort"
+//     shape), reused directly, not re-derived.
+//   - THE REAL, DISTINCTIVE ABSENCE VERIFIED THIS ROUND: unlike phase 5's
+//     mag fusion, FuseAirspeed() has NO second "healthyFusion"
+//     (KHP[i][i] > P[i][i]) guard anywhere in its body - verified directly
+//     by reading the full ~136 lines line-by-line. After the badly-
+//     conditioned check passes, the Kalman gain is computed and used
+//     unconditionally (subject only to the gate below). This port's
+//     fuse_airspeed() therefore has exactly ONE covariance-reset abort path
+//     (badly-conditioned), not phase 5/6's two.
+//   - The innovation-consistency gate (~line 108-110): `tasTestRatio =
+//     sq(innovVtas) / (sq(MAX(0.01f*_tasInnovGate,1.0f)) * varInnovVtas)`,
+//     `isConsistent = (tasTestRatio < 1.0f) || badIMUdata`. `varInnovVtas =
+//     1.0f/SK_TAS[0]` (~line 105) - i.e. EXACTLY `temp` from the badly-
+//     conditioned check above, NOT a separable R_OBS-style noise formula
+//     the way GPS's/baro's gates are (see "tas_test_ratio() IS MAG-SHAPED,
+//     NOT GPS/BARO-SHAPED" below).
+//   - `badIMUdata` - already-established permanently-false exclusion (phase
+//     1 simplification 3) - `isConsistent` reduces to the bare
+//     `tasTestRatio < 1.0f` check.
+//   - VERIFIED DIRECTLY, PER THIS TICKET'S OWN INSTRUCTION: NO Reset*() call
+//     anywhere in FuseAirspeed()'s ~136 lines - confirmed by grepping the
+//     real function body. A gate failure has no reset consequence at all
+//     (see "THE REAL, THREE-WAY OUTCOME SHAPE" below for exactly what does
+//     happen instead).
+//
+// tas_test_ratio() IS MAG-SHAPED, NOT GPS/BARO-SHAPED - A REAL DESIGN
+// DECISION, NOT AN ARBITRARY CHOICE: gps_vel_test_ratio()/gps_pos_test_ratio()/
+// hgt_test_ratio() all RECOMPUTE their innovation/variance fresh from a given
+// sample, because their R_OBS noise formulas are separable from the Kalman
+// gain computation (GPS/baro observe a single state element directly, H has
+// exactly one nonzero entry, so varInnovVelPos = P[stateIndex][stateIndex] +
+// R_OBS needs no Jacobian at all). mag_test_ratio() instead reads
+// ALREADY-POPULATED innov_mag/var_innov_mag members, because varInnovMag is
+// itself the output of the same dense, P-coupled Jacobian algebra the Kalman
+// gain needs - recomputing it independently would mean duplicating that
+// algebra under a second name. Verified directly this round: airspeed's
+// varInnovVtas has the EXACT SAME shape - `varInnovVtas = 1.0f/SK_TAS[0]`
+// IS `temp`, the same dense P[4..6][4..6,22,23]-coupled expression the
+// badly-conditioned check and the Kalman gain both consume. This phase
+// therefore follows mag fusion's stored-member convention (innov_vtas/
+// var_innov_vtas populated by fuse_airspeed() itself; tas_test_ratio() just
+// applies the gate formula to what is already there), NOT GPS/baro's
+// recompute-fresh convention - a deliberate, disclosed choice matching the
+// real upstream algebraic shape, not an arbitrary pick between two
+// established precedents.
+//
+// THE REAL, THREE-WAY OUTCOME SHAPE (get this right - the ticket's own text
+// warned against inventing a nonexistent third "timeout" outcome; the real
+// third outcome is different from that, and distinct from phase 5/6's
+// three-outcome mag shape too):
+//   1. VtasPred <= 1.0 (predicted airspeed below the singular-Jacobian
+//      threshold) -> returns false immediately. NOTHING happens: not even
+//      ForceSymmetry()/ConstrainVariances() run (they are INSIDE the
+//      `if (VtasPred > 1.0f)` block upstream, confirmed by direct reading -
+//      see "VERIFIED STRUCTURE" above). State and P are byte-for-byte
+//      untouched.
+//   2. Badly-conditioned (`temp < tasDataDelayed.tasVariance`) -> covariance_
+//      init() then returns false, mirroring phase 5's mag-fusion abort
+//      exactly (P has ALREADY been reset by the time this returns).
+//   3. Gate failure (tasTestRatio >= 1.0) -> returns false, but - A REAL,
+//      VERIFIED DIVERGENCE FROM GPS/BARO'S "COMPLETELY UNTOUCHED" GATE
+//      FAILURE, AND FROM PHASE 6'S MAG-GATE "BARE RETURN, NOTHING TOUCHED"
+//      SHAPE TOO - ForceSymmetry()/ConstrainVariances() are NOT inside the
+//      `isConsistent` if-block upstream (~line 117-149); they are the
+//      trailing two lines of the OUTER `if (VtasPred > 1.0f)` block
+//      (~line 153-154), so they run UNCONDITIONALLY whenever VtasPred > 1.0,
+//      REGARDLESS of whether the gate passed or failed. Confirmed directly
+//      by reading the real brace nesting, not assumed from the ticket's own
+//      "a gate failure just skips fusion for that cycle, full stop" framing
+//      (which is correct about StateVector and about there being no
+//      Reset*() call, but does not by itself rule out P being touched by
+//      something other than a reset). This port's fuse_airspeed() therefore
+//      calls force_symmetry(lim) + constrain_variances(dt_ekf_avg)
+//      unconditionally on a gate failure too, matching upstream exactly.
+//      PRACTICAL CONSEQUENCE, VERIFIED EMPIRICALLY BY THIS PHASE'S OWN
+//      TESTS - AND NOT AS BENIGN AS "NO-OP" ACROSS THE WHOLE MATRIX:
+//      force_symmetry() is a no-op on an already-symmetric P, and
+//      constrain_variances()'s clamps over P[0..15] are no-ops on a P
+//      already produced by a prior covariance_prediction()/covariance_init()
+//      call under normal operating conditions - so StateVector and P[0..15]
+//      are exactly byte-for-byte untouched on a gate failure in that
+//      realistic case (this phase's own gate-failure test constructs its
+//      fixture this way and confirms it directly, rather than asserting the
+//      weaker "no reset happened"). BUT constrain_variances()'s ALREADY-
+//      ESTABLISHED unconditional mag/wind zeroing (this file's own phase-2
+//      banner: "P[16..21]... are zeroed every predict cycle") is NOT a
+//      no-op here whenever covariance_init() last seeded a nonzero
+//      P[16..21] diagonal (sq(mag_noise)) - it fires on EVERY call that
+//      reaches the trailing force_symmetry()/constrain_variances() pair,
+//      gate failure included, verified directly by this phase's own
+//      gate-failure test. So the honest claim is: StateVector and P[0..15]
+//      are untouched on a gate failure in the realistic case; P[16..23]
+//      are NOT - they get zeroed regardless of whether the gate passed,
+//      failed, or - the one case that differs - never got a chance to run
+//      at all (VtasPred <= 1.0, outcome 1 above, where NEITHER function
+//      runs). This is still a real, disclosed divergence from GPS/baro's
+//      structurally-guaranteed untouched-on-failure shape, not merely a
+//      restatement of it - a test or caller that engineers P[0..15] to
+//      violate a constrain_variances() clamp right before a gate-failing
+//      fuse_airspeed() call would see that violation silently corrected
+//      despite no fusion having occurred, something GPS's/baro's gate
+//      failure paths cannot do (they never call constrain_variances() at
+//      all on failure) - and P[16..23] specifically are unconditionally
+//      zeroed on a gate failure regardless of what they held at entry.
+//
+// airDataFusionWindOnly IS PROVABLY ALWAYS FALSE IN THIS PORT - VERIFIED
+// DIRECTLY, NOT ASSUMED FROM THE TICKET'S OWN TEXT: `airDataFusionWindOnly`
+// (a bool member, AP_NavEKF3_core.h:1219) gates every kalman_mask bit in the
+// real FuseAirspeed() EXCEPT the wind bits 22-23 (which are instead gated by
+// `!treatWindStatesAsTruth`, see below) - real upstream lines 67/71/75/85:
+// `if (tasDataDelayed.allowFusion && !airDataFusionWindOnly) {...}` etc.
+// Traced EVERY assignment of airDataFusionWindOnly in the real upstream
+// source, not just inside FuseAirspeed() itself (grepped the whole
+// AP_NavEKF3_AirDataFusion.cpp and AP_NavEKF3_core.cpp):
+//   - ONE-TIME INIT: `airDataFusionWindOnly = false;` (AP_NavEKF3_core.cpp:
+//     327, inside InitialiseVariables() or equivalent).
+//   - THE ONLY TWO ASSIGNMENTS ANYWHERE ELSE: both inside
+//     `NavEKF3_core::SelectBetaDragFusion()` (AP_NavEKF3_AirDataFusion.cpp
+//     lines 214/217) - a COMPLETELY DIFFERENT function from FuseAirspeed(),
+//     driving `FuseSideslip()` (synthetic zero-sideslip fusion) and (behind
+//     `#if EK3_FEATURE_DRAG_FUSION`) `FuseDragForces()` (body-frame drag
+//     fusion) - two separate, unrelated wind-estimation mechanisms this
+//     ticket explicitly does not port (see "EXPLICITLY OUT OF SCOPE" below).
+//   - CONFIRMED: this ticket does not call SelectBetaDragFusion()/
+//     FuseSideslip()/FuseDragForces() anywhere, and this port has never built
+//     any part of them (grepped this port's own module tree - no trace).
+//     With the only two real assignment sites unreachable and the one-time
+//     init being `false`, airDataFusionWindOnly CAN NEVER become true in
+//     this port - PROVABLY always false, the same shape as CPP-062's own
+//     "baroHgtOffset is provably always zero" finding. THE TICKET'S OWN
+//     FINDING HOLDS, verified directly this round, not merely trusted. Every
+//     `!airDataFusionWindOnly` gate in the real kalman_mask construction
+//     therefore simplifies away (always true) - no field/parameter is added
+//     for something that can never vary in this port.
+//
+// treatWindStatesAsTruth - NOT A NEW FINDING, RE-APPLYING AN
+// ALREADY-ESTABLISHED PHASE-2 DECISION: the wind bits (22-23) in
+// FuseAirspeed()'s kalman_mask are gated by `!inhibitWindStates &&
+// !treatWindStatesAsTruth` (~line 89), NOT by `!airDataFusionWindOnly` the
+// way every other bit is - a real, verified distinction from the ticket's
+// own summary ("gates every mask bit EXCEPT the wind-state bits behind
+// !airDataFusionWindOnly" - true only in the sense that the wind bits are
+// the one exception; they are gated by a DIFFERENT flag, not left
+// ungated). `treatWindStatesAsTruth` already has NO equivalent in this port
+// - this was decided in phase 2 (CPP-056)'s own banner above ("NOT PORTED
+// FROM FuseVelPosNED()": "no such field exists in this port (no
+// optical-flow/const-position-hold subsystem that would ever set it)") and
+// applied again identically in this file's fuse_direct_state_observation()
+// (ekf_core.cpp's own comment: "treatWindStatesAsTruth has no equivalent in
+// this port... moot since inhibit_wind_states is permanently true in this
+// phase regardless"). This phase re-verifies that reasoning still holds
+// (traced treatWindStatesAsTruth's real assignments: AP_NavEKF3_core.cpp:274
+// one-time init to false, :1100/:1104 set inside CovariancePrediction()'s
+// own `if (!inhibitWindStates) {...}` block from `isDragFusionDeadReckoning`/
+// `windStateIsObservable` - both real upstream concepts this port's own
+// covariance_prediction() does not model, already an unaffected area since
+// this ticket does not touch that function) and drops the term the same way
+// phase 2 already did - `!inhibit_wind_states` alone gates the wind bits
+// here, consistent with the rest of this file, not a fresh, independent cut.
+//
+// A NOTABLE STRUCTURAL CONSEQUENCE, VERIFIED THIS ROUND: after applying the
+// three already-established exclusions above (tasDataDelayed.allowFusion -
+// see "EXPLICITLY OUT OF SCOPE" below - always true; airDataFusionWindOnly
+// provably always false; treatWindStatesAsTruth not modeled/moot) PLUS the
+// already-established dvelBiasAxisInhibit[] collapse (single
+// inhibit_del_vel_bias_states flag, phases 1/2/5's own precedent),
+// FuseAirspeed()'s real kalman_mask construction becomes ALGEBRAICALLY
+// IDENTICAL IN STRUCTURE to fuse_magnetometer()'s own kalman_mask block
+// already in this file (ekf_core.cpp): bits 0-9 unconditional, bits 10-12
+// gated by inhibit_del_ang_bias_states, bits 13-15 by
+// inhibit_del_vel_bias_states, bits 16-21 by inhibit_mag_states, bits 22-23
+// by inhibit_wind_states - the same four inhibit flags, same nesting order.
+// This is not a coincidence to re-derive from scratch: both real upstream
+// functions share this exact four-flag structure, and phase 5/6's own
+// banner already established (and this phase's own kalman_mask reuses
+// without re-proving) that this mask shape is algebraically equal to
+// bounding the Kfusion-computation loop at state_index_lim() for every
+// combination these four flags can produce - the Kfusion loop below is
+// therefore reproduced literally as upstream's own unbounded 0..23 loop
+// with the mask check inside, matching phase 5/6's own precedent exactly,
+// not "corrected" to bound at lim.
+//
+// WHAT THIS PHASE BUILDS:
+//   - fuse_airspeed(true_airspeed_m_s, dt_ekf_avg): the real FuseAirspeed()
+//     body - VtasPred precondition, innovVtas, the dense SH_TAS/H_TAS/temp/
+//     SK_TAS Jacobian/Kalman-gain algebra (verbatim transcription, same
+//     disclosed exception as phase 1's CovariancePrediction() block and
+//     phase 5's FuseMagnetometer() block - dense, auto-generated,
+//     error-prone-to-hand-rederive algebra), the simplified kalman_mask
+//     (see above), the gate, and the conditional state/unconditional
+//     covariance-symmetrize-and-constrain tail. Reuses apply_state_correction()
+//     (this file's existing helper) for the state update - no new state-
+//     correction code needed, same as fuse_baro_height()'s own reuse.
+//   - tas_test_ratio(): the real tasTestRatio formula, public (like every
+//     other gate formula in this file) so tests can verify it independently
+//     - see "tas_test_ratio() IS MAG-SHAPED" above for why this reads
+//     stored innov_vtas/var_innov_vtas members rather than recomputing
+//     fresh.
+//   - innov_vtas / var_innov_vtas: public ftype members (upstream: innovVtas/
+//     varInnovVtas), same treatment as innov_mag/var_innov_mag - scalars
+//     here (one obsIndex), not Vector3F (three).
+//   - eas_noise: new public field, upstream `_easNoise` (AP_GROUPINFO(
+//     "EAS_M_NSE", 16, NavEKF3, _easNoise, 1.4f), AP_NavEKF3.cpp ~line 274) -
+//     EAS_M_NSE_DEFAULT=1.4, verified directly. Same "AP_Param not wired in
+//     yet" treatment as this file's other noise parameters.
+//   - tas_innov_gate_pct: new public field, upstream `_tasInnovGate`
+//     (AP_GROUPINFO("EAS_I_GATE", 17, NavEKF3, _tasInnovGate, 400),
+//     AP_NavEKF3.cpp ~line 282) - EAS_I_GATE_DEFAULT=400.
+//
+// A REAL, VERIFIED CONSTANT-DEFINITION-STYLE DISTINCTION (per the ticket's
+// own instruction to verify directly, not assume): every other gate default
+// in this file (VEL_I_GATE_DEFAULT/POS_I_GATE_DEFAULT/MAG_I_GATE_DEFAULT/
+// HGT_I_GATE_DEFAULT) is a `#define` MACRO, repeated identically across
+// every APM_BUILD_TYPE #elif block in AP_NavEKF3.cpp (verified in phases
+// 3/6/8's own banners). `EAS_I_GATE`/`EAS_M_NSE` are NOT macros at all -
+// grepped AP_NavEKF3.cpp and AP_NavEKF3.h for both names: the ONLY two
+// occurrences are the `@Param` doc comment and the single `AP_GROUPINFO(
+// "EAS_I_GATE", 17, NavEKF3, _tasInnovGate, 400)` call itself (~line 282) -
+// a LITERAL default argument in ONE AP_GROUPINFO call, not gated by
+// APM_BUILD_TYPE at all (this whole parameter table entry is vehicle-
+// independent, unlike the #elif-gated blocks the other four gate defaults
+// live in). Same for EAS_M_NSE/_easNoise (~line 274, literal `1.4f`). A
+// real, verified distinction from this file's other four gate parameters,
+// not a stylistic detail - there is no second value to cross-check across
+// vehicle types the way phases 3/6/8 each did for their own gate constant.
+//
+// EAS2TAS - NOT MODELED, FOLLOWING AN ALREADY-ESTABLISHED PORT-WIDE
+// PRECEDENT: the real `tasDataNew.tasVariance = sq(MAX(frontend->_easNoise *
+// EAS2TAS, 0.5f))` formula (AP_NavEKF3_Measurements.cpp's readAirSpdData(),
+// already out of scope - see below) scales equivalent airspeed noise by
+// `dal.get_EAS2TAS()`, an air-density-derived equivalent-to-true-airspeed
+// conversion factor - a full atmospheric/density model this port does not
+// have anywhere. This is NOT a fresh gap this phase introduces: modules/
+// ap-tecs/include/fwcpp/tecs/tecs.hpp's own file banner already established
+// the identical simplification for TECS's own airspeed handling verbatim
+// ("EAS2TAS (TecsInputs::eas2tas, default 1.0f) - this port has no
+// atmosphere model... 'true == equivalent airspeed' until a future slice
+// adds one"). This phase follows that exact precedent: EAS2TAS is treated
+// as exactly 1.0 (sea-level, no compressibility/density correction), so
+// `eas_noise` is used directly as true-airspeed noise in m/s
+// (`tas_variance = sq(max(eas_noise, 0.5))`), and the caller's own
+// `true_airspeed_m_s` parameter is taken as already being TRUE airspeed
+// (matching upstream's own `tasDataDelayed.tas` naming, which is TAS, not
+// EAS) - not a new port-specific choice, a direct reuse of TECS's own
+// already-disclosed one.
+//
+// tas_reading: BARE ftype, NOT A NEW STRUCT - SAME REASONING CPP-062 USED
+// FOR baro_altitude_m: checked this file's own two established precedents
+// before deciding (per the ticket's own "New input needed" instruction).
+// GpsSample/MagSample exist because each bundles MULTIPLE distinct fields
+// (GpsSample: velocity_ned + position_ne) or anchors a real, documented
+// convention decision worth a named type (MagSample, for consistency with
+// GpsSample's own precedent). A single true-airspeed reading is exactly one
+// ftype with no bundling or convention decision to anchor - CPP-062's own
+// `baro_altitude_m` (a bare parameter reading directly from a single sensor,
+// deliberately NOT wrapped in a one-field BaroSample struct) is the closer,
+// directly-applicable precedent, not GpsSample/MagSample. This phase follows
+// it: fuse_airspeed() takes `ftype true_airspeed_m_s` directly, matching
+// baro_altitude_m's own "bare scalar, unit-suffixed name" convention for
+// exactly the same reason - a wrapper struct here would carry no information
+// a bare parameter doesn't already convey.
+//
+// EXPLICITLY OUT OF SCOPE (each named with its real upstream trigger, per
+// the ticket's own acceptance criterion):
+//   - `FuseSideslip()`/`SelectBetaDragFusion()`/`FuseDragForces()` (the other
+//     three functions in AP_NavEKF3_AirDataFusion.cpp, verified: this ticket
+//     is FuseAirspeed() only) - separate, unrelated synthetic-zero-sideslip
+//     and body-frame-drag wind-estimation mechanisms, not the direct
+//     TAS-sensor fusion this ticket ports. This is also WHY
+//     airDataFusionWindOnly is provably always false in this port - see
+//     above.
+//   - The `tasTimeout && posTimeout` forced-fusion override (`if
+//     (tasDataDelayed.allowFusion && (isConsistent || (tasTimeout &&
+//     posTimeout)))`, ~line 117) - a real cross-fusion-type coupling with
+//     GPS position's own `posTimeout` bool, a different, wall-clock-driven
+//     concept from this port's last_pos_pass_time_s elapsed-time field
+//     (CPP-058) that this port does not attempt to wire together (matching
+//     the ticket's own explicit instruction). fuse_airspeed() uses the
+//     simpler `isConsistent` condition alone - a gate failure is never
+//     force-fused, unlike upstream's real behavior during a simultaneous
+//     airspeed-and-GPS-position outage.
+//   - `badIMUdata`-driven forced-fusion bypass (`|| badIMUdata` in
+//     `isConsistent`'s real definition) - already-established permanently-
+//     false exclusion (phase 1 simplification 3), same treatment as every
+//     prior phase.
+//   - `dvelBiasAxisInhibit[]` per-axis accel-bias-state narrowing inside
+//     kalman_mask - already a named phase-1/2/5 exclusion (single
+//     inhibit_del_vel_bias_states flag covering all 3 axes together); see
+//     "A NOTABLE STRUCTURAL CONSEQUENCE" above.
+//   - `SelectTasFusion()`'s own orchestration (~line 158-176 of the same
+//     upstream file) - the magFusePerformed-driven `airSpdFusionDelayed`
+//     one-tick-slip logic, `readAirSpdData()` (see below), and the
+//     `tasDataToFuse && statesInitialised && !inhibitWindStates` call
+//     condition - this ticket builds FuseAirspeed() itself, callable
+//     directly, matching this port's established "caller decides when to
+//     call" convention (same as every other fusion function built so far:
+//     fuse_gps_velocity()/fuse_gps_position()/fuse_magnetometer()/
+//     fuse_baro_height()).
+//   - `readAirSpdData()`/`tasDataDelayed`/`storedTAS` (AP_NavEKF3_
+//     Measurements.cpp, already an established phase-1 exclusion - "no
+//     fusion time-horizon delay buffer... multi-sensor sample buffering")
+//     - `tasDataDelayed.allowFusion` (real trigger: `airspeed->healthy(...)
+//     && airspeed->use(...)`, the real physical-sensor branch, ~line 869)
+//     is therefore always treated as true here: the caller is expected to
+//     have already validated sensor health before calling
+//     fuse_airspeed(), exactly matching GpsSample/MagSample/baro_altitude_m's
+//     own established "caller supplies an already-known-good reading"
+//     convention. The synthetic-airspeed fallback branches
+//     (`assume_zero_sideslip()`'s `defaultAirSpeed`/`lastAspdEstIsValid`
+//     paths, ~line 884-911, for vehicles/configurations with no physical
+//     airspeed sensor at all) are also out of scope for the same reason -
+//     this port's caller always supplies a real reading when it calls this
+//     function, there is no "no sensor, fall back to a model estimate"
+//     mode here.
+//   - `EAS2TAS` (air-density-derived EAS-to-TAS conversion) - see "EAS2TAS -
+//     NOT MODELED" above.
+//   - `faultStatus.bad_airspeed` bookkeeping - write-only diagnostic flag,
+//     already-established exclusion pattern (same as every faultStatus.bad_*
+//     field since phase 5's own precedent) - fuse_airspeed()'s bool return
+//     value is this port's only fault signal, same treatment.
+// ============================================================================
+
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -1395,6 +1763,13 @@ public:
     Vector3F innov_mag{};      // upstream: innovMag
     Vector3F var_innov_mag{};  // upstream: varInnovMag
 
+    // CPP-063 phase 9. upstream: innovVtas/varInnovVtas (NavEKF3_core
+    // members) - see this file's "CPP-063, PHASE 9" banner ("tas_test_
+    // ratio() IS MAG-SHAPED"). Scalars, not Vector3F, since airspeed fusion
+    // has exactly one obsIndex.
+    ftype innov_vtas{};      // upstream: innovVtas
+    ftype var_innov_vtas{};  // upstream: varInnovVtas
+
     // --- Noise/limit parameters. Defaults are upstream's real
     // Plane-4.7.0 AP_NavEKF3.cpp APM_BUILD_ArduPlane parameter-default
     // block (traced directly, not invented) - "AP_Param not wired in
@@ -1439,6 +1814,17 @@ public:
     // Same "AP_Param not wired in yet" treatment as this file's other gate
     // parameters. See this file's "CPP-062, PHASE 8" banner.
     ftype hgt_innov_gate_pct = static_cast<ftype>(500);  // HGT_I_GATE_DEFAULT
+
+    // CPP-063 phase 9: real EAS_M_NSE_DEFAULT/EAS_I_GATE_DEFAULT parameters
+    // (AP_NavEKF3.cpp _easNoise/_tasInnovGate, ~line 274/282) - see this
+    // file's "CPP-063, PHASE 9" banner "A REAL, VERIFIED CONSTANT-
+    // DEFINITION-STYLE DISTINCTION" for why, unlike every other gate default
+    // in this file, these are LITERAL AP_GROUPINFO default arguments, not
+    // #define macros repeated across APM_BUILD_TYPE blocks. eas_noise is
+    // used directly as true-airspeed noise (EAS2TAS assumed 1.0 - see
+    // banner "EAS2TAS - NOT MODELED").
+    ftype eas_noise = static_cast<ftype>(1.4f);          // EAS_M_NSE_DEFAULT
+    ftype tas_innov_gate_pct = static_cast<ftype>(400);  // EAS_I_GATE_DEFAULT
 
     // CPP-062 phase 8: upstream lastHgtPassTime_ms (AP_NavEKF3_core.h - the
     // same bookkeeping family as lastVelPassTime_ms/lastGpsPosPassTime_ms
@@ -1712,6 +2098,42 @@ public:
     // that's the honest shape for a single-obsIndex primitive with exactly
     // one failure mode.
     bool fuse_baro_height(ftype baro_altitude_m, ftype dt_ekf_avg, ftype now_s = ftype(0));
+
+    // CPP-063 phase 9. upstream: tasTestRatio, AP_NavEKF3_AirDataFusion.cpp
+    // ~line 108-110 - `sq(innovVtas) / (sq(MAX(0.01*_tasInnovGate,1.0)) *
+    // varInnovVtas)`. See this file's "CPP-063, PHASE 9" banner ("tas_test_
+    // ratio() IS MAG-SHAPED, NOT GPS/BARO-SHAPED") for why this reads this
+    // object's own already-populated innov_vtas/var_innov_vtas (set by
+    // fuse_airspeed() itself before this gate needs them), matching
+    // mag_test_ratio()'s convention, not gps_vel_test_ratio()'s/
+    // hgt_test_ratio()'s recompute-fresh convention. Public so tests can
+    // verify the exact formula independently, same treatment as this file's
+    // other gate formulas.
+    [[nodiscard]] ftype tas_test_ratio() const;
+
+    // CPP-063 phase 9. upstream: NavEKF3_core::FuseAirspeed(),
+    // AP_NavEKF3_AirDataFusion.cpp lines ~20-156 - see this file's "CPP-063,
+    // PHASE 9" banner for the full scope, the verbatim-transcription
+    // rationale, the airDataFusionWindOnly-provably-always-false finding,
+    // and "THE REAL, THREE-WAY OUTCOME SHAPE" for exactly what each of the
+    // three false-returning paths does and does not touch.
+    //
+    // `true_airspeed_m_s`: a bare scalar sensor reading, matching
+    // baro_altitude_m's own established convention (see banner "tas_
+    // reading: BARE ftype, NOT A NEW STRUCT") - taken as already being TRUE
+    // airspeed (EAS2TAS assumed 1.0, see banner "EAS2TAS - NOT MODELED",
+    // reusing TECS's own already-disclosed identical simplification).
+    //
+    // Returns true only if the gate passed AND the correction was actually
+    // applied (VtasPred > 1.0 AND not badly-conditioned AND tasTestRatio <
+    // 1.0) - false on any of the three distinct outcomes documented in the
+    // banner. Unlike fuse_gps_velocity()/fuse_gps_position()/
+    // fuse_baro_height(), there is NO now_s/timeout/reset parameter or
+    // mechanism at all here - verified directly that FuseAirspeed() contains
+    // no Reset*() call anywhere (see banner) - so this signature has no
+    // `now_s` parameter and this class has no last_tas_pass_time_s field;
+    // adding either would invent a mechanism that does not exist upstream.
+    bool fuse_airspeed(ftype true_airspeed_m_s, ftype dt_ekf_avg);
 
 private:
     void constrain_states(ftype dt_ekf_avg);   // upstream: NavEKF3_core::ConstrainStates()

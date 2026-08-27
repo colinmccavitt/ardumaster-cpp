@@ -1679,4 +1679,194 @@ bool EkfCore::fuse_baro_height(ftype baro_altitude_m, ftype dt_ekf_avg, ftype no
     return applied;
 }
 
+// ============================================================================
+// CPP-063 PHASE 9: true airspeed / wind velocity fusion. See ekf_core.hpp's
+// "CPP-063, PHASE 9" banner for the full scope/exclusions/corrections
+// discussion - only implementation-level notes live here.
+// ============================================================================
+
+// upstream: tasTestRatio, AP_NavEKF3_AirDataFusion.cpp ~line 108-110 - see
+// ekf_core.hpp banner "tas_test_ratio() IS MAG-SHAPED" for why this reads
+// this object's own stored innov_vtas/var_innov_vtas (populated by
+// fuse_airspeed() itself) rather than recomputing fresh.
+ftype EkfCore::tas_test_ratio() const {
+    const ftype gate = std::max(ftype(0.01) * tas_innov_gate_pct, ftype(1.0));
+    return sq(innov_vtas) / (sq(gate) * var_innov_vtas);
+}
+
+// upstream: NavEKF3_core::FuseAirspeed(), AP_NavEKF3_AirDataFusion.cpp lines
+// ~20-156 - verified line-by-line against that source (not approximated).
+// See ekf_core.hpp's "CPP-063, PHASE 9" banner for the full derivation of
+// every simplification applied below (allowFusion always true,
+// airDataFusionWindOnly provably always false, treatWindStatesAsTruth not
+// modeled, dvelBiasAxisInhibit[] already collapsed) and for "THE REAL,
+// THREE-WAY OUTCOME SHAPE" this function reproduces.
+bool EkfCore::fuse_airspeed(ftype true_airspeed_m_s, ftype dt_ekf_avg) {
+    // upstream ~line 26-30: copy required states to local variable names.
+    const ftype vn = state.velocity.x;
+    const ftype ve = state.velocity.y;
+    const ftype vd = state.velocity.z;
+    const ftype vwn = state.wind_vel.x;
+    const ftype vwe = state.wind_vel.y;
+
+    // upstream ~line 33: `VtasPred = norm((ve-vwe),(vn-vwn),vd)`.
+    const ftype VtasPred = Vector3F(ve - vwe, vn - vwn, vd).length();
+
+    // upstream ~line 34/155: the ENTIRE rest of the function - including
+    // the trailing ForceSymmetry()/ConstrainVariances() calls - is wrapped
+    // in `if (VtasPred > 1.0f) { ... }`. Below that threshold, NOTHING
+    // happens: not a failure mode with any state/covariance consequence,
+    // see banner "THE REAL, THREE-WAY OUTCOME SHAPE" outcome 1.
+    if (!(VtasPred > ftype(1.0))) {
+        return false;
+    }
+
+    // upstream ~line 37: `innovVtas = VtasPred - tasDataDelayed.tas;`.
+    innov_vtas = VtasPred - true_airspeed_m_s;
+
+    // upstream ~line 40-42: observation jacobians SH_TAS[0..2].
+    const ftype sh_tas0 = ftype(1) / VtasPred;
+    const ftype sh_tas1 = (sh_tas0 * (ftype(2) * ve - ftype(2) * vwe)) * ftype(0.5);
+    const ftype sh_tas2 = (sh_tas0 * (ftype(2) * vn - ftype(2) * vwn)) * ftype(0.5);
+
+    // upstream ~line 43-48: H_TAS[4]/[5]/[6]/[22]/[23] - all other indices
+    // are 0 (value-initialized below, same convention as fuse_magnetometer()'s
+    // H_MAG).
+    std::array<ftype, 24> H_TAS{};
+    H_TAS[4] = sh_tas2;
+    H_TAS[5] = sh_tas1;
+    H_TAS[6] = vd * sh_tas0;
+    H_TAS[22] = -sh_tas2;
+    H_TAS[23] = -sh_tas1;
+
+    // upstream: tasDataDelayed.tasVariance = sq(MAX(_easNoise*EAS2TAS,
+    // 0.5f)) (readAirSpdData(), already out of scope - see banner). EAS2TAS
+    // assumed 1.0 (banner "EAS2TAS - NOT MODELED", reusing TECS's own
+    // precedent).
+    const ftype tas_variance = sq(std::max(eas_noise, ftype(0.5)));
+
+    // upstream ~line 49: dense, auto-generated Kalman-gain-denominator
+    // expression spanning P[4..6][4..6,22,23] - transcribed verbatim, same
+    // disclosed exception as CovariancePrediction()/FuseMagnetometer()'s own
+    // dense blocks (see banner).
+    const ftype temp =
+        (tas_variance +
+         sh_tas2 * (P[4][4] * sh_tas2 + P[5][4] * sh_tas1 - P[22][4] * sh_tas2 - P[23][4] * sh_tas1 +
+                    P[6][4] * vd * sh_tas0) +
+         sh_tas1 * (P[4][5] * sh_tas2 + P[5][5] * sh_tas1 - P[22][5] * sh_tas2 - P[23][5] * sh_tas1 +
+                    P[6][5] * vd * sh_tas0) -
+         sh_tas2 * (P[4][22] * sh_tas2 + P[5][22] * sh_tas1 - P[22][22] * sh_tas2 - P[23][22] * sh_tas1 +
+                    P[6][22] * vd * sh_tas0) -
+         sh_tas1 * (P[4][23] * sh_tas2 + P[5][23] * sh_tas1 - P[22][23] * sh_tas2 - P[23][23] * sh_tas1 +
+                    P[6][23] * vd * sh_tas0) +
+         vd * sh_tas0 * (P[4][6] * sh_tas2 + P[5][6] * sh_tas1 - P[22][6] * sh_tas2 - P[23][6] * sh_tas1 +
+                          P[6][6] * vd * sh_tas0));
+
+    // upstream ~line 54-60: badly-conditioned check - mirrors phase 5's
+    // mag-fusion badly-conditioned-axis failure mode exactly (banner "THE
+    // REAL, THREE-WAY OUTCOME SHAPE" outcome 2). Unlike phase 5/6's mag
+    // fusion, there is no SECOND (healthyFusion) covariance-reset guard
+    // anywhere in FuseAirspeed() - verified directly (banner "THE REAL,
+    // DISTINCTIVE ABSENCE").
+    if (temp < tas_variance) {
+        covariance_init(dt_ekf_avg);
+        return false;
+    }
+    const ftype sk_tas0 = ftype(1) / temp;
+    const ftype sk_tas1 = sh_tas1;  // upstream ~line 61: `SK_TAS[1] = SH_TAS[1];`
+
+    // upstream ~line 63-90: kalman_mask construction. See banner "A NOTABLE
+    // STRUCTURAL CONSEQUENCE" - after this port's already-established
+    // exclusions, this is algebraically identical in structure to
+    // fuse_magnetometer()'s own kalman_mask block (same four inhibit flags,
+    // same nesting order) - reused directly, not re-derived.
+    std::uint32_t kalman_mask = (1u << 10) - 1;
+    if (!inhibit_del_ang_bias_states) {
+        kalman_mask |= (1u << 10) | (1u << 11) | (1u << 12);
+    }
+    if (!inhibit_del_vel_bias_states) {
+        kalman_mask |= (1u << 13) | (1u << 14) | (1u << 15);
+    }
+    if (!inhibit_mag_states) {
+        kalman_mask |= (1u << 16) | (1u << 17) | (1u << 18) | (1u << 19) | (1u << 20) | (1u << 21);
+    }
+    if (!inhibit_wind_states) {
+        kalman_mask |= (1u << 22) | (1u << 23);
+    }
+
+    // upstream ~line 92-97: NOT bounded at stateIndexLim, same as
+    // fuse_magnetometer()'s own Kfusion loop (banner: verified equal to
+    // bounding at state_index_lim() for every inhibit-flag combination,
+    // reusing phase 5/6's own proof rather than re-deriving it).
+    std::array<ftype, 24> kfusion{};
+    for (int i = 0; i < 24; ++i) {
+        if ((kalman_mask & (1u << i)) == 0) {
+            continue;
+        }
+        const auto ii = static_cast<std::size_t>(i);
+        kfusion[ii] = sk_tas0 * (P[ii][4] * sh_tas2 - P[ii][22] * sh_tas2 + P[ii][5] * sk_tas1 -
+                                  P[ii][23] * sk_tas1 + P[ii][6] * vd * sh_tas0);
+    }
+
+    // upstream ~line 105: `varInnovVtas = 1.0f/SK_TAS[0];` - exactly `temp`
+    // (see banner "tas_test_ratio() IS MAG-SHAPED").
+    var_innov_vtas = temp;
+
+    // upstream ~line 108-113: `tasTestRatio = ...; isConsistent =
+    // (tasTestRatio < 1.0f) || badIMUdata;` - badIMUdata already-established
+    // permanently false (phase 1 simplification 3), dropped.
+    const bool is_consistent = tas_test_ratio() < ftype(1.0);
+
+    const int lim = state_index_lim();
+
+    // upstream ~line 117-149: `if (tasDataDelayed.allowFusion &&
+    // (isConsistent || (tasTimeout && posTimeout))) { ... }` - allowFusion
+    // always true (banner), the `tasTimeout && posTimeout` forced-fusion
+    // disjunct explicitly out of scope (banner) - reduces to `if
+    // (is_consistent)`.
+    if (is_consistent) {
+        // upstream ~line 128-138: covariance update P -= K*H*P, taking
+        // advantage of H_TAS's known-zero elements - same structure as
+        // fuse_magnetometer()'s own KHP loop, bounded at lim.
+        Matrix24 khp{};
+        for (int i = 0; i <= lim; ++i) {
+            const auto ii = static_cast<std::size_t>(i);
+            for (int j = 0; j <= lim; ++j) {
+                const auto jj = static_cast<std::size_t>(j);
+                ftype res = 0;
+                res += (kfusion[ii] * H_TAS[4]) * P[4][jj];
+                res += (kfusion[ii] * H_TAS[5]) * P[5][jj];
+                res += (kfusion[ii] * H_TAS[6]) * P[6][jj];
+                res += (kfusion[ii] * H_TAS[22]) * P[22][jj];
+                res += (kfusion[ii] * H_TAS[23]) * P[23][jj];
+                khp[ii][jj] = res;
+            }
+        }
+        for (int i = 0; i <= lim; ++i) {
+            const auto ii = static_cast<std::size_t>(i);
+            for (int j = 0; j <= lim; ++j) {
+                const auto jj = static_cast<std::size_t>(j);
+                P[ii][jj] -= khp[ii][jj];
+            }
+        }
+
+        // upstream ~line 120-125: `statesArray[j] -= Kfusion[j]*innovVtas;
+        // stateStruct.quat.normalize();` - reuses apply_state_correction(),
+        // no new state-correction code needed (same reuse as
+        // fuse_baro_height()).
+        apply_state_correction(kfusion, innov_vtas);
+    }
+
+    // upstream ~line 153-154: `ForceSymmetry(); ConstrainVariances();` -
+    // OUTSIDE the `isConsistent` if-block but INSIDE the outer
+    // `if (VtasPred > 1.0f)` block, so these run UNCONDITIONALLY here,
+    // regardless of whether the gate passed or failed - see banner "THE
+    // REAL, THREE-WAY OUTCOME SHAPE" outcome 3 for the real, verified
+    // consequence of this on a gate failure.
+    force_symmetry(lim);
+    constrain_variances(dt_ekf_avg);
+
+    return is_consistent;
+}
+
 } // namespace fwcpp::ekf

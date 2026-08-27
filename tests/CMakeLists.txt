@@ -332,3 +332,13 @@ catch_discover_tests(ekf_mag_fusion_test)
 add_executable(ekf_closed_loop_test ekf_closed_loop_test.cpp)
 target_link_libraries(ekf_closed_loop_test PRIVATE ap-ekf ap-sim ap-compass ap-vehicle Catch2::Catch2WithMain)
 catch_discover_tests(ekf_closed_loop_test)
+
+# CPP-063 phase 9: true airspeed / wind velocity fusion (fuse_airspeed())
+# unit tests (see fwcpp/ekf/ekf_core.hpp's "CPP-063, PHASE 9" scope banner
+# section). A new file, not ekf_fusion_test.cpp/ekf_mag_fusion_test.cpp -
+# same reasoning phase 5 (CPP-059) used for its own new file: a genuinely
+# independent, self-contained fusion mechanism, not built on
+# fuse_direct_state_observation().
+add_executable(ekf_airspeed_fusion_test ekf_airspeed_fusion_test.cpp)
+target_link_libraries(ekf_airspeed_fusion_test PRIVATE ap-ekf Catch2::Catch2WithMain)
+catch_discover_tests(ekf_airspeed_fusion_test)

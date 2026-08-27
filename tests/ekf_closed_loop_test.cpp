@@ -86,14 +86,39 @@
 // disciplined by a direct observation - see that TEST_CASE's own updated
 // comment for the exact before/after numbers this run measured.
 //
+// CPP-063 UPDATE (phase 9, true airspeed / wind velocity fusion): this file
+// now also exercises fuse_airspeed() on the `fused` instance, at the same
+// 10Hz cadence as mag/baro (no airspeed-specific "average sample interval"
+// upstream constant exists the way hgtAvg_ms does for baro - verified
+// directly, see ekf_core.hpp's own "CPP-063, PHASE 9" banner - so this
+// reuses mag/baro's already-established cadence rather than inventing a
+// new one), feeding each tick's `sim_plane.airspeed` (SimPlane's own real,
+// noiseless true-airspeed magnitude, `velocity_air_bf.length()` - CPP-051's
+// wind model - same disclosed no-noise asymmetry already established below
+// for GPS/mag/baro) as `true_airspeed_m_s`. inhibit_wind_states is left at
+// its real default (true, unchanged since phase 2) - same "default
+// settings" precedent this file's own magnetometer-fusion integration
+// already established for inhibit_mag_states - so this exercises airspeed
+// fusion's REAL, ALWAYS-ACTIVE velocity/attitude correction (bits 0-9,
+// never masked by inhibit_wind_states - see ekf_core.hpp's own banner),
+// NOT wind-state learning (already unit-tested in isolation,
+// ekf_airspeed_fusion_test.cpp, where the one-call-then-capped limitation
+// is demonstrated directly - not repeated here, since SimPlane's
+// wind_config defaults to all-zero in this run anyway, per this file's own
+// established precedent of leaving sensor models at their real, undisturbed
+// defaults unless a ticket specifically calls for exercising them). The
+// bounds in the first TEST_CASE below were re-measured after adding this.
+//
 // REAL, DISCLOSED GAPS THIS RUN CONFIRMS (none are bugs - see hpp banners):
 //   - No fusion time-horizon delay buffer: this test feeds time-aligned
-//     GPS/baro/mag samples against the CURRENT state every time, matching
-//     ekf_core.hpp's own disclosed simplification (phase 2 banner).
+//     GPS/baro/mag/airspeed samples against the CURRENT state every time,
+//     matching ekf_core.hpp's own disclosed simplification (phase 2
+//     banner).
 //   - No innovation-gating false-positive/negative TUNING validation -
-//     this test exercises the real gates (CPP-057/CPP-060/CPP-062) as one
-//     more realistic input stream, but does not attempt to prove the gate
-//     THRESHOLDS themselves are well-tuned (out of this ticket's scope).
+//     this test exercises the real gates (CPP-057/CPP-060/CPP-062/CPP-063)
+//     as one more realistic input stream, but does not attempt to prove
+//     the gate THRESHOLDS themselves are well-tuned (out of this ticket's
+//     scope).
 
 #include <algorithm>
 #include <cmath>
@@ -147,6 +172,11 @@ constexpr int kMagPeriodTicks = kTicksPerSecond / 10;  // 10 Hz
 // between height measurements", AP_NavEKF3.h:502) -> 10Hz, cited directly
 // rather than an arbitrary choice.
 constexpr int kBaroPeriodTicks = kTicksPerSecond / 10;  // 10 Hz
+// CPP-063 phase 9: no airspeed-specific "average sample interval" constant
+// exists upstream the way hgtAvg_ms does for baro (verified directly, see
+// ekf_core.hpp's "CPP-063, PHASE 9" banner) - reuses mag/baro's own already-
+// established 10Hz cadence rather than inventing a new one.
+constexpr int kAirspeedPeriodTicks = kTicksPerSecond / 10;  // 10 Hz
 
 // --- Initial condition: level, steady cruise flight, well clear of the
 // ground (see this file's own banner for why this test starts already
@@ -289,6 +319,8 @@ struct ClosedLoopComparison {
     int n_mag_fused_count = 0;
     int n_baro_attempts = 0;
     int n_baro_fused_count = 0;
+    int n_airspeed_attempts = 0;
+    int n_airspeed_fused_count = 0;
 };
 
 // Runs the full 120s multi-phase flight ONCE (SimPlane's own physics are
@@ -466,6 +498,28 @@ ClosedLoopComparison run_closed_loop_comparison() {
             // unfused: baro fusion is never called either - pure prediction.
         }
 
+        // --- True airspeed fusion at 10Hz (CPP-063, phase 9) - the real
+        // mechanism that estimates wind, exercised here at DEFAULT settings
+        // (inhibit_wind_states left true, unchanged since phase 2 - same
+        // "default settings" precedent this file's own magnetometer
+        // integration already established for inhibit_mag_states). At these
+        // settings this exercises ONLY the always-active velocity/attitude
+        // correction (bits 0-9 of kalman_mask, never masked by
+        // inhibit_wind_states - see ekf_core.hpp's own banner); wind-state
+        // learning itself is unit-tested in isolation
+        // (ekf_airspeed_fusion_test.cpp), not repeated here. `true_airspeed_m_s`
+        // is SimPlane's own true, noiseless airspeed magnitude - the same
+        // disclosed no-noise asymmetry already established above for
+        // GPS/mag/baro. ---
+        if (tick_index % kAirspeedPeriodTicks == 0) {
+            const fwcpp::ekf::ftype true_airspeed_m_s = static_cast<fwcpp::ekf::ftype>(sim_plane.airspeed);
+            ++result.n_airspeed_attempts;
+            if (fused.fuse_airspeed(true_airspeed_m_s, kDtEkf)) {
+                ++result.n_airspeed_fused_count;
+            }
+            // unfused: airspeed fusion is never called either - pure prediction.
+        }
+
         update_metrics(result.fused, fused, sim_plane);
         update_metrics(result.unfused, unfused, sim_plane);
     }
@@ -491,7 +545,8 @@ TEST_CASE("EkfCore closed-loop pipeline (mechanization + GPS fusion + magnetomet
     INFO("GPS velocity fused " << r.n_gps_vel_fused_count << "/" << r.n_gps_vel_attempts
          << " attempts, GPS position fused " << r.n_gps_pos_fused_count << "/" << r.n_gps_pos_attempts
          << " attempts, magnetometer fused " << r.n_mag_fused_count << "/" << r.n_mag_attempts
-         << " attempts, baro height fused " << r.n_baro_fused_count << "/" << r.n_baro_attempts << " attempts");
+         << " attempts, baro height fused " << r.n_baro_fused_count << "/" << r.n_baro_attempts
+         << " attempts, airspeed fused " << r.n_airspeed_fused_count << "/" << r.n_airspeed_attempts << " attempts");
 
     // Sanity: fusion actually engaged meaningfully throughout the run, not
     // just at the very start (or never, e.g. due to a permanently-failing
@@ -502,6 +557,7 @@ TEST_CASE("EkfCore closed-loop pipeline (mechanization + GPS fusion + magnetomet
     REQUIRE(r.n_gps_pos_fused_count > static_cast<int>(0.8 * r.n_gps_pos_attempts));
     REQUIRE(r.n_mag_fused_count > static_cast<int>(0.8 * r.n_mag_attempts));
     REQUIRE(r.n_baro_fused_count > static_cast<int>(0.8 * r.n_baro_attempts));
+    REQUIRE(r.n_airspeed_fused_count > static_cast<int>(0.8 * r.n_airspeed_attempts));
 
     // --- Bounds and their rationale (ticket item 6: "a real,
     // EXPLICITLY-JUSTIFIED bound... if the real error turns out larger
@@ -530,8 +586,12 @@ TEST_CASE("EkfCore closed-loop pipeline (mechanization + GPS fusion + magnetomet
     // AND (via covariance_prediction()'s real cross-coupling) lets the
     // filter learn the injected accel bias over time (same mechanism
     // ekf_fusion_test.cpp's own "GPS fusion measurably corrects INS
-    // drift" test already demonstrates in isolation). Measured max: 0.133m
-    // / 0.233 m/s.
+    // drift" test already demonstrates in isolation). Measured max
+    // (pre-CPP-063, GPS+mag+baro only): 0.133m / 0.233 m/s. RE-MEASURED
+    // this ticket (CPP-063) after adding airspeed fusion's own always-active
+    // velocity correction to the same pipeline: 0.1295m / 0.2324 m/s - a
+    // real, small (~3%) shift from the added velocity correction, still
+    // comfortably inside the same bound; not re-widened.
     REQUIRE(r.fused.max_horiz_pos_err_m < 1.0);
     REQUIRE(r.fused.max_vel_err_mps < 1.5);
 
@@ -540,45 +600,60 @@ TEST_CASE("EkfCore closed-loop pipeline (mechanization + GPS fusion + magnetomet
     // this axis's measured effect, since CPP-061's original note flagged it
     // as the one most likely to show improvement). BEFORE (CPP-061, no baro
     // fusion - altitude disciplined only indirectly via GPS vertical-
-    // velocity integration): measured max 0.127m. AFTER (this ticket,
+    // velocity integration): measured max 0.127m. AFTER (CPP-062,
     // fuse_baro_height() added at a real 10Hz rate): measured max 0.1215m,
-    // final 0.0139m (both re-measured from this test's own actual run).
-    // HONEST FINDING: the peak-error IMPROVEMENT in THIS SPECIFIC 120s
-    // flight profile is modest (0.127m -> 0.1215m, ~4% tighter), smaller
-    // than a first guess might expect for adding a direct observation of a
-    // previously-only-indirectly-observed state - because, exactly as the
-    // ORIGINAL (pre-CPP-062) comment here already noted, GPS's real
-    // vertical-velocity fusion was ALREADY disciplining this run's altitude
-    // almost as tightly as horizontal position fusion disciplines the
-    // horizontal case, leaving comparatively little headroom for a further
-    // noiseless direct observation to visibly improve on in THIS
-    // particular, GPS-healthy-throughout flight. The REAL value of this
-    // phase is structural, not this run's peak-error delta: state.
-    // position.z now has an INDEPENDENT anchor that does not depend on GPS
-    // vertical-velocity fusion succeeding at all (see fuse_baro_height()'s
-    // own gate/timeout/reset machinery, entirely separate from GPS's) - a
-    // scenario with degraded/absent GPS but healthy baro (unexercised by
-    // THIS closed-loop profile, which keeps GPS healthy throughout) is
-    // where this phase's real payoff would show up much more starkly; this
-    // test's own honest numbers should not be over-read as "baro fusion
-    // barely helps" in general. The bound is nonetheless tightened here
-    // from the pre-CPP-062 value (1.5) to match the horizontal case's own
-    // bound (1.0) - both axes are now the SAME structural category (direct
-    // observation, similar headroom above their own measured maxima), so a
-    // vertical-specific loosening is no longer justified.
+    // final 0.0139m. HONEST FINDING: the peak-error IMPROVEMENT in THIS
+    // SPECIFIC 120s flight profile is modest (0.127m -> 0.1215m, ~4%
+    // tighter), smaller than a first guess might expect for adding a direct
+    // observation of a previously-only-indirectly-observed state - because,
+    // exactly as the ORIGINAL (pre-CPP-062) comment here already noted,
+    // GPS's real vertical-velocity fusion was ALREADY disciplining this
+    // run's altitude almost as tightly as horizontal position fusion
+    // disciplines the horizontal case, leaving comparatively little
+    // headroom for a further noiseless direct observation to visibly
+    // improve on in THIS particular, GPS-healthy-throughout flight. The
+    // REAL value of this phase is structural, not this run's peak-error
+    // delta: state.position.z now has an INDEPENDENT anchor that does not
+    // depend on GPS vertical-velocity fusion succeeding at all (see
+    // fuse_baro_height()'s own gate/timeout/reset machinery, entirely
+    // separate from GPS's) - a scenario with degraded/absent GPS but
+    // healthy baro (unexercised by THIS closed-loop profile, which keeps
+    // GPS healthy throughout) is where this phase's real payoff would show
+    // up much more starkly; this test's own honest numbers should not be
+    // over-read as "baro fusion barely helps" in general. RE-MEASURED this
+    // ticket (CPP-063) after adding airspeed fusion's own always-active
+    // velocity correction: max 0.1224m, final 0.0141m - both shifted
+    // slightly (the final-value shift, ~0.0002m->0.0141m in absolute terms,
+    // looks larger only because the pre-CPP-063 final value happened to be
+    // unusually small; both remain comfortably inside the same bound). The
+    // bound is unchanged from CPP-062's own tightened value (1.0, matching
+    // the horizontal case's own bound) - both axes remain the SAME
+    // structural category (direct observation, similar headroom above
+    // their own measured maxima).
     REQUIRE(r.fused.max_vert_pos_err_m < 1.0);
 
     // ATTITUDE: disciplined by magnetometer fusion (H_MAG[0..3] always
     // unmasked - see ekf_core.hpp's phase 5 banner - even with the
     // mag-field states themselves permanently inhibited) at 10Hz, despite
-    // the injected gyro bias's continuous attitude-drift pressure.
-    // Measured max: 0.546deg.
+    // the injected gyro bias's continuous attitude-drift pressure. Measured
+    // max (pre-CPP-063): 0.546deg. RE-MEASURED this ticket (CPP-063) after
+    // adding airspeed fusion: 0.5487deg - a negligible shift, still
+    // comfortably inside the same bound.
     REQUIRE(r.fused.max_att_err_deg < 3.0);
 
     // Final-value bounds are naturally tighter than the running max above
     // (the filter has had the whole run to converge/re-correct, and the
-    // profile ends in a stable phase, not mid-transient). Measured finals:
-    // 0.0143m / 0.0043m / 0.0156 m/s / 0.0398deg.
+    // profile ends in a stable phase, not mid-transient). Measured finals
+    // (pre-CPP-063): 0.0143m / 0.0043m / 0.0156 m/s / 0.0398deg.
+    // RE-MEASURED this ticket (CPP-063) after adding airspeed fusion:
+    // 0.0145m / 0.0141m / 0.0145 m/s / 0.0416deg - all four shifted by a
+    // small, real amount (the vertical final in particular, ~3x in
+    // absolute terms, though both values are small fractions of the 0.2
+    // bound) from airspeed fusion's own always-active velocity/attitude
+    // correction perturbing this chaotic, turn-heavy 120s trajectory's
+    // exact final state - an honest, disclosed re-measurement, not a bound
+    // adjustment (all four remain comfortably inside their existing
+    // bounds, unchanged below).
     REQUIRE(r.fused.final_horiz_pos_err_m < 0.2);
     REQUIRE(r.fused.final_vert_pos_err_m < 0.2);
     REQUIRE(r.fused.final_vel_err_mps < 0.2);
