@@ -126,6 +126,14 @@ add_executable(defaults_test defaults_test.cpp)
 target_link_libraries(defaults_test PRIVATE ap-param Catch2::Catch2WithMain)
 catch_discover_tests(defaults_test)
 
+add_executable(top_level_test top_level_test.cpp)
+target_link_libraries(top_level_test PRIVATE ap-param Catch2::Catch2WithMain)
+catch_discover_tests(top_level_test)
+
+add_executable(native_value_test native_value_test.cpp)
+target_link_libraries(native_value_test PRIVATE ap-param Catch2::Catch2WithMain)
+catch_discover_tests(native_value_test)
+
 add_executable(notch_filter_params_test notch_filter_params_test.cpp)
 target_link_libraries(notch_filter_params_test PRIVATE ap-filter ap-param Catch2::Catch2WithMain)
 catch_discover_tests(notch_filter_params_test)
@@ -193,6 +201,13 @@ catch_discover_tests(fw_control_test)
 add_executable(vehicle_test vehicle_test.cpp)
 target_link_libraries(vehicle_test PRIVATE ap-vehicle ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(vehicle_test)
+
+# CPP-043: storage/persistence integration test for Plane::aparm - no
+# ap-sim needed (not a closed-loop test, see the ticket's own "NOT a
+# SimPlane closed-loop test" instruction).
+add_executable(plane_aparm_param_test plane_aparm_param_test.cpp)
+target_link_libraries(plane_aparm_param_test PRIVATE ap-vehicle Catch2::Catch2WithMain)
+catch_discover_tests(plane_aparm_param_test)
 
 add_executable(gps_test gps_test.cpp)
 target_link_libraries(gps_test PRIVATE ap-gps Catch2::Catch2WithMain)

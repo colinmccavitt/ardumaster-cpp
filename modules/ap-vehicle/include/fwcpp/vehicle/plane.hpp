@@ -2956,6 +2956,12 @@
 #include <fwcpp/location.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/nav/l1_control.hpp>
+#include <fwcpp/param/group_info.hpp>
+#include <fwcpp/param/native_value.hpp>
+#include <fwcpp/param/param.hpp>
+#include <fwcpp/param/persistence.hpp>
+#include <fwcpp/param/storage.hpp>
+#include <fwcpp/param/top_level.hpp>
 #include <fwcpp/rc/rc_channels.hpp>
 #include <fwcpp/srv/srv_channels.hpp>
 #include <fwcpp/steer_control/steer_controller.hpp>
@@ -3130,6 +3136,332 @@ struct FixedWingTunables {
     std::int8_t takeoff_tdrag_elevator = 0; // TKOFF_TDRAG_ELEV / g.takeoff_tdrag_elevator, Parameters.cpp default 0, %
     float takeoff_tdrag_speed1 = 0.0f;      // TKOFF_TDRAG_SPD1 / g.takeoff_tdrag_speed1, Parameters.cpp default 0, m/s
 };
+
+// === CPP-043 ADDENDUM: real top-level AP_Param Info[] table for aparm,
+// load/save round-trip ===
+//
+// CPP-022 (AP_Param GroupInfo/Info tree traversal, load/save-to-storage)
+// stopped at 95%, deliberately, per ADR-0013's own scope boundary: no
+// AP_Vehicle-level integration exists without "a scheduler or vehicle
+// skeleton" - CPP-031 built that skeleton (this `Plane`, `aparm` above).
+// This addendum is that now-unblocked continuation, for `aparm` only
+// (phase 1 - see "DEFERRED" list below for everything else).
+//
+// FINDING #1, corrects this ticket's own framing - VERIFIED BY READING
+// libraries/AP_Vehicle/AP_FixedWing.h AND ArduPlane/Parameters.cpp/.h IN
+// FULL, not assumed: upstream's real `AP_FixedWing` (the actual type of
+// `Plane::aparm`, ArduPlane/Plane.h:195) has only 21 fields, MUCH
+// smaller than this port's ~50-field `FixedWingTunables`, and critically
+// upstream does NOT register them under one shared "aparm" name/prefix/
+// GROUP entry at all. Reading the `ASCALAR` macro itself
+// (AP_Param/AP_Param.h:175: `{ name, &AP_PARAM_VEHICLE_NAME.aparm.v,
+// {def}, 0, Parameters::k_param_##v, aparm.v.vtype }`) shows every
+// `aparm` field is its OWN independent, individually-keyed, individually
+// -named TOP-LEVEL `AP_Param::Info` entry in `Plane::var_info[]`
+// (Parameters.cpp) - e.g. `ASCALAR(roll_limit, "ROLL_LIMIT_DEG", ...)`,
+// `ASCALAR(throttle_cruise, "TRIM_THROTTLE", ...)` - NOT one grouped
+// "ARSPD_"-style entry the way `rollController`/`compass`/etc really are
+// (those genuinely use `GOBJECT(x, "PREFIX_", Type)`, a true nested
+// GROUP). This ticket's own scope text guessed at a shared prefix
+// ("name e.g. 'ARSPD'... this port has latitude") - reading upstream
+// directly shows that guess doesn't match reality, so this port's own
+// `aparm_param_info` table below reproduces the REAL shape: 13 flat,
+// individually-keyed, individually-named top-level `param::Info` scalar
+// entries (see FINDING #2 for why only 13, not 21 or ~50), with NO
+// GROUP-type entry for "aparm" at all. `find_group`/GROUP-type `Info`
+// dispatch (CPP-022 slice 3) is still real machinery this port's
+// generic top-level `param::find()` (fwcpp/param/top_level.hpp)
+// supports and needs (upstream's `rollController`/`compass`/etc DO use
+// it, a later phase's real work) - it's simply not what `aparm` itself
+// needs, so `top_level_test.cpp`'s own synthetic table (matching CPP-022/
+// upstream's own test_find_by_name.cpp precedent) is what actually
+// exercises that branch for now, independent of `Plane`.
+//
+// FINDING #2 - ALSO verified by reading AP_FixedWing.h/Parameters.cpp
+// directly, not assumed: of `FixedWingTunables`' ~50 fields, only 13 are
+// genuinely backed by upstream's real `aparm`/`AP_FixedWing` object at
+// all (identifiable by each field's own pre-existing comment reading
+// literally "aparm.<field>", not "g.<field>"/"g2.<field>"/
+// "AP_Landing::<field>"): roll_limit_deg, pitch_limit_max_deg,
+// pitch_limit_min_deg, airspeed_min, airspeed_max, airspeed_stall,
+// stall_prevention, throttle_cruise, throttle_min, throttle_max,
+// takeoff_throttle_max, airspeed_cruise, loiter_radius. Every OTHER
+// field in `FixedWingTunables` (level_roll_limit_deg, scaling_speed,
+// stab_pitch_down, throttle_passthru_stabilize, pitch_trim_deg,
+// kff_throttle_to_pitch, kff_rudder_mix, rudder_only, man_expo_*,
+// flybywire_*, cruise_alt_floor, waypoint_radius, rtl_*, throttle_fs_*,
+// fs_action_*, rc_fs_timeout_ms, fs_timeout_long_ms, ground_steer_*,
+// takeoff_rotate_speed, flap_*, flare_*, takeoff_tdrag_*) is a REAL
+// upstream AP_Param too, just backed by a DIFFERENT upstream object
+// (Plane's own `g`/`g2` Parameters structs, or AP_Landing) that this
+// port's `FixedWingTunables` happens to bundle into the same C++ struct
+// for its own convenience (per this ticket's own "its own aggregation,
+// not a literal copy" framing) - these are covered by this ticket's
+// "other tunable-bearing structs... deferred" language too, just a
+// category the ticket didn't name explicitly since it assumed a cleaner
+// aparm/FixedWingTunables correspondence than actually exists. Building
+// fabricated top-level entries for these under invented "aparm-adjacent"
+// names would misrepresent them; they're deferred to whichever future
+// phase ports Plane's own `g`/`g2`/`AP_Landing` Info tables for real.
+//
+// FINDING #3, a genuine, REGISTERED divergence (ADR-0007: fix/flag
+// divergences in the port, don't silently drop them) - verified by
+// reading AP_FixedWing.h's real field types: upstream stores
+// throttle_cruise/throttle_min/throttle_max/takeoff_throttle_max as
+// `AP_Int8` (1 byte) and airspeed_min/airspeed_max/loiter_radius as
+// `AP_Int16` (2 bytes), but THIS PORT's `FixedWingTunables` (established
+// across CPP-031 through CPP-042, long before this ticket) declares ALL
+// SEVEN as plain C++ `float` (4 bytes), for arithmetic convenience
+// alongside its other, genuinely-float, aparm fields. Retrofitting these
+// seven fields' C++ TYPE to match upstream's narrower integer width was
+// rejected for this ticket: it would ripple through every one of their
+// many read sites across CPP-031-CPP-042 for a byte-width change with no
+// behavioral benefit any of this ticket's acceptance criteria need.
+// Instead, this port's own `aparm_param_info` table below uses
+// `VarType::Float` (this port's OWN live width) for all twelve `float`-
+// typed real-aparm fields, INCLUDING these seven - meaning this port's
+// on-storage encoding for exactly these seven parameters does not match
+// a byte blob a real upstream vehicle (or upstream's own SITL) would
+// produce for the same parameter names. Nothing in this ticket's
+// acceptance criteria exercises cross-implementation interchange (no
+// test parses a real upstream-written EEPROM blob) - the FORMAT-level
+// byte compatibility ADR-0013 established (EEPROM_header/Param_header
+// encoding, key-splitting, sentinel handling - CPP-021, independently
+// verified against upstream's own struct layout) is untouched; only
+// these seven fields' chosen on-storage WIDTH diverges from a real
+// vehicle's, a narrow, explicit, deliberately-flagged trade-off, not a
+// silent gap. `stall_prevention` (the 13th real field) has NO such
+// mismatch: it's a C++ `bool` (1 byte) here, matching upstream's real
+// `AP_Int8` (1 byte) width exactly.
+//
+// FINDING #4 - why CPP-022 slice 6/7's `setup_object_defaults`/
+// `set_value`/`cast_to_float` (defaults.hpp/persistence.hpp) are NOT
+// reused unchanged here, unlike this ticket's own text expected: those
+// three functions reinterpret their resolved address as `ParamInt8*`/
+// `ParamInt16*`/`ParamInt32*`/`ParamFloat*` (this port's AP_Param VALUE
+// WRAPPER classes, param.hpp) and call THAT class's own member
+// functions - correct only when an object of that EXACT wrapper class
+// genuinely lives at the address (true for NotchFilterParams, CPP-024,
+// whose fields ARE declared `param::ParamFloat`). `aparm`'s fields are
+// plain `float`/`bool` (FINDING #3's own reasoning: retrofitting them to
+// wrapper types was rejected as disproportionate for this ticket) - a
+// `float`/`bool` object is NOT a `ParamFloat`/`ParamInt8` object, even
+// though they happen to share layout on every compiler this port
+// targets, so reinterpreting one as the other would be exactly the kind
+// of unsafe reinterpretation ADR-0012 forbids (Float16's bit_cast
+// precedent). `fwcpp/param/native_value.hpp` (CPP-043, new) provides a
+// memcpy-based equivalent pair (`set_native_value`/`native_cast_to_float`)
+// that reads/writes the correctly-sized bytes at an address without
+// assuming any particular class lives there - well-defined for any
+// TriviallyCopyable destination of matching size, per
+// [basic.types.general], which is what memcpy is FOR. Genuinely reused
+// UNCHANGED from CPP-022, because they never touch the pointee's static
+// type at all: `find_group`/`get_base`/`adjust_group_offset` (pure
+// address resolution), `load_raw`/`save_raw`/`scan` (plain
+// `StorageAccess::read_block`/`write_block` memcpy), `should_skip_save`
+// (pure float arithmetic), `type_size`, `get_default_value`'s `Info`
+// overload (reads `info.def_value`, a float, not `vp`'s pointee type
+// except a same-treatment sibling-float read under kFlagDefaultPointer -
+// unused here).
+//
+// EXPLICIT, NOT IMPLICIT (matching this port's own stated bias, and this
+// ticket's own suggested phrasing): `apply_aparm_defaults`/
+// `load_aparm_parameters`/`save_aparm_parameters` below are ordinary
+// free functions a caller invokes explicitly - NOT called from `Plane`'s
+// constructor. This changes nothing for `Plane`'s existing ~30 tests
+// across fw_control_test.cpp/tecs_test.cpp/vehicle_test.cpp/etc: they
+// never call these new functions, and `aparm`'s fields keep getting
+// their real defaults exactly as before, via `FixedWingTunables`' own
+// C++ in-class default member initializers above (independently
+// verified, per field, against the SAME real Parameters.cpp/config.h
+// values this addendum's own `aparm_param_info` table cites - see
+// plane_aparm_param_test.cpp's defaults spot-check). `apply_aparm_
+// defaults` exists as a SEPARATE, explicit way to reach the identical
+// values FROM the AP_Param table (the authoritative source upstream
+// itself uses - upstream's own `AP_Int8 throttle_min` has NO in-class
+// default at all, only the `ASCALAR` macro's argument does), for a
+// caller (e.g. this ticket's own test) that wants that guarantee
+// independent of whether `FixedWingTunables`' initializer and this
+// table's `def_value` have been kept in sync by hand.
+//
+// DEFERRED TO FUTURE PHASES, named explicitly, not silently skipped:
+//   - Every other Plane tunable-bearing struct this ticket's own text
+//     already named: fw_control::{Roll,Pitch,Yaw}Controller::Gains,
+//     steer_control::SteerController::Gains, tecs::Tecs::Gains,
+//     nav::L1Control::Gains, RC/SRV per-channel configuration.
+//   - The ADDITIONAL category FINDING #2 above surfaced: every
+//     `FixedWingTunables` field backed by upstream's real `g`/`g2`
+//     Parameters structs or `AP_Landing` (the ~37 fields listed in
+//     FINDING #2) - genuinely real upstream AP_Params, just not
+//     `aparm`'s own, so out of THIS ticket's "aparm only" scope.
+//   - `find_var_info` (by-pointer-identity self-discovery, incl. Vector3f
+//     sub-element detection) - still no real caller without a GCS/
+//     parameter-enumeration consumer this port doesn't have (CPP-022's
+//     own repeatedly-deferred remaining piece).
+//   - Conversion/upgrade machinery for older-format storage (CPP-023,
+//     already its own ticket).
+//   - `param_overrides` board-config mechanism (CPP-022 slice 6's own
+//     note).
+//   - Byte-width-accurate on-storage encoding for the seven FINDING #3
+//     fields (would need a width-converting staging buffer between the
+//     live `float` and a real Int8/Int16 on-disk representation) - not
+//     attempted here, registered as a known, narrow divergence instead.
+
+// This port's own top-level key allocation for the 13 real `aparm`
+// fields below - informed by, but independent of, upstream's real
+// Parameters.h `k_param_*` enum (whose specific numeric values are an
+// upstream EEPROM-migration/ordering detail this port has no reason to
+// reproduce - see ADR-0013's own note that conversion machinery for
+// older-format storage is separately-tracked, unbuilt work). Matches
+// CPP-022/ADR-0013's "no full vehicle-wide key space exists yet"
+// starting point: only these 13 values are allocated so far; a future
+// phase's own Info-table entries pick the next free value.
+enum class AparmParamKey : std::uint16_t {
+    kRollLimitDeg = 1,
+    kPitchLimitMaxDeg = 2,
+    kPitchLimitMinDeg = 3,
+    kAirspeedMin = 4,
+    kAirspeedMax = 5,
+    kAirspeedStall = 6,
+    kStallPrevention = 7,
+    kThrottleCruise = 8,
+    kThrottleMin = 9,
+    kThrottleMax = 10,
+    kTakeoffThrottleMax = 11,
+    kAirspeedCruise = 12,
+    kLoiterRadius = 13,
+};
+
+// Builds a fresh top-level param::Info[] table (13 real scalar entries +
+// a VarType::None sentinel, matching every other table in this port's
+// AP_Param module) addressing `aparm`'s fields DIRECTLY (info.ptr =
+// &aparm.field). Built per-call rather than a shared `static` table
+// (unlike e.g. NotchFilterParams::var_info(), CPP-024): upstream's own
+// Info table is `static` because there is exactly one global `plane`
+// object to point into - this port allows more than one live `Plane`
+// (the round-trip test below constructs two), so there is no single
+// fixed address to bake in at compile time; a fresh, cheap-to-construct
+// 13-entry array per call is the honest equivalent.
+//
+// Names are transcribed directly from upstream's real ASCALAR lines
+// (ArduPlane/Parameters.cpp, grepped and read directly - see FINDING #1
+// above); every def_value is upstream's real config.h/Parameters.cpp
+// constant (ROLL_LIMIT_DEG=45, PITCH_MAX=20, PITCH_MIN=-25,
+// AIRSPEED_FBW_MIN=9, AIRSPEED_FBW_MAX=22, AIRSPEED_STALL=0,
+// STALL_PREVENTION=1, AP_PLANE_TRIM_THROTTLE_DEFAULT=45, THROTTLE_MIN=0,
+// THROTTLE_MAX=100, TKOFF_THR_MAX=0, AIRSPEED_CRUISE=12,
+// LOITER_RADIUS_DEFAULT=60 - all re-verified against config.h directly
+// for this ticket, matching every value FixedWingTunables' own
+// pre-existing field comments already recorded).
+[[nodiscard]] inline std::array<param::Info, 14> aparm_param_info(FixedWingTunables& aparm) {
+    using param::Info;
+    using param::VarType;
+    auto entry = [](const char* name, const void* ptr, float def_value, AparmParamKey key, VarType type) {
+        Info info{};
+        info.name = name;
+        info.ptr = ptr;
+        info.def_value = def_value;
+        info.flags = 0;
+        info.key = static_cast<std::uint16_t>(key);
+        info.type = static_cast<std::uint8_t>(type);
+        return info;
+    };
+    return {{
+        entry("ROLL_LIMIT_DEG", &aparm.roll_limit_deg, 45.0f, AparmParamKey::kRollLimitDeg, VarType::Float),
+        entry("PTCH_LIM_MAX_DEG", &aparm.pitch_limit_max_deg, 20.0f, AparmParamKey::kPitchLimitMaxDeg, VarType::Float),
+        entry("PTCH_LIM_MIN_DEG", &aparm.pitch_limit_min_deg, -25.0f, AparmParamKey::kPitchLimitMinDeg, VarType::Float),
+        entry("AIRSPEED_MIN", &aparm.airspeed_min, 9.0f, AparmParamKey::kAirspeedMin, VarType::Float),
+        entry("AIRSPEED_MAX", &aparm.airspeed_max, 22.0f, AparmParamKey::kAirspeedMax, VarType::Float),
+        entry("AIRSPEED_STALL", &aparm.airspeed_stall, 0.0f, AparmParamKey::kAirspeedStall, VarType::Float),
+        entry("STALL_PREVENTION", &aparm.stall_prevention, 1.0f, AparmParamKey::kStallPrevention, VarType::Int8),
+        entry("TRIM_THROTTLE", &aparm.throttle_cruise, 45.0f, AparmParamKey::kThrottleCruise, VarType::Float),
+        entry("THR_MIN", &aparm.throttle_min, 0.0f, AparmParamKey::kThrottleMin, VarType::Float),
+        entry("THR_MAX", &aparm.throttle_max, 100.0f, AparmParamKey::kThrottleMax, VarType::Float),
+        entry("TKOFF_THR_MAX", &aparm.takeoff_throttle_max, 0.0f, AparmParamKey::kTakeoffThrottleMax, VarType::Float),
+        entry("AIRSPEED_CRUISE", &aparm.airspeed_cruise, 12.0f, AparmParamKey::kAirspeedCruise, VarType::Float),
+        entry("WP_LOITER_RAD", &aparm.loiter_radius, 60.0f, AparmParamKey::kLoiterRadius, VarType::Float),
+        Info{}, // sentinel: type == VarType::None (0) via zero-init, matching every other table in this module
+    }};
+}
+
+// Applies every entry's own AP_Param-table default directly into
+// `aparm`'s live fields - see this addendum's "EXPLICIT, NOT IMPLICIT"
+// note above for why this is a separate, opt-in function rather than
+// something Plane's constructor calls.
+inline void apply_aparm_defaults(FixedWingTunables& aparm) {
+    const std::array<param::Info, 14> table = aparm_param_info(aparm);
+    for (const param::Info& info : table) {
+        if (info.type == static_cast<std::uint8_t>(param::VarType::None)) {
+            break;
+        }
+        param::set_native_value(static_cast<param::VarType>(info.type), const_cast<void*>(info.ptr), info.def_value);
+    }
+}
+
+// Port of AP_Param::load() (AP_Param.cpp ~line 1310, read in full),
+// specialized to a flat top-level table (`aparm`'s real fields are each
+// individually top-level upstream too - FINDING #1 above - so there is
+// no group_element nesting to compute; group_element is always 0) and to
+// NOT use find_var_info's by-pointer-identity self-discovery (out of
+// scope - the caller already knows which object/table it's loading,
+// exactly as upstream's OWN load_object_from_eeprom does via a supplied
+// key rather than load()'s own self-discovery). Per real upstream
+// load(): if a stored value is found, its bytes are read straight into
+// the live object (upstream: `_storage.read_block(ap, ofs+sizeof(phdr),
+// type_size(...))` - directly into the live AP_Param, not a staging
+// copy); if NOT found, "set the default value" (verified by reading
+// load()'s own body) - both behaviors reproduced exactly, using
+// load_raw (CPP-022 slice 5, unchanged: a plain memcpy, safe to target
+// aparm's own live field address) and set_native_value (CPP-043) for
+// the not-found/default case.
+inline void load_aparm_parameters(const storage::StorageAccess& storage, FixedWingTunables& aparm) {
+    const std::array<param::Info, 14> table = aparm_param_info(aparm);
+    for (const param::Info& info : table) {
+        if (info.type == static_cast<std::uint8_t>(param::VarType::None)) {
+            break;
+        }
+        const auto type = static_cast<param::VarType>(info.type);
+        param::ParamHeader phdr{};
+        phdr.type = info.type;
+        param::set_key(phdr, info.key);
+        phdr.group_element = 0;
+        void* field_ptr = const_cast<void*>(info.ptr);
+        if (!param::load_raw(storage, phdr, field_ptr, param::type_size(type))) {
+            param::set_native_value(type, field_ptr, info.def_value);
+        }
+    }
+}
+
+// Port of AP_Param::save_sync's default-skip-then-write path
+// (AP_Param.cpp ~line 1138, read in full), specialized the same way
+// load_aparm_parameters is above (flat top-level table, no find_var_info
+// self-discovery - the caller already knows the table). Reuses
+// should_skip_save (CPP-022 slice 7, persistence.hpp) COMPLETELY
+// UNCHANGED - it is pure float arithmetic with no pointer casting at
+// all, so it applies here exactly as it does to the ParamValue<T>-based
+// case this port already had it working for. `force_save` matches
+// upstream's own save_sync(force_save, ...) parameter (unused by this
+// ticket's own test, which relies on the default-skip path, but wired
+// through for a future caller - e.g. a GCS PARAM_SET - that needs it).
+inline void save_aparm_parameters(storage::StorageAccess& storage, FixedWingTunables& aparm, bool force_save = false) {
+    const std::array<param::Info, 14> table = aparm_param_info(aparm);
+    for (const param::Info& info : table) {
+        if (info.type == static_cast<std::uint8_t>(param::VarType::None)) {
+            break;
+        }
+        const auto type = static_cast<param::VarType>(info.type);
+        const void* field_ptr = info.ptr;
+        const float current = param::native_cast_to_float(type, field_ptr);
+        if (param::should_skip_save(type, current, info.def_value, force_save)) {
+            continue;
+        }
+        param::ParamHeader phdr{};
+        phdr.type = info.type;
+        param::set_key(phdr, info.key);
+        phdr.group_element = 0;
+        (void)param::save_raw(storage, phdr, field_ptr, param::type_size(type));
+    }
+}
 
 // CPP-038: a small, LOCAL port of upstream's SRV_Channels::set_slew_rate()/
 // get_slew_limited_output_scaled() (SRV_Channel_aux.cpp, read in full,
@@ -7504,6 +7836,36 @@ public:
     void failsafe_long_off_event() {
         long_failsafe_pending = false; // upstream: unconditional, first line
         failsafe.state = FailsafeState::Level::None; // upstream: failsafe.state = FAILSAFE_NONE
+    }
+
+    // === CPP-043: aparm parameter persistence ===
+    // Thin instance-bound wrappers around the free functions declared
+    // above FixedWingTunables (aparm_param_info/apply_aparm_defaults/
+    // load_aparm_parameters/save_aparm_parameters) - see this file's own
+    // "CPP-043 ADDENDUM" banner (immediately after FixedWingTunables'
+    // closing brace) for the full design rationale, real-upstream
+    // verification, and registered divergences. Each wrapper here binds
+    // those free functions to THIS instance's own `aparm` and
+    // `hal.storage` (CPP-025's HalContext, which already owns the real
+    // backing `storage::RawStorage` buffer - no new storage mechanism
+    // introduced here, matching ADR-0013's "storage mechanism is out of
+    // scope" layering).
+    //
+    // Named "*_aparm_*", not upstream's "load_all"/"save_all" - see the
+    // CPP-043 ADDENDUM's FINDING #2: this phase covers only aparm's own
+    // 13 real fields, not "all" of Plane's parameters (dozens of other
+    // real AP_Params live on this port's g/g2/AP_Landing-backed fields,
+    // deferred), so naming these "_all_" would overclaim.
+    void apply_aparm_defaults() { fwcpp::vehicle::apply_aparm_defaults(aparm); }
+
+    void load_aparm_parameters() {
+        storage::StorageAccess param_storage(hal.storage, storage::StorageType::Param);
+        fwcpp::vehicle::load_aparm_parameters(param_storage, aparm);
+    }
+
+    void save_aparm_parameters(bool force_save = false) {
+        storage::StorageAccess param_storage(hal.storage, storage::StorageType::Param);
+        fwcpp::vehicle::save_aparm_parameters(param_storage, aparm, force_save);
     }
 
 private:
