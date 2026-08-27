@@ -301,3 +301,9 @@ catch_discover_tests(yaw_controller_param_test)
 add_executable(steer_controller_param_test steer_controller_param_test.cpp)
 target_link_libraries(steer_controller_param_test PRIVATE ap-steer-control ap-param Catch2::Catch2WithMain)
 catch_discover_tests(steer_controller_param_test)
+
+# CPP-052 phase 1: strapdown INS mechanization + covariance prediction
+# unit tests, no fusion (see fwcpp/ekf/ekf_core.hpp's scope banner).
+add_executable(ekf_core_test ekf_core_test.cpp)
+target_link_libraries(ekf_core_test PRIVATE ap-ekf Catch2::Catch2WithMain)
+catch_discover_tests(ekf_core_test)
