@@ -230,3 +230,12 @@ catch_discover_tests(steer_controller_test)
 add_executable(pitch_controller_param_test pitch_controller_param_test.cpp)
 target_link_libraries(pitch_controller_param_test PRIVATE ap-fw-control Catch2::Catch2WithMain)
 catch_discover_tests(pitch_controller_param_test)
+
+# CPP-046: storage/persistence integration test for
+# fw_control::YawController::Gains - no ap-sim/ap-vehicle needed (not a
+# closed-loop test, see the ticket's own "NOT a SimPlane closed-loop
+# test" instruction); ap-fw-control alone (which transitively pulls in
+# ap-param via ap-pid -> ap-filter -> ap-param) is enough.
+add_executable(yaw_controller_param_test yaw_controller_param_test.cpp)
+target_link_libraries(yaw_controller_param_test PRIVATE ap-fw-control Catch2::Catch2WithMain)
+catch_discover_tests(yaw_controller_param_test)

@@ -135,6 +135,19 @@
 #include <fwcpp/fw_control/fw_controller.hpp>
 #include <fwcpp/math/scalar.hpp>
 
+// CPP-046: real top-level AP_Param support for YawController::Gains -
+// see the "CPP-046 ADDENDUM" comment below (after the YawController
+// class) for the full design rationale. param::Info/GroupInfo live in
+// group_info.hpp; the rest are the same type-agnostic (find/native
+// memcpy bridge/persistence) primitives CPP-043's aparm addendum already
+// established as reusable unchanged.
+#include <array>
+#include <fwcpp/param/group_info.hpp>
+#include <fwcpp/param/native_value.hpp>
+#include <fwcpp/param/param.hpp>
+#include <fwcpp/param/persistence.hpp>
+#include <fwcpp/param/storage.hpp>
+
 namespace fwcpp::fw_control {
 
 // Everything AP_YawController::get_servo_out() (the sideslip/turn-
@@ -367,5 +380,254 @@ private:
     // own note.
     pid::PidInfo pid_info_;
 };
+
+// === CPP-046 ADDENDUM: real top-level AP_Param Info[] table for
+// YawController::Gains, load/save round-trip ===
+//
+// Phase 2c of the AP_Param vehicle-integration effort CPP-043 started
+// (phase 1: Plane::aparm, fwcpp/vehicle/plane.hpp's own "CPP-043
+// ADDENDUM" - the template this addendum follows). Self-contained to
+// this file only, per this ticket's own parallel-work constraint (six
+// sibling tickets, CPP-044 through CPP-049, port the same pattern for
+// Roll/Pitch/Steer/L1/TECS's own Gains structs independently - touching
+// only each one's own header keeps all six independently mergeable).
+//
+// REAL UPSTREAM SOURCE, READ IN FULL (not assumed from this ticket's own
+// summary - which turned out to be wrong on the prefix, see FINDING #1):
+// libraries/APM_Control/AP_YawController.cpp's real `var_info[]` (lines
+// 29-177) and ArduPlane/Parameters.cpp's real registration line (grepped
+// directly: `GOBJECT(yawController, "YAW", AP_YawController)`, line 834).
+//
+// FINDING #1, corrects this ticket's own framing - VERIFIED BY READING
+// Parameters.cpp DIRECTLY, not assumed: the real GOBJECT prefix is
+// `"YAW"`, NOT `"YAW2SRV_"` as this ticket's own scope text guessed. Every
+// local var_info name is concatenated onto that shorter "YAW" prefix to
+// form the real, full parameter name a GCS would show - e.g. local name
+// "2SRV_SLIP" (AP_GROUPINFO's first argument) + prefix "YAW" =
+// "YAW2SRV_SLIP" (the params happen to spell out "2SRV" themselves,
+// which is why the ticket's own "YAW2SRV_" guess looked plausible without
+// actually being the real registered prefix string). Table below uses
+// each field's REAL FULL name (prefix genuinely concatenated in, matching
+// what a real upstream vehicle would expose), not the bare local name.
+//
+// FINDING #2 - which of Gains' fields are genuinely upstream AP_Param-
+// backed, verified against var_info[] entry-by-entry, matching CPP-043's
+// own finding that only a fraction of its target struct turned out to be
+// genuinely backed: SIX of Gains' seven fields are direct top-level
+// AP_GROUPINFO scalars - k_a (idx 0, "2SRV_SLIP"), k_i (idx 1,
+// "2SRV_INT"), k_d (idx 2, "2SRV_DAMP"), k_ff (idx 3, "2SRV_RLL"),
+// imax_cd (idx 5, "2SRV_IMAX" - idx 4 is a documented upstream GAP, see
+// FINDING #3), rate_enable (idx 6, "_RATE_ENABLE", AP_GROUPINFO_FLAGS
+// with AP_PARAM_FLAG_ENABLE - see FINDING #4). The SEVENTH field,
+// rate_pid (pid::AcPid::Gains), is genuinely upstream AP_Param-backed
+// TOO - AP_SUBGROUPINFO(rate_pid, "_RATE_", 9, AP_YawController, AC_PID)
+// registers AC_PID's own var_info[] (P/I/D/FF/IMAX/FLTT/FLTE/FLTD/SMAX/
+// PDMX/D_FF/NTF/NEF - the comment-only block at var_info.cpp lines 83-172
+// documents these; the real AP_GROUPINFO entries live in AC_PID's OWN
+// var_info[], not AP_YawController's) as a NESTED GROUP at idx 9 - but
+// building that nested GroupInfo tree requires AC_PID's own GroupInfo
+// table, which lives in ap-pid's ac_pid.hpp, a DIFFERENT module this
+// ticket's own scope constraint forbids touching (only yaw_controller.hpp,
+// this ticket's own new test file, and tests/CMakeLists.txt). rate_pid is
+// therefore explicitly DEFERRED here, named rather than silently skipped
+// - a future ticket building AC_PID's own reusable GroupInfo table
+// (shared infrastructure: Roll/PitchController::Gains also each embed a
+// rate_pid of the identical type, per CPP-044/045's own likely scope)
+// can wire it in without redesigning this file's six real entries.
+//
+// FINDING #3: var_info[]'s own comment (AP_YawController.cpp:63-66)
+// documents idx 4 as a deliberate gap: "index 4 should not be used - it
+// was used for an incorrect AP_Int8 version of the IMAX in the 2.74
+// release". This is upstream's own historical reservation, not a field
+// this port has any corresponding value for - correctly absent from the
+// table below (idx values are GroupInfo-local nesting slots in any case,
+// irrelevant to this ticket's flat top-level table / independent key
+// allocation - see below).
+//
+// FINDING #4: rate_enable's real AP_GROUPINFO_FLAGS carries
+// AP_PARAM_FLAG_ENABLE (var_info line 81). This port's `ParamFlag::
+// kFlagEnable` (group_info.hpp) already exists for exactly this bit;
+// set on this one entry below for faithfulness, though - matching
+// aparm_param_info's own precedent for flags nothing currently reads -
+// no code in this port currently consumes AP_PARAM_FLAG_ENABLE semantics
+// (it would gate a GCS/MAVLink parameter-metadata consumer this port
+// doesn't have), so the bit is inert today but preserved for a future
+// reader rather than silently dropped.
+//
+// A REGISTERED DIVERGENCE, matching FINDING #3's aparm precedent
+// (ADR-0007: flag divergences in the port, don't drop them silently):
+// upstream's real `_imax` is an AP_Int16 (2 bytes; default 1500,
+// centidegrees), but this port's Gains::imax_cd (established well before
+// this ticket, CPP-032) is a plain C++ `float` (4 bytes) - for arithmetic
+// convenience alongside k_a/k_i/k_d/k_ff, which genuinely ARE upstream
+// AP_Float (4 bytes) already, so no divergence there. Retrofitting
+// imax_cd's C++ type to a narrower int was rejected as disproportionate,
+// identical reasoning to aparm's seven float-vs-AP_Int8/16 fields.
+// yaw_param_info uses VarType::Float (this port's own live width) for
+// imax_cd - this port's on-storage encoding for exactly this one
+// parameter would not match a byte blob a real upstream vehicle would
+// produce for "YAW2SRV_IMAX". rate_enable has NO such mismatch: it's a
+// C++ `bool` (1 byte) here, matching upstream's real AP_Int8 (1 byte)
+// width exactly.
+//
+// SHAPE DECISION: a FLAT top-level table (matching CPP-043's
+// aparm_param_info() shape exactly - 6 real entries + a VarType::None
+// sentinel), NOT a nested param::Info{type=Group} entry, even though
+// upstream's real registration genuinely IS a GOBJECT/GROUP (unlike
+// aparm, which CPP-043 found has no real GROUP wrapper at all - a
+// genuine difference between the two tickets' targets). A real nested
+// GROUP entry here would need a GroupInfo[] table for AP_YawController's
+// own six direct fields (straightforward) PLUS AC_PID's own nested
+// GroupInfo[] for rate_pid's AP_SUBGROUPINFO (FINDING #2) to be
+// complete and accurate - and the latter cannot be built without
+// touching ac_pid.hpp, out of this ticket's scope. Rather than build a
+// GROUP entry with a hole in it (a nested group whose own AP_SUBGROUPINFO
+// silently doesn't resolve), this file uses each real field's own FULL
+// concatenated name (FINDING #1) as a top-level scalar Info entry
+// instead - functionally equivalent for `param::find()`'s SCALAR branch
+// (case-insensitive full-name match, top_level.hpp), which is all this
+// ticket's own required "top_level::find()-by-name test" needs. The
+// GROUP branch itself remains real, tested machinery (CPP-022/CPP-043)
+// exercised by top_level_test.cpp's synthetic table; this ticket adds no
+// second real GROUP caller either, matching aparm's own precedent.
+//
+// KEY ALLOCATION: this port's own top-level key space, informed by but
+// independent of upstream's real Parameters.h k_param_yawController
+// value (an EEPROM-migration/ordering detail this port has no reason to
+// reproduce - ADR-0013). Starts at 1, matching CPP-043's own aparm
+// enum's starting point, NOT continuing after aparm's 1-13: this ticket
+// runs in an isolated clone in parallel with five sibling tickets
+// (CPP-044/045/047/048/049) that independently port Roll/Pitch/Steer/L1/
+// TECS's own Gains the same way, none of which can see this ticket's (or
+// each other's) key choices before all six merge - a truly non-
+// overlapping GLOBAL vehicle-wide key space cannot be allocated
+// correctly from within any one isolated ticket. Each module's table is
+// only ever loaded into its OWN isolated storage::RawStorage in this
+// ticket's own tests (never combined with aparm's or another module's
+// saved keys in the same physical storage region), so no actual
+// collision occurs within this ticket's own scope. Reconciling all six
+// (and aparm's already-allocated 1-13) into one final, non-overlapping
+// vehicle-wide key space is explicitly future integration-ticket work -
+// the same "separate future integration ticket... wires Plane-level
+// convenience methods across all of them at once" this ticket's own text
+// already calls out - noted here rather than silently assumed away.
+enum class YawParamKey : std::uint16_t {
+    kSlipGain = 1,   // YAW2SRV_SLIP  (upstream _K_A,   idx 0)
+    kIntGain = 2,    // YAW2SRV_INT   (upstream _K_I,   idx 1)
+    kDampGain = 3,   // YAW2SRV_DAMP  (upstream _K_D,   idx 2)
+    kRllGain = 4,    // YAW2SRV_RLL   (upstream _K_FF,  idx 3)
+    kImax = 5,       // YAW2SRV_IMAX  (upstream _imax,  idx 5 - idx 4 is upstream's own documented gap)
+    kRateEnable = 6, // YAW_RATE_ENABLE (upstream _rate_enable, idx 6, AP_PARAM_FLAG_ENABLE)
+};
+
+// Builds a fresh top-level param::Info[] table (6 real scalar entries +
+// a VarType::None sentinel, matching every other table in this port's
+// AP_Param module) addressing `gains`' fields DIRECTLY (info.ptr =
+// &gains.field). Built per-call, not a shared `static` table, matching
+// aparm_param_info's own reasoning: this port allows more than one live
+// Gains instance (the round-trip test below constructs two), so there is
+// no single fixed address to bake in at compile time.
+//
+// Names/defaults transcribed directly from upstream's real AP_GROUPINFO
+// lines (AP_YawController.cpp, grepped and read directly - see FINDING
+// #1/#2 above): _K_A=0, _K_I=0, _K_D=0, _K_FF=1, _imax=1500,
+// _rate_enable=0 - each independently re-verified against this port's
+// own Gains struct's pre-existing default member initializers above
+// (k_a/k_i/k_d default 0.0f, k_ff default 1.0f, imax_cd default 1500.0f,
+// rate_enable default false), which already agree.
+[[nodiscard]] inline std::array<param::Info, 7> yaw_param_info(YawController::Gains& gains) {
+    using param::Info;
+    using param::VarType;
+    auto entry = [](const char* name, const void* ptr, float def_value, YawParamKey key, VarType type,
+                     std::uint16_t flags = 0) {
+        Info info{};
+        info.name = name;
+        info.ptr = ptr;
+        info.def_value = def_value;
+        info.flags = flags;
+        info.key = static_cast<std::uint16_t>(key);
+        info.type = static_cast<std::uint8_t>(type);
+        return info;
+    };
+    return {{
+        entry("YAW2SRV_SLIP", &gains.k_a, 0.0f, YawParamKey::kSlipGain, VarType::Float),
+        entry("YAW2SRV_INT", &gains.k_i, 0.0f, YawParamKey::kIntGain, VarType::Float),
+        entry("YAW2SRV_DAMP", &gains.k_d, 0.0f, YawParamKey::kDampGain, VarType::Float),
+        entry("YAW2SRV_RLL", &gains.k_ff, 1.0f, YawParamKey::kRllGain, VarType::Float),
+        entry("YAW2SRV_IMAX", &gains.imax_cd, 1500.0f, YawParamKey::kImax, VarType::Float),
+        entry("YAW_RATE_ENABLE", &gains.rate_enable, 0.0f, YawParamKey::kRateEnable, VarType::Int8,
+              param::kFlagEnable), // FINDING #4
+        Info{}, // sentinel: type == VarType::None (0) via zero-init, matching every other table in this module
+    }};
+}
+
+// Applies every entry's own AP_Param-table default directly into
+// `gains`' live fields. Explicit, not implicit (matching CPP-043's own
+// "EXPLICIT, NOT IMPLICIT" note): an ordinary free function a caller
+// invokes on purpose - Gains' own C++ in-class default member
+// initializers already give the identical values for an ordinary
+// default-constructed Gains (see this addendum's own cross-check above);
+// this exists as a SEPARATE, explicit way to reach the same values FROM
+// the AP_Param table itself, for a caller that wants that guarantee
+// independent of whether the two have been kept in sync by hand.
+inline void apply_yaw_defaults(YawController::Gains& gains) {
+    const std::array<param::Info, 7> table = yaw_param_info(gains);
+    for (const param::Info& info : table) {
+        if (info.type == static_cast<std::uint8_t>(param::VarType::None)) {
+            break;
+        }
+        param::set_native_value(static_cast<param::VarType>(info.type), const_cast<void*>(info.ptr), info.def_value);
+    }
+}
+
+// Port of AP_Param::load() (AP_Param.cpp ~line 1310), specialized to a
+// flat top-level table exactly as load_aparm_parameters is (CPP-043) -
+// each of these 6 real fields is itself top-level (FINDING #2), so
+// group_element is always 0, and there is no find_var_info self-
+// discovery (the caller already knows the table - out of scope, same
+// exclusion CPP-043 already established). Reuses load_raw/type_size/
+// set_native_value UNCHANGED - none of them are type-specific.
+inline void load_yaw_parameters(const storage::StorageAccess& storage, YawController::Gains& gains) {
+    const std::array<param::Info, 7> table = yaw_param_info(gains);
+    for (const param::Info& info : table) {
+        if (info.type == static_cast<std::uint8_t>(param::VarType::None)) {
+            break;
+        }
+        const auto type = static_cast<param::VarType>(info.type);
+        param::ParamHeader phdr{};
+        phdr.type = info.type;
+        param::set_key(phdr, info.key);
+        phdr.group_element = 0;
+        void* field_ptr = const_cast<void*>(info.ptr);
+        if (!param::load_raw(storage, phdr, field_ptr, param::type_size(type))) {
+            param::set_native_value(type, field_ptr, info.def_value);
+        }
+    }
+}
+
+// Port of AP_Param::save_sync's default-skip-then-write path
+// (AP_Param.cpp ~line 1138), specialized the same way
+// save_aparm_parameters is (CPP-043). Reuses should_skip_save/save_raw/
+// type_size/native_cast_to_float COMPLETELY UNCHANGED. `force_save`
+// matches upstream's own save_sync(force_save, ...) parameter.
+inline void save_yaw_parameters(storage::StorageAccess& storage, YawController::Gains& gains, bool force_save = false) {
+    const std::array<param::Info, 7> table = yaw_param_info(gains);
+    for (const param::Info& info : table) {
+        if (info.type == static_cast<std::uint8_t>(param::VarType::None)) {
+            break;
+        }
+        const auto type = static_cast<param::VarType>(info.type);
+        const void* field_ptr = info.ptr;
+        const float current = param::native_cast_to_float(type, field_ptr);
+        if (param::should_skip_save(type, current, info.def_value, force_save)) {
+            continue;
+        }
+        param::ParamHeader phdr{};
+        phdr.type = info.type;
+        param::set_key(phdr, info.key);
+        phdr.group_element = 0;
+        (void)param::save_raw(storage, phdr, field_ptr, param::type_size(type));
+    }
+}
 
 } // namespace fwcpp::fw_control
