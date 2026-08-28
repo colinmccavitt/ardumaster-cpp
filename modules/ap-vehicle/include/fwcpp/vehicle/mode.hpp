@@ -983,8 +983,19 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, StabilizeInp
     // any of them are read, is what makes the override visible to every
     // one of those later reads without threading a separate value
     // through each of them individually.
+    // CPP-083: now_ms is passed through so AirspeedSensor::update() can
+    // service its own real boot-time zero-offset calibration internally
+    // (gated on calibration_state() == InProgress) - no separate
+    // calibration call site is needed here, matching the ticket's own
+    // instruction. A caller must still call plane.airspeed_sensor.
+    // start_calibration(now_ms) itself once (this port has no
+    // AP_Vehicle::init_ardupilot() equivalent boot sequence yet to do it
+    // unconditionally, unlike real upstream's own boot-time call - see
+    // airspeed_sensor.hpp's file banner) for calibration to ever run;
+    // until then calibration_state() stays NotStarted and this call is
+    // simply the CPP-082 read()-formula pipeline, byte-for-byte.
     if (in.airspeed_sensor_enabled) {
-        plane.airspeed_sensor.update(in.airspeed_raw_pressure_pa);
+        plane.airspeed_sensor.update(in.airspeed_raw_pressure_pa, in.now_ms);
         in.airspeed_valid = plane.airspeed_sensor.healthy();
         in.airspeed_eas = plane.airspeed_sensor.airspeed();
     }

@@ -8,7 +8,9 @@
 // real airspeed backend (analog, digital, SITL) shares. Matches this
 // port's established "match the real formula, not the generic interface"
 // methodology (ap-compass's Compass, ap-gps's Gps). CPP-082, phase 1 of
-// this port's airspeed sensor subsystem.
+// this port's airspeed sensor subsystem. CPP-083, phase 2, added the
+// real boot-time zero-offset calibration routine - see "CALIBRATION"
+// section below.
 //
 // Upstream (Plane-4.7.0, read directly from the pinned worktree, not from
 // training-data memory):
@@ -27,6 +29,15 @@
 //   - AP_Airspeed/AP_Airspeed_Params.cpp's real AP_GROUPINFO defaults:
 //     ARSPD_RATIO=2 (GROUPINFO id 4), ARSPD_OFFSET=0 (GROUPINFO id 3) -
 //     verified directly, not guessed.
+//   - CPP-083: AP_Airspeed/AP_Airspeed.cpp's real calibrate() (~line 528)
+//     and update_calibration() (~line 574), read in full - see
+//     "CALIBRATION" below. AP_Vehicle/AP_Vehicle.cpp (~line 441) calls
+//     `airspeed.calibrate(true)` UNCONDITIONALLY at boot when the sensor
+//     is enabled - no GCS/MAVLink command needed - and AP_Airspeed_
+//     Params.cpp's SKIP_CAL (GROUPINFO id 8) defaults to 0
+//     (SkipCalType::None - calibration proceeds normally), both verified
+//     directly this ticket: this is genuinely active-by-default upstream
+//     behavior, not a disabled/opt-in feature.
 //
 // REAL read() FORMULA (AP_Airspeed.cpp, PITOT_TUBE_ORDER_AUTO branch,
 // transcribed directly):
@@ -87,6 +98,11 @@
 // phase can still add ARSPD_RATIO/ARSPD_OFFSET to aparm then and pass
 // aparm.airspeed_ratio/aparm.airspeed_offset into this constructor - this
 // choice does not foreclose that, it just doesn't build it prematurely.
+// CPP-083's calibration routine follows this SAME precedent: the
+// calibrated offset is written directly to this class's own offset_
+// field ("set", the achievable subset), never through an AP_Param
+// set_and_save() equivalent ("save"/persistence across a restart is out
+// of scope - see "CALIBRATION" below).
 //
 // "USE()" - A REAL, DISCLOSED SIMPLIFICATION: upstream's real use(i)
 // (AP_Airspeed.cpp) is `lib_enabled() && !_force_disable_use &&
@@ -118,6 +134,75 @@
 // Matches Compass's own "healthy means update() was called" precedent
 // exactly (compass.hpp).
 //
+// CALIBRATION (CPP-083) - the real boot-time ZERO-OFFSET calibration
+// routine, i.e. AP_Airspeed::calibrate()/update_calibration() - NOT the
+// interactive in-flight RATIO auto-calibration (Airspeed_Calibration.cpp,
+// a separate, substantially more complex mechanism, out of scope - see
+// "EXCLUDED" below).
+//
+//   calibrate(in_startup=true) (AP_Airspeed.cpp ~line 528) real upstream
+//   sequence, ported by start_calibration(now_ms):
+//     cal.start_ms = now_ms; cal.count = 0; cal.sum = 0;
+//     cal.read_count = 0; cal.state = IN_PROGRESS;
+//   NOT ported (explicitly deferred, named per ticket):
+//     - was_watchdog_reset() skip-on-crash-restart check - no HAL
+//       watchdog subsystem in this port.
+//     - the in_startup SkipCalType switch (NoCalRequired/SkipBootCal) -
+//       SkipCalType/SKIP_CAL parameter support is out of scope; this
+//       port's start_calibration() always behaves like the real
+//       SkipCalType::None (default) path, matching SKIP_CAL's own real
+//       default of 0.
+//     - the NOT_REQUIRED_ZERO_OFFSET early-continue - inapplicable, this
+//       port's one SITL sensor always needs offset calibration (real
+//       upstream SITL sensors do too - see AP_Airspeed_Backend.cpp's own
+//       has_zero_offset_calibration() default of false, never overridden
+//       by AP_Airspeed_SITL).
+//
+//   update_calibration(i, raw_pressure) (AP_Airspeed.cpp ~line 574) real
+//   upstream logic, transcribed exactly, woven into update()'s own body
+//   below (gated on calibration_state() == InProgress, matching
+//   upstream's own `cal.start_ms != 0` gate - the ticket's own instructed
+//   substitution since this port models calibration as an enum, not a
+//   raw timestamp):
+//     - Called with raw_pressure (PRE-offset-subtraction), and, in real
+//       upstream, textually BEFORE the filter update but AFTER
+//       airspeed_pressure/corrected_pressure are computed with the
+//       offset value CURRENT AT THE START of this call - reproduced
+//       below by computing corrected_pressure_ first, then running
+//       calibration, so a same-tick Success->offset_ write takes effect
+//       starting NEXT tick's corrected_pressure_, never retroactively
+//       this tick, exactly like upstream's get_offset(i) ordering.
+//     - Finalize check FIRST: once `now_ms - cal.start_ms >= 1000` AND
+//       `cal.read_count > 15`: if `cal.count == 0`, mark FAILED
+//       (shouldn't happen once healthy, but real upstream still checks
+//       it); otherwise `offset = sum / count`, mark SUCCESS. Either way
+//       `cal.start_ms = 0` and return - no accumulation happens on the
+//       finalizing call itself.
+//     - Otherwise (still accumulating): discard the first 5 samples -
+//       `cal.read_count > 5` gates accumulation (a STRICT greater-than,
+//       so calls 1-5 are discarded and accumulation starts on call 6).
+//       When healthy_ (this port's near-always-true gate, matching
+//       upstream's own `state[i].healthy &&`) and past the discard
+//       count: `cal.sum += raw_pressure; cal.count++`. `cal.read_count`
+//       increments on EVERY non-finalizing call regardless of the
+//       discard/accumulate gate - read_count and count are genuinely
+//       DIFFERENT counters (read_count counts calls; count counts
+//       samples actually summed) - re-verified directly against upstream,
+//       not assumed.
+//   NOT ported (explicitly deferred, named per ticket):
+//     - the fixed_wing_parameters->airspeed_min-based "offset changed
+//       too much, pitot may be covered" WARNING check - upstream's own
+//       real behavior here is GCS-text-only, not behaviorally
+//       load-bearing, and this port has no GCS.
+//     - set_and_save() - this ticket applies the calibrated value to
+//       offset_ directly ("set"); persisting it across a restart
+//       ("save") is out of scope, matching CPP-082's own RATIO/OFFSET
+//       PLACEMENT precedent (no AP_Param wiring for this value yet).
+//
+//   The aggregate get_calibration_state() (multi-sensor voting across
+//   AIRSPEED_MAX_SENSORS) has no equivalent here - this port has exactly
+//   one sensor, so calibration_state() below already IS the aggregate.
+//
 // EXCLUDED - each a genuine, named scope boundary for THIS ticket, not
 // an oversight:
 //   - Sensor failure injection (arspd.fail/arspd.fail_pressure/
@@ -128,19 +213,40 @@
 //     instance precedent.
 //   - The interactive ground/inflight ratio-calibration state machine
 //     (Airspeed_Calibration.cpp, update_calibration()/get_calibration_
-//     state()) - a real, separate upstream subsystem; this port's ratio/
-//     offset are fixed, caller-supplied constructor values, never
-//     recalibrated at runtime.
+//     state()) - a real, separate upstream subsystem; this port's ratio
+//     is a fixed, caller-supplied constructor value, never recalibrated
+//     at runtime. (NOTE: upstream reuses the identifier
+//     "update_calibration" for BOTH this ratio auto-cal machinery's own
+//     ratio-side bookkeeping in some comments AND the zero-offset
+//     routine CPP-083 actually ports from AP_Airspeed.cpp - CPP-083
+//     ports only the latter, the real `AP_Airspeed::update_calibration
+//     (uint8_t i, float raw_pressure)` zero-offset function, never the
+//     Airspeed_Calibration.cpp ratio estimator.)
 //   - The health-check state machine (AP_Airspeed_Health.cpp - IMU/GPS-
 //     predicted-vs-pitot consistency checking used to auto-disable a
-//     drifting sensor) - real, separate, substantial upstream scope, not
-//     modeled by healthy() above.
+//     drifting sensor). Investigated in full this round: its real,
+//     active-by-default gate is ARSPD_WIND_GATE (default 5.0, positive),
+//     which drives an EKF-INNOVATION-CONSISTENCY check
+//     (AP::ahrs().airspeed_health_data()) - this port has no live EKF
+//     fusion wired in place of AhrsDcm (EkfCoreBackend, CPP-080, exists
+//     but is not wired to replace AhrsDcm as of CPP-081), and AhrsDcm
+//     itself has no Kalman-filter "innovation" concept at all (a
+//     complementary-filter DCM, not an EKF). The OTHER half of that
+//     function (ARSPD_WIND_MAX-gated GPS-speed-vs-airspeed plausibility
+//     check) IS self-contained and buildable, but ARSPD_WIND_MAX
+//     defaults to 0 (NOT positive) - i.e. that half is INACTIVE by
+//     default, and building only the inactive half would be exactly the
+//     kind of default-dead speculative scope this port's own convention
+//     avoids (see TKOFF_OPTIONS's own exclusion precedent). Genuinely
+//     blocked on live EKF wiring - named here as real future work, not
+//     built as a partial, default-inert version now.
 //   - PITOT_TUBE_ORDER_NEGATIVE/_POSITIVE - see "PITOT TUBE ORDER" above.
 //   - Temperature compensation / get_temperature() - AP_Airspeed_SITL's
 //     own get_temperature() has no consumer in this port's read()-
 //     formula port (upstream's own temperature correction lives in
 //     specific hardware backends' airspeed calculations, not the shared
 //     read() path this ticket ports).
+#include <cstdint>
 #include <cmath>
 
 namespace fwcpp::airspeed {
@@ -150,6 +256,12 @@ namespace fwcpp::airspeed {
 inline constexpr float kDefaultRatio = 2.0f;  // ARSPD_RATIO
 inline constexpr float kDefaultOffset = 0.0f; // ARSPD_OFFSET
 
+// upstream: AP_Airspeed::CalibrationState (AP_Airspeed.h) - this port
+// omits NOT_REQUIRED_ZERO_OFFSET (inapplicable, see file banner's
+// "CALIBRATION" section) since this port's one SITL sensor always needs
+// offset calibration.
+enum class CalibrationState { NotStarted, InProgress, Success, Failed };
+
 class AirspeedSensor {
 public:
     // ratio/offset default to upstream's own real ARSPD_RATIO/
@@ -158,14 +270,31 @@ public:
     // Plane::aparm-owned.
     explicit AirspeedSensor(float ratio = kDefaultRatio, float offset = kDefaultOffset) : ratio_(ratio), offset_(offset) {}
 
+    // upstream: AP_Airspeed::calibrate(in_startup=true) (~line 528) - see
+    // file banner's "CALIBRATION" section for the full real sequence and
+    // what's deferred (watchdog-reset check, SkipCalType, the
+    // NOT_REQUIRED_ZERO_OFFSET early-continue).
+    void start_calibration(std::uint32_t now_ms) {
+        cal_start_ms_ = now_ms;
+        cal_count_ = 0;
+        cal_sum_ = 0.0f;
+        cal_read_count_ = 0;
+        cal_state_ = CalibrationState::InProgress;
+    }
+
     // upstream: AP_Airspeed::read(i) (~line 646) - see file banner for
     // the full formula transcription and the unhealthy->healthy reset
     // edge case. Takes the raw differential pressure (Pa) this tick -
     // upstream's own sensor[i]->get_differential_pressure() return value
     // (a caller drives this from sim_plane.hpp's
     // airspeed_sensor_differential_pressure() in a closed-loop test, or
-    // a real hardware driver in production).
-    void update(float raw_pressure) {
+    // a real hardware driver in production). `now_ms` defaults to 0 for
+    // callers that never calibrate (calibration_state() stays
+    // NotStarted forever, so the CPP-083 calibration branch below is
+    // simply never entered and now_ms is never read) - CPP-082's own
+    // existing single-argument call sites and tests keep compiling
+    // unchanged.
+    void update(float raw_pressure, std::uint32_t now_ms = 0) {
         // prev_healthy MUST be read before healthy_ is overwritten below -
         // this is upstream's own state[i].healthy read at the top of
         // read(), before this same call's backend read touches it again.
@@ -179,6 +308,17 @@ public:
 
         const float airspeed_pressure = raw_pressure - offset_;
         corrected_pressure_ = airspeed_pressure;
+
+        // CPP-083: real update_calibration(i, raw_pressure) - called
+        // with the RAW pressure (matching upstream), AFTER
+        // corrected_pressure_ is computed with THIS tick's starting
+        // offset_ (matching upstream's real ordering - see file banner's
+        // "CALIBRATION" section for why this ordering matters: a
+        // same-tick Success->offset_ write must not retroactively change
+        // this same tick's corrected_pressure_).
+        if (cal_state_ == CalibrationState::InProgress) {
+            step_calibration(raw_pressure, now_ms);
+        }
 
         if (!prev_healthy) {
             // upstream: "if (!prev_healthy) { filtered_pressure =
@@ -226,7 +366,47 @@ public:
     [[nodiscard]] float ratio() const { return ratio_; }
     [[nodiscard]] float offset() const { return offset_; }
 
+    // upstream: state[i].cal.state - CPP-083. See file banner's
+    // "CALIBRATION" section.
+    [[nodiscard]] CalibrationState calibration_state() const { return cal_state_; }
+
+    // upstream: state[i].cal.read_count - exposed for tests verifying
+    // the discard-first-5/finalize-at->15-reads thresholds directly,
+    // independent of offset()'s own final averaged value.
+    [[nodiscard]] std::uint16_t calibration_read_count() const { return cal_read_count_; }
+
+    // upstream: state[i].cal.count - the number of samples actually
+    // accumulated into cal.sum (i.e. calibration_read_count() minus the
+    // first 5 discarded reads) - exposed for tests verifying the discard
+    // count independently of calibration_read_count().
+    [[nodiscard]] std::uint16_t calibration_sample_count() const { return cal_count_; }
+
 private:
+    // upstream: AP_Airspeed::update_calibration(i, raw_pressure)
+    // (AP_Airspeed.cpp ~line 574) - see file banner's "CALIBRATION"
+    // section for the full transcription. Only called from update()
+    // while calibration_state() == InProgress.
+    void step_calibration(float raw_pressure, std::uint32_t now_ms) {
+        // consider calibration complete when we have at least 15 samples
+        // over at least 1 second (upstream's own comment, transcribed).
+        if (now_ms - cal_start_ms_ >= 1000 && cal_read_count_ > 15) {
+            if (cal_count_ == 0) {
+                cal_state_ = CalibrationState::Failed;
+            } else {
+                offset_ = cal_sum_ / cal_count_;
+                cal_state_ = CalibrationState::Success;
+            }
+            cal_start_ms_ = 0;
+            return;
+        }
+        // we discard the first 5 samples
+        if (healthy_ && cal_read_count_ > 5) {
+            cal_sum_ += raw_pressure;
+            cal_count_++;
+        }
+        cal_read_count_++;
+    }
+
     float ratio_;
     float offset_;
     bool healthy_ = false; // upstream: state[i].healthy's real zero-initialized default.
@@ -234,6 +414,13 @@ private:
     float filtered_pressure_ = 0.0f;
     float raw_airspeed_ = 0.0f;
     float airspeed_ = 0.0f;
+
+    // upstream: state[i].cal.* (AP_Airspeed.h) - CPP-083.
+    CalibrationState cal_state_ = CalibrationState::NotStarted;
+    std::uint32_t cal_start_ms_ = 0;
+    float cal_sum_ = 0.0f;
+    std::uint16_t cal_count_ = 0;
+    std::uint16_t cal_read_count_ = 0;
 };
 
 } // namespace fwcpp::airspeed
