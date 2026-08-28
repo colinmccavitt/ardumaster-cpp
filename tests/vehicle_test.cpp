@@ -223,7 +223,7 @@ TEST_CASE("ModeFBWA: stabilize_roll's commanded rate shrinks as roll approaches 
     float last_target_rate = 1.0e9f;
     std::uint32_t now_ms = 0;
     for (float roll_deg : {0.0f, commanded_roll_deg * 0.3f, commanded_roll_deg * 0.6f, commanded_roll_deg * 0.9f}) {
-        plane.ahrs.roll = fwcpp::math::radians(roll_deg);
+        plane.ahrs_dcm_.roll = fwcpp::math::radians(roll_deg);
         now_ms += 20;
         in.now_ms = now_ms;
         plane.stabilize_roll(in);
@@ -818,9 +818,9 @@ DriftRunResult run_biased_closed_loop(bool with_correction, int num_ticks, float
     result.final_true_roll_deg = fwcpp::math::degrees(result.final_true_roll_deg);
     result.final_true_pitch_deg = fwcpp::math::degrees(result.final_true_pitch_deg);
     result.final_true_yaw_deg = fwcpp::math::degrees(result.final_true_yaw_deg);
-    result.final_est_roll_deg = fwcpp::math::degrees(plane.ahrs.roll);
-    result.final_est_pitch_deg = fwcpp::math::degrees(plane.ahrs.pitch);
-    result.final_est_yaw_deg = fwcpp::math::degrees(plane.ahrs.yaw);
+    result.final_est_roll_deg = fwcpp::math::degrees(plane.ahrs->get_roll());
+    result.final_est_pitch_deg = fwcpp::math::degrees(plane.ahrs->get_pitch());
+    result.final_est_yaw_deg = fwcpp::math::degrees(plane.ahrs->get_yaw());
     return result;
 }
 
@@ -993,7 +993,7 @@ CompassRunResult run_stationary_yaw_bias_closed_loop(bool with_compass, int num_
     float true_yaw_rad = 0.0f;
     sim_plane.dcm.to_euler(&true_roll_rad, &true_pitch_rad, &true_yaw_rad);
     result.final_true_yaw_deg = fwcpp::math::degrees(true_yaw_rad);
-    result.final_est_yaw_deg = fwcpp::math::degrees(plane.ahrs.yaw);
+    result.final_est_yaw_deg = fwcpp::math::degrees(plane.ahrs->get_yaw());
     result.final_ground_speed_ms = plane.gps.sample().ground_speed_ms;
     return result;
 }
@@ -1118,7 +1118,7 @@ TEST_CASE("ModeCRUISE: roll/rudder stick input unlocks a previously-locked headi
     // with sticks centered and a fast, forward-moving GPS fix.
     set_sticks(plane, 1500, 1500, 1500, 1500);
     plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f));
-    plane.ahrs.yaw = 0.0f; // facing north, matching the GPS course below
+    plane.ahrs_dcm_.yaw = 0.0f; // facing north, matching the GPS course below
     set_gps_sample(plane, /*course_deg=*/0.0f, /*speed=*/10.0f, /*has_fix=*/true);
 
     // Starts at a NONZERO now_ms - see set_gps_sample()'s sibling note
@@ -1159,7 +1159,7 @@ TEST_CASE("ModeCRUISE: the 0.5s lock timer requires ALL conditions sustained - s
     Plane plane;
     ModeCRUISE cruise(plane);
     plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f));
-    plane.ahrs.yaw = 0.0f;
+    plane.ahrs_dcm_.yaw = 0.0f;
     set_gps_sample(plane, 0.0f, 10.0f, true);
 
     set_sticks(plane, 1600, 1500, 1500, 1500); // roll stick NOT centered
@@ -1177,7 +1177,7 @@ TEST_CASE("ModeCRUISE: the 0.5s lock timer requires ALL conditions sustained - g
     Plane plane;
     ModeCRUISE cruise(plane);
     plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f));
-    plane.ahrs.yaw = 0.0f;
+    plane.ahrs_dcm_.yaw = 0.0f;
     set_sticks(plane, 1500, 1500, 1500, 1500);
 
     // Below kGpsGndCrsMinSpd (5 m/s).
@@ -1196,7 +1196,7 @@ TEST_CASE("ModeCRUISE: the 0.5s lock timer requires ALL conditions sustained - n
     Plane plane;
     ModeCRUISE cruise(plane);
     plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f));
-    plane.ahrs.yaw = 0.0f;
+    plane.ahrs_dcm_.yaw = 0.0f;
     set_sticks(plane, 1500, 1500, 1500, 1500);
 
     // See set_gps_sample()'s own comment: a "no usable fix" receiver
@@ -1226,7 +1226,7 @@ TEST_CASE("ModeCRUISE: the 0.5s lock timer requires ALL conditions sustained - m
 
     // Facing north (yaw=0) but GPS ground course says moving due south -
     // fails the moving_forwards check (wrap_PI(course-yaw) == pi > pi/2).
-    plane.ahrs.yaw = 0.0f;
+    plane.ahrs_dcm_.yaw = 0.0f;
     set_gps_sample(plane, 180.0f, 10.0f, true);
 
     StabilizeInputs in = make_cruise_inputs(1000, 0.0f, 0.0f); // nonzero start - see "TIMER SENTINEL" note below
@@ -1243,7 +1243,7 @@ TEST_CASE("ModeCRUISE: with every condition sustained, the heading actually lock
     Plane plane;
     ModeCRUISE cruise(plane);
     plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f));
-    plane.ahrs.yaw = 0.0f;
+    plane.ahrs_dcm_.yaw = 0.0f;
     set_sticks(plane, 1500, 1500, 1500, 1500);
     set_gps_sample(plane, 30.0f, 10.0f, true); // 30deg course, well within +-90deg of yaw=0
 
@@ -1284,7 +1284,7 @@ TEST_CASE("ModeCRUISE: once locked, nav_roll_cd comes from L1Control's real guid
     plane.update_flight_limits();
     ModeCRUISE cruise(plane);
     plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f));
-    plane.ahrs.yaw = 0.0f;
+    plane.ahrs_dcm_.yaw = 0.0f;
     set_sticks(plane, 1500, 1500, 1500, 1500);
     set_gps_sample(plane, 0.0f, 10.0f, true);
 
@@ -1325,7 +1325,7 @@ TEST_CASE("ModeCRUISE: the locked-heading waypoint is projected ~1km ahead along
     // exactly ON the +-90deg boundary the way yaw=0/course=90 would (a
     // genuine floating-point-unstable edge case, not a meaningful "is this
     // vehicle actually moving forwards" scenario).
-    plane.ahrs.yaw = fwcpp::math::radians(90.0f);
+    plane.ahrs_dcm_.yaw = fwcpp::math::radians(90.0f);
     set_sticks(plane, 1500, 1500, 1500, 1500);
     set_gps_sample(plane, 90.0f, 10.0f, true); // due east
 
@@ -5220,7 +5220,7 @@ TEST_CASE("calc_nav_yaw_course: a nonzero bearing error produces same-sign steer
     plane.armed = true;
     plane.hal.rc_output.force_safety_off();
     plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 0.0f, 0.0f));
-    plane.ahrs.yaw = 0.0f; // facing north
+    plane.ahrs_dcm_.yaw = 0.0f; // facing north
     // A due-east target bearing (90deg) with the vehicle facing north
     // gives a positive (rightward) bearing error via L1Control.
     plane.next_WP_loc = plane.current_loc;
@@ -5395,7 +5395,7 @@ TEST_CASE("Plane::takeoff_calc_roll: altitude-scaled roll-limit interpolation ac
     plane.next_WP_loc = fwcpp::Location();
     plane.next_WP_loc.offset(1000.0f, 0.0f); // 1000m north
     plane.update_current_loc(fwcpp::math::Vector3f(0.0f, 500.0f, 0.0f)); // 500m east of the line
-    plane.ahrs.yaw = 0.0f;                                               // facing north
+    plane.ahrs_dcm_.yaw = 0.0f;                                               // facing north
 
     // build_l1_inputs() reads groundspeed from plane.gps.sample() (real
     // GPS wiring, not a raw velocity field) - a never-primed (zero) GPS
@@ -5535,7 +5535,7 @@ TEST_CASE("Plane::takeoff_calc_pitch: stall_prevention reduces pitch demand by c
     in.airspeed_valid = false; // isolate the reduction: nav_pitch_cd starts pinned at takeoff_pitch_cd (1000)
 
     plane.nav_roll_cd = 6000; // 60deg commanded roll
-    plane.ahrs.roll = 0.0f;   // actual roll still level -> 60deg roll ERROR
+    plane.ahrs_dcm_.roll = 0.0f;   // actual roll still level -> 60deg roll ERROR
 
     plane.takeoff_calc_pitch(in);
     // reduction = cos^2(60deg) = 0.25 -> 1000 * 0.25 = 250
@@ -5547,7 +5547,7 @@ TEST_CASE("Plane::takeoff_calc_pitch: stall_prevention reduces pitch demand by c
         plane2.takeoff_state.takeoff_pitch_cd = 1000;
         plane2.aparm.stall_prevention = false;
         plane2.nav_roll_cd = 6000;
-        plane2.ahrs.roll = 0.0f;
+        plane2.ahrs_dcm_.roll = 0.0f;
         StabilizeInputs in2;
         in2.airspeed_valid = false;
         plane2.takeoff_calc_pitch(in2);
@@ -5858,7 +5858,7 @@ TEST_CASE("Plane::takeoff_tail_hold(): holds the tail down (returns TKOFF_TDRAG_
     plane.aparm.takeoff_tdrag_speed1 = 8.0f;
     plane.takeoff_state.highest_airspeed = 3.0f; // below speed1
     plane.takeoff_state.initial_pitch_cd = 0;
-    plane.ahrs.pitch = 0.0f; // pitch_sensor_cd() == 0, well within initial_pitch_cd + 1000
+    plane.ahrs_dcm_.pitch = 0.0f; // pitch_sensor_cd() == 0, well within initial_pitch_cd + 1000
 
     REQUIRE(plane.takeoff_tail_hold() == 100);
 }
@@ -5872,7 +5872,7 @@ TEST_CASE("Plane::takeoff_tail_hold(): speed1-exceeded early-out - returns 0 onc
     plane.aparm.takeoff_tdrag_speed1 = 8.0f;
     plane.takeoff_state.fbwa_tdrag_takeoff_mode = true; // engaged
     plane.takeoff_state.initial_pitch_cd = 0;
-    plane.ahrs.pitch = 0.0f;
+    plane.ahrs_dcm_.pitch = 0.0f;
 
     plane.takeoff_state.highest_airspeed = 8.0f; // exactly at speed1 - upstream's real ">=" includes the boundary
     REQUIRE(plane.takeoff_tail_hold() == 0);
@@ -5894,12 +5894,12 @@ TEST_CASE("Plane::takeoff_tail_hold(): pitch-safety early-out - returns 0 once p
     // Exactly AT the +10deg boundary (1000 centidegrees) - upstream's own
     // strict "> initial_pitch_cd + 1000" comparison does NOT trigger here,
     // so the tail is still held.
-    plane.ahrs.pitch = fwcpp::math::radians(10.0f);
+    plane.ahrs_dcm_.pitch = fwcpp::math::radians(10.0f);
     REQUIRE(plane.takeoff_tail_hold() == 100);
     REQUIRE(plane.takeoff_state.fbwa_tdrag_takeoff_mode); // still engaged - not yet tripped
 
     // Just past the boundary - trips the safety early-out.
-    plane.ahrs.pitch = fwcpp::math::radians(11.0f);
+    plane.ahrs_dcm_.pitch = fwcpp::math::radians(11.0f);
     REQUIRE(plane.takeoff_tail_hold() == 0);
     REQUIRE_FALSE(plane.takeoff_state.fbwa_tdrag_takeoff_mode);
 }
@@ -5920,7 +5920,7 @@ TEST_CASE("Plane::stabilize_pitch(): when takeoff_tail_hold() returns nonzero, t
     // explained by the early return actually firing, not by the two
     // paths coincidentally agreeing.
     plane.nav_pitch_cd = 2000;
-    plane.ahrs.pitch = fwcpp::math::radians(-5.0f);
+    plane.ahrs_dcm_.pitch = fwcpp::math::radians(-5.0f);
 
     StabilizeInputs in;
     in.dt = 0.02f;
@@ -5946,7 +5946,7 @@ TEST_CASE("ModeFBWA::enter() captures takeoff_state.initial_pitch_cd from the cu
           "reader of both fields",
           "[vehicle][fbwa][tdrag]") {
     Plane plane;
-    plane.ahrs.pitch = fwcpp::math::radians(7.5f);
+    plane.ahrs_dcm_.pitch = fwcpp::math::radians(7.5f);
     plane.takeoff_state.highest_airspeed = 42.0f; // stale, from a hypothetical prior takeoff/mode
 
     ModeFBWA fbwa(plane);

@@ -4857,7 +4857,21 @@ public:
     hal::HalContext hal;
     rc::RcChannels rc_channels;
     srv::SrvChannels srv_channels;
-    ahrs::AhrsDcm ahrs;
+    ahrs::AhrsDcm ahrs_dcm_;
+    // CPP-081: AhrsBackend* pointing at ahrs_dcm_ - raw, non-owning,
+    // matching mode_manual/control_mode's own owned-value-plus-raw-
+    // pointer idiom (below, ~line 7009/7047; ADR-0012: no unique_ptr,
+    // no heap allocation). Declared IMMEDIATELY AFTER ahrs_dcm_ so this
+    // default member initializer's `&ahrs_dcm_` runs only once ahrs_dcm_
+    // is fully constructed - member init order follows DECLARATION
+    // order, not initializer-list order, so this adjacency is load-
+    // bearing, not cosmetic: reordering these two declarations would be
+    // legal C++ but would leave `ahrs` pointing at a not-yet-constructed
+    // object during Plane's own construction. Points only at ahrs_dcm_ -
+    // no backend-selection logic, config flag, or EkfCoreBackend
+    // reference (CPP-080) exists anywhere here; AhrsDcm remains the only
+    // backend Plane ever actually runs.
+    ahrs::AhrsBackend* ahrs = &ahrs_dcm_;
     gps::Gps gps; // CPP-031 slice 3 (see file banner addendum) - CPP-033's minimal SITL GPS backend.
     // CPP-035 (see modules/ap-compass's own file banner) - fixed-earth-field
     // compass model, default-constructed to a real, cited earth field (see
@@ -5137,8 +5151,8 @@ public:
     // upstream: ahrs.roll_sensor/ahrs.pitch_sensor (centidegrees, int32_t)
     // - this port's AhrsDcm keeps roll/pitch as float radians only, so
     // these convert on demand rather than caching a redundant int copy.
-    [[nodiscard]] std::int32_t roll_sensor_cd() const { return static_cast<std::int32_t>(math::degrees(ahrs.roll) * 100.0f); }
-    [[nodiscard]] std::int32_t pitch_sensor_cd() const { return static_cast<std::int32_t>(math::degrees(ahrs.pitch) * 100.0f); }
+    [[nodiscard]] std::int32_t roll_sensor_cd() const { return static_cast<std::int32_t>(math::degrees(ahrs->get_roll()) * 100.0f); }
+    [[nodiscard]] std::int32_t pitch_sensor_cd() const { return static_cast<std::int32_t>(math::degrees(ahrs->get_pitch()) * 100.0f); }
 
     // upstream: Plane::calc_speed_scaler() (Attitude.cpp). `armed_and_
     // safety_off` replaces `arming.is_armed_and_safety_off()` - see file
@@ -5216,8 +5230,8 @@ public:
     void update_flight_limits() {
         roll_limit_cd = static_cast<std::int32_t>(aparm.roll_limit_deg * 100.0f);
         pitch_limit_min = aparm.pitch_limit_min_deg;
-        roll_limit_cd = static_cast<std::int32_t>(static_cast<float>(roll_limit_cd) * std::cos(ahrs.pitch));
-        pitch_limit_min *= std::fabs(std::cos(ahrs.roll));
+        roll_limit_cd = static_cast<std::int32_t>(static_cast<float>(roll_limit_cd) * std::cos(ahrs->get_pitch()));
+        pitch_limit_min *= std::fabs(std::cos(ahrs->get_roll()));
     }
 
     // upstream: Plane::stabilize_roll()/stabilize_roll_get_roll_out()
@@ -5232,7 +5246,7 @@ public:
     void stabilize_roll(const StabilizeInputs& in) {
         const float scaler = get_speed_scaler();
         fw_control::RateLoopInputs rin;
-        rin.measured_rate = ahrs.omega.x;
+        rin.measured_rate = ahrs->get_omega().x;
         // roll's own no-sensor fallback (0) - see roll_controller.hpp /
         // AP_RollController::get_airspeed().
         rin.airspeed = in.airspeed_valid ? in.airspeed_eas : 0.0f;
@@ -5268,15 +5282,15 @@ public:
 
         const float scaler = get_speed_scaler();
         fw_control::PitchInputs pin;
-        pin.measured_rate = ahrs.omega.y;
+        pin.measured_rate = ahrs->get_omega().y;
         // pitch's own no-sensor fallback (average of min/max) - see
         // pitch_controller.hpp / AP_PitchController::get_airspeed().
         pin.airspeed = in.airspeed_valid ? in.airspeed_eas : 0.5f * (aparm.airspeed_min + aparm.airspeed_max);
         pin.eas2tas = in.eas2tas;
         pin.dt = in.dt;
         pin.now_ms = in.now_ms;
-        pin.bank_angle_rad = ahrs.roll;
-        pin.pitch_rad = ahrs.pitch;
+        pin.bank_angle_rad = ahrs->get_roll();
+        pin.pitch_rad = ahrs->get_pitch();
 
         const std::int32_t demanded_pitch = nav_pitch_cd + static_cast<std::int32_t>(aparm.pitch_trim_deg * 100.0f) +
             static_cast<std::int32_t>(srv_channels.get_output_scaled(srv::Function::kThrottle) * aparm.kff_throttle_to_pitch);
@@ -5297,7 +5311,7 @@ public:
         // upstream: degrees(AP::ahrs().get_yaw_rate_earth()) - see file
         // banner's "LOCKED_COURSE_ERR ACCUMULATION" note for the identical
         // dot-product this port already uses for the same upstream call.
-        sin.yaw_rate_earth_dps = math::degrees(ahrs.omega * ahrs.dcm_matrix.c);
+        sin.yaw_rate_earth_dps = math::degrees(ahrs->get_omega() * ahrs->get_dcm_matrix().c);
         sin.dt = in.dt;
         sin.now_ms = in.now_ms;
         return sin;
@@ -5394,7 +5408,7 @@ public:
         // = wrap_PI(...);` - see "LOCKED_COURSE_ERR ACCUMULATION" note for
         // why it is folded in here rather than a separate always-runs-
         // every-loop hook.
-        steer_state.locked_course_err += (ahrs.omega * ahrs.dcm_matrix.c) * in.dt;
+        steer_state.locked_course_err += (ahrs->get_omega() * ahrs->get_dcm_matrix().c) * in.dt;
         steer_state.locked_course_err = math::wrap_PI(steer_state.locked_course_err);
 
         // upstream: Plane::stabilize_yaw()'s real, remaining
@@ -5411,8 +5425,8 @@ public:
 
         const float scaler = get_speed_scaler();
         fw_control::YawCoordinationInputs yin;
-        yin.bank_angle_rad = ahrs.roll;
-        yin.gyro_z = ahrs.omega.z;
+        yin.bank_angle_rad = ahrs->get_roll();
+        yin.gyro_z = ahrs->get_omega().z;
         yin.accel_y = in.accel_y;
         yin.airspeed_valid = in.airspeed_valid;
         yin.airspeed_eas = in.airspeed_eas;
@@ -5534,9 +5548,9 @@ public:
         l1_in.current_loc = current_loc;
         l1_in.location_valid = true; // see file banner's "build_l1_inputs()" note
         l1_in.groundspeed_vector = gps.sample().velocity_ned.xy();
-        l1_in.yaw_rad = ahrs.yaw;
-        l1_in.yaw_sensor_cd = static_cast<std::int32_t>(math::rad_to_cd(ahrs.yaw));
-        l1_in.pitch_rad = ahrs.pitch;
+        l1_in.yaw_rad = ahrs->get_yaw();
+        l1_in.yaw_sensor_cd = static_cast<std::int32_t>(math::rad_to_cd(ahrs->get_yaw()));
+        l1_in.pitch_rad = ahrs->get_pitch();
         l1_in.eas2tas = in.eas2tas;
         l1_in.target_airspeed = 0.0f; // not read by update_waypoint() - see file banner
         l1_in.now_us = static_cast<std::uint32_t>(in.now_us);
@@ -5889,15 +5903,15 @@ public:
         t.relative_position_d_home_m = -in.current_altitude_m;
         t.velocity_ned_valid = false;
         t.baro_altitude_m = in.current_altitude_m;
-        t.accel_ef_z = ahrs.accel_ef.z;
-        t.rotation_body_to_ned = ahrs.dcm_matrix;
-        t.accel_body_x = (ahrs.dcm_matrix.transposed() * ahrs.accel_ef).x;
+        t.accel_ef_z = ahrs->get_accel_ef().z;
+        t.rotation_body_to_ned = ahrs->get_dcm_matrix();
+        t.accel_body_x = (ahrs->get_dcm_matrix().transposed() * ahrs->get_accel_ef()).x;
         t.eas2tas = in.eas2tas;
         t.using_airspeed_sensor = in.airspeed_valid;
         t.airspeed_eas_valid = in.airspeed_valid;
         t.airspeed_eas = in.airspeed_eas;
-        t.roll_rad = ahrs.roll;
-        t.pitch_rad = ahrs.pitch;
+        t.roll_rad = ahrs->get_roll();
+        t.pitch_rad = ahrs->get_pitch();
         t.now_us = in.now_us;
         t.now_ms = in.now_ms;
         return t;

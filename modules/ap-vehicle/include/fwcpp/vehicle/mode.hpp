@@ -209,7 +209,7 @@ inline void ModeCRUISE::navigate(const StabilizeInputs& in) {
     const ahrs::GpsSample& gps_sample = plane_.gps.sample();
     const std::int32_t ground_course_cd = static_cast<std::int32_t>(gps_sample.ground_course_deg * 100.0f);
     const bool moving_forwards = std::fabs(math::wrap_PI(
-        math::cd_to_rad(static_cast<float>(ground_course_cd)) - plane_.ahrs.yaw)) < static_cast<float>(M_PI_2);
+        math::cd_to_rad(static_cast<float>(ground_course_cd)) - plane_.ahrs->get_yaw())) < static_cast<float>(M_PI_2);
 
     if (!locked_heading_ && plane_.channel_roll()->control_in == 0 && plane_.rudder_input() == 0 && gps_sample.has_fix &&
         gps_sample.ground_speed_ms >= kGpsGndCrsMinSpd && moving_forwards && lock_timer_ms_ == 0) {
@@ -959,7 +959,7 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     // file banner's "IS_ARMED_AND_SAFETY_OFF() BECOMES COMPUTED" note.
     const bool armed_and_safety_off = plane.is_armed_and_safety_off();
 
-    plane.ahrs.update_full_cycle(gyro_sample, in.accel_sample, in.dt, compass, gps_sample, plane.fly_forward(),
+    plane.ahrs->update_full_cycle(gyro_sample, in.accel_sample, in.dt, compass, gps_sample, plane.fly_forward(),
                                   armed_and_safety_off, in.gps_use_enabled, wind_speed_ms, in.wind_estimate,
                                   airspeed_tas, plane.accel_healthy(), plane.ins_healthy(), in.now_ms);
 
