@@ -904,10 +904,8 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     //    200ms, exactly like the real backend, so most calls are a no-op.
     plane.gps.update(in.true_velocity_ned, in.now_ms);
 
-    // 3. AHRS update (upstream: Plane::ahrs_update()'s ahrs.update() call)
-    plane.ahrs.update(gyro_sample);
-
-    // 3b. Drift correction (upstream: the REST of AP_AHRS_DCM::update() -
+    // 3/3b. AHRS full estimator cycle (upstream: Plane::ahrs_update()'s
+    //    ahrs.update() call plus the REST of AP_AHRS_DCM::update() -
     //    drift_correction(delta_t) - which this port's AhrsDcm (CPP-028
     //    slices 2/3) split into accumulate_accel() (every tick, unrated)
     //    plus drift_correction_yaw()/drift_correction_accel() (each
@@ -927,6 +925,27 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     //    it over GPS ground course - see ahrs_dcm.hpp's use_compass() - so
     //    yaw drift can now be corrected even below kGpsSpeedMinMs (3 m/s),
     //    closing the gap CPP-035's own ticket exists to close.
+    //
+    //    CPP-078: the four separate AhrsDcm calls this call site used to
+    //    make (update(), accumulate_accel(), drift_correction_yaw(),
+    //    drift_correction_accel()) are now ONE call to AhrsDcm::
+    //    update_full_cycle() - see that method's own doc comment in
+    //    ahrs_dcm.hpp for its full parameter-provenance rationale. This
+    //    is a pure call-site collapse, not a behavior change:
+    //    update_full_cycle() still calls update() first, then
+    //    accumulate_accel(), then drift_correction_yaw(), then
+    //    drift_correction_accel(), in that exact order with the exact
+    //    same arguments each received before this change. Nothing
+    //    between the old update() call and the old accumulate_accel()
+    //    call reads AhrsDcm's own state: compass.update() below only
+    //    touches plane.compass (in.compass_field_bf is the caller's own
+    //    true-attitude-derived field, not anything read back from ahrs),
+    //    and gps_sample/wind_speed_ms/airspeed_tas/armed_and_safety_off
+    //    are all computed independently of ahrs's attitude/velocity
+    //    estimate too - so folding update() into the single call below
+    //    (which necessarily runs textually after these independent
+    //    computations, since it needs their results as arguments)
+    //    changes nothing observable.
     if (in.compass_healthy) {
         plane.compass.update(in.compass_field_bf, in.now_us);
     }
@@ -940,11 +959,9 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     // file banner's "IS_ARMED_AND_SAFETY_OFF() BECOMES COMPUTED" note.
     const bool armed_and_safety_off = plane.is_armed_and_safety_off();
 
-    plane.ahrs.accumulate_accel(in.accel_sample, in.dt);
-    plane.ahrs.drift_correction_yaw(compass, gps_sample, plane.fly_forward(), armed_and_safety_off, in.gps_use_enabled,
-                                     wind_speed_ms, in.now_ms);
-    plane.ahrs.drift_correction_accel(compass, gps_sample, plane.fly_forward(), armed_and_safety_off, in.gps_use_enabled,
-                                       in.wind_estimate, airspeed_tas, plane.accel_healthy(), plane.ins_healthy(), in.now_ms);
+    plane.ahrs.update_full_cycle(gyro_sample, in.accel_sample, in.dt, compass, gps_sample, plane.fly_forward(),
+                                  armed_and_safety_off, in.gps_use_enabled, wind_speed_ms, in.wind_estimate,
+                                  airspeed_tas, plane.accel_healthy(), plane.ins_healthy(), in.now_ms);
 
     // 4. scaled roll/pitch limits from current attitude (upstream: the
     //    rest of Plane::ahrs_update())

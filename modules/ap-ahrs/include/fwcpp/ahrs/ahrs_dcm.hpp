@@ -1186,6 +1186,55 @@ public:
         last_velocity_ = velocity;
     }
 
+    // CPP-078: single-call orchestration wrapper collapsing the four
+    // methods above (update(), accumulate_accel(), drift_correction_yaw(),
+    // drift_correction_accel()) into the ONE call point a future generic
+    // "run one estimator cycle" abstraction needs. Exists purely so
+    // modules/ap-vehicle/include/fwcpp/vehicle/mode.hpp's tick()
+    // (~line 908-946) can stop calling four AhrsDcm-specific methods
+    // directly - none of which have any equivalent on EkfCore (this
+    // port's NavEKF3-equivalent estimator, which fuses via
+    // fuse_gps_velocity()/fuse_magnetometer()/etc. instead, not these
+    // DCM-specific steps). A real polymorphic AhrsBackend-style interface
+    // (implemented by both AhrsDcm and a future EkfCore adapter) is the
+    // actual next step this groundwork exists for - deliberately NOT
+    // attempted here (CPP-078 scope: collapse four known-sequential
+    // calls into one, nothing more).
+    //
+    // Pure, mechanical pass-through: changes nothing about how the four
+    // calls below work internally, and calls them in the exact order,
+    // with the exact arguments, mode.hpp's real call site already used
+    // before this method existed - re-verified directly against that
+    // call site (not assumed) before writing this. Parameter list is the
+    // union of what those four calls collectively need, in the order
+    // they're consumed below:
+    //   - gyro_sample: update()'s only argument.
+    //   - accel_sample, dt: accumulate_accel()'s two arguments.
+    //   - compass, gps: shared by drift_correction_yaw() and
+    //     drift_correction_accel().
+    //   - fly_forward, armed_and_safety_off, gps_use_enabled, now_ms:
+    //     shared by both drift_correction_*() calls (named
+    //     armed_and_safety_off, not armed, to match the real call site's
+    //     own local variable name - plane.is_armed_and_safety_off()).
+    //   - wind_speed_ms: drift_correction_yaw()-only.
+    //   - wind_estimate, airspeed_tas, accel_healthy, ins_healthy:
+    //     drift_correction_accel()-only.
+    // drift_correction_accel()'s own trailing max_gyro_drift_rad_s
+    // parameter is deliberately NOT exposed here: mode.hpp's real call
+    // site never passes it either, so before and after this refactor it
+    // resolves to the same kDefaultMaxGyroDriftRadS default either way.
+    void update_full_cycle(const GyroSample& gyro_sample, const AccelSample& accel_sample, float dt,
+                            const CompassSample& compass, const GpsSample& gps, bool fly_forward,
+                            bool armed_and_safety_off, bool gps_use_enabled, float wind_speed_ms,
+                            const math::Vector3f& wind_estimate, float airspeed_tas, bool accel_healthy,
+                            bool ins_healthy, std::uint32_t now_ms) {
+        update(gyro_sample);
+        accumulate_accel(accel_sample, dt);
+        drift_correction_yaw(compass, gps, fly_forward, armed_and_safety_off, gps_use_enabled, wind_speed_ms, now_ms);
+        drift_correction_accel(compass, gps, fly_forward, armed_and_safety_off, gps_use_enabled, wind_estimate,
+                                airspeed_tas, accel_healthy, ins_healthy, now_ms);
+    }
+
     // Primary attitude representation - upstream: _dcm_matrix.
     math::Matrix3f dcm_matrix;
 

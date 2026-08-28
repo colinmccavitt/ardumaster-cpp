@@ -806,3 +806,171 @@ TEST_CASE("drift_correction_accel: stationary level GPS-locked scenario settles 
     REQUIRE(ahrs.omega_i().y == 0.0f);
     REQUIRE(ahrs.omega_i().z == 0.0f);
 }
+
+// ===========================================================================
+// CPP-078: update_full_cycle() A/B parity tests. update_full_cycle() is a
+// pure, mechanical pass-through collapsing the four calls above (update(),
+// accumulate_accel(), drift_correction_yaw(), drift_correction_accel()) -
+// see its own doc comment in ahrs_dcm.hpp. These tests prove that directly:
+// two AhrsDcm instances fed the exact same inputs, one through the four
+// separate calls and one through the single new method, must end up in
+// byte-identical observable state after every tick, not just "the existing
+// suite still passes".
+// ===========================================================================
+
+namespace {
+
+// Runs the four original calls, in their original order/arguments, exactly
+// as modules/ap-vehicle/include/fwcpp/vehicle/mode.hpp's tick() did before
+// CPP-078 collapsed them into AhrsDcm::update_full_cycle().
+void run_four_separate_calls(AhrsDcm& ahrs, const GyroSample& gyro_sample, const AccelSample& accel_sample, float dt,
+                              const CompassSample& compass, const GpsSample& gps, bool fly_forward,
+                              bool armed_and_safety_off, bool gps_use_enabled, float wind_speed_ms,
+                              const Vector3f& wind_estimate, float airspeed_tas, bool accel_healthy, bool ins_healthy,
+                              std::uint32_t now_ms) {
+    ahrs.update(gyro_sample);
+    ahrs.accumulate_accel(accel_sample, dt);
+    ahrs.drift_correction_yaw(compass, gps, fly_forward, armed_and_safety_off, gps_use_enabled, wind_speed_ms, now_ms);
+    ahrs.drift_correction_accel(compass, gps, fly_forward, armed_and_safety_off, gps_use_enabled, wind_estimate,
+                                 airspeed_tas, accel_healthy, ins_healthy, now_ms);
+}
+
+// Every field either path can observe, compared field-by-field. Deliberately
+// exact (==), not Catch::Approx - both paths run the exact same underlying
+// arithmetic on the exact same inputs, so anything other than bit-identical
+// results would itself be evidence of a real behavioral divergence.
+void require_identical_state(const AhrsDcm& separate, const AhrsDcm& combined) {
+    REQUIRE(combined.roll == separate.roll);
+    REQUIRE(combined.pitch == separate.pitch);
+    REQUIRE(combined.yaw == separate.yaw);
+    REQUIRE(combined.dcm_matrix.a == separate.dcm_matrix.a);
+    REQUIRE(combined.dcm_matrix.b == separate.dcm_matrix.b);
+    REQUIRE(combined.dcm_matrix.c == separate.dcm_matrix.c);
+    REQUIRE(combined.omega == separate.omega);
+    REQUIRE(combined.accel_ef == separate.accel_ef);
+    REQUIRE(combined.omega_yaw_p() == separate.omega_yaw_p());
+    REQUIRE(combined.omega_i() == separate.omega_i());
+    REQUIRE(combined.omega_p() == separate.omega_p());
+    REQUIRE(combined.get_error_rp() == separate.get_error_rp());
+    REQUIRE(combined.get_error_yaw() == separate.get_error_yaw());
+    REQUIRE(combined.yaw_initialised() == separate.yaw_initialised());
+    REQUIRE(combined.last_airspeed_tas() == separate.last_airspeed_tas());
+}
+
+} // namespace
+
+TEST_CASE("update_full_cycle: single tick matches the four separate calls exactly", "[ahrs_dcm]") {
+    AhrsDcm separate;
+    AhrsDcm combined;
+
+    GyroSample gyro;
+    gyro.delta_angle = Vector3f(0.001f, -0.0005f, 0.0002f);
+    gyro.dangle_dt = 0.01f;
+    gyro.gyro = Vector3f(0.1f, -0.05f, 0.02f);
+
+    AccelSample accel;
+    accel.accel = Vector3f(0.3f, -0.2f, -9.7f);
+    accel.delta_velocity_dt = 0.01f;
+    accel.delta_velocity = accel.accel * accel.delta_velocity_dt;
+
+    CompassSample compass;
+    compass.healthy = true;
+    compass.field = Vector3f(0.9f, 0.1f, 0.3f);
+    compass.declination_rad = 0.05f;
+    compass.last_update_usec = 500000;
+
+    GpsSample gps;
+    gps.has_fix = true;
+    gps.has_3d_fix = true;
+    gps.num_sats = 10;
+    gps.ground_speed_ms = 12.0f;
+    gps.ground_course_deg = 30.0f;
+    gps.last_fix_time_ms = 1000;
+    gps.velocity_ned = Vector3f(10.0f, 5.0f, 0.0f);
+
+    const bool fly_forward = true;
+    const bool armed_and_safety_off = true;
+    const bool gps_use_enabled = true;
+    const float wind_speed_ms = 2.0f;
+    const Vector3f wind_estimate(1.0f, 0.5f, 0.0f);
+    const float airspeed_tas = 15.0f;
+    const bool accel_healthy = true;
+    const bool ins_healthy = true;
+    const std::uint32_t now_ms = 1000;
+
+    run_four_separate_calls(separate, gyro, accel, 0.01f, compass, gps, fly_forward, armed_and_safety_off,
+                             gps_use_enabled, wind_speed_ms, wind_estimate, airspeed_tas, accel_healthy, ins_healthy,
+                             now_ms);
+    combined.update_full_cycle(gyro, accel, 0.01f, compass, gps, fly_forward, armed_and_safety_off, gps_use_enabled,
+                                wind_speed_ms, wind_estimate, airspeed_tas, accel_healthy, ins_healthy, now_ms);
+
+    require_identical_state(separate, combined);
+}
+
+TEST_CASE("update_full_cycle: multi-tick closed-loop scenario stays byte-identical to the four separate calls",
+          "[ahrs_dcm]") {
+    AhrsDcm separate;
+    AhrsDcm combined;
+
+    // A realistic, evolving scenario: gentle turning flight with a healthy
+    // compass and a GPS fix that updates every 5th tick (200ms @ 25ms
+    // ticks, roughly matching a 5Hz GPS against a 40Hz loop) - deliberately
+    // NOT constant inputs, so both drift_correction_yaw()'s compass-vs-GPS
+    // branch and drift_correction_accel()'s GPS-triggered fusion branch
+    // actually run more than once across the run, exercising the
+    // internal ra_sum_/ra_deltat_/omega_i_sum_ accumulators that persist
+    // across ticks - not just a single stateless call.
+    GpsSample gps;
+    gps.has_fix = true;
+    gps.has_3d_fix = true;
+    gps.num_sats = 9;
+
+    CompassSample compass;
+    compass.healthy = true;
+
+    const bool gps_use_enabled = true;
+    const bool accel_healthy = true;
+    const bool ins_healthy = true;
+
+    for (int tick = 0; tick < 60; ++tick) {
+        const std::uint32_t now_ms = 1000 + static_cast<std::uint32_t>(tick) * 25;
+        const float t = static_cast<float>(tick) * 0.025f;
+
+        GyroSample gyro;
+        gyro.delta_angle = Vector3f(0.0005f, -0.0003f, 0.0008f);
+        gyro.dangle_dt = 0.025f;
+        gyro.gyro = Vector3f(0.02f, -0.01f, 0.08f); // steady yaw rate - gentle turn
+
+        AccelSample accel;
+        accel.accel = Vector3f(0.5f * std::sin(t), 0.2f * std::cos(t), -9.75f);
+        accel.delta_velocity_dt = 0.025f;
+        accel.delta_velocity = accel.accel * accel.delta_velocity_dt;
+
+        compass.field = Vector3f(0.8f * std::cos(t * 0.5f), 0.6f * std::sin(t * 0.5f), 0.35f);
+        compass.declination_rad = 0.03f;
+        compass.last_update_usec = static_cast<std::uint64_t>(now_ms) * 1000ULL;
+
+        if (tick % 5 == 0) {
+            gps.last_fix_time_ms = now_ms;
+            gps.ground_speed_ms = 14.0f + static_cast<float>(tick) * 0.05f;
+            gps.ground_course_deg = 45.0f + static_cast<float>(tick) * 0.5f;
+            gps.velocity_ned = Vector3f(10.0f, 8.0f + 0.1f * static_cast<float>(tick), -0.2f);
+        }
+
+        const bool fly_forward = true;
+        const bool armed_and_safety_off = tick >= 10; // starts disarmed, arms partway through
+        const float wind_speed_ms = 3.0f;
+        const Vector3f wind_estimate(1.5f, 0.5f, 0.0f);
+        const float airspeed_tas = 18.0f;
+
+        run_four_separate_calls(separate, gyro, accel, 0.025f, compass, gps, fly_forward, armed_and_safety_off,
+                                 gps_use_enabled, wind_speed_ms, wind_estimate, airspeed_tas, accel_healthy,
+                                 ins_healthy, now_ms);
+        combined.update_full_cycle(gyro, accel, 0.025f, compass, gps, fly_forward, armed_and_safety_off,
+                                    gps_use_enabled, wind_speed_ms, wind_estimate, airspeed_tas, accel_healthy,
+                                    ins_healthy, now_ms);
+
+        INFO("tick " << tick);
+        require_identical_state(separate, combined);
+    }
+}
