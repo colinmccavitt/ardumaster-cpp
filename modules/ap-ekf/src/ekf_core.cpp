@@ -1581,6 +1581,58 @@ bool EkfCore::recall_gps_sample(GpsSample& out, ftype now_s) {
     return gps_buffer.recall(out, now_ms);
 }
 
+// CPP-075 (NavEKF3-equivalent phase 21). See ekf_core.hpp's
+// "recall_gps_sample_interpolated()" doc comment (just above its
+// declaration, right after recall_gps_sample()'s own) for the full
+// algorithm/justification - a DELIBERATE ENHANCEMENT beyond upstream's
+// own real algorithm (upstream's storedGPS.recall() has no interpolating
+// variant either), not a fidelity fix. recall_gps_sample()/
+// fuse_gps_velocity()/fuse_gps_position() above are completely
+// unchanged by this addition.
+bool EkfCore::recall_gps_sample_interpolated(GpsSample& out, ftype now_s) {
+    GpsSample before;
+    if (!recall_gps_sample(before, now_s)) {
+        return false;
+    }
+
+    GpsSample after;
+    if (!gps_buffer.peek_oldest(after)) {
+        // No "after" bracket available yet - fall back to today's
+        // existing single-sample behaviour, unmodified. A real,
+        // necessary, disclosed fallback (the common, realistic case when
+        // the next GPS fix simply hasn't arrived yet), not a
+        // degradation.
+        out = before;
+        return true;
+    }
+
+    // recall_gps_sample()'s own real algorithm (ekf_buffer.hpp's
+    // ObsBuffer::recall()) guarantees before.time_s() <= now_s, and
+    // guarantees (whenever an "after" element exists at all) that it is
+    // strictly newer than now_s - see this method's own doc comment in
+    // ekf_core.hpp for the full reasoning. span > 0 therefore always
+    // holds in practice; the guard below is defensive, matching this
+    // port's own established defensive-clamp convention (e.g.
+    // GpsSample::set_time_s()), not a case expected to hit.
+    const ftype t_before = before.time_s();
+    const ftype t_after = after.time_s();
+    const ftype span = t_after - t_before;
+    ftype frac = (span > ftype(0)) ? (now_s - t_before) / span : ftype(0);
+    frac = frac < ftype(0) ? ftype(0) : (frac > ftype(1) ? ftype(1) : frac);
+
+    out = before;
+    out.velocity_ned = before.velocity_ned + (after.velocity_ned - before.velocity_ned) * frac;
+    out.position_ne = before.position_ne + (after.position_ne - before.position_ne) * frac;
+    // `out` now represents an ESTIMATE for `now_s` itself, not either
+    // real bracketing sample's own true arrival time - stamp it
+    // accordingly. Not read by fuse_gps_velocity()/fuse_gps_position()
+    // themselves (verified directly - neither reads GpsSample::time_s()
+    // at all), so this has no effect on fusion; it is for any
+    // future/diagnostic caller that does read GpsSample::time_s().
+    out.set_time_s(now_s);
+    return true;
+}
+
 // ============================================================================
 // CPP-059 PHASE 5: 3-axis magnetometer fusion. See ekf_core.hpp's
 // "CPP-059, PHASE 5" banner for the full scope/exclusions/corrections

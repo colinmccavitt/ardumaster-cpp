@@ -1239,6 +1239,142 @@ TEST_CASE("push_gps_sample/recall_gps_sample: recalls the correct sample under r
 }
 
 // ============================================================================
+// CPP-075 (NavEKF3-equivalent phase 21): linear interpolation for buffered
+// GPS recall. See ekf_core.hpp's "recall_gps_sample_interpolated()" doc
+// comment (right after recall_gps_sample()'s own) for the full algorithm/
+// justification - a DELIBERATE ENHANCEMENT beyond upstream's own real
+// algorithm (upstream's storedGPS.recall() has no interpolating variant
+// either, per CPP-074's own commit message), not a fidelity fix.
+// ObsBuffer::recall()/push()/reset() and fuse_gps_velocity()/
+// fuse_gps_position()/recall_gps_sample() themselves are all completely
+// unchanged by this addition.
+//
+// Test strategy (per the ticket's own acceptance criteria):
+//   (a) THE REAL, NEW CAPABILITY: push two GPS samples with known,
+//       DIFFERENT velocity_ned/position_ne values at two known
+//       timestamps, query at a time exactly between them, and confirm
+//       the result is the correct linear blend - not just one endpoint.
+//   (b) THE GRACEFUL FALLBACK: when no "after" bracket exists yet
+//       (gps_buffer empty once "before" is consumed), confirm the result
+//       matches plain recall_gps_sample()'s own existing single-sample
+//       behaviour EXACTLY.
+// ============================================================================
+
+TEST_CASE("recall_gps_sample_interpolated: linearly blends the two real bracketing samples, "
+          "not just one endpoint",
+          "[ekf_core][fusion][gps_buffer][cpp075]") {
+    EkfCore ekf;
+
+    // Two real samples, 0.2s apart (matching this port's own 5Hz
+    // GPS-period precedent elsewhere in this file), each carrying
+    // distinct, deliberately different velocity_ned/position_ne values
+    // so a genuine blend is distinguishable from either endpoint alone.
+    GpsSample before;
+    before.set_time_s(ftype(1.0));
+    before.velocity_ned = Vector3F(ftype(10.0), ftype(0.0), ftype(0.0));
+    before.position_ne = Vector2F(ftype(100.0), ftype(0.0));
+    ekf.push_gps_sample(before);
+
+    GpsSample after;
+    after.set_time_s(ftype(1.2));
+    after.velocity_ned = Vector3F(ftype(20.0), ftype(4.0), ftype(-2.0));
+    after.position_ne = Vector2F(ftype(120.0), ftype(8.0));
+    ekf.push_gps_sample(after);
+
+    // Query at now_s=1.099s: dt for `before` is 99ms (0 <= 99 < 100,
+    // matches, per ObsBuffer::recall()'s own real `dt >= 0 && dt < 100`
+    // condition - ekf_buffer.hpp), and dt for `after` is -101ms (strictly
+    // newer than now_s, left untouched by recall()'s own "stop without
+    // consuming" rule). Deliberately NOT queried at exactly 1.1s (the
+    // true midpoint): dt for `before` would then be exactly 100ms, which
+    // recall()'s own STRICT `dt < 100` condition does NOT match - 1.099s
+    // keeps this test comfortably inside the documented boundary while
+    // still landing almost exactly halfway between the two real samples.
+    GpsSample interpolated;
+    interpolated.velocity_ned = Vector3F(ftype(-1.0), ftype(-1.0), ftype(-1.0));  // sentinel
+    const ftype now_s = ftype(1.099);
+    REQUIRE(ekf.recall_gps_sample_interpolated(interpolated, now_s));
+
+    const double frac = (1.099 - 1.0) / (1.2 - 1.0);
+    const double expected_vx = 10.0 + frac * (20.0 - 10.0);
+    const double expected_vy = 0.0 + frac * (4.0 - 0.0);
+    const double expected_vz = 0.0 + frac * (-2.0 - 0.0);
+    const double expected_px = 100.0 + frac * (120.0 - 100.0);
+    const double expected_py = 0.0 + frac * (8.0 - 0.0);
+
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.x) == Catch::Approx(expected_vx).margin(1e-4));
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.y) == Catch::Approx(expected_vy).margin(1e-4));
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.z) == Catch::Approx(expected_vz).margin(1e-4));
+    REQUIRE(static_cast<double>(interpolated.position_ne.x) == Catch::Approx(expected_px).margin(1e-4));
+    REQUIRE(static_cast<double>(interpolated.position_ne.y) == Catch::Approx(expected_py).margin(1e-4));
+
+    // THE ACTUAL POINT OF THIS TEST: the result must NOT equal either
+    // endpoint - a genuine blend, not a disguised pass-through.
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.x) != Catch::Approx(10.0));
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.x) != Catch::Approx(20.0));
+    REQUIRE(static_cast<double>(interpolated.position_ne.x) != Catch::Approx(100.0));
+    REQUIRE(static_cast<double>(interpolated.position_ne.x) != Catch::Approx(120.0));
+
+    // The "after" bracket is PEEKED, not consumed - it remains in
+    // gps_buffer for a later recall (a real, disclosed effect: only
+    // `before` was ever destructively consumed, by the underlying
+    // recall_gps_sample() call).
+    REQUIRE(ekf.gps_buffer.size() == 1);
+}
+
+TEST_CASE("recall_gps_sample_interpolated: falls back to plain recall_gps_sample() behaviour "
+          "exactly when no 'after' bracket exists yet",
+          "[ekf_core][fusion][gps_buffer][cpp075]") {
+    EkfCore ekf;
+
+    GpsSample only_sample;
+    only_sample.set_time_s(ftype(1.0));
+    only_sample.velocity_ned = Vector3F(ftype(10.0), ftype(1.0), ftype(2.0));
+    only_sample.position_ne = Vector2F(ftype(100.0), ftype(50.0));
+    ekf.push_gps_sample(only_sample);
+
+    // Query just after the only sample's own timestamp (dt=50ms,
+    // comfortably inside the 100ms window) - recall_gps_sample() itself
+    // succeeds and drains gps_buffer completely, so peek_oldest() has
+    // nothing left to look at: the realistic "next GPS fix hasn't
+    // arrived yet" case this fallback exists for.
+    GpsSample interpolated;
+    const ftype now_s = ftype(1.05);
+    REQUIRE(ekf.recall_gps_sample_interpolated(interpolated, now_s));
+
+    // EXACTLY today's existing single-sample recall_gps_sample()
+    // behaviour - the sample returned unmodified, not blended with
+    // anything (there is nothing left to blend with).
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.x) == Catch::Approx(10.0));
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.y) == Catch::Approx(1.0));
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.z) == Catch::Approx(2.0));
+    REQUIRE(static_cast<double>(interpolated.position_ne.x) == Catch::Approx(100.0));
+    REQUIRE(static_cast<double>(interpolated.position_ne.y) == Catch::Approx(50.0));
+
+    REQUIRE(ekf.gps_buffer.empty());
+
+    // Confirm this matches plain recall_gps_sample() bit-for-bit under
+    // the identical scenario (a separate EkfCore instance, same input) -
+    // the fallback is a real match, not merely "a plausible-looking
+    // value".
+    EkfCore ekf_plain;
+    GpsSample only_sample2 = only_sample;
+    ekf_plain.push_gps_sample(only_sample2);
+    GpsSample plain_result;
+    REQUIRE(ekf_plain.recall_gps_sample(plain_result, now_s));
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.x) ==
+            Catch::Approx(static_cast<double>(plain_result.velocity_ned.x)));
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.y) ==
+            Catch::Approx(static_cast<double>(plain_result.velocity_ned.y)));
+    REQUIRE(static_cast<double>(interpolated.velocity_ned.z) ==
+            Catch::Approx(static_cast<double>(plain_result.velocity_ned.z)));
+    REQUIRE(static_cast<double>(interpolated.position_ne.x) ==
+            Catch::Approx(static_cast<double>(plain_result.position_ne.x)));
+    REQUIRE(static_cast<double>(interpolated.position_ne.y) ==
+            Catch::Approx(static_cast<double>(plain_result.position_ne.y)));
+}
+
+// ============================================================================
 // CPP-069 PHASE 15: time-correct baro sample recall via ObsBuffer. See
 // ekf_core.hpp's "CPP-069, PHASE 15" banner (above EkfCore::baro_buffer)
 // and BaroSample's own banner (above its struct definition, near

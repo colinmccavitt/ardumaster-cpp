@@ -231,6 +231,42 @@ public:
         return found;
     }
 
+    // CPP-075 (NavEKF3-equivalent phase 21): read the CURRENT oldest
+    // element WITHOUT consuming it - a minimal, GENERIC "peek" capability
+    // with NO upstream equivalent (upstream's own ekf_ring_buffer /
+    // EKF_obs_buffer_t<T> has no peek-without-consuming method at all;
+    // this is new, additive infrastructure this port adds on top of the
+    // faithfully-ported recall()/push()/reset() above - it does not
+    // change recall()'s own existing, already-verified destructive-
+    // consumption/newest-match-wins semantics in any way). It exists so
+    // a caller can inspect whatever recall()'s own "an element strictly
+    // newer than sample_time_ms stops the search immediately, left
+    // untouched" behaviour (see recall()'s comment above) left behind,
+    // without re-running the search itself, duplicating any storage, or
+    // touching count_/oldest_ - the buffer is completely unaffected by a
+    // call to this method, successful or not.
+    //
+    // Deliberately GENERIC (element-type-agnostic, like every other
+    // method on this class) - this port's GPS-specific interpolation
+    // logic that USES this peek belongs, and lives, in EkfCore itself
+    // (see ekf_core.hpp's recall_gps_sample_interpolated()), not here:
+    // ObsBuffer<T,N> is shared, sensor-agnostic infrastructure also used
+    // by mag/baro/airspeed, and interpolating a GpsSample's
+    // velocity_ned/position_ne fields is domain-specific knowledge that
+    // does not belong in this generic buffer - matching this port's own
+    // established sensor-agnostic-buffer-vs-sensor-specific-wrapper
+    // convention (recall_gps_sample() itself is exactly this kind of
+    // thin, GPS-specific wrapper over the generic recall() above).
+    //
+    // Returns false (leaving `out` untouched) if the buffer is empty.
+    [[nodiscard]] bool peek_oldest(T& out) const {
+        if (count_ == 0) {
+            return false;
+        }
+        out = buffer_[oldest_];
+        return true;
+    }
+
     // Matches ekf_ring_buffer::reset(): drop all elements (does not
     // clear the stored data itself, matching upstream - only count_/
     // oldest_ are touched, exactly as upstream's reset() only zeroes

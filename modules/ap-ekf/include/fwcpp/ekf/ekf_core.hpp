@@ -2770,6 +2770,64 @@ public:
     // SCOPE" precedent).
     bool recall_gps_sample(GpsSample& out, ftype now_s);
 
+    // CPP-075 (NavEKF3-equivalent phase 21). A DELIBERATE ENHANCEMENT
+    // BEYOND UPSTREAM'S OWN REAL ALGORITHM, NOT A FIDELITY FIX - see this
+    // file's own "CPP-067, PHASE 13" banner above and ticket CPP-075/
+    // CPP-074's own commit message for the full justification. Upstream's
+    // storedGPS.recall() (AP_NavEKF3_PosVelFusion.cpp, ported above as
+    // recall_gps_sample()/ObsBuffer::recall()) returns the NEWEST sample
+    // no more than 100ms older than the query time - never the query
+    // time itself. CPP-074 measured that residual staleness directly
+    // (mean 11.1ms, max 18.0ms over a realistic 120s run) and showed via
+    // real arithmetic that, multiplied by this port's own real measured
+    // turn/climb ground speeds (up to ~26.8 m/s), it plausibly explains
+    // the ENTIRE ~0.41m unrecovered horizontal-position-accuracy gap
+    // CPP-067/072 measured for buffered/jittered GPS timing versus
+    // direct-fed fusion (~0.13m). This method closes that gap with
+    // linear interpolation between the two REAL GPS samples that bracket
+    // the query time, rather than simply returning the nearest one -
+    // upstream itself does NOT do this (storedGPS.recall() has no
+    // interpolating variant); this is a genuine, disclosed improvement
+    // over the literal upstream port, offered as a NEW, separate, opt-in
+    // entry point that leaves recall_gps_sample() itself (and therefore
+    // every one of its ~20 existing call sites) completely unchanged.
+    //
+    // ALGORITHM: call the existing recall_gps_sample() to get the
+    // "before" bracket - EXACTLY today's existing behaviour, unchanged.
+    // If it fails (no sample within the 100ms window), this fails too,
+    // leaving `out` untouched, matching recall_gps_sample()'s own
+    // contract. If it succeeds, peek (via ObsBuffer::peek_oldest(),
+    // CPP-075's own new generic addition to ekf_buffer.hpp) at whatever
+    // gps_buffer's new oldest_ element now is. recall_gps_sample()'s own
+    // real algorithm (ekf_buffer.hpp's ObsBuffer::recall()) GUARANTEES
+    // that if such an element exists, its timestamp is strictly newer
+    // than `now_s` - it is the one element recall()'s own search
+    // examined but deliberately left UNTOUCHED, stopping "without
+    // consuming it" specifically because it was too new to match - so it
+    // is exactly the "after" bracket this interpolation needs, with no
+    // separate search or extra assumption required. `out` is then
+    // linearly interpolated between "before" and "after"'s
+    // velocity_ned/position_ne at `now_s`'s own fractional position
+    // between their two real timestamps (before.time_s() <= now_s <
+    // after.time_s() always holds whenever an "after" sample exists, per
+    // the guarantee above, so the interpolation fraction is always
+    // genuinely in [0, 1) - defensively clamped anyway rather than
+    // assumed, matching this port's own established defensive-clamp
+    // convention, e.g. GpsSample::set_time_s()). If NO "after" sample
+    // exists yet (gps_buffer is empty once "before" is consumed - the
+    // realistic, common case when the next GPS fix simply hasn't arrived
+    // yet), this falls back to returning "before" directly, UNMODIFIED -
+    // EXACTLY today's existing recall_gps_sample() behaviour, a real,
+    // disclosed, necessary fallback, not a degradation.
+    //
+    // fuse_gps_velocity()/fuse_gps_position()/recall_gps_sample()
+    // themselves are completely UNCHANGED by this addition - matching
+    // every prior integration ticket's own "don't touch already-verified
+    // functions" precedent. A caller opts into interpolation purely by
+    // calling this method instead of recall_gps_sample(); both remain
+    // available side by side.
+    bool recall_gps_sample_interpolated(GpsSample& out, ftype now_s);
+
     // CPP-056 phase 2. upstream: FuseVelPosNED()'s R_OBS[0]/[1]/[2] "no
     // reported accuracy" formula, AP_NavEKF3_PosVelFusion.cpp ~line
     // 740-742 - `sq(constrain_ftype(noise, 0.05f, 5.0f)) +

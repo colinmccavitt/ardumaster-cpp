@@ -205,6 +205,82 @@ TEST_CASE("ObsBuffer::reset drops all elements", "[ekf_buffer][obs]") {
 }
 
 // ---------------------------------------------------------------------
+// ObsBuffer<T, N>::peek_oldest (CPP-075, NavEKF3-equivalent phase 21) - a
+// minimal, GENERIC "peek without consuming" addition with no upstream
+// equivalent (see ekf_buffer.hpp's own doc comment on peek_oldest() for
+// the full justification: it exists so EkfCore::recall_gps_sample_
+// interpolated() can inspect whatever recall()'s own "stop without
+// consuming" rule left behind, without a second search or any change to
+// recall()'s own already-verified destructive-consumption/newest-match
+// -wins semantics). Deliberately tested here with the same generic
+// TestObs type every other ObsBuffer test in this file uses - this
+// method is element-type-agnostic, not GPS-specific; the GPS-specific
+// interpolation logic that consumes it lives in EkfCore/ekf_core.cpp
+// and is tested there (ekf_fusion_test.cpp), not here.
+// ---------------------------------------------------------------------
+
+TEST_CASE("ObsBuffer::peek_oldest on an empty buffer returns false and leaves `out` untouched",
+          "[ekf_buffer][obs][cpp075]") {
+    ObsBuffer<TestObs, 4> buf;
+    TestObs out{{0}, 77}; // sentinel value - must survive a failed peek untouched
+    REQUIRE_FALSE(buf.peek_oldest(out));
+    REQUIRE(out.value == 77);
+    REQUIRE(buf.empty()); // peek_oldest must never mutate an empty buffer either
+}
+
+TEST_CASE("ObsBuffer::peek_oldest returns the oldest element WITHOUT consuming it - size, "
+          "contents, and a subsequent recall() are all completely unaffected",
+          "[ekf_buffer][obs][cpp075]") {
+    ObsBuffer<TestObs, 4> buf;
+    buf.push(TestObs{{1000}, 1});
+    buf.push(TestObs{{1010}, 2});
+    buf.push(TestObs{{1020}, 3});
+    REQUIRE(buf.size() == 3);
+
+    // Peek repeatedly - must return the SAME oldest element (value=1,
+    // time_ms=1000) every time, and must never shrink the buffer, unlike
+    // recall() which is destructive by design (see the "recall is
+    // destructive" test above in this file). This is the core property
+    // this method exists to provide: read-only inspection of whatever
+    // recall()'s own "newer than query, stop without consuming" rule
+    // left behind, with zero observable side effects.
+    TestObs peeked1;
+    REQUIRE(buf.peek_oldest(peeked1));
+    REQUIRE(peeked1.value == 1);
+    REQUIRE(peeked1.time_ms == 1000);
+    REQUIRE(buf.size() == 3); // completely unchanged
+
+    TestObs peeked2;
+    REQUIRE(buf.peek_oldest(peeked2));
+    REQUIRE(peeked2.value == 1); // identical result - still not consumed
+    REQUIRE(buf.size() == 3);
+
+    // THE REAL PROOF this is non-destructive, not merely "size looks
+    // right": run the buffer's OWN recall() afterward and confirm it
+    // returns EXACTLY what it would have returned had no peek ever
+    // happened at all - a query time an intervening peek could only have
+    // corrupted if peek_oldest() touched count_/oldest_ or the stored
+    // data itself.
+    ObsBuffer<TestObs, 4> reference_buf; // same pushes, no peeks at all
+    reference_buf.push(TestObs{{1000}, 1});
+    reference_buf.push(TestObs{{1010}, 2});
+    reference_buf.push(TestObs{{1020}, 3});
+
+    TestObs recalled_after_peeks;
+    TestObs recalled_reference;
+    const bool found_after_peeks = buf.recall(recalled_after_peeks, 1099);          // dt=99,49,19 - newest (3) wins
+    const bool found_reference = reference_buf.recall(recalled_reference, 1099);
+    REQUIRE(found_after_peeks == found_reference);
+    REQUIRE(found_after_peeks);
+    REQUIRE(recalled_after_peeks.value == recalled_reference.value);
+    REQUIRE(recalled_after_peeks.value == 3);
+    // Both buffers end up equally drained - the peeks above left no
+    // residue at all.
+    REQUIRE(buf.empty());
+    REQUIRE(reference_buf.empty());
+}
+
+// ---------------------------------------------------------------------
 // ImuBuffer<T, N> - a distinct type/access pattern, tested separately.
 // ---------------------------------------------------------------------
 
