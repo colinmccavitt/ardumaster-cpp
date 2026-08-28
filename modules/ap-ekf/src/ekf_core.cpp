@@ -1962,6 +1962,31 @@ bool EkfCore::fuse_magnetometer(const MagSample& mag, const GyroSample& gyro, ft
     return true;
 }
 
+// CPP-068 phase 14. upstream: NavEKF3_core::readMagData()'s
+// `storedMag.push(magDataNew);` (AP_NavEKF3_Measurements.cpp ~line 377).
+// See ekf_core.hpp's "CPP-068, PHASE 14" banner and push_mag_sample()'s
+// own doc comment for the full scope discussion - a thin pass-through,
+// identical in shape to push_gps_sample() above, all the real behavior
+// lives in ObsBuffer::push() (ekf_buffer.hpp).
+void EkfCore::push_mag_sample(const MagSample& sample) {
+    mag_buffer.push(sample);
+}
+
+// CPP-068 phase 14. upstream: NavEKF3_core::SelectMagFusion()'s
+// `magDataToFuse = storedMag.recall(magDataDelayed,
+// imuDataDelayed.time_ms);` (AP_NavEKF3_MagFusion.cpp ~line 411) - see
+// ekf_core.hpp's "CPP-068, PHASE 14" banner and recall_mag_sample()'s own
+// doc comment for the full now_s-vs-imuDataDelayed.time_ms discussion.
+// `now_s` is converted to milliseconds identically to recall_gps_sample()
+// above (clamp negative to zero before the cast, matching MagSample::
+// set_time_s()'s own convention) - ObsBuffer::recall()'s own 100ms window
+// and dt arithmetic (ekf_buffer.hpp) then decide the match.
+bool EkfCore::recall_mag_sample(MagSample& out, ftype now_s) {
+    const ftype clamped_now_s = now_s > ftype(0) ? now_s : ftype(0);
+    const std::uint32_t now_ms = static_cast<std::uint32_t>(clamped_now_s * ftype(1000));
+    return mag_buffer.recall(out, now_ms);
+}
+
 // ============================================================================
 // CPP-062 PHASE 8: baro height fusion. See ekf_core.hpp's "CPP-062, PHASE 8"
 // banner for the full scope/exclusions/corrections discussion - only

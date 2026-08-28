@@ -69,7 +69,9 @@
 // engineer #4 and #5 as clean, ISOLATED single-variable perturbations
 // rather than fighting the full dense algebra.
 
+#include <array>
 #include <cmath>
+#include <vector>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -595,4 +597,168 @@ TEST_CASE("fuse_magnetometer: a borderline-inside-gate reading still fuses norma
 
     REQUIRE(applied);
     REQUIRE(static_cast<double>(ekf.mag_test_ratio().x) < 1.0);
+}
+
+
+// ============================================================================
+// CPP-068 PHASE 14: time-correct magnetometer sample recall via ObsBuffer -
+// extends CPP-067 (phase 13)'s identical GPS pattern to magnetometer
+// fusion. See ekf_core.hpp's "CPP-068, PHASE 14" banner (above
+// EkfCore::mag_buffer) for the full scope/reasoning: the deliberately
+// narrower recall-against-caller's-own-now_s design (same simplification
+// CPP-067 already disclosed for GPS), the buffer-size justification
+// (independently re-derived for magnetometer's own real 10Hz closed-loop-
+// test rate, not copied from GPS's N=4 unexamined), the verified-moot
+// second storedMag.recall() call site (learnMagBiasFromGPS(), already an
+// established CPP-059 exclusion - this port has no such function, so
+// recall_mag_sample() is the ONLY consumer of mag_buffer), and why
+// fuse_magnetometer() above is kept completely unchanged - the new
+// capability is delivered entirely by the two additions exercised here:
+// push_mag_sample()/recall_mag_sample().
+//
+// Test strategy (mirrors CPP-067's own GPS buffer test shape exactly):
+//   1. MagSample::set_time_s()/time_s() round-trip at millisecond
+//      resolution (the disclosed ObsElement::time_ms quantization,
+//      identical convention to GpsSample's own).
+//   2. recall_mag_sample() on an empty buffer returns false and leaves
+//      `out` untouched.
+//   3. THE REAL, NEW CAPABILITY: push several magnetometer samples at
+//      DIFFERENT, non-tick-aligned timestamps (simulating a real compass
+//      driver reading arriving asynchronously relative to the EKF's own
+//      scheduling, exactly as upstream's readMagData()/SelectMagFusion()
+//      are two independently-scheduled functions), then confirm fusion
+//      at each 50Hz tick correctly recalls the most-recently-available
+//      sample and successfully fuses it against a valid attitude/field
+//      fixture - the test never calls push/recall at matching times, and
+//      never hand-feeds fuse_magnetometer() "the right sample" the way
+//      every other test above this section does.
+// ============================================================================
+
+TEST_CASE("MagSample::set_time_s/time_s round-trips at millisecond resolution", "[ekf_core][mag_fusion][mag_buffer]") {
+    MagSample mag;
+    REQUIRE(static_cast<double>(mag.time_s()) == Catch::Approx(0.0));  // zero-initialized ObsElement::time_ms
+
+    mag.set_time_s(ftype(1.234));
+    REQUIRE(static_cast<double>(mag.time_s()) == Catch::Approx(1.234).margin(1e-6));
+
+    mag.set_time_s(ftype(0.0));
+    REQUIRE(static_cast<double>(mag.time_s()) == Catch::Approx(0.0));
+
+    // Defensive negative clamp (see MagSample::set_time_s()'s own doc
+    // comment - now_s is never legitimately negative in this port's own
+    // convention, but the clamp avoids UB rather than assuming callers
+    // never pass one) - identical convention to GpsSample's own.
+    mag.set_time_s(ftype(-5.0));
+    REQUIRE(static_cast<double>(mag.time_s()) == Catch::Approx(0.0));
+}
+
+TEST_CASE("recall_mag_sample: returns false on an empty buffer", "[ekf_core][mag_fusion][mag_buffer]") {
+    EkfCore ekf;
+    MagSample out;
+    out.mag = Vector3F(ftype(99.0), ftype(99.0), ftype(99.0));  // sentinel - must be untouched
+
+    REQUIRE_FALSE(ekf.recall_mag_sample(out, ftype(0.05)));
+    REQUIRE(ekf.mag_buffer.empty());
+    // Untouched on failure, matching ObsBuffer::recall()'s own documented
+    // contract (ekf_buffer.hpp).
+    REQUIRE(static_cast<double>(out.mag.x) == Catch::Approx(99.0));
+}
+
+TEST_CASE("push_mag_sample/recall_mag_sample: recalls the correct sample under realistic "
+          "asynchronous (non-tick-aligned) magnetometer arrival, without the caller hand-feeding "
+          "exactly the right sample synchronously",
+          "[ekf_core][mag_fusion][mag_buffer]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));  // identity - DCM = I
+    ekf.state.earth_magfield = Vector3F(ftype(0.2), ftype(0.1), ftype(0.4));
+    ekf.state.body_magfield = Vector3F(ftype(0.01), ftype(-0.02), ftype(0.03));
+    ekf.covariance_init(ftype(0.01));
+
+    constexpr ftype kDt = ftype(0.02);  // 50Hz IMU tick, matching this port's own
+                                         // closed-loop-test precedent (ekf_closed_loop_test.cpp).
+
+    // Four magnetometer readings, each carrying its own TRUE arrival
+    // timestamp - none of them a multiple of kDt (0.02s), i.e. none would
+    // ever land exactly on an IMU tick boundary (verified: 91, 233, 456,
+    // 719 mod 20 are all nonzero). Each carries a distinct, tagged
+    // `mag.x` offset from the exactly-consistent reading (see
+    // ekf.state.earth_magfield/body_magfield above and this file's own
+    // "consistent with current state" fixture pattern) so a successful
+    // recall can be matched back to exactly which reading it returned.
+    struct Fix {
+        ftype arrival_s;
+        ftype tag;
+        bool pushed = false;
+    };
+    std::array<Fix, 4> fixes{{
+        {ftype(0.091), ftype(1.0)},
+        {ftype(0.233), ftype(2.0)},
+        {ftype(0.456), ftype(3.0)},
+        {ftype(0.719), ftype(4.0)},
+    }};
+
+    const Vector3F consistent_mag = ekf.state.earth_magfield + ekf.state.body_magfield;
+
+    std::vector<ftype> recalled_tags;
+    std::vector<ftype> recall_latency_s;  // now_s at recall time - the sample's own arrival_s
+
+    for (int tick = 1; tick <= 60; ++tick) {  // 60 * 20ms = 1.2s, comfortably past the last reading
+        const ftype now_s = static_cast<ftype>(tick) * kDt;
+
+        // --- Sample arrival: modelled as an independently-scheduled event
+        // (upstream: readMagData(), its own function, called on its own
+        // terms) that pushes into mag_buffer AS SOON AS it has arrived,
+        // stamped with its OWN true arrival time - NOT now_s, and NOT
+        // aligned to the tick grid at all. ---
+        for (Fix& fix : fixes) {
+            if (!fix.pushed && now_s >= fix.arrival_s) {
+                MagSample mag;
+                mag.set_time_s(fix.arrival_s);
+                mag.mag = Vector3F(consistent_mag.x + fix.tag, consistent_mag.y, consistent_mag.z);
+                ekf.push_mag_sample(mag);
+                fix.pushed = true;
+            }
+        }
+
+        // --- Fusion attempted EVERY tick (upstream: SelectMagFusion()
+        // runs every EKF cycle) - recall_mag_sample() decides, purely
+        // from timestamps, whether a time-eligible sample exists yet. THE
+        // TEST NEVER TELLS IT WHICH TICK TO EXPECT A MATCH ON - that is
+        // exactly the capability this ticket adds (contrast with every
+        // fuse_magnetometer(mag, ...) call above this section, which
+        // hands over a hand-built MagSample directly, on the exact call
+        // the test chooses). ---
+        MagSample recalled;
+        if (ekf.recall_mag_sample(recalled, now_s)) {
+            recalled_tags.push_back(recalled.mag.x - consistent_mag.x);
+            recall_latency_s.push_back(now_s - recalled.time_s());
+
+            // The full pipeline: fuse the recalled sample exactly like
+            // any other MagSample - fuse_magnetometer() itself is
+            // completely unchanged by this ticket.
+            ekf.fuse_magnetometer(recalled, make_gyro(ftype(0.01)), kDt);
+        }
+    }
+
+    // All 4 asynchronously-arriving readings were recalled exactly once
+    // each, in arrival order, none lost and none double-counted - the
+    // real acceptance criterion: fusion recalled the right sample at the
+    // right (later, tick-quantized) time without ever being handed it
+    // directly.
+    REQUIRE(recalled_tags.size() == 4);
+    REQUIRE(static_cast<double>(recalled_tags[0]) == Catch::Approx(1.0));
+    REQUIRE(static_cast<double>(recalled_tags[1]) == Catch::Approx(2.0));
+    REQUIRE(static_cast<double>(recalled_tags[2]) == Catch::Approx(3.0));
+    REQUIRE(static_cast<double>(recalled_tags[3]) == Catch::Approx(4.0));
+
+    // Each recall happened PROMPTLY after its sample's true arrival - at
+    // most one tick (kDt) of latency, and never before arrival.
+    for (const ftype latency : recall_latency_s) {
+        REQUIRE(static_cast<double>(latency) >= 0.0);
+        REQUIRE(static_cast<double>(latency) < static_cast<double>(kDt) + 1e-9);
+    }
+
+    // The buffer is drained back to empty - every pushed sample was
+    // consumed by exactly one recall, none left stranded.
+    REQUIRE(ekf.mag_buffer.empty());
 }

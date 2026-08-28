@@ -1835,6 +1835,11 @@ struct AccelSample {
 //     airspeed (upstream: storedMag/storedBaro/storedTAS, the same
 //     EKF_obs_buffer_t<T> machinery) - GPS only, in this phase, to keep
 //     it bounded. A likely, disclosed NEXT ticket, not this one.
+//     CPP-068 UPDATE (phase 14): the magnetometer portion of this
+//     exclusion is now LIFTED - see this file's "CPP-068, PHASE 14"
+//     banner (above EkfCore::mag_buffer) for push_mag_sample()/
+//     recall_mag_sample(), the identical pattern applied to
+//     magnetometer fusion. baro/airspeed remain out of scope, unchanged.
 //   - The `waitingForGpsChecks`-gated startup logic (upstream:
 //     SelectVelPosFusion()'s own `&& !waitingForGpsChecks` conjunct on
 //     the recall-result line, verified directly, ~line 534) - ties to
@@ -1917,8 +1922,28 @@ struct GpsSample : public ObsElement {
 // explicit input (ADR-0012), not a duplicate of an existing one, same
 // reasoning CPP-056's own GpsSample-vs-ahrs::GpsSample discussion above
 // already established for GPS.
-struct MagSample {
+//
+// CPP-068 phase 14 addendum: MagSample now also derives from ObsElement
+// and gains set_time_s()/time_s(), the IDENTICAL pattern CPP-067 (phase
+// 13) established for GpsSample above - reused directly, not reinvented.
+// The same real tension GpsSample's own comment resolves applies here
+// unchanged (ObsElement's contract IS a uint32_t time_ms field;
+// ObsBuffer<T,N>::recall()'s algorithm is written in terms of that exact
+// field) and is resolved the identical way: one single stored timestamp
+// (the inherited time_ms), time_s()/set_time_s() as the only caller-facing
+// accessors, negative input clamped to 0 before the uint32_t cast. See
+// this file's "CPP-068, PHASE 14" banner (below EkfCore::mag_buffer) for
+// the full scope/reasoning writeup.
+struct MagSample : public ObsElement {
     Vector3F mag;  // upstream: magDataDelayed.mag, body-frame gauss
+
+    // See GpsSample::set_time_s()/time_s() above - identical convention,
+    // reused verbatim for MagSample.
+    void set_time_s(ftype t) {
+        const ftype clamped_s = t > ftype(0) ? t : ftype(0);
+        time_ms = static_cast<std::uint32_t>(clamped_s * ftype(1000));
+    }
+    [[nodiscard]] ftype time_s() const { return static_cast<ftype>(time_ms) / ftype(1000); }
 };
 
 // upstream: state_elements, AP_NavEKF3_core.h:566-575. Field order and
@@ -2068,6 +2093,83 @@ public:
     // rather than only observing recall's effect indirectly through
     // fusion counts.
     ObsBuffer<GpsSample, kGpsBufferCapacity> gps_buffer;
+
+    // ========================================================================
+    // CPP-068, PHASE 14 (this ticket): extends phase 13 (CPP-067)'s
+    // buffered, time-correct recall pattern to magnetometer fusion. Read
+    // directly before writing any code (per the ticket's own instruction):
+    // AP_NavEKF3_MagFusion.cpp SelectMagFusion()'s `magDataToFuse =
+    // storedMag.recall(magDataDelayed,imuDataDelayed.time_ms);` (~line
+    // 411, verified directly - matches the ticket's own ~395-420 estimate)
+    // and AP_NavEKF3_Measurements.cpp's `storedMag.push(magDataNew);`
+    // (~line 377, the last statement before `lastMagRead_ms = ...;` inside
+    // the compass-read block - verified directly, matches the ticket's own
+    // ~370-395 estimate).
+    //
+    // THE SECOND storedMag.recall() CALL SITE - VERIFIED, CONFIRMED MOOT:
+    // storedMag.recall() is called in exactly TWO places in the real
+    // upstream source (grepped directly across both files named above,
+    // not assumed): SelectMagFusion() (~line 411, the one ported here) and
+    // AP_NavEKF3_MagFusion.cpp's learnMagBiasFromGPS() (~line 1376: `if
+    // (!storedMag.recall(mag_data, imuDataDelayed.time_ms)) { ... }`,
+    // read directly - a completely separate function that learns
+    // magnetometer hard-iron bias from GPS-derived yaw, gated on
+    // have_table_earth_field/inFlight, feeding a World-Magnetic-Model
+    // earth-field table lookup this port does not have). This port's own
+    // CPP-059 phase 5 banner ALREADY names learnMagBiasFromGPS() as
+    // excluded ("a separate, unrelated mag-bias learning mechanism
+    // (verified: a distinct function, not called from within
+    // FuseMagnetometer()), not part of this ticket") - confirmed again
+    // here, directly, rather than assumed: this port has no
+    // learnMagBiasFromGPS() equivalent at all, so recall_mag_sample()
+    // below (SelectMagFusion()'s ported call) is the ONLY consumer of
+    // mag_buffer. CPP-067's own central insight - ObsBuffer::recall() is
+    // DESTRUCTIVE, so two independent callers draining the same queue
+    // would be a real correctness bug, not a style question - does NOT
+    // apply here: there is exactly one real consumer, matching CPP-067's
+    // own GPS precedent (storedGPS.recall() also has exactly one real
+    // call site, SelectVelPosFusion()).
+    //
+    // BUFFER SIZE REASONING - INDEPENDENTLY RE-DERIVED FOR MAGNETOMETER,
+    // NOT COPIED FROM CPP-067's GPS-derived N=4: CPP-067's own
+    // kGpsBufferCapacity=4 was derived from GPS's ticket-stated 5-10Hz
+    // realistic range, using the FASTER end (10Hz = 100ms period, the
+    // worst case for "how fast can unconsumed samples pile up") as the
+    // base case. Magnetometer fusion has no such stated range in this
+    // ticket - this port's own real, established precedent instead is a
+    // single fixed rate: ekf_closed_loop_test.cpp's kMagPeriodTicks =
+    // kTicksPerSecond/10 = 10Hz (100ms period), the ONLY magnetometer
+    // fusion rate this port has ever exercised in a closed-loop
+    // integration test (CPP-059/CPP-061's own established precedent,
+    // cited directly per the ticket's own instruction). Applying the
+    // SAME reasoning CPP-067 used (worst-case back-to-back pushes before
+    // an intervening successful recall, PLUS a 2x safety margin against a
+    // transient hiccup silently discarding valid readings via push()'s
+    // overwrite-oldest-at-capacity behavior) to mag's own real 10Hz rate:
+    //   - up to 2 samples pushed back-to-back before an intervening
+    //     successful recall (recall_mag_sample() is attempted every EKF
+    //     tick, far faster than 10Hz, so this covers a caller skipping a
+    //     tick or two, or a compass driver emitting two readings in quick
+    //     succession) at mag's own 100ms period,
+    //   - PLUS the same 2x safety margin.
+    // This independently lands on kMagBufferCapacity=4 - the SAME numeral
+    // as CPP-067's kGpsBufferCapacity, but arrived at via mag's own real
+    // 10Hz rate, not by copying GPS's reasoning unexamined. This is not a
+    // coincidence to be embarrassed by: it is the DIRECT, disclosed
+    // consequence of mag's own established 100ms period being
+    // numerically identical to the fastest-end 100ms period that already
+    // drove GPS's own derivation (10Hz in both cases) - had this port's
+    // own magnetometer closed-loop precedent instead been, say, 25Hz
+    // (40ms period), the same worst-case-plus-margin reasoning would have
+    // produced a different N. A compile-time std::array size (no dynamic
+    // allocation, ADR-0012 decision 4), same as gps_buffer.
+    static constexpr std::size_t kMagBufferCapacity = 4;
+
+    // The actual buffer - see push_mag_sample()/recall_mag_sample() below.
+    // Public, matching gps_buffer's own established convention (direct
+    // test inspection via mag_buffer.size()/.empty()).
+    ObsBuffer<MagSample, kMagBufferCapacity> mag_buffer;
+    // ========================================================================
 
     // CPP-059 phase 5. upstream: innovMag/varInnovMag (NavEKF3_core
     // members) - see this file's "CPP-059, PHASE 5" banner. Public so
@@ -2439,6 +2541,53 @@ public:
     // sequentially) completed without either covariance-reset abort path
     // firing.
     bool fuse_magnetometer(const MagSample& mag, const GyroSample& gyro, ftype dt_ekf_avg);
+
+    // CPP-068 phase 14. upstream: NavEKF3_core::readMagData()'s own
+    // `storedMag.push(magDataNew);` (AP_NavEKF3_Measurements.cpp ~line
+    // 377, verified directly) - the SAME new capability CPP-067 (phase
+    // 13) added for GPS, now for magnetometer: callers push MagSample
+    // readings into mag_buffer AS THEY ARRIVE, decoupled from the EKF's
+    // own per-tick fusion cadence, instead of having to hand
+    // fuse_magnetometer() exactly the right sample synchronously every
+    // time (today's only option, still available unchanged - see this
+    // file's "CPP-068, PHASE 14" banner above mag_buffer for why both old
+    // and new paths are kept). The caller must stamp `sample`'s
+    // timestamp via MagSample::set_time_s() before calling this
+    // (matching upstream's own `magDataNew.time_ms = ...;
+    // storedMag.push(magDataNew)` sequence); this function does not
+    // stamp it itself.
+    void push_mag_sample(const MagSample& sample);
+
+    // CPP-068 phase 14. upstream: NavEKF3_core::SelectMagFusion()'s own
+    // `magDataToFuse = storedMag.recall(magDataDelayed,
+    // imuDataDelayed.time_ms);` (AP_NavEKF3_MagFusion.cpp ~line 411,
+    // verified directly) - recalls the correct buffered sample by
+    // timestamp using `now_s`, THIS PORT'S OWN CALLER-SUPPLIED CURRENT
+    // TIME (ADR-0012/CPP-058 convention, identical to
+    // recall_gps_sample()'s own now_s-vs-imuDataDelayed.time_ms
+    // simplification - see this file's "CPP-068, PHASE 14" banner).
+    //
+    // Unlike recall_gps_sample() (which feeds ONE recalled sample to BOTH
+    // fuse_gps_velocity()/fuse_gps_position()), magnetometer fusion has
+    // only ONE consumer of the recalled sample (fuse_magnetometer()
+    // itself) - so there is no "two independent callers draining the
+    // same queue" hazard to design around here the way CPP-067 had to for
+    // GPS. This is still deliberately a SEPARATE, ADDITIVE primitive
+    // rather than a change to fuse_magnetometer()'s own signature/body,
+    // matching CPP-067's own kept-vs-replace reasoning exactly: zero of
+    // this port's existing fuse_magnetometer() call sites (ekf_mag_
+    // fusion_test.cpp, ekf_closed_loop_test.cpp) need to change.
+    //
+    // Returns false (leaving `out` untouched) if mag_buffer has no
+    // sample within its hardcoded 100ms window of `now_s` (ekf_buffer.hpp's
+    // own upstream-derived recall() window) - matching upstream's own
+    // control flow: SelectMagFusion()'s `magDataToFuse` false means
+    // `dataReady` is false, so the entire per-tick magnetometer fusion
+    // decision (including the FUSE_YAW/FUSE_MAG3D branch selection) is
+    // skipped for the tick, not merely "the gate failed inside
+    // fuse_magnetometer()".
+    bool recall_mag_sample(MagSample& out, ftype now_s);
+
 
     // CPP-062 phase 8. upstream: R_OBS[5]'s baro branch,
     // selectHeightForFusion(), AP_NavEKF3_PosVelFusion.cpp ~line 1376-1377 -
