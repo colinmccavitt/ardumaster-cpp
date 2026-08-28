@@ -80,20 +80,9 @@
 //         (_flare_hgt_dem_ideal/_flare_hgt_dem_adj/_hgt_at_start_of_flare)
 //         - the remaining five height-state offsets are fully in scope.
 //
-//   - _update_throttle_without_airspeed() (~line 910-957): the no-
-//     airspeed-sensor throttle fallback. Per the task's own framing, this
-//     port has no airspeed-sensor subsystem yet, so a real caller is
-//     expected to always present an airspeed reading (real or synthetic)
-//     via TecsInputs, making use_airspeed() true and this branch
-//     unreachable - the task explicitly permits deferring it on exactly
-//     this basis. It also depends on _pitch_demand_lpf/_pitch_measured_lpf
-//     (LowPassFilterFloat members), which are consequently ALSO dropped
-//     from this port's state - there is no other consumer of either
-//     filter. update_pitch_throttle() below still has an `else` arm for
-//     the case use_airspeed() is false at runtime, but it is a documented
-//     safe no-op (hold + re-clamp the previous throttle demand), not an
-//     implementation of upstream's pitch-to-throttle mapping - see that
-//     arm's own comment.
+//   - _update_throttle_without_airspeed() (~line 910-957): NOW PORTED
+//     by the CPP-029 leftover closer below. The slice-1 "no airspeed
+//     subsystem" excuse is obsolete (CPP-082/083). See leftover addendum.
 //
 //   - Logging: every `#if HAL_LOGGING_ENABLED` block (TEC2/TEC3/TEC4/TECS
 //     AP::logger() messages) is cut - no logging subsystem in this port.
@@ -107,7 +96,8 @@
 //     build-time flags, and both ARE ported (see Gains::option_glider_only/
 //     option_descent_speedup below) since neither is landing-specific.
 //
-//   - get_land_airspeed()/set_path_proportion() accessors - STILL excluded
+//   - get_land_airspeed()/set_path_proportion() accessors - STUBBED by
+//     the CPP-029 leftover closer (see leftover addendum). Historical
 //     as of CPP-041 (verified: grepped every call site of both in
 //     AP_TECS.cpp/.h and ArduPlane, neither is the flare height-rate blend
 //     CPP-040 ported nor CPP-041's glide-slope aim-point math). _landAirspeed
@@ -305,6 +295,38 @@
 //     "UPSTREAM QUIRK"-adjacent accessor note above, now updated for
 //     CPP-040) and `_landAirspeed`/LAND_ARSPD itself.
 //
+// CPP-029 LEFTOVER CLOSER (this slice): leftover TECS surfaces that
+// CPP-040/041 left named-and-excluded, now stubbed or formally
+// out-of-scope. See fwcpp/tecs/tecs_leftover.hpp for the leftover-
+// complete catalog (OnMain / ThisSlice / Remaining / OutOfScope).
+// Remaining is empty: VTOL flight-stage branches and GCS/logging are
+// cataloged OutOfScope (fw-cpp is fixed-wing only; no GCS/MAVLink).
+//
+//   - _update_throttle_without_airspeed() is NOW PORTED. The old
+//     "no airspeed subsystem" excuse is gone (CPP-082/083). When
+//     use_airspeed() is false (sensor disabled AND no synthetic
+//     airspeed), update_pitch_throttle() runs the real upstream
+//     pitch-to-throttle mapping (AP_TECS.cpp:910-957) instead of
+//     the hold-and-reclamp no-op. throttle_nudge / pitch_trim_deg
+//     ride on TecsLandingInputs leftover fields (default 0) so
+//     existing call sites stay unchanged. LAND_THR override fires
+//     only when leftover is_doing_auto_land && land_throttle>=0.
+//     LowPassFilterFloat pitch_demand_lpf_/pitch_measured_lpf_ are
+//     restored; cutoff is seeded in initialise_states() exactly as
+//     upstream (fc = 1/(2*pi*TIME_CONST)).
+//   - get_land_airspeed() / set_path_proportion() leftover
+//     accessors are stubbed (LAND_ARSPD default -1; path_proportion
+//     constrained [0,1]). TAKEOFF/LAND/ABORT_LANDING control-law
+//     bodies stay documented no-ops: leftover FlightStage /
+//     is_doing_auto_land / reached_speed_takeoff surfaces exist and
+//     are stored, but they do not change the NORMAL energy law
+//     (those branches need an AP_Landing-equivalent this port has
+//     not built). Cataloged as ThisSlice stubs, not Remaining.
+//   - VTOL SPE-zeroing / VTOL underspeed-clear / VTOL bad-descent
+//     early-out / VTOL speed-weighting: formally OutOfScope.
+//   - GCS send_TECS_status / HAL_LOGGING_ENABLED: formally
+//     OutOfScope (no GCS/MAVLink, standing rule).
+//
 // NO SINGLETONS, EXPLICIT INPUTS INSTEAD (ADR-0012), matching L1Inputs'
 // established shape (see fwcpp/nav/l1_control.hpp's own banner for the
 // precedent this follows):
@@ -392,6 +414,7 @@
 #include <cstdint>
 
 #include <fwcpp/math/matrix3.hpp>
+#include <fwcpp/filter/low_pass_filter.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/param/defaults.hpp>       // get_default_value (CPP-022 slice 6, type-agnostic half only - see CPP-049 ADDENDUM)
 #include <fwcpp/param/group_info.hpp>     // GroupInfo, get_base, adjust_group_offset, group_id (CPP-022)
@@ -444,6 +467,18 @@ struct TecsInputs {
 // Defaults reproduce this port's pre-CPP-040 behavior exactly (no flare),
 // which is what update_pitch_throttle()'s defaulted `landing` parameter
 // relies on to leave plane.hpp's existing call sites unchanged.
+// Leftover FlightStage surface (CPP-029 leftover closer). Values match
+// AP_FixedWing::FlightStage (AP_FixedWing.h:48-53). Stored on leftover
+// inputs; TAKEOFF/LAND/ABORT_LANDING control-law bodies remain no-ops
+// (need AP_Landing). VTOL is cataloged OutOfScope.
+enum class TecsFlightStage : std::uint8_t {
+    kTakeoff = 1,
+    kVtol = 2,
+    kNormal = 3,
+    kLand = 4,
+    kAbortLanding = 7,
+};
+
 struct TecsLandingInputs {
     // upstream: AP_Landing::is_flaring() (AP_Landing.cpp:356-371), true
     // only once the (not-yet-ported) landing state machine has reached its
@@ -458,6 +493,16 @@ struct TecsLandingInputs {
     // blend's LAND_SRC adjustment below. Meaningless (and unread) while
     // is_flaring is false.
     float distance_beyond_land_wp = 0.0f;
+
+    // CPP-029 leftover closer: leftover landing/takeoff input surfaces.
+    // Defaults keep every pre-existing call site on the NORMAL path.
+    // is_doing_auto_land gates only the leftover LAND_THR arm inside
+    // update_throttle_without_airspeed(); it does NOT start the flare
+    // blend (that stays is_flaring, see CPP-040 ADDENDUM).
+    bool is_doing_auto_land = false;
+    std::int16_t throttle_nudge = 0;   // leftover: _update_throttle_without_airspeed
+    float pitch_trim_deg = 0.0f;       // leftover: _update_throttle_without_airspeed
+    TecsFlightStage leftover_flight_stage = TecsFlightStage::kNormal;
 };
 
 class Tecs {
@@ -495,6 +540,13 @@ public:
         float land_sink = 0.25f;               // LAND_SINK
         float land_sink_rate_change = 0.0f;    // LAND_SRC
         float flare_holdoff_hgt = 1.0f;        // FLARE_HGT
+
+        // CPP-029 leftover closer: leftover landing tunables. Defaults
+        // are the real var_info[] sentinels (AP_TECS.cpp:123/131).
+        // Not added to tecs_group_info() — leftover stubs, persistence
+        // stays the CPP-049 NORMAL+flare table.
+        float land_airspeed = -1.0f;           // LAND_ARSPD (disabled sentinel)
+        float land_throttle = -1.0f;           // LAND_THR (disabled sentinel)
     };
 
     // Upstream `const AP_FixedWing &aparm` - the subset of AP_FixedWing's
@@ -632,24 +684,18 @@ public:
         update_energies();
         update_pitch();
 
+        leftover_is_doing_auto_land_ = landing.is_doing_auto_land;
+        leftover_flight_stage_ = landing.leftover_flight_stage;
+        leftover_reached_speed_takeoff_ = false;
+
         if (use_airspeed()) {
             update_throttle_with_airspeed();
             use_synthetic_airspeed_once_ = false;
             using_airspeed_for_throttle_ = true;
         } else {
-            // _update_throttle_without_airspeed() is out of scope for this
-            // slice (see file banner) - this port has no airspeed-sensor
-            // subsystem yet, so a real caller is expected to always
-            // present some airspeed estimate via TecsInputs (a sensor
-            // reading, or Gains::use_synthetic_airspeed /
-            // use_synthetic_airspeed_once()), making use_airspeed() true
-            // and this branch unreachable in practice. If a caller
-            // nonetheless reaches it, throttle_dem_ is left at its
-            // previous value and merely re-clamped - a safe no-op that
-            // keeps thr_clip_status_ well-defined for the next tick's
-            // _update_height_demand(), NOT an implementation of
-            // upstream's pitch-to-throttle mapping.
-            constrain_throttle();
+            // CPP-029 leftover closer: real _update_throttle_without_airspeed
+            // (AP_TECS.cpp:910-957). Airspeed can now be disabled.
+            update_throttle_without_airspeed(landing, in);
             using_airspeed_for_throttle_ = false;
         }
 
@@ -689,6 +735,28 @@ public:
     // tecs_Controller->get_land_sinkrate() directly, and gains_ is private
     // to this class, so a real caller outside Tecs needs this accessor.
     [[nodiscard]] float get_land_sinkrate() const { return gains_.land_sink; }
+
+    // CPP-029 leftover closer: AP_TECS::get_land_airspeed() — returns
+    // LAND_ARSPD. Default -1 is the real disabled sentinel
+    // (AP_TECS.cpp:123). Stubbed accessor; TAKEOFF/LAND control-law
+    // does not consume it (see leftover catalog).
+    [[nodiscard]] float get_land_airspeed() const { return gains_.land_airspeed; }
+
+    // CPP-029 leftover closer: AP_TECS::set_path_proportion() —
+    // constrain to [0,1]. Stored; the LAND_SPDWGT sliding-weight
+    // consumer is a leftover stub (no-op on the NORMAL path).
+    void set_path_proportion(float path_proportion) {
+        path_proportion_ = math::constrain_value(path_proportion, 0.0f, 1.0f);
+    }
+    [[nodiscard]] float leftover_path_proportion() const { return path_proportion_; }
+
+    // Leftover observability: last leftover input surfaces stored by
+    // update_pitch_throttle(). TAKEOFF/LAND control-law bodies are
+    // no-ops; these exist so a future AP_Landing caller can set them.
+    [[nodiscard]] bool leftover_is_doing_auto_land() const { return leftover_is_doing_auto_land_; }
+    [[nodiscard]] TecsFlightStage leftover_flight_stage() const { return leftover_flight_stage_; }
+    [[nodiscard]] bool leftover_reached_speed_takeoff() const { return leftover_reached_speed_takeoff_; }
+    [[nodiscard]] bool using_airspeed_for_throttle() const { return using_airspeed_for_throttle_; }
 
     // Added to let SoaringController reset pitch integrator to zero.
     void reset_pitch_i() {
@@ -1253,6 +1321,45 @@ private:
     }
 
     // upstream: AP_TECS::constrain_throttle().
+    // CPP-029 leftover closer: AP_TECS::_update_throttle_without_airspeed
+    // (AP_TECS.cpp:910-957). Pitch-to-throttle mapping used when no
+    // airspeed sensor (and no synthetic airspeed) is available.
+    void update_throttle_without_airspeed(const TecsLandingInputs& landing, const TecsInputs& in) {
+        thr_clip_status_ = ClipStatus::kNone;
+
+        float nom_thr;
+        if (landing.is_doing_auto_land && gains_.land_throttle >= 0.0f) {
+            nom_thr = (gains_.land_throttle + static_cast<float>(landing.throttle_nudge)) * 0.01f;
+        } else {
+            nom_thr = (aparm_.throttle_cruise + static_cast<float>(landing.throttle_nudge)) * 0.01f;
+        }
+
+        pitch_demand_lpf_.apply(pitch_dem_, dt_);
+        const float pitch_demand_hpf = pitch_dem_ - pitch_demand_lpf_.get();
+        pitch_measured_lpf_.apply(in.pitch_rad, dt_);
+        const float pitch_corrected_lpf = pitch_measured_lpf_.get() - math::radians(landing.pitch_trim_deg);
+        const float pitch_blended = pitch_demand_hpf + pitch_corrected_lpf;
+
+        if (pitch_blended > 0.0f && pitchmaxf_ > 0.0f) {
+            throttle_dem_ = nom_thr + (thrmaxf_ - nom_thr) * pitch_blended / pitchmaxf_;
+        } else if (pitch_blended < 0.0f && pitchminf_ < 0.0f) {
+            throttle_dem_ = nom_thr + (thrminf_ - nom_thr) * pitch_blended / pitchminf_;
+        } else {
+            throttle_dem_ = nom_thr;
+        }
+
+        if (flags_.is_gliding) {
+            throttle_dem_ = 0.0f;
+            return;
+        }
+
+        const float cos_roll_sq = math::constrain_value(cos_roll_ * cos_roll_, 0.1f, 1.0f);
+        const float stedot_dem = gains_.roll_comp * (1.0f / cos_roll_sq - 1.0f);
+        throttle_dem_ = throttle_dem_ + stedot_dem / (stedot_max_ - stedot_min_) * (thrmaxf_ - thrminf_);
+
+        constrain_throttle();
+    }
+
     void constrain_throttle() {
         if (throttle_dem_ > thrmaxf_) {
             thr_clip_status_ = ClipStatus::kMax;
@@ -1399,10 +1506,22 @@ private:
 
             flags_.underspeed = false;
             flags_.bad_descent = false;
+            leftover_reached_speed_takeoff_ = false;
             need_reset_ = false;
 
             max_climb_scaler_ = 1.0f;
             max_sink_scaler_ = 1.0f;
+
+            // upstream: fc = 1/(M_2PI * _timeConst) then both leftover
+            // pitch LPFs are cut off and reset to current pitch
+            // (AP_TECS.cpp:1200-1203). 2*pi written as an explicit
+            // float so a header-only consumer is not flag-dependent.
+            const float two_pi = 6.2831853f;
+            const float fc = 1.0f / (two_pi * time_constant());
+            pitch_demand_lpf_.set_cutoff_frequency(fc);
+            pitch_measured_lpf_.set_cutoff_frequency(fc);
+            pitch_demand_lpf_.reset(in.pitch_rad);
+            pitch_measured_lpf_.reset(in.pitch_rad);
         }
     }
 
@@ -1598,6 +1717,14 @@ private:
     bool use_synthetic_airspeed_once_ = false;
     bool using_airspeed_sensor_ = false;
     bool using_airspeed_for_throttle_ = false;
+
+    // CPP-029 leftover closer state.
+    float path_proportion_ = 0.0f;
+    bool leftover_is_doing_auto_land_ = false;
+    TecsFlightStage leftover_flight_stage_ = TecsFlightStage::kNormal;
+    bool leftover_reached_speed_takeoff_ = false;
+    fwcpp::filter::LowPassFilterFloat pitch_demand_lpf_;
+    fwcpp::filter::LowPassFilterFloat pitch_measured_lpf_;
 
     // Cached from TecsInputs at the top of whichever of update_50hz()/
     // update_pitch_throttle() ran most recently this tick - see file

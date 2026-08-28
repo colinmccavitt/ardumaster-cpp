@@ -227,6 +227,10 @@ add_executable(tecs_param_test tecs_param_test.cpp)
 target_link_libraries(tecs_param_test PRIVATE ap-tecs ap-param Catch2::Catch2WithMain)
 catch_discover_tests(tecs_param_test)
 
+add_executable(tecs_leftover_test tecs_leftover_test.cpp)
+target_link_libraries(tecs_leftover_test PRIVATE ap-tecs ap-param Catch2::Catch2WithMain)
+catch_discover_tests(tecs_leftover_test)
+
 add_executable(fw_control_test fw_control_test.cpp)
 # ap-param: CPP-044 added real AP_Param Info-table support directly to
 # roll_controller.hpp (included here), which now unconditionally
