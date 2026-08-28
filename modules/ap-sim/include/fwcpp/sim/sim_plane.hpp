@@ -213,6 +213,7 @@
 // constant" case, rather than adding a second hardcoded copy of M_PI here.
 
 #include <cmath>
+#include <cstdint>
 #include <random>
 
 #include <fwcpp/math/matrix3.hpp>
@@ -318,6 +319,60 @@ struct WindConfig {
     float direction = 0.0f;   // deg, 0..360, compass bearing wind blows FROM
     float turbulence = 0.0f;  // turbulence intensity (upstream's own SIM_WIND_TURB-equivalent units)
     float dir_z = 0.0f;       // deg, -90..90, vertical wind angle
+};
+
+// CPP-030 leftover closer: Aircraft::ground_behavior (SIM_Aircraft.h:308).
+// Upstream Plane defaults to GROUND_BEHAVIOR_FWD_ONLY (SIM_Plane.cpp:50);
+// this class defaults to kNone so the already-landed "don't sink through
+// the floor" clamp stays the no-config path (existing sim_plane_test).
+// kTailsitter is named for catalog completeness and is a documented no-op
+// (fw-cpp is fixed-wing only).
+enum class GroundBehavior : std::uint8_t {
+    kNone = 0,
+    kNoMovement = 1,
+    kFwdOnly = 2,
+    kTailsitter = 3,
+};
+
+// CPP-030 leftover closer: Plane constructor frame-string mix flags
+// (SIM_Plane.cpp:61-74). kDspoilers/kRedundant need extra servo channels
+// this port's four-float update() does not carry; those mixes live on
+// mix_dspoilers()/mix_redundant() instead of the update() path.
+enum class AirframeMix : std::uint8_t {
+    kStandard = 0,
+    kElevons = 1,
+    kVtail = 2,
+    kDspoilers = 3,
+    kRedundant = 4,
+};
+
+struct FrameConfig {
+    AirframeMix mix = AirframeMix::kStandard;
+    bool reverse_elevator_rudder = false;
+    bool reverse_thrust = false;
+};
+
+struct SurfaceDeflections {
+    float aileron = 0.0f;
+    float elevator = 0.0f;
+    float rudder = 0.0f;
+    float throttle = 0.0f;
+};
+
+struct DspoilerInputs {
+    float dspoiler1_left = 0.0f;
+    float dspoiler1_right = 0.0f;
+    float dspoiler2_left = 0.0f;
+    float dspoiler2_right = 0.0f;
+};
+
+struct RedundantInputs {
+    float aileron_left = 0.0f;
+    float aileron_right = 0.0f;
+    float elevator_left = 0.0f;
+    float elevator_right = 0.0f;
+    float rudder_top = 0.0f;
+    float rudder_bottom = 0.0f;
 };
 
 // Ground-truth fixed-wing flight dynamics model - upstream: SITL::Plane
@@ -582,6 +637,122 @@ public:
     // so position.z >= 0 means "at or below the starting ground plane".
     [[nodiscard]] bool on_ground() const { return position.z >= 0.0f; }
 
+    // CPP-030 leftover closer: Plane::calculate_forces surface mix
+    // (SIM_Plane.cpp:405-447). reverse_elevator_rudder runs first (same
+    // order as upstream). elevons/vtail are the real four-channel mixes.
+    // kDspoilers/kRedundant on this four-channel path leave surfaces as
+    // given; callers with extra channels use mix_dspoilers/mix_redundant.
+    // reverse_thrust: this port has no PWM decode (throttle is already a
+    // float); the flag is a stored leftover surface and throttle is used
+    // as given (signed allowed).
+    [[nodiscard]] SurfaceDeflections mix_surfaces(float aileron, float elevator, float rudder, float throttle) const {
+        if (frame_config.reverse_elevator_rudder) {
+            elevator = -elevator;
+            rudder = -rudder;
+        }
+        SurfaceDeflections out;
+        out.throttle = throttle;
+        switch (frame_config.mix) {
+        case AirframeMix::kElevons: {
+            const float ch1 = aileron;
+            const float ch2 = elevator;
+            out.aileron = (ch2 - ch1) / 2.0f;
+            out.elevator = -(ch2 + ch1) / 2.0f;
+            out.rudder = 0.0f;
+            break;
+        }
+        case AirframeMix::kVtail: {
+            const float ch1 = elevator;
+            const float ch2 = rudder;
+            out.aileron = aileron;
+            out.elevator = (ch2 - ch1) / 2.0f;
+            out.rudder = (ch2 + ch1) / 2.0f;
+            break;
+        }
+        case AirframeMix::kDspoilers:
+        case AirframeMix::kRedundant:
+        case AirframeMix::kStandard:
+            out.aileron = aileron;
+            out.elevator = elevator;
+            out.rudder = rudder;
+            break;
+        }
+        return out;
+    }
+
+    // Upstream: SIM_Plane.cpp:426-436 (channels 1/2/4/5 as dspoilers).
+    [[nodiscard]] static SurfaceDeflections mix_dspoilers(const DspoilerInputs& in) {
+        const float elevon_left = (in.dspoiler1_left + in.dspoiler2_left) / 2.0f;
+        const float elevon_right = (in.dspoiler1_right + in.dspoiler2_right) / 2.0f;
+        SurfaceDeflections out;
+        out.aileron = (elevon_right - elevon_left) / 2.0f;
+        out.elevator = (elevon_left + elevon_right) / 2.0f;
+        out.rudder = std::fabs(in.dspoiler1_right - in.dspoiler2_right) / 2.0f
+                     - std::fabs(in.dspoiler1_left - in.dspoiler2_left) / 2.0f;
+        return out;
+    }
+
+    // Upstream: SIM_Plane.cpp:437-446 (paired leftover channels averaged).
+    [[nodiscard]] static SurfaceDeflections mix_redundant(const RedundantInputs& in) {
+        SurfaceDeflections out;
+        out.aileron = (in.aileron_left + in.aileron_right) / 2.0f;
+        out.elevator = (in.elevator_left + in.elevator_right) / 2.0f;
+        out.rudder = (in.rudder_top + in.rudder_bottom) / 2.0f;
+        return out;
+    }
+
+    // CPP-030 leftover closer: Aircraft::update_dynamics switch
+    // (SIM_Aircraft.cpp:787-868). Ship/tether gnd_movement is always
+    // zero (no ship sim). kTailsitter is a no-op (out of scope).
+    void apply_ground_behavior([[maybe_unused]] float dt) {
+        if (!on_ground()) {
+            return;
+        }
+        switch (ground_behavior) {
+        case GroundBehavior::kNone:
+            break;
+        case GroundBehavior::kNoMovement: {
+            float r = 0.0f;
+            float p = 0.0f;
+            float y = 0.0f;
+            dcm.to_euler(&r, &p, &y);
+            dcm.from_euler(0.0f, 0.0f, y);
+            velocity_ef.x = 0.0f;
+            velocity_ef.y = 0.0f;
+            if (velocity_ef.z > 0.0f) {
+                velocity_ef.z = 0.0f;
+            }
+            gyro.zero();
+            break;
+        }
+        case GroundBehavior::kFwdOnly: {
+            float r = 0.0f;
+            float p = 0.0f;
+            float y = 0.0f;
+            dcm.to_euler(&r, &p, &y);
+            if (velocity_ef.length() < 5.0f) {
+                p = 0.0f;
+            } else {
+                p = (p > 0.0f) ? p : 0.0f;
+            }
+            dcm.from_euler(0.0f, p, y);
+            math::Vector3f v_bf = dcm.transposed() * velocity_ef;
+            v_bf.y = 0.0f;
+            if (v_bf.x < 0.0f) {
+                v_bf.x = 0.0f;
+            }
+            velocity_ef = dcm * v_bf;
+            if (velocity_ef.z > 0.0f) {
+                velocity_ef.z = 0.0f;
+            }
+            gyro.zero();
+            break;
+        }
+        case GroundBehavior::kTailsitter:
+            break;
+        }
+    }
+
     // Upstream: Plane::calculate_forces (SIM_Plane.cpp:398) + the thrust-
     // scaling/ground-friction tail of it, folded together with
     // Aircraft::update_dynamics (SIM_Aircraft.cpp:709) into one per-tick
@@ -601,6 +772,10 @@ public:
         // update_dynamics()).
         update_wind();
 
+        // CPP-030 leftover closer: Plane::calculate_forces surface-mixing
+        // (SIM_Plane.cpp:405-447). Default FrameConfig is identity.
+        const SurfaceDeflections mixed = mix_surfaces(aileron, elevator, rudder, throttle);
+
         // calculate angle of attack (upstream: Plane::calculate_forces,
         // reading the PREVIOUS tick's velocity_air_bf - exactly reproduced:
         // velocity_air_bf here is only ever written by update_dynamics(),
@@ -609,15 +784,15 @@ public:
         angle_of_attack = std::atan2(velocity_air_bf.z, velocity_air_bf.x);
         beta = std::atan2(velocity_air_bf.y, velocity_air_bf.x);
 
-        const math::Vector3f force = getForce(aileron, elevator, rudder, angle_of_attack, beta, airspeed, gyro, air_density);
-        math::Vector3f rot_accel = getTorque(aileron, elevator, rudder, throttle, force, angle_of_attack, airspeed, beta, gyro, air_density);
+        const math::Vector3f force = getForce(mixed.aileron, mixed.elevator, mixed.rudder, angle_of_attack, beta, airspeed, gyro, air_density);
+        math::Vector3f rot_accel = getTorque(mixed.aileron, mixed.elevator, mixed.rudder, mixed.throttle, force, angle_of_attack, airspeed, beta, gyro, air_density);
 
         // scale thrust to newtons - upstream: thrust_scale = (mass *
         // GRAVITY_MSS) / hover_throttle, computed once in Plane::Plane();
         // computed per-call here since mass/hover_throttle are plain public
         // fields a caller may change between calls.
         const float thrust_scale = (mass * kGravityMss) / hover_throttle;
-        const float thrust_newtons = throttle * thrust_scale;
+        const float thrust_newtons = mixed.throttle * thrust_scale;
 
         accel_body = math::Vector3f(thrust_newtons, 0.0f, 0.0f) + force;
         accel_body = accel_body / mass;
@@ -710,6 +885,10 @@ public:
         if (on_ground() && velocity_ef.z > 0.0f) {
             velocity_ef.z = 0.0f;
         }
+
+        // CPP-030 leftover closer: taxi/takeoff-roll variants. kNone is a
+        // no-op here (the clamp above is the already-landed floor model).
+        apply_ground_behavior(dt);
     }
 
     // CPP-082 - upstream: HALSITL::SITL_State::_update_airspeed(true_
@@ -838,6 +1017,13 @@ public:
     // "wind assumed zero" behavior exactly when a caller never touches it.
     WindConfig wind_config;
 
+    // CPP-030 leftover closer: default kNone preserves the landed floor
+    // clamp. Set kNoMovement / kFwdOnly for taxi/takeoff-roll variants.
+    GroundBehavior ground_behavior = GroundBehavior::kNone;
+
+    // CPP-030 leftover closer: default standard (identity mix).
+    FrameConfig frame_config;
+
     // True earth-frame (NED) wind velocity, m/s - upstream: Aircraft::wind_ef,
     // POST the real `wind_ef = -wind_ef` sign flip (see update_wind()'s own
     // note) - i.e. this IS the physical velocity of the moving air mass,
@@ -890,15 +1076,9 @@ public:
 
 } // namespace fwcpp::sim
 
-// SLICE 2 NOTE: a higher-fidelity ap-sim would add (a) the ground_behavior
-// variants (GROUND_BEHAVIOR_NO_MOVEMENT/FWD_ONLY/TAILSITTER) for realistic
-// taxi/takeoff-roll behavior, once this port wants to simulate ground
-// operations rather than just "don't sink through the floor"; and (b) the
-// airframe config variants (elevons, vtail, dspoilers, tailsitter,
-// aerobatic, reverse_thrust, ICEngine, launcher) - each is a self-contained
-// addition to calculate_forces'/getTorque's existing branch points, not a
-// redesign of what's here. Wind modeling (steady vector + turbulence
-// gusts) was this list's remaining item (a) through CPP-030/CPP-041; it is
-// now real - see the file banner's "WIND MODELING (CPP-051)" note. Neither
-// (a) nor (b) here change update_dynamics' core rigid-body integration,
-// which this slice already ports in full.
+// LEFTOVER CLOSER (CPP-030): ground_behavior taxi/takeoff variants
+// (kNone / kNoMovement / kFwdOnly) and FW airframe mix (elevons / vtail
+// plus dspoilers / redundant / reverse_* leftover surfaces) are stubbed
+// on this class. tailsitter (airframe + GROUND_BEHAVIOR_TAILSITTER) is
+// formally out of scope — fw-cpp is fixed-wing only. See
+// fwcpp/sim/sim_leftover.hpp for the leftover-complete catalog.

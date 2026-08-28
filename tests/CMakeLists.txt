@@ -208,6 +208,10 @@ add_executable(sim_plane_test sim_plane_test.cpp)
 target_link_libraries(sim_plane_test PRIVATE ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sim_plane_test)
 
+add_executable(sim_leftover_test sim_leftover_test.cpp)
+target_link_libraries(sim_leftover_test PRIVATE ap-sim Catch2::Catch2WithMain)
+catch_discover_tests(sim_leftover_test)
+
 add_executable(tecs_test tecs_test.cpp)
 # ap-param added by CPP-049: tecs.hpp itself now #includes several
 # fwcpp/param/ headers for its own "CPP-049 ADDENDUM" (tecs_group_info/
