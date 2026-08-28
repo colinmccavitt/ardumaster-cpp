@@ -452,6 +452,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include <fwcpp/ahrs/ahrs_backend.hpp>
 #include <fwcpp/math/matrix3.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector2.hpp>
@@ -545,7 +546,14 @@ struct AccelSample {
                                     // a SEPARATE reading from delta_velocity/delta_velocity_dt, see file banner.
 };
 
-class AhrsDcm {
+// CPP-079: implements AhrsBackend - see ahrs_backend.hpp's own file banner
+// for the verified real interface surface, the getters-vs-field-access
+// design decision, and the A/B-test proof this derivation is zero
+// behavior change (tests/ahrs_dcm_test.cpp's "CPP-079: AhrsBackend
+// interface" section). Every existing method/field below is completely
+// unchanged; only `: public AhrsBackend`, `override` on
+// update_full_cycle(), and six new one-line getters are added.
+class AhrsDcm : public AhrsBackend {
 public:
     // kp_yaw: upstream `AP_Float& _kp_yaw`, defaulted to AHRS_YAW_P's
     // GSCALAR default (0.2f) - see file banner. Defaulted (not a mandatory
@@ -1227,13 +1235,24 @@ public:
                             const CompassSample& compass, const GpsSample& gps, bool fly_forward,
                             bool armed_and_safety_off, bool gps_use_enabled, float wind_speed_ms,
                             const math::Vector3f& wind_estimate, float airspeed_tas, bool accel_healthy,
-                            bool ins_healthy, std::uint32_t now_ms) {
+                            bool ins_healthy, std::uint32_t now_ms) override {
         update(gyro_sample);
         accumulate_accel(accel_sample, dt);
         drift_correction_yaw(compass, gps, fly_forward, armed_and_safety_off, gps_use_enabled, wind_speed_ms, now_ms);
         drift_correction_accel(compass, gps, fly_forward, armed_and_safety_off, gps_use_enabled, wind_estimate,
                                 airspeed_tas, accel_healthy, ins_healthy, now_ms);
     }
+
+    // CPP-079: AhrsBackend getters - see ahrs_backend.hpp's file banner.
+    // New, additive, one-line accessors; the public fields they read
+    // (below) are completely unchanged and remain directly accessible
+    // exactly as before, for the callers that already use them that way.
+    [[nodiscard]] float get_roll() const override { return roll; }
+    [[nodiscard]] float get_pitch() const override { return pitch; }
+    [[nodiscard]] float get_yaw() const override { return yaw; }
+    [[nodiscard]] const math::Vector3f& get_omega() const override { return omega; }
+    [[nodiscard]] const math::Matrix3f& get_dcm_matrix() const override { return dcm_matrix; }
+    [[nodiscard]] const math::Vector3f& get_accel_ef() const override { return accel_ef; }
 
     // Primary attitude representation - upstream: _dcm_matrix.
     math::Matrix3f dcm_matrix;

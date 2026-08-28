@@ -6,9 +6,11 @@
 
 #include <cmath>
 #include <limits>
+#include <type_traits>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <fwcpp/ahrs/ahrs_backend.hpp>
 #include <fwcpp/ahrs/ahrs_dcm.hpp>
 
 using namespace fwcpp::ahrs;
@@ -972,5 +974,186 @@ TEST_CASE("update_full_cycle: multi-tick closed-loop scenario stays byte-identic
 
         INFO("tick " << tick);
         require_identical_state(separate, combined);
+    }
+}
+
+// ===========================================================================
+// CPP-079: AhrsBackend interface. AhrsDcm now derives from AhrsBackend -
+// see ahrs_backend.hpp's own file banner for the verified real interface
+// surface (re-derived directly from plane.hpp/mode.hpp, and materially
+// smaller than the ticket's own initial, uncross-checked survey) and the
+// getters-vs-field-access design decision. These tests prove, matching
+// CPP-078's own A/B-test precedent immediately above, that driving a real
+// AhrsDcm instance PURELY through an AhrsBackend& reference produces
+// results byte-identical (==, not Catch::Approx) to driving the exact
+// same operations directly on the concrete AhrsDcm type - both for the
+// one real interface method (update_full_cycle()) and for each of the six
+// new getters against its corresponding pre-existing public field.
+// ===========================================================================
+
+static_assert(std::is_base_of_v<AhrsBackend, AhrsDcm>,
+              "AhrsDcm must implement AhrsBackend - see ahrs_backend.hpp");
+
+TEST_CASE("AhrsBackend: AhrsDcm's getters return exactly its own public fields after a real tick",
+          "[ahrs_dcm][ahrs_backend]") {
+    AhrsDcm ahrs;
+    ahrs.reset(Vector3f(1.5f, -0.8f, -9.6f), false);
+
+    GyroSample gyro;
+    gyro.delta_angle = Vector3f(0.002f, -0.001f, 0.0015f);
+    gyro.dangle_dt = 0.01f;
+    gyro.gyro = Vector3f(0.05f, -0.02f, 0.03f);
+    ahrs.update(gyro);
+
+    AccelSample accel;
+    accel.accel = Vector3f(0.4f, -0.3f, -9.75f);
+    accel.delta_velocity_dt = 0.01f;
+    accel.delta_velocity = accel.accel * accel.delta_velocity_dt;
+    ahrs.accumulate_accel(accel, 0.01f);
+
+    const AhrsBackend& backend = ahrs;
+    REQUIRE(backend.get_roll() == ahrs.roll);
+    REQUIRE(backend.get_pitch() == ahrs.pitch);
+    REQUIRE(backend.get_yaw() == ahrs.yaw);
+    REQUIRE(backend.get_omega() == ahrs.omega);
+    REQUIRE(backend.get_dcm_matrix().a == ahrs.dcm_matrix.a);
+    REQUIRE(backend.get_dcm_matrix().b == ahrs.dcm_matrix.b);
+    REQUIRE(backend.get_dcm_matrix().c == ahrs.dcm_matrix.c);
+    REQUIRE(backend.get_accel_ef() == ahrs.accel_ef);
+}
+
+namespace {
+
+// Every AhrsBackend-observable value, compared field-by-field - the
+// interface's own equivalent of this file's earlier
+// require_identical_state() (CPP-078). Deliberately exact (==), not
+// Catch::Approx - see that function's own comment for why: both paths run
+// the exact same underlying arithmetic on the exact same inputs.
+void require_identical_via_backend(const AhrsDcm& direct, const AhrsBackend& via_backend) {
+    REQUIRE(via_backend.get_roll() == direct.roll);
+    REQUIRE(via_backend.get_pitch() == direct.pitch);
+    REQUIRE(via_backend.get_yaw() == direct.yaw);
+    REQUIRE(via_backend.get_omega() == direct.omega);
+    REQUIRE(via_backend.get_dcm_matrix().a == direct.dcm_matrix.a);
+    REQUIRE(via_backend.get_dcm_matrix().b == direct.dcm_matrix.b);
+    REQUIRE(via_backend.get_dcm_matrix().c == direct.dcm_matrix.c);
+    REQUIRE(via_backend.get_accel_ef() == direct.accel_ef);
+}
+
+} // namespace
+
+TEST_CASE("AhrsBackend: single update_full_cycle() tick through the interface matches the concrete type exactly",
+          "[ahrs_dcm][ahrs_backend]") {
+    AhrsDcm direct;
+    AhrsDcm via_instance;
+    AhrsBackend& via_backend = via_instance;
+
+    GyroSample gyro;
+    gyro.delta_angle = Vector3f(0.001f, -0.0005f, 0.0002f);
+    gyro.dangle_dt = 0.01f;
+    gyro.gyro = Vector3f(0.1f, -0.05f, 0.02f);
+
+    AccelSample accel;
+    accel.accel = Vector3f(0.3f, -0.2f, -9.7f);
+    accel.delta_velocity_dt = 0.01f;
+    accel.delta_velocity = accel.accel * accel.delta_velocity_dt;
+
+    CompassSample compass;
+    compass.healthy = true;
+    compass.field = Vector3f(0.9f, 0.1f, 0.3f);
+    compass.declination_rad = 0.05f;
+    compass.last_update_usec = 500000;
+
+    GpsSample gps;
+    gps.has_fix = true;
+    gps.has_3d_fix = true;
+    gps.num_sats = 10;
+    gps.ground_speed_ms = 12.0f;
+    gps.ground_course_deg = 30.0f;
+    gps.last_fix_time_ms = 1000;
+    gps.velocity_ned = Vector3f(10.0f, 5.0f, 0.0f);
+
+    const bool fly_forward = true;
+    const bool armed_and_safety_off = true;
+    const bool gps_use_enabled = true;
+    const float wind_speed_ms = 2.0f;
+    const Vector3f wind_estimate(1.0f, 0.5f, 0.0f);
+    const float airspeed_tas = 15.0f;
+    const bool accel_healthy = true;
+    const bool ins_healthy = true;
+    const std::uint32_t now_ms = 1000;
+
+    direct.update_full_cycle(gyro, accel, 0.01f, compass, gps, fly_forward, armed_and_safety_off, gps_use_enabled,
+                              wind_speed_ms, wind_estimate, airspeed_tas, accel_healthy, ins_healthy, now_ms);
+    via_backend.update_full_cycle(gyro, accel, 0.01f, compass, gps, fly_forward, armed_and_safety_off,
+                                   gps_use_enabled, wind_speed_ms, wind_estimate, airspeed_tas, accel_healthy,
+                                   ins_healthy, now_ms);
+
+    require_identical_via_backend(direct, via_backend);
+}
+
+TEST_CASE("AhrsBackend: multi-tick closed-loop scenario stays byte-identical through the interface",
+          "[ahrs_dcm][ahrs_backend]") {
+    AhrsDcm direct;
+    AhrsDcm via_instance;
+    AhrsBackend& via_backend = via_instance;
+
+    // Same realistic, evolving scenario shape as the CPP-078 multi-tick
+    // test above (gentle turning flight, GPS fix every 5th tick) - see
+    // that test's own comment for why these specific inputs exercise the
+    // internal ra_sum_/ra_deltat_/omega_i_sum_ accumulators across ticks,
+    // not just a single stateless call.
+    GpsSample gps;
+    gps.has_fix = true;
+    gps.has_3d_fix = true;
+    gps.num_sats = 9;
+
+    CompassSample compass;
+    compass.healthy = true;
+
+    const bool gps_use_enabled = true;
+    const bool accel_healthy = true;
+    const bool ins_healthy = true;
+
+    for (int tick = 0; tick < 60; ++tick) {
+        const std::uint32_t now_ms = 1000 + static_cast<std::uint32_t>(tick) * 25;
+        const float t = static_cast<float>(tick) * 0.025f;
+
+        GyroSample gyro;
+        gyro.delta_angle = Vector3f(0.0005f, -0.0003f, 0.0008f);
+        gyro.dangle_dt = 0.025f;
+        gyro.gyro = Vector3f(0.02f, -0.01f, 0.08f);
+
+        AccelSample accel;
+        accel.accel = Vector3f(0.5f * std::sin(t), 0.2f * std::cos(t), -9.75f);
+        accel.delta_velocity_dt = 0.025f;
+        accel.delta_velocity = accel.accel * accel.delta_velocity_dt;
+
+        compass.field = Vector3f(0.8f * std::cos(t * 0.5f), 0.6f * std::sin(t * 0.5f), 0.35f);
+        compass.declination_rad = 0.03f;
+        compass.last_update_usec = static_cast<std::uint64_t>(now_ms) * 1000ULL;
+
+        if (tick % 5 == 0) {
+            gps.last_fix_time_ms = now_ms;
+            gps.ground_speed_ms = 14.0f + static_cast<float>(tick) * 0.05f;
+            gps.ground_course_deg = 45.0f + static_cast<float>(tick) * 0.5f;
+            gps.velocity_ned = Vector3f(10.0f, 8.0f + 0.1f * static_cast<float>(tick), -0.2f);
+        }
+
+        const bool fly_forward = true;
+        const bool armed_and_safety_off = tick >= 10; // starts disarmed, arms partway through
+        const float wind_speed_ms = 3.0f;
+        const Vector3f wind_estimate(1.5f, 0.5f, 0.0f);
+        const float airspeed_tas = 18.0f;
+
+        direct.update_full_cycle(gyro, accel, 0.025f, compass, gps, fly_forward, armed_and_safety_off,
+                                  gps_use_enabled, wind_speed_ms, wind_estimate, airspeed_tas, accel_healthy,
+                                  ins_healthy, now_ms);
+        via_backend.update_full_cycle(gyro, accel, 0.025f, compass, gps, fly_forward, armed_and_safety_off,
+                                       gps_use_enabled, wind_speed_ms, wind_estimate, airspeed_tas, accel_healthy,
+                                       ins_healthy, now_ms);
+
+        INFO("tick " << tick);
+        require_identical_via_backend(direct, via_backend);
     }
 }
