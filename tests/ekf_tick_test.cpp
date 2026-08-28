@@ -38,6 +38,17 @@
 //      own timestamp concept - see hpp banner).
 //   4. imu_buffer_seeded flips true after exactly the first tick() call,
 //      never again.
+//   5. CPP-073: under a REALISTIC non-zero starting velocity (unlike
+//      every test above, which - like CPP-071's own original tests -
+//      starts from a stationary, zero-velocity vehicle), state.position
+//      must NOT drift during the pre-fill window (the bug CPP-072's own
+//      closed-loop test found and disclosed, now fixed by tick()'s
+//      snapshot/restore of state.position while ticks_since_seed <
+//      kImuBufferCapacity-1 - see ekf_core.hpp's "CPP-073 ADDENDUM" and
+//      ekf_core.cpp's EkfCore::tick() implementation), while velocity and
+//      attitude continue to behave exactly as tests 1-4 above already
+//      prove (unaffected by this fix - those tests are unchanged by this
+//      ticket and still pass bit-for-bit identically).
 
 #include <cmath>
 #include <cstddef>
@@ -249,4 +260,80 @@ TEST_CASE("EkfCore::tick genuinely produces a state delayed by exactly kImuBuffe
     REQUIRE(ticked.imu_buffer.is_filled());
     REQUIRE(static_cast<double>(ticked.delayed_time_s) ==
             Catch::Approx(static_cast<double>(kDt) * static_cast<double>(total_ticks)));
+}
+
+TEST_CASE("EkfCore::tick does not let position drift during pre-fill under a "
+          "realistic non-zero starting velocity (CPP-073)",
+          "[ekf_core][tick]") {
+    // CPP-072's own closed-loop test first surfaced this bug by starting
+    // from a realistic 18 m/s cruise velocity rather than every prior
+    // test's stationary zero-velocity convention - reproduced here in
+    // isolation, directly against tick(), rather than via a full
+    // closed-loop scenario.
+    constexpr ftype kInitialSpeed = static_cast<ftype>(18.0);
+
+    EkfCore ekf;
+    ekf.state.velocity = Vector3F(kInitialSpeed, ftype(0), ftype(0));
+    const Vector3F initial_position = ekf.state.position;
+    REQUIRE(initial_position.x == ftype(0));
+    REQUIRE(initial_position.y == ftype(0));
+    REQUIRE(initial_position.z == ftype(0));
+
+    const std::size_t n = EkfCore::kImuBufferCapacity;
+    REQUIRE(n == 11);
+
+    // Independent reference EkfCore, same non-zero starting velocity,
+    // fed the SAME seed sample directly (bypassing tick()'s fix) - this
+    // is what tick()'s pre-fill window would produce WITHOUT this
+    // ticket's snapshot/restore, i.e. the bug reproduced directly. Used
+    // below to confirm this test is actually exercising the bug's real
+    // mechanism, not something already coincidentally zero.
+    EkfCore ref_unfixed;
+    ref_unfixed.state.velocity = Vector3F(kInitialSpeed, ftype(0), ftype(0));
+
+    for (std::size_t k = 1; k < n; ++k) {
+        const int tick_index = static_cast<int>(k);
+        ekf.tick(real_gyro(tick_index), real_accel(tick_index), kDt);
+        ref_unfixed.update_strapdown_equations_ned(seed_gyro(), seed_accel(), kDt);
+        ref_unfixed.covariance_prediction(seed_gyro(), seed_accel(), kDt);
+
+        REQUIRE_FALSE(ekf.imu_buffer.is_filled());
+
+        // The actual fix under test: position must stay EXACTLY at its
+        // starting value throughout the whole pre-fill window, tick by
+        // tick, not just "eventually" - a non-zero velocity would
+        // otherwise advance it by velocity*dt every single call (the bug).
+        REQUIRE(static_cast<double>(ekf.state.position.x) == Catch::Approx(static_cast<double>(initial_position.x)));
+        REQUIRE(static_cast<double>(ekf.state.position.y) == Catch::Approx(static_cast<double>(initial_position.y)));
+        REQUIRE(static_cast<double>(ekf.state.position.z) == Catch::Approx(static_cast<double>(initial_position.z)));
+
+        // Velocity and attitude are unaffected by this fix - continue to
+        // behave exactly as the true no-op pre-fill already guarantees
+        // (tests 1/3 above): velocity stays at its initial value (the
+        // seeded sample's delta-velocity exactly cancels gravity, and
+        // there is no horizontal specific force), attitude stays level.
+        REQUIRE(static_cast<double>(ekf.state.velocity.x) == Catch::Approx(static_cast<double>(kInitialSpeed)));
+        REQUIRE(static_cast<double>(ekf.state.velocity.y) == Catch::Approx(0.0));
+        REQUIRE(static_cast<double>(ekf.state.velocity.z) == Catch::Approx(0.0));
+    }
+
+    // Sanity: confirm the bug is real and this test would have caught it
+    // pre-fix - the UNFIXED reference (same starting velocity, same seed
+    // sample, no snapshot/restore) DOES drift in position by
+    // approximately initial_velocity * (n-1) * dt, matching CPP-072's own
+    // measured ~3.6m-at-18m/s finding scaled to this test's own n/dt.
+    const ftype expected_unfixed_drift = kInitialSpeed * static_cast<ftype>(n - 1) * kDt;
+    REQUIRE(static_cast<double>(ref_unfixed.state.position.x) ==
+            Catch::Approx(static_cast<double>(expected_unfixed_drift)).margin(1e-6));
+    REQUIRE(ref_unfixed.state.position.x != ftype(0)); // genuinely drifted, not coincidentally zero
+
+    // Once the buffer fills and real samples start flowing through, the
+    // fix's window has closed and normal (correct) integration resumes -
+    // exercised past n to confirm the fix doesn't leak into or otherwise
+    // disturb post-fill behavior.
+    for (int k = static_cast<int>(n); k <= 20; ++k) {
+        ekf.tick(real_gyro(k), real_accel(k), kDt);
+    }
+    REQUIRE(ekf.imu_buffer.is_filled());
+    REQUIRE(ekf.ticks_since_seed == 20);
 }

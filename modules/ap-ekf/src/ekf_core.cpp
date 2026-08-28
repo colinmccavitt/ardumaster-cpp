@@ -2359,6 +2359,22 @@ void EkfCore::tick(const GyroSample& gyro, const AccelSample& accel, ftype dt_ek
     imu_buffer.push_youngest_element(ImuSample{gyro, accel});
     const ImuSample delayed = imu_buffer.get_oldest_element();
 
+    // CPP-073: while ticks_since_seed is still less than
+    // kImuBufferCapacity-1, get_oldest_element() above is still returning
+    // one of the seeded no-op slots, not a genuinely-pushed real sample -
+    // see hpp banner's "CPP-073 ADDENDUM" for the full bug trace. The
+    // seeded sample is a true mechanization no-op for attitude/velocity
+    // (zero delta-angle, gravity-cancelling delta-velocity), but
+    // update_strapdown_equations_ned()'s trapezoidal position integration
+    // reads the state's OWN EXISTING velocity every call regardless of
+    // the IMU sample content, so a non-zero starting velocity still
+    // advances position during these calls unless explicitly held. Snapshot
+    // state.position immediately before mechanizing and restore it
+    // immediately after, for exactly this window - velocity/attitude/
+    // covariance are untouched, already correctly unaffected.
+    const bool in_prefill_window = ticks_since_seed < (kImuBufferCapacity - 1);
+    const Vector3F position_before_prefill = state.position;
+
     // The EXISTING, UNCHANGED direct-call functions - called here with
     // the delayed, buffer-sourced sample instead of an immediate one.
     // Their own signatures/behavior are completely untouched by this
@@ -2366,6 +2382,11 @@ void EkfCore::tick(const GyroSample& gyro, const AccelSample& accel, ftype dt_ek
     // keeps calling them directly and is unaffected.
     update_strapdown_equations_ned(delayed.gyro, delayed.accel, dt_ekf_avg);
     covariance_prediction(delayed.gyro, delayed.accel, dt_ekf_avg);
+
+    if (in_prefill_window) {
+        state.position = position_before_prefill;
+    }
+    ++ticks_since_seed;
 
     // upstream: imuDataDelayed's own timestamp concept, advanced by this
     // tick's dt_ekf_avg - see hpp banner's own field doc comment for why

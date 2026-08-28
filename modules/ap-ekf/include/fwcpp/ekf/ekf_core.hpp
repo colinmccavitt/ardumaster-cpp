@@ -3213,6 +3213,17 @@ public:
     // every call).
     bool imu_buffer_seeded = false;
 
+    // CPP-073 (this ticket): counts real tick() calls since the one-time
+    // pre-fill seed above, starting at 0 on the first post-seed call.
+    // Used by tick() below to know exactly when get_oldest_element() is
+    // still returning one of the seeded no-op slots (ticks_since_seed <
+    // kImuBufferCapacity-1) versus a genuinely-pushed real sample - see
+    // tick()'s own doc comment and ekf_core.cpp's implementation for why
+    // this drives the position pre-fill fix. Public, matching this
+    // section's own "expose internal state for direct test verification"
+    // convention (imu_buffer_seeded, above).
+    std::size_t ticks_since_seed = 0;
+
     // CPP-071, PHASE 17 (this ticket). upstream: the per-tick sequence
     // documented in this section's own opening banner above -
     // push_youngest_element() immediately followed by get_oldest_element()
@@ -3273,12 +3284,71 @@ public:
     // and verifies), both dt fields set to dt_ekf_avg (nonzero - no
     // division hazard). Feeding this sample through
     // update_strapdown_equations_ned()/covariance_prediction() during
-    // pre-fill is therefore a TRUE no-op mechanization step (state
-    // unchanged, matching that existing test's own verified behavior) -
-    // sane and explicitly disclosed, not an invented shortcut and not
+    // pre-fill is therefore a TRUE no-op mechanization step for attitude
+    // and velocity (matching that existing test's own verified behavior)
+    // - sane and explicitly disclosed, not an invented shortcut and not
     // upstream's own real (NaN-hazardous, if literally copied) zero
     // cold-start. See ekf_tick_test.cpp for the test verifying pre-fill
-    // ticks are true no-ops.
+    // ticks are true no-ops for attitude/velocity.
+    //
+    // CPP-073 ADDENDUM - POSITION WAS NOT ACTUALLY A NO-OP: CPP-072
+    // (phase 18's own closed-loop validation test, the first tick()
+    // caller to start from a realistic non-zero cruise velocity rather
+    // than every prior test's stationary zero-velocity convention)
+    // found and disclosed a real gap in the "TRUE no-op" claim above:
+    // update_strapdown_equations_ned()'s trapezoidal position integration
+    // (`state.position += (state.velocity + last_velocity) * (dt*0.5)`,
+    // ekf_core.cpp) reads the state's OWN EXISTING velocity every call,
+    // independent of what IMU sample is fed in - so feeding the seeded
+    // no-op sample genuinely leaves velocity/attitude unchanged (0
+    // delta-angle, gravity-cancelling delta-velocity - a real no-op for
+    // THOSE states) but does NOT stop position from advancing by
+    // velocity*dt each pre-fill tick when that existing velocity is
+    // non-zero - a real, deterministic, one-time startup position
+    // offset of ~initial_velocity*(kImuBufferCapacity-1)*dt_ekf_avg
+    // (~3.6m measured in CPP-072's own 18 m/s cruise-start scenario).
+    // CPP-071's own tests never caught this because every EkfCore they
+    // construct starts at velocity=(0,0,0) - 0*dt=0 regardless, hiding
+    // the effect completely.
+    //
+    // FIX (this ticket): while ticks_since_seed (above) is still less
+    // than kImuBufferCapacity-1 - i.e. while get_oldest_element() is
+    // still returning a seeded slot, not a genuinely-pushed real sample -
+    // tick() snapshots state.position immediately before calling
+    // update_strapdown_equations_ned() and restores it immediately after,
+    // directly neutralizing this specific integration without touching
+    // velocity/attitude/covariance (already correctly unaffected) or
+    // the seed content/ImuBuffer/delay arithmetic themselves (unchanged,
+    // still exactly as CPP-071's own ekf_tick_test.cpp verifies).
+    //
+    // WHY SNAPSHOT/RESTORE, NOT AN UPSTREAM-INFORMED ALTERNATIVE: upstream
+    // NavEKF3's own real cold-start (InitialiseFilterBootstrap(),
+    // AP_NavEKF3_core.cpp ~line 468, verified directly against the pinned
+    // Plane-4.7.0 source) sidesteps this class of bug completely
+    // differently and more drastically - it does not mechanize AT ALL
+    // during its own IMU-buffer pre-fill window (readIMUData(false),
+    // "don't allow prediction", gated by storedIMU.is_filled()), and once
+    // it does start, stateStruct.velocity/position are explicitly
+    // zeroed by InitialiseFilterBootstrap() itself before ResetVelocity()/
+    // ResetPosition() populate them from a real GPS fix (upstream Plane
+    // additionally refuses to initialise at all without 3D GPS lock) -
+    // so upstream's own pre-fill velocity is always exactly zero and this
+    // bug is architecturally impossible upstream, not merely avoided by
+    // a targeted guard. Reproducing that architecture here - skipping
+    // mechanization entirely during pre-fill, or forcing velocity/
+    // position to zero at construction - would be a materially larger,
+    // out-of-scope change: it would alter tick()'s own already-verified
+    // delay arithmetic and pre-fill call sequence (ekf_tick_test.cpp's
+    // "genuinely produces a state delayed by exactly kImuBufferCapacity-1
+    // ticks" test relies on update_strapdown_equations_ned()/
+    // covariance_prediction() being called every tick, pre-fill included),
+    // and would silently discard a real vehicle's actual non-zero
+    // starting velocity/position rather than just neutralizing the one
+    // integration this bug identified. The named divergence is therefore
+    // real and worth recording, but the narrower snapshot/restore fix is
+    // the right, minimally-invasive choice for this port's own
+    // already-established tick()/pre-fill convention (CPP-071) - see
+    // ekf_tick_test.cpp for the test proving position no longer drifts.
     void tick(const GyroSample& gyro, const AccelSample& accel, ftype dt_ekf_avg);
 
 private:
