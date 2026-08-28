@@ -363,3 +363,14 @@ catch_discover_tests(ekf_buffer_test)
 add_executable(ekf_tick_test ekf_tick_test.cpp)
 target_link_libraries(ekf_tick_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_tick_test)
+
+# CPP-080: EkfCoreBackend, the adapter making EkfCore implement
+# fwcpp::ahrs::AhrsBackend (see fwcpp/ekf/ekf_backend.hpp's own file
+# banner for the full design writeup). Links ap-ahrs directly (in
+# addition to ap-ekf) because this test file itself, not just
+# ekf_backend.hpp, uses fwcpp::ahrs:: sample types (GyroSample/
+# AccelSample/CompassSample/GpsSample) directly - same precedent as
+# tecs_param_test's own direct ap-param link above.
+add_executable(ekf_backend_test ekf_backend_test.cpp)
+target_link_libraries(ekf_backend_test PRIVATE ap-ekf ap-ahrs Catch2::Catch2WithMain)
+catch_discover_tests(ekf_backend_test)
