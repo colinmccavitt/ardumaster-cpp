@@ -342,3 +342,14 @@ catch_discover_tests(ekf_closed_loop_test)
 add_executable(ekf_airspeed_fusion_test ekf_airspeed_fusion_test.cpp)
 target_link_libraries(ekf_airspeed_fusion_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_airspeed_fusion_test)
+
+# CPP-066 phase 12: standalone generic ring-buffer infrastructure
+# (fwcpp::ekf::ObsBuffer<T,N> / fwcpp::ekf::ImuBuffer<T,N>, see
+# fwcpp/ekf/ekf_buffer.hpp's own file banner) - the FIRST step of the
+# delay-buffer/observation-time-horizon fusion epic. Header-only, but
+# still links ap-ekf (same include path/namespace as ekf_core.hpp) rather
+# than being a bare Catch2 executable - NOT wired into EkfCore at all,
+# zero change to any existing ap-ekf file.
+add_executable(ekf_buffer_test ekf_buffer_test.cpp)
+target_link_libraries(ekf_buffer_test PRIVATE ap-ekf Catch2::Catch2WithMain)
+catch_discover_tests(ekf_buffer_test)
