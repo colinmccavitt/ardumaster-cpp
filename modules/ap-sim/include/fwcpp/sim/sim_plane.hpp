@@ -230,6 +230,32 @@ inline constexpr float kGravityMss = 9.80665f;
 // file banner's "atmosphere/air density model" exclusion.
 inline constexpr float kSslAirDensity = 1.225f;
 
+// CPP-082 - defaults for airspeed_sensor_differential_pressure() below.
+// Real upstream has TWO independent parameters here: SITL's own
+// simulated-sensor ratio (SITL_Airspeed.cpp's AP_GROUPINFO("RATIO", 7,
+// AirspeedParm, ratio, 1.99) - ARSPD_RATIO under the SIM_ prefix,
+// modeling manufacturing tolerance in the simulated sensor itself) and
+// the vehicle's own calibrated ratio it divides back out on read
+// (AP_Airspeed_Params.cpp's AP_GROUPINFO("RATIO", 4, AP_Airspeed_Params,
+// ratio, 2) - the real ARSPD_RATIO a user calibrates). This port has no
+// calibration-error/ratio-mismatch modeling (see modules/ap-airspeed's
+// own file banner "OUT OF SCOPE" list - the interactive ratio-
+// calibration state machine is real, separate, deferred upstream scope)
+// so phase 1 deliberately reuses ONE shared value for both sides -
+// upstream's own AP_Airspeed_Params.cpp default (2.0, not SITL's 1.99),
+// verified directly, since that is the value this port's AirspeedSensor
+// (ap-airspeed) itself also defaults to (kDefaultRatio, airspeed_
+// sensor.hpp) - a caller wanting to exercise a genuine ratio mismatch
+// can still pass different values to each side explicitly.
+inline constexpr float kDefaultAirspeedSensorRatio = 2.0f;
+
+// Upstream: SITL_Airspeed.cpp's AP_GROUPINFO("RND", 1, AirspeedParm,
+// noise, 2.0) - ARSPD_RND under the SIM_ prefix, the simulated pressure
+// noise amplitude (Pa) `_update_airspeed()` scales its rand_float() draw
+// by. No vehicle-side counterpart (this is purely a simulated-sensor
+// characteristic) - verified directly, not invented.
+inline constexpr float kDefaultAirspeedNoisePa = 2.0f;
+
 // Upstream: SIM_Plane.h's nested `struct Coefficients` and its
 // `default_coefficients` member - reproduced here as a plain, caller-
 // overridable aggregate (no AP_JSON load_coeffs() in this port; a caller
@@ -686,6 +712,80 @@ public:
         }
     }
 
+    // CPP-082 - upstream: HALSITL::SITL_State::_update_airspeed(true_
+    // airspeed) (AP_HAL_SITL/sitl_airspeed.cpp, read in full). Produces
+    // the raw differential pressure (Pa) a real airspeed pitot sensor
+    // would report for this aircraft's CURRENT true airspeed (the
+    // `airspeed` member above, already EAS==TAS at this port's own
+    // established eas2tas=1.0 simplification - see that field's own doc
+    // comment and this ticket's own "EAS2TAS" note) - the value a caller
+    // feeds into fwcpp::airspeed::AirspeedSensor::update() (ap-airspeed)
+    // to drive the vehicle's real sensor model end to end.
+    //
+    // WITHOUT the real fail/fail_pressure/signflip branches
+    // (sitl_airspeed.cpp's own arspd.fail/arspd.fail_pressure/
+    // arspd.signflip - sensor failure injection, explicitly deferred to
+    // a future ticket, see modules/ap-airspeed's own file banner for the
+    // fuller exclusion list) and WITHOUT the SITL-side arspd.offset
+    // additive term real upstream's own _update_airspeed() computes -
+    // VERIFIED DIRECTLY against AP_Airspeed_SITL.cpp's real
+    // get_differential_pressure() (the backend AP_Airspeed::init()
+    // actually selects for CONFIG_HAL_BOARD==HAL_BOARD_SITL builds, NOT
+    // the legacy analog-pin path _update_airspeed()'s own
+    // airspeed_pin_voltage/PASCAL_TO_VOLTS machinery exists to serve):
+    // get_differential_pressure() returns `_sitl->state.airspeed_raw_
+    // pressure[i]`, which _update_airspeed() assigns BEFORE adding
+    // arspd.offset (`_sitl->state.airspeed_raw_pressure[i] =
+    // airspeed_pressure;` textually precedes `airspeed_raw =
+    // airspeed_pressure + arspd.offset;` - only airspeed_raw/
+    // airspeed_pin_voltage, read solely by the unported analog backend,
+    // ever sees that offset term). So the REAL modern SITL backend this
+    // port models never applies that additive term at all - reproduced
+    // faithfully here by omitting it, not by silently dropping a real
+    // behavior the ticket's own summary (written before this direct
+    // re-verification) implied existed.
+    //
+    // Formula (sitl_airspeed.cpp), ratio/noise_amplitude passed
+    // explicitly - see kDefaultAirspeedSensorRatio/kDefaultAirspeedNoisePa
+    // above for why phase 1 reuses one shared ratio rather than
+    // upstream's two independent real parameters:
+    //   eas = true_airspeed / eas2tas;             // eas2tas == 1.0 here, so eas == true_airspeed == this->airspeed
+    //   diff_pressure = eas^2 / ratio;
+    //   eas_noisy = sqrt(|ratio * (diff_pressure + noise_amplitude * rand_float())|);
+    //   airspeed_pressure = eas_noisy^2 / ratio;    // == AP_Airspeed_SITL::get_differential_pressure()'s real return
+    // eas_noisy^2/ratio is algebraically identical to
+    // |diff_pressure + noise_amplitude*rand_float()| for any ratio > 0
+    // (a real, always-positive calibration constant) - the sqrt-then-
+    // square round trip is kept literal anyway, matching upstream's own
+    // statement-for-statement structure exactly rather than an
+    // algebraically-equivalent but harder-to-audit rewrite (same
+    // "byte-for-byte" fidelity precedent as compass.hpp's from_euler
+    // reproduction).
+    //
+    // rand_float() is upstream's own UNIFORM [-1,1] draw (AP_Math.cpp's
+    // real rand_float(), verified directly - NOT Gaussian, despite this
+    // class's OWN wind-turbulence model using a normal distribution for
+    // a different, unrelated real upstream quantity). Reproduced with
+    // airspeed_noise_dist_ (std::uniform_real_distribution<float>(-1,1))
+    // drawn from this SAME instance's wind_rng_ engine - reusing the one
+    // per-instance, explicitly-seeded engine already established by
+    // WindConfig's turbulence model (see wind_rng_seed's own doc comment
+    // below) rather than adding a second, separately-seeded engine for
+    // this second, unrelated noise source. Determinism note: this means
+    // a caller who also drives update_wind() interleaves both noise
+    // streams from the one engine - acceptable for a test harness (both
+    // are still fully deterministic for a given seed and call sequence)
+    // and matches upstream's own real behavior of every SITL noise
+    // source sharing ONE process-global libc rand() stream.
+    [[nodiscard]] float airspeed_sensor_differential_pressure(float ratio = kDefaultAirspeedSensorRatio,
+                                                               float noise_amplitude = kDefaultAirspeedNoisePa) {
+        const float eas = airspeed; // eas2tas == 1.0 - see doc comment above
+        const float diff_pressure = (eas * eas) / ratio;
+        const float eas_noisy =
+            std::sqrt(std::fabs(ratio * (diff_pressure + noise_amplitude * airspeed_noise_dist_(wind_rng_))));
+        return (eas_noisy * eas_noisy) / ratio;
+    }
+
     // Aerodynamic/mass model - upstream: Plane::coefficient (assigned from
     // default_coefficients, or JSON-loaded - see file banner), Plane::mass
     // (Aircraft::mass, 2.0f), Plane::hover_throttle (const 0.7f).
@@ -703,6 +803,10 @@ public:
     std::mt19937 wind_rng_;
     std::normal_distribution<double> wind_normal_dist_{0.0, 1.0};
     std::uniform_real_distribution<float> wind_azimuth_step_dist_{0.0f, 360.0f};
+    // CPP-082: airspeed_sensor_differential_pressure()'s own noise draw -
+    // see that method's own doc comment for why this reuses wind_rng_
+    // rather than a second engine.
+    std::uniform_real_distribution<float> airspeed_noise_dist_{-1.0f, 1.0f};
 
     // True attitude - upstream: Aircraft::dcm (_dcm_matrix's SITL-truth
     // counterpart; SITL's own dcm, not AhrsDcm's dcm_matrix - see file

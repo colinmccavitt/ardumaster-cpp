@@ -6767,3 +6767,152 @@ TEST_CASE("FlapSlewState: the slew window is seeded once from the first raw valu
         REQUIRE(state.limited(50.0f) == Catch::Approx(1.5f));
     }
 }
+
+// ---------------------------------------------------------------------
+// CPP-082: real airspeed sensor wiring into tick() - this is the
+// ticket's own explicit acceptance criterion: a closed-loop test proving
+// GENUINE tick()-driven sensor output (SimPlane truth ->
+// SimPlane::airspeed_sensor_differential_pressure() -> real raw pressure
+// -> plane.airspeed_sensor.update() -> in.airspeed_valid/in.airspeed_eas
+// override, ALL performed inside tick() itself, see mode.hpp's own
+// "CPP-082" note) changes real vehicle behavior end to end - NEVER a
+// hand-set `in.airspeed_valid = true` (every OTHER test in this file
+// that touches airspeed_valid does exactly that; this is deliberately
+// the one exception). Observed two ways:
+//   1. Plane::get_speed_scaler() - the real, low-pass-filtered value
+//      stabilize_roll()/stabilize_pitch() actually read (calc_speed_
+//      scaler()'s airspeed-valid branch vs. its armed-and-safety-off
+//      throttle-fallback branch produce analytically distinct results
+//      for this test's chosen inputs - see the two expected values
+//      below).
+//   2. Plane::takeoff_state.highest_airspeed - a Plane member
+//      update_speed_scaler() writes ONLY when airspeed_valid is
+//      genuinely true (plane.hpp: `if (airspeed_valid && armed_and_
+//      safety_off && airspeed_eas > takeoff_state.highest_airspeed)`) -
+//      its being nonzero after the run is independent proof the
+//      override reached real Plane state, not just this test's own
+//      local StabilizeInputs copy.
+// ---------------------------------------------------------------------
+
+namespace {
+
+struct SpeedScalerRunResult {
+    float final_speed_scaler = 0.0f;
+    float final_highest_airspeed = 0.0f;
+};
+
+SpeedScalerRunResult run_speed_scaler_closed_loop(bool with_airspeed_sensor, int num_ticks) {
+    Plane plane;
+    fwcpp::sim::SimPlane sim_plane;
+    ModeManual manual(plane);
+    plane.control_mode = &manual;
+
+    constexpr float kDt = 0.02f; // 50Hz
+    plane.armed = true;
+    plane.hal.rc_output.force_safety_off();
+
+    // True airspeed held fixed by the test at aparm.scaling_speed's own
+    // real default (15 m/s) - representing steady, wings-level cruise
+    // flight ground truth, matching the compass closed-loop test's own
+    // precedent (run_stationary_yaw_bias_closed_loop, above) of pinning
+    // SimPlane ground truth at a fixed, test-controlled value to isolate
+    // a single mechanism (there: yaw correction; here: the sensor
+    // pipeline) rather than depending on a fully-trimmed free-flight
+    // dynamic to happen to hold a particular airspeed. With aparm.
+    // scaling_speed == airspeed_eas, calc_speed_scaler()'s airspeed-
+    // valid branch analytically gives speed_scaler = scaling_speed /
+    // airspeed_eas = 1.0 exactly, well inside [scale_min, scale_max] for
+    // this plane's default airspeed_min/max/scaling_speed - a specific,
+    // easily-distinguished value from the no-sensor throttle-fallback
+    // branch's result below.
+    sim_plane.airspeed = plane.aparm.scaling_speed;
+
+    StabilizeInputs in;
+    in.dt = kDt;
+    fwcpp::ahrs::GyroSample gyro_sample; // zero throughout - not this test's concern
+
+    std::uint32_t now_ms = 0;
+    for (int i = 0; i < num_ticks; ++i) {
+        now_ms += 20;
+        in.now_ms = now_ms;
+        in.now_us = static_cast<std::uint64_t>(now_ms) * 1000ULL;
+
+        // Full throttle every tick (set_sticks() must be called EVERY
+        // tick, not just once before the loop - see this file's own
+        // CPP-031 slice 8 failsafe note elsewhere: RcInput::set_channel()
+        // marks a one-shot "new frame" flag tick()'s own read_input()
+        // consumes, so a stale/unrefreshed stick would eventually starve
+        // the RC short failsafe check and change control_mode out from
+        // under this test) -> throttle_out == 100.0 exactly (this file's
+        // own established "2000us -> 100.0" convention, see line 151
+        // above) -> WITHOUT an airspeed sensor, calc_speed_scaler()'s
+        // armed_and_safety_off branch gives sqrt(45/100) =~ 0.6708.
+        set_sticks(plane, 1500, 1500, 2000, 1500);
+
+        if (with_airspeed_sensor) {
+            in.airspeed_sensor_enabled = true;
+            // Zero noise amplitude (ratio=2.0, matching AirspeedSensor's
+            // own real ARSPD_RATIO default) - a fully deterministic raw
+            // pressure, so the expected converged airspeed_eas below is
+            // exactly analytically predictable rather than merely
+            // statistically close.
+            in.airspeed_raw_pressure_pa = sim_plane.airspeed_sensor_differential_pressure(2.0f, 0.0f);
+        }
+        // else: leave airspeed_sensor_enabled at StabilizeInputs' own
+        // default (false) - plane.airspeed_sensor.update() is never
+        // called this run, exactly this port's pre-CPP-082 behavior
+        // (mode.hpp) - in.airspeed_valid/in.airspeed_eas pass straight
+        // through at their own StabilizeInputs defaults (false/0.0).
+
+        tick(plane, gyro_sample, in);
+    }
+
+    SpeedScalerRunResult result;
+    result.final_speed_scaler = plane.get_speed_scaler();
+    result.final_highest_airspeed = plane.takeoff_state.highest_airspeed;
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Closed loop: a genuine tick()-driven AirspeedSensor reading (SimPlane truth -> the real SITL pressure "
+          "formula -> AirspeedSensor::update() -> in.airspeed_valid/airspeed_eas, all performed inside tick() "
+          "itself) changes Plane::get_speed_scaler()'s real output versus the no-sensor fallback",
+          "[vehicle][integration][airspeed]") {
+    // 300 ticks (6s at 50Hz) - the sensor's own IIR filter converges
+    // immediately (its very first update() call resets to the raw value
+    // rather than blending, see airspeed_sensor_test.cpp; with a
+    // constant zero-noise input every subsequent call reproduces that
+    // same value exactly), so this budget is entirely for update_speed_
+    // scaler()'s OWN 2Hz low-pass (surface_speed_scaler) to settle -
+    // its alpha at 50Hz/2Hz is large enough that this converges within a
+    // handful of ticks in practice; 300 leaves a comfortable margin.
+    constexpr int kNumTicks = 300;
+
+    const SpeedScalerRunResult without_sensor = run_speed_scaler_closed_loop(false, kNumTicks);
+    const SpeedScalerRunResult with_sensor = run_speed_scaler_closed_loop(true, kNumTicks);
+
+    // WITHOUT the sensor: airspeed_valid is never true, so calc_speed_
+    // scaler() always takes the armed_and_safety_off throttle-fallback
+    // branch, and update_speed_scaler()'s `if (airspeed_valid && ...)`
+    // guard (plane.hpp) never fires - highest_airspeed stays at its
+    // zero-initialized default.
+    REQUIRE(without_sensor.final_highest_airspeed == Catch::Approx(0.0f));
+    const float expected_throttle_fallback_scaler = std::sqrt(45.0f / 100.0f); // kTrimThrottleDefault / throttle_out
+    REQUIRE(without_sensor.final_speed_scaler == Catch::Approx(expected_throttle_fallback_scaler).margin(0.01f));
+
+    // WITH the sensor: the real pipeline made airspeed_valid true and
+    // airspeed_eas converge to exactly aparm.scaling_speed (15.0) -
+    // highest_airspeed being nonzero here is independent, real-Plane-
+    // state proof the override actually reached tick()'s downstream
+    // consumers, not just this test's own local StabilizeInputs.
+    REQUIRE(with_sensor.final_highest_airspeed > 0.0f);
+    REQUIRE(with_sensor.final_highest_airspeed == Catch::Approx(15.0f).margin(0.05f));
+    REQUIRE(with_sensor.final_speed_scaler == Catch::Approx(1.0f).margin(0.01f));
+
+    // The whole point of this ticket: these two runs differ only in
+    // whether the real sensor path was engaged, and that alone changes
+    // real vehicle behavior (get_speed_scaler()) by a wide, unambiguous
+    // margin.
+    REQUIRE(std::fabs(with_sensor.final_speed_scaler - without_sensor.final_speed_scaler) > 0.2f);
+}

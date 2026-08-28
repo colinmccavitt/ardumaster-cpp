@@ -2965,6 +2965,7 @@
 #include <span>
 
 #include <fwcpp/ahrs/ahrs_dcm.hpp>
+#include <fwcpp/airspeed/airspeed_sensor.hpp>
 #include <fwcpp/compass/compass.hpp>
 #include <fwcpp/fw_control/fw_controller.hpp>
 #include <fwcpp/fw_control/pitch_controller.hpp>
@@ -3634,6 +3635,38 @@ struct StabilizeInputs {
     math::Vector3f compass_field_bf; // pre-rotated body-frame magnetic field, milliGauss - meaningful only if
                                       // compass_healthy is true this tick.
     bool compass_healthy = false;    // whether compass_field_bf holds a real reading this tick - see above.
+
+    // --- CPP-082 additions - see modules/ap-airspeed's own file banner
+    // for AirspeedSensor's full design, and mode.hpp's tick() for the
+    // real insertion point. ---
+    //
+    // tick() cannot supply plane.airspeed_sensor with a raw pressure in
+    // production either - a real airspeed driver reads its own hardware
+    // pitot directly. So, exactly like compass_field_bf above, the
+    // CALLER (a production hardware driver, or a test/SITL-integration
+    // harness holding SimPlane's true airspeed) supplies the raw
+    // differential pressure directly - see sim_plane.hpp's own
+    // airspeed_sensor_differential_pressure() for how a caller with true
+    // airspeed computes it.
+    //
+    // airspeed_sensor_enabled DEFAULTS FALSE, DELIBERATELY, SO EVERY
+    // EXISTING CALLER KEEPS TODAY'S EXACT BEHAVIOR UNCHANGED - same shape
+    // as compass_healthy above, and for the same reason: mode.hpp's
+    // tick() only calls plane.airspeed_sensor.update(...) and only
+    // OVERRIDES airspeed_valid/airspeed_eas from its output when this
+    // flag is true THIS TICK. A caller that never touches these two
+    // fields never triggers that call, so tick() passes THIS OBJECT's
+    // OWN airspeed_valid/airspeed_eas straight through completely
+    // unmodified - bit-for-bit the prior behavior every existing unit
+    // test that hand-sets `in.airspeed_valid = true` directly already
+    // relies on (mode.hpp used to read these two fields as pure
+    // caller-supplied input, unconditionally; with this flag left at its
+    // default, it still does). Only a caller that opts in - a genuine
+    // closed-loop test, or a real vehicle build - gets the actual sensor
+    // pipeline (offset/filter/ratio) between "raw pressure" and
+    // "airspeed_valid/airspeed_eas" for the first time.
+    float airspeed_raw_pressure_pa = 0.0f; // raw differential pressure, Pa - meaningful only if airspeed_sensor_enabled.
+    bool airspeed_sensor_enabled = false;  // whether to feed airspeed_raw_pressure_pa through plane.airspeed_sensor this tick - see above.
 };
 
 // upstream: this port's own bound on mission length, NOT upstream's - see
@@ -4880,6 +4913,17 @@ public:
     // compass_healthy is true this tick - see that field's own doc comment
     // below for why.
     compass::Compass compass;
+
+    // CPP-082 (see modules/ap-airspeed's own file banner) - this port's
+    // first real airspeed sensor model, default-constructed to upstream's
+    // own real ARSPD_RATIO/ARSPD_OFFSET defaults (AirspeedSensor's own
+    // kDefaultRatio/kDefaultOffset). tick() (mode.hpp) only feeds it a
+    // raw pressure reading, and only overrides StabilizeInputs::
+    // airspeed_valid/airspeed_eas from its output, when the caller's
+    // StabilizeInputs::airspeed_sensor_enabled is true this tick - see
+    // that field's own doc comment below for why (same opt-in shape as
+    // compass_healthy above).
+    airspeed::AirspeedSensor airspeed_sensor;
 
     // MUST precede roll_controller/pitch_controller/yaw_controller/tecs -
     // see file banner's "DECLARATION-ORDER CONSTRAINT" note.

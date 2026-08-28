@@ -269,6 +269,16 @@ add_executable(compass_test compass_test.cpp)
 target_link_libraries(compass_test PRIVATE ap-compass Catch2::Catch2WithMain)
 catch_discover_tests(compass_test)
 
+# CPP-082 phase 1: AirspeedSensor's own read()-formula unit tests - no
+# ap-sim/ap-vehicle needed (not a closed-loop test, matching CPP-043's
+# own plane_aparm_param_test precedent above). The genuine closed-loop
+# test proving tick()-driven sensor output changes real vehicle behavior
+# lives in vehicle_test.cpp instead (ap-sim is already a test-only
+# dependency there).
+add_executable(airspeed_sensor_test airspeed_sensor_test.cpp)
+target_link_libraries(airspeed_sensor_test PRIVATE ap-airspeed Catch2::Catch2WithMain)
+catch_discover_tests(airspeed_sensor_test)
+
 add_executable(steer_controller_test steer_controller_test.cpp)
 target_link_libraries(steer_controller_test PRIVATE ap-steer-control Catch2::Catch2WithMain)
 catch_discover_tests(steer_controller_test)

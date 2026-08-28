@@ -826,7 +826,27 @@ inline void ModeTAKEOFF::navigate(const StabilizeInputs& in) {
 // available and independently verified (scheduler_test.cpp) for a future
 // caller that genuinely needs runtime-registered/variable-rate tasks,
 // which this vehicle does not today.
-inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const StabilizeInputs& in) {
+//
+// CPP-082 NOTE: `in` is now taken BY VALUE, not `const StabilizeInputs&`.
+// This is the FIRST tick() slice to need a value this function itself
+// computes (the real airspeed sensor's output) to flow into every
+// existing downstream consumer of in.airspeed_valid/in.airspeed_eas
+// (this function's own airspeed_tas/update_speed_scaler() below, AND
+// mode.navigate(in)/mode.update(in)/mode.run(in)'s internal stabilize_
+// roll()/pitch()/yaw()/build_l1_inputs()/takeoff_calc_pitch() reads,
+// plane.hpp) - every one of which reads `in` again after this function's
+// own call site, not a value this function could thread through as a
+// separate parameter. Taking `in` by value gives this function its OWN
+// local copy to override in place (see step 3/3b below) so every one of
+// those later reads - inside THIS function and inside mode.navigate/
+// update/run() - sees the overridden value automatically, without
+// renaming every "in." reference in this file. This is transparent to
+// every existing caller: tick(plane, gyro, in) already passed an
+// lvalue StabilizeInputs at every call site (grep confirms it), so this
+// change only adds one (cheap - a handful of floats/bools/Vector3f, no
+// heap allocation) copy per call; the CALLER's own `in` object is never
+// mutated, exactly as when this was a const reference.
+inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, StabilizeInputs in) {
     Mode& mode = *plane.control_mode; // see this function's own "CPP-031 SLICE 7 NOTE" above
 
     // 1. pull RC input (upstream: AP_Vehicle's read_radio() scheduled task)
@@ -949,6 +969,32 @@ inline void tick(Plane& plane, const ahrs::GyroSample& gyro_sample, const Stabil
     if (in.compass_healthy) {
         plane.compass.update(in.compass_field_bf, in.now_us);
     }
+
+    // CPP-082: real airspeed sensor wiring - see modules/ap-airspeed's
+    // own file banner for AirspeedSensor's full read()-formula design,
+    // and StabilizeInputs::airspeed_sensor_enabled's own doc comment
+    // (plane.hpp) for why this defaults false/inert. MUST run before
+    // airspeed_tas below (the first of MANY real consumers of in.
+    // airspeed_valid/in.airspeed_eas this tick - see this function's own
+    // "CPP-082 NOTE" above for the full list, which also includes mode.
+    // navigate/update/run()'s internal stabilize_roll/pitch/yaw()/
+    // build_l1_inputs()/takeoff_calc_pitch() reads further down this same
+    // call): overriding `in`'s own copy of these two fields here, before
+    // any of them are read, is what makes the override visible to every
+    // one of those later reads without threading a separate value
+    // through each of them individually.
+    if (in.airspeed_sensor_enabled) {
+        plane.airspeed_sensor.update(in.airspeed_raw_pressure_pa);
+        in.airspeed_valid = plane.airspeed_sensor.healthy();
+        in.airspeed_eas = plane.airspeed_sensor.airspeed();
+    }
+    // else: leave airspeed_valid/airspeed_eas exactly as the caller set
+    // them - plane.airspeed_sensor is never even touched, so a caller
+    // that never sets airspeed_sensor_enabled gets bit-for-bit this
+    // port's pre-CPP-082 behavior (mode.hpp used to read these two
+    // fields as pure caller-supplied input, unconditionally; it still
+    // does, unless this flag opts in).
+
     const ahrs::CompassSample compass = plane.compass.sample();
     const ahrs::GpsSample& gps_sample = plane.gps.sample();
     const float wind_speed_ms = in.wind_estimate.xy().length(); // see plane.hpp's file banner addendum
