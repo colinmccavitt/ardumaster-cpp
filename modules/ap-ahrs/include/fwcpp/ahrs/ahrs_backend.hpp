@@ -133,7 +133,10 @@
 
 #include <cstdint>
 
+#include <fwcpp/ahrs/ahrs_leftover.hpp>
+#include <fwcpp/location.hpp>
 #include <fwcpp/math/matrix3.hpp>
+#include <fwcpp/math/vector2.hpp>
 #include <fwcpp/math/vector3.hpp>
 
 namespace fwcpp::ahrs {
@@ -173,6 +176,22 @@ public:
     [[nodiscard]] virtual const math::Vector3f& get_omega() const = 0;
     [[nodiscard]] virtual const math::Matrix3f& get_dcm_matrix() const = 0;
     [[nodiscard]] virtual const math::Vector3f& get_accel_ef() const = 0;
+
+    // CPP-028 leftover production surface. See ahrs_leftover.hpp.
+    // now_ms REPLACES AP_HAL::millis() (ADR-0012). pre_arm_check has no
+    // GCS failure_msg buffer - logging/MAVLink is formally out of scope.
+    [[nodiscard]] virtual bool healthy(std::uint32_t now_ms) const = 0;
+    [[nodiscard]] virtual bool pre_arm_check(bool requires_position, std::uint32_t now_ms) const = 0;
+    [[nodiscard]] virtual float groundspeed() const = 0;
+    [[nodiscard]] virtual math::Vector2f groundspeed_vector() const = 0;
+    [[nodiscard]] virtual bool airspeed_EAS(float& airspeed_ret) const = 0;
+    [[nodiscard]] virtual bool using_airspeed_sensor() const = 0;
+    virtual void observe_airspeed(float eas, bool sensor_healthy) = 0;
+    virtual void set_home(const Location& home) = 0;
+    [[nodiscard]] virtual bool home_is_set() const = 0;
+    virtual void observe_position(const Location& loc) = 0;
+    [[nodiscard]] virtual bool get_relative_position_NE_home(math::Vector2f& pos_ne) const = 0;
+    [[nodiscard]] virtual bool get_relative_position_D_home(float& pos_d) const = 0;
 };
 
 } // namespace fwcpp::ahrs

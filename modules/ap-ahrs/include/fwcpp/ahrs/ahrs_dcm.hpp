@@ -453,6 +453,8 @@
 #include <cstdint>
 
 #include <fwcpp/ahrs/ahrs_backend.hpp>
+#include <fwcpp/ahrs/ahrs_leftover.hpp>
+#include <fwcpp/location.hpp>
 #include <fwcpp/math/matrix3.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector2.hpp>
@@ -674,6 +676,7 @@ public:
 
         if (!renorm(t0, dcm_matrix.a) || !renorm(t1, dcm_matrix.b) || !renorm(t2, dcm_matrix.c)) {
             // Blowing up - force back to the last known-good euler angles.
+            last_failure_ms_ = last_now_ms_ == 0 ? 1 : last_now_ms_;
             reset(last_initial_accel_, true);
         }
     }
@@ -1067,6 +1070,7 @@ public:
             ga_e.normalize();
             if (ga_e.is_inf()) {
                 // wait for some non-zero acceleration information
+                last_failure_ms_ = now_ms == 0 ? 1 : now_ms;
                 return;
             }
             using_gps_corrections = true;
@@ -1076,6 +1080,7 @@ public:
         // instance gated by accel_healthy - see file banner.
         if (!accel_healthy) {
             // no healthy accelerometers
+            last_failure_ms_ = now_ms == 0 ? 1 : now_ms;
             return;
         }
 
@@ -1128,6 +1133,7 @@ public:
         if (error.is_nan() || error.is_inf()) {
             // don't allow bad values
             check_matrix();
+            last_failure_ms_ = now_ms == 0 ? 1 : now_ms;
             return;
         }
 
@@ -1236,6 +1242,8 @@ public:
                             bool armed_and_safety_off, bool gps_use_enabled, float wind_speed_ms,
                             const math::Vector3f& wind_estimate, float airspeed_tas, bool accel_healthy,
                             bool ins_healthy, std::uint32_t now_ms) override {
+        last_now_ms_ = now_ms;
+        last_gps_ = gps;
         update(gyro_sample);
         accumulate_accel(accel_sample, dt);
         drift_correction_yaw(compass, gps, fly_forward, armed_and_safety_off, gps_use_enabled, wind_speed_ms, now_ms);
@@ -1253,6 +1261,46 @@ public:
     [[nodiscard]] const math::Vector3f& get_omega() const override { return omega; }
     [[nodiscard]] const math::Matrix3f& get_dcm_matrix() const override { return dcm_matrix; }
     [[nodiscard]] const math::Vector3f& get_accel_ef() const override { return accel_ef; }
+
+    // CPP-028 leftover production accessors - see ahrs_leftover.hpp.
+    [[nodiscard]] bool healthy(std::uint32_t now_ms) const override {
+        return healthy_from_last_failure(last_failure_ms_, now_ms);
+    }
+    [[nodiscard]] bool pre_arm_check(bool requires_position, std::uint32_t now_ms) const override {
+        return pre_arm_check_from_healthy(healthy(now_ms), requires_position);
+    }
+    [[nodiscard]] float groundspeed() const override {
+        return groundspeed_from_gps(last_gps_.has_fix, last_gps_.ground_speed_ms);
+    }
+    [[nodiscard]] math::Vector2f groundspeed_vector() const override {
+        return groundspeed_vector_from_gps(last_gps_.has_fix, last_gps_.velocity_ned);
+    }
+    [[nodiscard]] bool airspeed_EAS(float& airspeed_ret) const override {
+        return airspeed_eas_from_sensor(airspeed_sensor_eas_, airspeed_sensor_healthy_, last_airspeed_tas_,
+                                        airspeed_ret);
+    }
+    [[nodiscard]] bool using_airspeed_sensor() const override {
+        return using_airspeed_from_sensor(airspeed_sensor_healthy_);
+    }
+    void observe_airspeed(float eas, bool sensor_healthy) override {
+        airspeed_sensor_eas_ = eas;
+        airspeed_sensor_healthy_ = sensor_healthy;
+    }
+    void set_home(const Location& home) override {
+        home_ = home;
+        home_is_set_ = true;
+    }
+    [[nodiscard]] bool home_is_set() const override { return home_is_set_; }
+    void observe_position(const Location& loc) override {
+        last_position_ = loc;
+        have_position_ = true;
+    }
+    [[nodiscard]] bool get_relative_position_NE_home(math::Vector2f& pos_ne) const override {
+        return relative_position_ne_home(home_, home_is_set_, last_position_, have_position_, pos_ne);
+    }
+    [[nodiscard]] bool get_relative_position_D_home(float& pos_d) const override {
+        return relative_position_d_home(home_, home_is_set_, last_position_, have_position_, pos_d);
+    }
 
     // Primary attitude representation - upstream: _dcm_matrix.
     math::Matrix3f dcm_matrix;
@@ -1338,6 +1386,21 @@ private:
     // use_fast_gains()'s window start - upstream: _last_startup_ms. Only
     // stamped by the 3-argument reset() overload - see file banner.
     std::uint32_t last_startup_ms_ = 0;
+
+    // CPP-028 leftover production state. last_failure_ms_ is upstream's
+    // _last_failure_ms (write-only in slices 1-3; healthy() is its reader).
+    // last_now_ms_ / last_gps_ are cached from update_full_cycle so
+    // groundspeed() and normalize()'s failure stamp have an explicit clock
+    // without reaching for AP_HAL::millis().
+    std::uint32_t last_failure_ms_ = 0;
+    std::uint32_t last_now_ms_ = 0;
+    GpsSample last_gps_{};
+    float airspeed_sensor_eas_ = 0.0f;
+    bool airspeed_sensor_healthy_ = false;
+    Location home_{};
+    bool home_is_set_ = false;
+    Location last_position_{};
+    bool have_position_ = false;
 
     // upstream: AP_AHRS_DCM::have_gps() - `_gps_use == GPSUse::Disable ||
     // AP::gps().status() <= AP_GPS::NO_FIX` collapses to this, per

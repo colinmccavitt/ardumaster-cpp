@@ -157,7 +157,9 @@
 #include <cstdint>
 
 #include <fwcpp/ahrs/ahrs_dcm.hpp> // fwcpp::ahrs::AhrsBackend + GyroSample/AccelSample/CompassSample/GpsSample
+#include <fwcpp/ahrs/ahrs_leftover.hpp>
 #include <fwcpp/ekf/ekf_core.hpp>
+#include <fwcpp/location.hpp>
 #include <fwcpp/math/matrix3.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector3.hpp>
@@ -229,10 +231,12 @@ public:
     // this override's parameter list is fixed by the base class).
     void update_full_cycle(const fwcpp::ahrs::GyroSample& gyro_sample, const fwcpp::ahrs::AccelSample& accel_sample,
                             float dt, const fwcpp::ahrs::CompassSample& /*compass*/,
-                            const fwcpp::ahrs::GpsSample& /*gps*/, bool /*fly_forward*/,
+                            const fwcpp::ahrs::GpsSample& gps, bool /*fly_forward*/,
                             bool /*armed_and_safety_off*/, bool /*gps_use_enabled*/, float /*wind_speed_ms*/,
                             const math::Vector3f& /*wind_estimate*/, float /*airspeed_tas*/, bool /*accel_healthy*/,
-                            bool /*ins_healthy*/, std::uint32_t /*now_ms*/) override {
+                            bool /*ins_healthy*/, std::uint32_t now_ms) override {
+        last_now_ms_ = now_ms;
+        last_gps_ = gps;
         const ftype dt_ekf_avg = static_cast<ftype>(dt);
 
         // A REAL BUG FOUND WHILE WRITING THIS TICKET'S OWN TESTS, fixed
@@ -280,6 +284,46 @@ public:
     [[nodiscard]] const math::Matrix3f& get_dcm_matrix() const override { return dcm_matrix_; }
     [[nodiscard]] const math::Vector3f& get_accel_ef() const override { return accel_ef_; }
 
+    // CPP-028 leftover production surface - same helpers AhrsDcm uses.
+    [[nodiscard]] bool healthy(std::uint32_t now_ms) const override {
+        return fwcpp::ahrs::healthy_from_last_failure(last_failure_ms_, now_ms);
+    }
+    [[nodiscard]] bool pre_arm_check(bool requires_position, std::uint32_t now_ms) const override {
+        return fwcpp::ahrs::pre_arm_check_from_healthy(healthy(now_ms), requires_position);
+    }
+    [[nodiscard]] float groundspeed() const override {
+        return fwcpp::ahrs::groundspeed_from_gps(last_gps_.has_fix, last_gps_.ground_speed_ms);
+    }
+    [[nodiscard]] math::Vector2f groundspeed_vector() const override {
+        return fwcpp::ahrs::groundspeed_vector_from_gps(last_gps_.has_fix, last_gps_.velocity_ned);
+    }
+    [[nodiscard]] bool airspeed_EAS(float& airspeed_ret) const override {
+        return fwcpp::ahrs::airspeed_eas_from_sensor(airspeed_sensor_eas_, airspeed_sensor_healthy_,
+                                                     last_airspeed_tas_, airspeed_ret);
+    }
+    [[nodiscard]] bool using_airspeed_sensor() const override {
+        return fwcpp::ahrs::using_airspeed_from_sensor(airspeed_sensor_healthy_);
+    }
+    void observe_airspeed(float eas, bool sensor_healthy) override {
+        airspeed_sensor_eas_ = eas;
+        airspeed_sensor_healthy_ = sensor_healthy;
+    }
+    void set_home(const fwcpp::Location& home) override {
+        home_ = home;
+        home_is_set_ = true;
+    }
+    [[nodiscard]] bool home_is_set() const override { return home_is_set_; }
+    void observe_position(const fwcpp::Location& loc) override {
+        last_position_ = loc;
+        have_position_ = true;
+    }
+    [[nodiscard]] bool get_relative_position_NE_home(math::Vector2f& pos_ne) const override {
+        return fwcpp::ahrs::relative_position_ne_home(home_, home_is_set_, last_position_, have_position_, pos_ne);
+    }
+    [[nodiscard]] bool get_relative_position_D_home(float& pos_d) const override {
+        return fwcpp::ahrs::relative_position_d_home(home_, home_is_set_, last_position_, have_position_, pos_d);
+    }
+
 private:
     // Recomputes every cached getter output from the CURRENT ekf_core_
     // state, plus this tick's raw gyro-rate/accel sample for the
@@ -321,6 +365,19 @@ private:
     float roll_ = 0.0f;
     float pitch_ = 0.0f;
     float yaw_ = 0.0f;
+
+    // CPP-028 leftover production state (mirrors AhrsDcm). last_failure_ms_
+    // stays 0 - this adapter does not yet stamp DCM-style fusion failures.
+    std::uint32_t last_failure_ms_ = 0;
+    std::uint32_t last_now_ms_ = 0;
+    fwcpp::ahrs::GpsSample last_gps_{};
+    float last_airspeed_tas_ = 0.0f;
+    float airspeed_sensor_eas_ = 0.0f;
+    bool airspeed_sensor_healthy_ = false;
+    fwcpp::Location home_{};
+    bool home_is_set_ = false;
+    fwcpp::Location last_position_{};
+    bool have_position_ = false;
 };
 
 } // namespace fwcpp::ekf
