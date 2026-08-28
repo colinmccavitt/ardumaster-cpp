@@ -2289,4 +2289,29 @@ bool EkfCore::fuse_airspeed(ftype true_airspeed_m_s, ftype dt_ekf_avg) {
     return is_consistent;
 }
 
+// See ekf_core.hpp's "CPP-070, PHASE 16" banner and push_tas_sample()'s
+// own doc comment for the full scope discussion - a thin pass-through,
+// identical in shape to push_gps_sample()/push_mag_sample()/
+// push_baro_sample() above, all the real behavior lives in
+// ObsBuffer::push() (ekf_buffer.hpp).
+void EkfCore::push_tas_sample(const TasSample& sample) {
+    tas_buffer.push(sample);
+}
+
+// CPP-070 phase 16. upstream: readAirSpdData()'s `tasDataToFuse =
+// storedTAS.recall(tasDataDelayed,imuDataDelayed.time_ms);`
+// (AP_NavEKF3_Measurements.cpp ~line 882) - see ekf_core.hpp's "CPP-070,
+// PHASE 16" banner and recall_tas_sample()'s own doc comment for the full
+// now_s-vs-imuDataDelayed.time_ms discussion. `now_s` is converted to
+// milliseconds identically to recall_gps_sample()/recall_mag_sample()/
+// recall_baro_sample() above (clamp negative to zero before the cast,
+// matching TasSample::set_time_s()'s own convention) - ObsBuffer::
+// recall()'s own 100ms window and dt arithmetic (ekf_buffer.hpp) then
+// decide the match.
+bool EkfCore::recall_tas_sample(TasSample& out, ftype now_s) {
+    const ftype clamped_now_s = now_s > ftype(0) ? now_s : ftype(0);
+    const std::uint32_t now_ms = static_cast<std::uint32_t>(clamped_now_s * ftype(1000));
+    return tas_buffer.recall(out, now_ms);
+}
+
 } // namespace fwcpp::ekf

@@ -55,6 +55,7 @@
 
 #include <array>
 #include <cmath>
+#include <vector>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -401,4 +402,171 @@ TEST_CASE("fuse_airspeed: VtasPred <= 1.0 leaves BOTH state and P byte-for-byte 
     // P[4][4] = -123.0 is still exactly -123.0 (constrain_variances() would
     // have clamped it to a positive floor).
     REQUIRE(ekf.P[4][4] == ftype(-123.0));
+}
+
+
+// ============================================================================
+// CPP-070 PHASE 16 (this ticket - the LAST sensor in the CPP-067/068/069/
+// 070 buffered/time-correct recall series): time-correct true-airspeed
+// sample recall via ObsBuffer. See ekf_core.hpp's "CPP-070, PHASE 16"
+// banner (above EkfCore::tas_buffer) and TasSample's own banner (above its
+// struct definition, near GpsSample/MagSample/BaroSample) for the full
+// scope/reasoning: the deliberately narrower recall-against-caller's-own-
+// now_s design (identical to CPP-067/068/069's own), the independently-
+// derived buffer-size justification (10Hz, from this file's own
+// kAirspeedPeriodTicks precedent - see ekf_closed_loop_test.cpp), the real
+// bare-scalar-vs-wrapper-struct tension this ticket resolves (identically
+// to baro's own CPP-069 resolution), why fuse_airspeed() itself is kept
+// completely unchanged, and why recall_tas_sample() is the ONLY consumer
+// of tas_buffer (verified: airspeed has exactly one storedTAS.recall()
+// call site upstream, in the SAME function as its own push() site - as
+// simple as baro's own single-site situation).
+//
+// Test strategy - mirrors CPP-067/068/069's own shape exactly:
+//   8. TasSample::set_time_s()/time_s() round-trip at millisecond
+//      resolution (the disclosed ObsElement::time_ms quantization).
+//   9. recall_tas_sample() on an empty buffer returns false and leaves
+//      `out` untouched.
+//   10. THE REAL, NEW CAPABILITY: push several airspeed readings at
+//       DIFFERENT, non-tick-aligned timestamps (arrival times that are not
+//       multiples of the 50Hz/20ms tick grid, modelling a real airspeed
+//       sensor reporting on its own schedule, independent of the EKF's
+//       own), then confirm fusion at each 50Hz tick correctly recalls the
+//       most-recently-available reading and hands the unwrapped bare
+//       `ftype` to the completely-unchanged fuse_airspeed() - the test
+//       never calls push/recall at matching times, and never hand-feeds a
+//       fusion call "the right reading" the way every other
+//       fuse_airspeed() call above this section does.
+// ============================================================================
+
+TEST_CASE("TasSample::set_time_s/time_s round-trips at millisecond resolution",
+          "[ekf_core][airspeed_fusion][tas_buffer]") {
+    TasSample tas;
+    REQUIRE(static_cast<double>(tas.time_s()) == Catch::Approx(0.0));  // zero-initialized ObsElement::time_ms
+
+    tas.set_time_s(ftype(1.234));
+    REQUIRE(static_cast<double>(tas.time_s()) == Catch::Approx(1.234).margin(1e-6));
+
+    tas.set_time_s(ftype(0.0));
+    REQUIRE(static_cast<double>(tas.time_s()) == Catch::Approx(0.0));
+
+    // Defensive negative clamp (see TasSample::set_time_s()'s own doc
+    // comment - now_s is never legitimately negative in this port's own
+    // convention, but the clamp avoids UB rather than assuming callers
+    // never pass one).
+    tas.set_time_s(ftype(-5.0));
+    REQUIRE(static_cast<double>(tas.time_s()) == Catch::Approx(0.0));
+}
+
+TEST_CASE("recall_tas_sample: returns false on an empty buffer", "[ekf_core][airspeed_fusion][tas_buffer]") {
+    EkfCore ekf;
+    TasSample out;
+    out.true_airspeed_m_s = ftype(99.0);  // sentinel - must be untouched
+
+    REQUIRE_FALSE(ekf.recall_tas_sample(out, ftype(0.05)));
+    REQUIRE(ekf.tas_buffer.empty());
+    // Untouched on failure, matching ObsBuffer::recall()'s own documented
+    // contract (ekf_buffer.hpp).
+    REQUIRE(static_cast<double>(out.true_airspeed_m_s) == Catch::Approx(99.0));
+}
+
+TEST_CASE("push_tas_sample/recall_tas_sample: recalls the correct sample under realistic "
+          "asynchronous (non-tick-aligned) airspeed arrival, without the caller hand-feeding "
+          "exactly the right reading synchronously, and hands the unwrapped bare ftype to the "
+          "unchanged fuse_airspeed()",
+          "[ekf_core][airspeed_fusion][tas_buffer]") {
+    EkfCore ekf = make_fixture();
+
+    constexpr ftype kDt = ftype(0.02);  // 50Hz IMU tick, matching this port's own
+                                         // closed-loop-test precedent (ekf_closed_loop_test.cpp).
+
+    // Four airspeed readings, each carrying its own TRUE arrival
+    // timestamp - none of them a multiple of kDt (0.02s), i.e. none would
+    // ever land exactly on an IMU tick boundary (verified: 91, 293, 512,
+    // 741 mod 20 are all nonzero). Each carries a distinct, tagged
+    // true_airspeed_m_s value close to make_fixture()'s own VtasPred=15.0
+    // (see this file's own test 1 above) so every reading passes the real
+    // tasTestRatio gate and actually fuses - this test is about recall
+    // correctness, not gate behavior, already covered above.
+    struct Reading {
+        ftype arrival_s;
+        ftype tag;
+        bool pushed = false;
+    };
+    std::array<Reading, 4> readings{{
+        {ftype(0.091), ftype(15.1)},
+        {ftype(0.293), ftype(15.2)},
+        {ftype(0.512), ftype(15.3)},
+        {ftype(0.741), ftype(15.4)},
+    }};
+
+    std::vector<ftype> recalled_tags;
+    std::vector<ftype> recall_latency_s;  // now_s at recall time - the sample's own arrival_s
+
+    for (int tick = 1; tick <= 60; ++tick) {  // 60 * 20ms = 1.2s, comfortably past the last reading
+        const ftype now_s = static_cast<ftype>(tick) * kDt;
+
+        // --- Sample arrival: modelled as an independently-scheduled event
+        // (upstream: readAirSpdData(), its own function, called on its own
+        // terms) that pushes into tas_buffer AS SOON AS it has arrived,
+        // stamped with its OWN true arrival time - NOT now_s, and NOT
+        // aligned to the tick grid at all. This is the realistic
+        // asynchronous-arrival part: the caller's EKF loop only gets a
+        // chance to call push_tas_sample() once per tick, but the sample
+        // it pushes carries whatever timestamp the airspeed sensor itself
+        // reported. ---
+        for (Reading& reading : readings) {
+            if (!reading.pushed && now_s >= reading.arrival_s) {
+                TasSample tas;
+                tas.set_time_s(reading.arrival_s);
+                tas.true_airspeed_m_s = reading.tag;
+                ekf.push_tas_sample(tas);
+                reading.pushed = true;
+            }
+        }
+
+        // --- Fusion attempted EVERY tick (upstream: readAirSpdData()'s own
+        // recall attempt runs every EKF cycle) - recall_tas_sample()
+        // decides, purely from timestamps, whether a time-eligible reading
+        // exists yet. THE TEST NEVER TELLS IT WHICH TICK TO EXPECT A MATCH
+        // ON - that is exactly the capability this ticket adds (contrast
+        // with every fuse_airspeed(true_airspeed_m_s, ...) call above this
+        // section, which hands over a hand-built bare ftype directly, on
+        // the exact call the test chooses). ---
+        TasSample recalled;
+        if (ekf.recall_tas_sample(recalled, now_s)) {
+            recalled_tags.push_back(recalled.true_airspeed_m_s);
+            recall_latency_s.push_back(now_s - recalled.time_s());
+
+            // The full pipeline: unwrap the recalled TasSample back to a
+            // bare ftype and fuse it exactly like any other reading -
+            // fuse_airspeed() itself is completely unchanged by this
+            // ticket (see TasSample's own "THE BARE-SCALAR-VS-WRAPPER-
+            // STRUCT TENSION" banner).
+            ekf.fuse_airspeed(recalled.true_airspeed_m_s, kDt);
+        }
+    }
+
+    // All 4 asynchronously-arriving readings were recalled exactly once
+    // each, in arrival order, none lost and none double-counted - the real
+    // acceptance criterion: fusion recalled the right reading at the right
+    // (later, tick-quantized) time without ever being handed it directly.
+    REQUIRE(recalled_tags.size() == 4);
+    REQUIRE(static_cast<double>(recalled_tags[0]) == Catch::Approx(15.1));
+    REQUIRE(static_cast<double>(recalled_tags[1]) == Catch::Approx(15.2));
+    REQUIRE(static_cast<double>(recalled_tags[2]) == Catch::Approx(15.3));
+    REQUIRE(static_cast<double>(recalled_tags[3]) == Catch::Approx(15.4));
+
+    // Each recall happened PROMPTLY after its sample's true arrival - at
+    // most one tick (kDt) of latency (the recalling tick is the first tick
+    // at/after arrival_s), and never before arrival (recall() would have
+    // left a strictly-newer element untouched - ekf_buffer.hpp).
+    for (const ftype latency : recall_latency_s) {
+        REQUIRE(static_cast<double>(latency) >= 0.0);
+        REQUIRE(static_cast<double>(latency) < static_cast<double>(kDt) + 1e-9);
+    }
+
+    // The buffer is drained back to empty - every pushed sample was
+    // consumed by exactly one recall, none left stranded.
+    REQUIRE(ekf.tas_buffer.empty());
 }

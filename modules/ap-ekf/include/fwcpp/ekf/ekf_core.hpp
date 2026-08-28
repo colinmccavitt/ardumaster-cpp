@@ -2016,6 +2016,63 @@ struct BaroSample : public ObsElement {
     [[nodiscard]] ftype time_s() const { return static_cast<ftype>(time_ms) / ftype(1000); }
 };
 
+// CPP-070 phase 16 (this ticket - the LAST sensor in the CPP-067/068/069
+// buffered/time-correct recall series). upstream: tas_elements (the one
+// field, `tas`, this port's fuse_airspeed() actually consumes) - see
+// AP_NavEKF3_Measurements.cpp readAirSpdData() (~line 878,
+// `storedTAS.push(tasDataNew);`) and (~line 882, `tasDataToFuse =
+// storedTAS.recall(tasDataDelayed,imuDataDelayed.time_ms);`), both
+// verified directly this round (grepped `storedTAS` across every
+// AP_NavEKF3_*.cpp file in the pinned Plane-4.7.0 worktree: exactly one
+// push() call site and exactly one recall() call site - both in the SAME
+// function, unlike GPS/baro's own cross-file split - as simple as baro's
+// own single-site situation, confirming this ticket's own claim directly
+// rather than assuming it).
+//
+// THE BARE-SCALAR-VS-WRAPPER-STRUCT TENSION - SAME RESOLUTION AS BARO'S
+// OWN (CPP-069): this port's existing fuse_airspeed() (CPP-063) already
+// takes a bare `ftype true_airspeed_m_s` directly, matching
+// baro_altitude_m's own established convention (see fuse_airspeed()'s own
+// doc comment, "tas_reading: BARE ftype, NOT A NEW STRUCT") - upstream's
+// one real consumed field (`tas`) is exactly one ftype, with tasVariance
+// computed internally by fuse_airspeed() itself from the stored eas_noise
+// member (ekf_core.cpp: `tas_variance = sq(std::max(eas_noise,
+// ftype(0.5)))`), NOT read per-sample from tas_elements the way
+// GpsSample/MagSample's own multi-field readings are - so there is
+// nothing here that changes fuse_airspeed()'s own bare-scalar decision,
+// per the ticket's own explicit instruction to leave it alone. But
+// BUFFERING a bare scalar via ObsBuffer<T, N> is impossible without some
+// wrapping (ObsBuffer<T,N> requires T to derive from ObsElement,
+// ekf_buffer.hpp's own static_assert) - so, identically to BaroSample's
+// own resolution, a minimal TasSample wrapper (one `ftype` reading plus
+// the inherited ObsElement timestamp) is added SOLELY to satisfy that
+// structural requirement. fuse_airspeed() never sees a TasSample -
+// recall_tas_sample() (below, near EkfCore::tas_buffer) unwraps it back
+// to a bare `ftype` at the caller's own call site, keeping
+// fuse_airspeed()'s signature and body byte-for-byte unchanged, exactly
+// as this ticket requires.
+//
+// Same set_time_s()/time_s() convention as GpsSample/MagSample/BaroSample
+// above - see GpsSample's own banner for the full ObsElement-time_ms-vs-
+// seconds discussion, reused verbatim here for the fourth and final time
+// in this series.
+struct TasSample : public ObsElement {
+    // upstream: tasDataDelayed.tas, true airspeed in m/s (EAS2TAS already
+    // applied upstream; this port's own fuse_airspeed() assumes
+    // EAS2TAS=1.0, see its own banner "EAS2TAS - NOT MODELED") -
+    // recall_tas_sample() hands this straight to fuse_airspeed()
+    // unchanged, no re-derivation here.
+    ftype true_airspeed_m_s = ftype(0);
+
+    // See GpsSample::set_time_s()/time_s() above - identical convention,
+    // reused verbatim for TasSample.
+    void set_time_s(ftype t) {
+        const ftype clamped_s = t > ftype(0) ? t : ftype(0);
+        time_ms = static_cast<std::uint32_t>(clamped_s * ftype(1000));
+    }
+    [[nodiscard]] ftype time_s() const { return static_cast<ftype>(time_ms) / ftype(1000); }
+};
+
 // upstream: state_elements, AP_NavEKF3_core.h:566-575. Field order and
 // element-count comments match upstream's own byte-for-byte (quat 0..3,
 // velocity 4..6, position 7..9, gyro_bias 10..12, accel_bias 13..15,
@@ -2307,6 +2364,72 @@ public:
     // below. Public, matching gps_buffer/mag_buffer's own established
     // convention (direct test inspection via baro_buffer.size()/.empty()).
     ObsBuffer<BaroSample, kBaroBufferCapacity> baro_buffer;
+    // ========================================================================
+
+    // ========================================================================
+    // CPP-070, PHASE 16 (this ticket - the LAST sensor in the CPP-067/068/
+    // 069 buffered/time-correct recall series): extends phase 13/14/15's
+    // pattern to true-airspeed fusion. Read directly before writing any
+    // code (per the ticket's own instruction): AP_NavEKF3_Measurements.cpp's
+    // readAirSpdData()'s own `storedTAS.push(tasDataNew);` (~line 878,
+    // verified directly) and `tasDataToFuse = storedTAS.recall(
+    // tasDataDelayed,imuDataDelayed.time_ms);` (~line 882, verified
+    // directly) - both match the ticket's own ~860-885 estimate exactly.
+    //
+    // THE SINGLE storedTAS PUSH/RECALL CALL SITES - VERIFIED DIRECTLY, NOT
+    // ASSUMED: grepped `storedTAS` across every AP_NavEKF3_*.cpp file in
+    // the pinned Plane-4.7.0 worktree - exactly ONE push() site
+    // (AP_NavEKF3_Measurements.cpp:878) and exactly ONE recall() site
+    // (AP_NavEKF3_Measurements.cpp:882, in the SAME function, unlike GPS's/
+    // baro's own cross-file push/recall split) - as simple as baro's own
+    // single-site situation, simpler even than magnetometer's two-site
+    // situation. recall_tas_sample() below is therefore the ONLY consumer
+    // of tas_buffer, so CPP-067's own destructive-recall/two-independent-
+    // callers correctness concern does not arise here either.
+    //
+    // THE BARE-SCALAR-VS-WRAPPER-STRUCT TENSION: see TasSample's own
+    // banner above (just above its struct definition, near GpsSample/
+    // MagSample/BaroSample) for the full discussion - a minimal TasSample
+    // wrapper was introduced SOLELY to satisfy ObsBuffer<T,N>'s
+    // ObsElement requirement, while fuse_airspeed() itself keeps its
+    // existing bare-`ftype` signature completely unchanged, matching
+    // CPP-067/068/069's own "don't touch the existing fusion function"
+    // precedent exactly.
+    //
+    // BUFFER SIZE REASONING - INDEPENDENTLY RE-DERIVED FOR AIRSPEED, NOT
+    // COPIED FROM CPP-067/068/069's N=4 UNEXAMINED: this port's own
+    // established closed-loop-test precedent (ekf_closed_loop_test.cpp's
+    // kAirspeedPeriodTicks = kTicksPerSecond/10 = 10Hz) is airspeed's own
+    // real, established fusion rate - CPP-063's own closed-loop extension
+    // of the main pipeline TEST_CASE (see that ticket's own commit
+    // message: "exercises fuse_airspeed() on the `fused` instance, at the
+    // same 10Hz cadence as mag/baro"), the same kind of real, cited port
+    // precedent CPP-068/069 each independently derived their own N from,
+    // re-checked here directly rather than copied. Applying the IDENTICAL
+    // worst-case-plus-margin reasoning CPP-067/068/069 all used (up to 2
+    // samples pushed back-to-back before an intervening successful
+    // recall - recall_tas_sample() is attempted every EKF tick, far
+    // faster than 10Hz - PLUS a 2x safety margin against a transient
+    // hiccup silently discarding valid readings via push()'s
+    // overwrite-oldest-at-capacity behavior) to airspeed's own real 100ms
+    // period independently lands on kTasBufferCapacity=4 - the SAME
+    // numeral as kGpsBufferCapacity/kMagBufferCapacity/kBaroBufferCapacity,
+    // arrived at via airspeed's own real, cited 10Hz rate. Not a
+    // coincidence to be embarrassed by (CPP-068's and CPP-069's own
+    // banners already made this point twice): airspeed's own established
+    // 10Hz rate is numerically identical to mag's and baro's own
+    // established 10Hz rates (all three cite a 100ms period) - had
+    // airspeed's own cited closed-loop rate instead been, say, 25Hz (40ms
+    // period), this independent derivation would have produced a
+    // different, larger N. A compile-time std::array size (no dynamic
+    // allocation, ADR-0012 decision 4), same as
+    // gps_buffer/mag_buffer/baro_buffer.
+    static constexpr std::size_t kTasBufferCapacity = 4;
+
+    // The actual buffer - see push_tas_sample()/recall_tas_sample() below.
+    // Public, matching gps_buffer/mag_buffer/baro_buffer's own established
+    // convention (direct test inspection via tas_buffer.size()/.empty()).
+    ObsBuffer<TasSample, kTasBufferCapacity> tas_buffer;
     // ========================================================================
 
     // CPP-059 phase 5. upstream: innovMag/varInnovMag (NavEKF3_core
@@ -2879,6 +3002,58 @@ public:
     // `now_s` parameter and this class has no last_tas_pass_time_s field;
     // adding either would invent a mechanism that does not exist upstream.
     bool fuse_airspeed(ftype true_airspeed_m_s, ftype dt_ekf_avg);
+
+    // CPP-070 phase 16. upstream: NavEKF3_core::readAirSpdData()'s own
+    // `storedTAS.push(tasDataNew);` (AP_NavEKF3_Measurements.cpp ~line
+    // 878, verified directly) - the SAME new capability CPP-067/068/069
+    // added for GPS/magnetometer/baro, now for true airspeed: callers push
+    // TasSample readings into tas_buffer AS THEY ARRIVE, decoupled from
+    // the EKF's own per-tick fusion cadence, instead of having to hand
+    // fuse_airspeed() exactly the right reading synchronously every time
+    // (today's only option, still available unchanged - see this file's
+    // "CPP-070, PHASE 16" banner above tas_buffer for why both old and new
+    // paths are kept). The caller must stamp `sample`'s timestamp via
+    // TasSample::set_time_s() before calling this (matching upstream's own
+    // `tasDataNew.time_ms = ...; ... storedTAS.push(tasDataNew)`
+    // sequence); this function does not stamp it itself.
+    void push_tas_sample(const TasSample& sample);
+
+    // CPP-070 phase 16. upstream: readAirSpdData()'s own `tasDataToFuse =
+    // storedTAS.recall(tasDataDelayed,imuDataDelayed.time_ms);`
+    // (AP_NavEKF3_Measurements.cpp ~line 882, verified directly) - recalls
+    // the correct buffered sample by timestamp using `now_s`, THIS PORT'S
+    // OWN CALLER-SUPPLIED CURRENT TIME (ADR-0012/CPP-058 convention,
+    // identical to recall_gps_sample()'s/recall_mag_sample()'s/
+    // recall_baro_sample()'s own now_s-vs-imuDataDelayed.time_ms
+    // simplification).
+    //
+    // Like recall_mag_sample()/recall_baro_sample() (and unlike
+    // recall_gps_sample(), which feeds ONE recalled sample to BOTH
+    // fuse_gps_velocity()/fuse_gps_position()), airspeed fusion has only
+    // ONE consumer of the recalled sample (fuse_airspeed() itself) - so
+    // there is no "two independent callers draining the same queue"
+    // hazard to design around here either. This is still deliberately a
+    // SEPARATE, ADDITIVE primitive rather than a change to
+    // fuse_airspeed()'s own signature/body, matching CPP-067/068/069's own
+    // kept-vs-replace reasoning exactly: zero of this port's existing
+    // fuse_airspeed() call sites (ekf_airspeed_fusion_test.cpp,
+    // ekf_closed_loop_test.cpp) need to change.
+    //
+    // Unwraps the recalled TasSample back to a bare `ftype` via
+    // `out.true_airspeed_m_s` at the caller's own call site (see
+    // TasSample's own banner "THE BARE-SCALAR-VS-WRAPPER-STRUCT TENSION")
+    // - `out` itself remains the wrapper type (matching
+    // recall_baro_sample()'s own `T& out` signature shape), the caller
+    // reads `out.true_airspeed_m_s` to get the bare scalar
+    // fuse_airspeed() actually wants.
+    //
+    // Returns false (leaving `out` untouched) if tas_buffer has no sample
+    // within its hardcoded 100ms window of `now_s` (ekf_buffer.hpp's own
+    // upstream-derived recall() window) - matching upstream's own control
+    // flow: readAirSpdData()'s `tasDataToFuse` false means the airspeed
+    // fusion attempt for the tick is skipped entirely, not merely "the
+    // gate failed inside fuse_airspeed()".
+    bool recall_tas_sample(TasSample& out, ftype now_s);
 
 private:
     void constrain_states(ftype dt_ekf_avg);   // upstream: NavEKF3_core::ConstrainStates()

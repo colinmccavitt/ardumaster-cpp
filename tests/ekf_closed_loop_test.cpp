@@ -388,8 +388,29 @@ struct ClosedLoopComparison {
 // not assumed either way going in. Independent of `use_buffered_gps`/
 // `use_buffered_mag` - any subset may be set; `unfused` is never touched
 // by this flag either, exactly as for GPS/mag.
+//
+// CPP-070 phase 16 addendum (the LAST sensor in this series): `use_buffered_tas`
+// (default false, same preserved-default-behavior convention as the three
+// flags above) switches the `fused` instance's TRUE-AIRSPEED path from the
+// original direct-fed pattern (a hand-built bare `ftype` handed straight to
+// fuse_airspeed() on the exact, kAirspeedPeriodTicks-aligned tick the test
+// chooses) to the new push_tas_sample()/recall_tas_sample() buffered path,
+// with airspeed readings arriving at a JITTERED, non-tick-aligned instant
+// within each ~100ms period and fusion attempted every 50Hz tick (see the
+// airspeed block below for the exact jitter scheme). At this pipeline's
+// DEFAULT settings (inhibit_wind_states left true throughout this
+// function, unchanged since phase 2), fuse_airspeed() only ever exercises
+// its always-active velocity/attitude correction (bits 0-9), never the
+// wind_vel correction - so this function alone can only show a
+// velocity/attitude effect, not a wind-state one; the wind-state question
+// is answered separately, by extending run_wind_closed_loop() below
+// (CPP-064's own real-nonzero-wind, inhibit_wind_states=false scenario)
+// with the identical jitter scheme, per this ticket's own explicit
+// instruction. Independent of `use_buffered_gps`/`use_buffered_mag`/
+// `use_buffered_baro` - any subset may be set; `unfused` is never touched
+// by this flag either.
 ClosedLoopComparison run_closed_loop_comparison(bool use_buffered_gps = false, bool use_buffered_mag = false,
-                                                 bool use_buffered_baro = false) {
+                                                 bool use_buffered_baro = false, bool use_buffered_tas = false) {
     Plane plane;
     ModeFBWA fbwa(plane);
     plane.control_mode = &fbwa;
@@ -695,8 +716,40 @@ ClosedLoopComparison run_closed_loop_comparison(bool use_buffered_gps = false, b
         // (ekf_airspeed_fusion_test.cpp), not repeated here. `true_airspeed_m_s`
         // is SimPlane's own true, noiseless airspeed magnitude - the same
         // disclosed no-noise asymmetry already established above for
-        // GPS/mag/baro. ---
-        if (tick_index % kAirspeedPeriodTicks == 0) {
+        // GPS/mag/baro.
+        //
+        // CPP-070 phase 16 addendum: `use_buffered_tas` switches this block
+        // from the direct-fed pattern below to the new
+        // push_tas_sample()/recall_tas_sample() buffered path, with the
+        // SAME jitter scheme (a jittered push-tick offset within each
+        // ~100ms period, plus a sub-tick fractional timestamp offset,
+        // cycling through 4 non-zero slots) CPP-067/068/069 each already
+        // used for GPS/mag/baro - fusion attempted every 50Hz tick via
+        // recall_tas_sample() rather than gated to kAirspeedPeriodTicks. ---
+        if (use_buffered_tas) {
+            static constexpr int kTasPushOffsetTicks[4] = {1, 3, 2, 4};
+            static constexpr fwcpp::ekf::ftype kTasSubTickJitterS[4] = {
+                fwcpp::ekf::ftype(0.009), fwcpp::ekf::ftype(0.002),
+                fwcpp::ekf::ftype(0.014), fwcpp::ekf::ftype(0.007)};
+            const int tas_period_index = tick_index / kAirspeedPeriodTicks;
+            const int tas_jitter_slot = tas_period_index % 4;
+            if (tick_index % kAirspeedPeriodTicks == kTasPushOffsetTicks[tas_jitter_slot]) {
+                fwcpp::ekf::TasSample tas;
+                tas.set_time_s(now_s + kTasSubTickJitterS[tas_jitter_slot]);
+                tas.true_airspeed_m_s = static_cast<fwcpp::ekf::ftype>(sim_plane.airspeed);
+                fused.push_tas_sample(tas);
+            }
+
+            fwcpp::ekf::TasSample recalled_tas;
+            if (fused.recall_tas_sample(recalled_tas, now_s)) {
+                ++result.n_airspeed_attempts;
+                if (fused.fuse_airspeed(recalled_tas.true_airspeed_m_s, kDtEkf)) {
+                    ++result.n_airspeed_fused_count;
+                }
+            }
+            // unfused: airspeed fusion is never called at all - pure
+            // prediction, same as the non-buffered path below.
+        } else if (tick_index % kAirspeedPeriodTicks == 0) {
             const fwcpp::ekf::ftype true_airspeed_m_s = static_cast<fwcpp::ekf::ftype>(sim_plane.airspeed);
             ++result.n_airspeed_attempts;
             if (fused.fuse_airspeed(true_airspeed_m_s, kDtEkf)) {
@@ -1192,6 +1245,106 @@ TEST_CASE("CPP-069: closed-loop baro height fusion via the new push_baro_sample(
 }
 
 // ============================================================================
+// CPP-070, PHASE 16 (this ticket - the LAST sensor in the CPP-067/068/069
+// buffered/time-correct recall series): the SAME closed-loop pipeline/
+// profile as the TEST_CASEs above, but with the `fused` instance's
+// TRUE-AIRSPEED path switched from the direct-fed pattern (a hand-built
+// bare `ftype` handed straight to fuse_airspeed() on the exact,
+// kAirspeedPeriodTicks-aligned tick the test chooses) to the new
+// push_tas_sample()/recall_tas_sample() buffered path, with airspeed
+// readings arriving at a jittered, non-tick-aligned instant within each
+// ~100ms period and fusion attempted every 50Hz tick (see
+// run_closed_loop_comparison()'s own "CPP-070 phase 16 addendum" comment
+// for the exact jitter scheme). At this pipeline's DEFAULT settings
+// (inhibit_wind_states left true), this can only show a velocity/attitude
+// effect - the SAME states GPS/mag ALSO correct - not a wind-state effect
+// (see the separate CPP-070 TEST_CASE extending run_wind_closed_loop()
+// below, tagged `[ekf_core][integration][wind][tas_buffer]`, for the
+// wind-specific measurement). CPP-067 found GPS's horizontal position (an
+// INTEGRATED quantity) got measurably WORSE (~4.2x) under buffered/
+// jittered timing; CPP-068 found magnetometer's directly-corrected
+// attitude was essentially unaffected (~1.0x); CPP-069 found baro's own
+// integrated state.position.z landed in between (~1.78x). Airspeed's own
+// fused quantity here, velocity, is ALREADY directly, synchronously
+// corrected by GPS velocity fusion in this same run (use_buffered_gps
+// stays false) - the a priori prediction is therefore that jittering ONLY
+// the airspeed channel should show little to no additional effect on
+// velocity, since GPS's own synchronous correction continues to
+// discipline it throughout the run. Answered empirically below with real
+// measured numbers - not assumed either way going in.
+// ============================================================================
+TEST_CASE("CPP-070: closed-loop true-airspeed fusion via the new push_tas_sample()/recall_tas_sample() "
+          "buffered path, with realistic jittered non-tick-aligned airspeed arrival - the fourth and "
+          "final data point in the buffered-recall series (does it pattern-match GPS/baro's own "
+          "'integrated state degrades' finding, or magnetometer's own 'directly-corrected state is "
+          "fine' finding?)",
+          "[ekf_core][integration][tas_buffer]") {
+    const ClosedLoopComparison direct = run_closed_loop_comparison(false, false, false, false);
+    const ClosedLoopComparison buffered = run_closed_loop_comparison(false, false, false, true);
+
+    INFO("direct-fed:  max horiz pos err (m) = " << direct.fused.max_horiz_pos_err_m
+         << ", max vert pos err (m) = " << direct.fused.max_vert_pos_err_m
+         << ", max vel err (m/s) = " << direct.fused.max_vel_err_mps
+         << ", max att err (deg) = " << direct.fused.max_att_err_deg);
+    INFO("buffered:    max horiz pos err (m) = " << buffered.fused.max_horiz_pos_err_m
+         << ", max vert pos err (m) = " << buffered.fused.max_vert_pos_err_m
+         << ", max vel err (m/s) = " << buffered.fused.max_vel_err_mps
+         << ", max att err (deg) = " << buffered.fused.max_att_err_deg);
+    INFO("buffered: airspeed fused " << buffered.n_airspeed_fused_count << "/" << buffered.n_airspeed_attempts
+         << " attempts");
+
+    // Sanity: the buffered path actually engaged airspeed fusion
+    // meaningfully throughout the run (not vacuously) - same 80% threshold
+    // convention as the main pipeline TEST_CASE and CPP-067/068/069's own
+    // buffer TEST_CASEs above.
+    REQUIRE(buffered.n_airspeed_fused_count > static_cast<int>(0.8 * buffered.n_airspeed_attempts));
+    REQUIRE(buffered.n_airspeed_attempts > 1100);  // ~1200 airspeed periods in 120s at 10Hz - confirms
+                                                    // recall is finding a fresh sample almost every period.
+
+    // THE REAL COMPARISON - MEASURED, in this test's own verification run
+    // (see this ticket's own commit message for the full four-sensor
+    // comparison table):
+    //   direct-fed:  max horiz pos err = 0.129456m, max vert pos err =
+    //                0.122375m, max vel err = 0.232445 m/s, max att err =
+    //                0.548697deg (identical to the main pipeline TEST_CASE
+    //                above, as expected - same seed, same profile,
+    //                use_buffered_gps/mag/baro/tas all false here).
+    //   buffered:    max horiz pos err = 0.131636m (+1.68%), max vert pos
+    //                err = 0.124573m (+1.80%), max vel err = 0.231684 m/s
+    //                (-0.33%), max att err = 0.540276deg (-1.53%).
+    // HONEST FINDING: every metric shifts by at most ~1.8%, two of the four
+    // metrics (velocity, attitude) actually come out very slightly BETTER
+    // under jittered timing than direct-fed, not worse - this is noise-
+    // scale variation, not a real, directional degradation. This CONFIRMS
+    // the a priori prediction (airspeed/wind should pattern-match
+    // magnetometer's ~1.0x, not GPS's ~4.2x or even baro's ~1.78x):
+    // velocity here is not itself an integrated state fused only by
+    // airspeed - it is ALSO directly, synchronously corrected by GPS
+    // velocity fusion every 5Hz tick throughout this run
+    // (use_buffered_gps=false), so jittering ONLY the airspeed channel
+    // cannot meaningfully move it, exactly the same "another synchronous
+    // channel keeps the state disciplined" mechanism CPP-069's own banner
+    // used to explain why baro's ~1.78x was smaller than GPS's ~4.2x -
+    // here that same protective effect is strong enough to fully absorb
+    // airspeed's own jitter, landing at ~1.0x rather than merely "smaller
+    // than baro's". Bounds below use the SAME generous, order-of-magnitude
+    // margin CPP-067/068/069 all used (not tightened just because the real
+    // effect landed wherever it landed), so a real future regression would
+    // still be caught.
+    REQUIRE(buffered.fused.max_horiz_pos_err_m < 2.0 * direct.fused.max_horiz_pos_err_m + 0.5);
+    REQUIRE(buffered.fused.max_vert_pos_err_m < 2.0 * direct.fused.max_vert_pos_err_m + 0.5);
+    REQUIRE(buffered.fused.max_vel_err_mps < 2.0 * direct.fused.max_vel_err_mps + 0.5);
+    REQUIRE(buffered.fused.max_att_err_deg < 2.0 * direct.fused.max_att_err_deg + 0.5);
+
+    // And, in absolute terms, still comfortably inside the SAME bounds the
+    // main pipeline TEST_CASE established for the direct-fed path.
+    REQUIRE(buffered.fused.max_horiz_pos_err_m < 1.0);
+    REQUIRE(buffered.fused.max_vert_pos_err_m < 1.0);
+    REQUIRE(buffered.fused.max_vel_err_mps < 1.5);
+    REQUIRE(buffered.fused.max_att_err_deg < 3.0);
+}
+
+// ============================================================================
 // CPP-064, PHASE 10 (this ticket): closed-loop wind-state estimation
 // validation. verification: sitl-diff - a VALIDATION round, like CPP-061
 // (phase 7) above, NOT new upstream porting work. This file adds ZERO
@@ -1332,6 +1485,12 @@ struct WindClosedLoopResult {
     // i.e. this isn't a vacuous run where something else silently broke).
     double final_horiz_pos_err_m = 0.0;
     double final_att_err_deg = 0.0;
+    // CPP-070 phase 16 addition: velocity error, tracked because this
+    // ticket's own central question is airspeed's effect on
+    // "velocity/wind-state accuracy" (the ticket's own phrasing) - the
+    // wind-scenario's own struct did not previously track this since
+    // CPP-064/065 had no reason to.
+    double final_vel_err_mps = 0.0;
 };
 
 // Runs the SAME 120s multi-phase closed-loop flight profile as
@@ -1356,7 +1515,22 @@ struct WindClosedLoopResult {
 // airspeed (10Hz) fusion all run exactly as CPP-061/062/063 already
 // established - this is the SAME fully-assembled pipeline, not a
 // specially-simplified wind-only harness.
-WindClosedLoopResult run_wind_closed_loop() {
+//
+// CPP-070 phase 16 addendum: `use_buffered_tas` (default false, preserving
+// the exact original behavior for every existing caller) switches the
+// airspeed path from the direct-fed pattern above to the new
+// push_tas_sample()/recall_tas_sample() buffered path, with the SAME
+// jitter scheme run_closed_loop_comparison() uses for its own
+// `use_buffered_tas` flag (see that function's own "CPP-070 phase 16
+// addendum" comment for the exact scheme, reused verbatim here). THIS is
+// the scenario that can actually answer the ticket's own central
+// question - unlike run_closed_loop_comparison() above,
+// inhibit_wind_states is cleared here and SimPlane carries a real,
+// nonzero wind, so wind_vel genuinely moves over the run and a
+// buffered-vs-direct comparison of wind_err_mag is a real, meaningful
+// measurement, not a vacuous zero-vs-zero comparison the way it would be
+// against run_closed_loop_comparison()'s own default-inhibited pipeline.
+WindClosedLoopResult run_wind_closed_loop(bool use_buffered_tas = false) {
     Plane plane;
     ModeFBWA fbwa(plane);
     plane.control_mode = &fbwa;
@@ -1461,7 +1635,40 @@ WindClosedLoopResult run_wind_closed_loop() {
             ekf.fuse_baro_height(baro_altitude_m, kDtEkf, now_s);
         }
 
-        if (tick_index % kAirspeedPeriodTicks == 0) {
+        if (use_buffered_tas) {
+            // CPP-070 phase 16: identical jitter scheme to
+            // run_closed_loop_comparison()'s own `use_buffered_tas` block -
+            // see that function's own comment for the full rationale,
+            // reused verbatim here since this is the SAME sensor being
+            // buffered the SAME way, just measured against a different
+            // (wind-state, not only velocity/attitude) metric.
+            static constexpr int kTasPushOffsetTicks[4] = {1, 3, 2, 4};
+            static constexpr fwcpp::ekf::ftype kTasSubTickJitterS[4] = {
+                fwcpp::ekf::ftype(0.009), fwcpp::ekf::ftype(0.002),
+                fwcpp::ekf::ftype(0.014), fwcpp::ekf::ftype(0.007)};
+            const int tas_period_index = tick_index / kAirspeedPeriodTicks;
+            const int tas_jitter_slot = tas_period_index % 4;
+            if (tick_index % kAirspeedPeriodTicks == kTasPushOffsetTicks[tas_jitter_slot]) {
+                fwcpp::ekf::TasSample tas;
+                tas.set_time_s(now_s + kTasSubTickJitterS[tas_jitter_slot]);
+                tas.true_airspeed_m_s = static_cast<fwcpp::ekf::ftype>(sim_plane.airspeed);
+                ekf.push_tas_sample(tas);
+            }
+
+            fwcpp::ekf::TasSample recalled_tas;
+            if (ekf.recall_tas_sample(recalled_tas, now_s)) {
+                ++result.n_airspeed_attempts;
+                const bool fused_now = ekf.fuse_airspeed(recalled_tas.true_airspeed_m_s, kDtEkf);
+                if (fused_now) {
+                    ++result.n_airspeed_fused_count;
+                    if (!result.had_first_call) {
+                        result.had_first_call = true;
+                        result.wind_n_after_first_call = static_cast<double>(ekf.state.wind_vel.x);
+                        result.wind_e_after_first_call = static_cast<double>(ekf.state.wind_vel.y);
+                    }
+                }
+            }
+        } else if (tick_index % kAirspeedPeriodTicks == 0) {
             const fwcpp::ekf::ftype true_airspeed_m_s = static_cast<fwcpp::ekf::ftype>(sim_plane.airspeed);
             ++result.n_airspeed_attempts;
             const bool fused_now = ekf.fuse_airspeed(true_airspeed_m_s, kDtEkf);
@@ -1503,6 +1710,14 @@ WindClosedLoopResult run_wind_closed_loop() {
             sim_plane.dcm.to_euler(&true_roll, &true_pitch, &true_yaw);
             const double est_yaw_deg = to_deg(static_cast<double>(ekf.state.quat.get_euler_yaw()));
             result.final_att_err_deg = std::abs(fwcpp::math::wrap_180(est_yaw_deg - to_deg(static_cast<double>(true_yaw))));
+
+            // CPP-070 phase 16 addition: velocity error, same formula
+            // update_metrics() uses above for run_closed_loop_comparison()'s
+            // own ClosedLoopMetrics.
+            const double dvx = static_cast<double>(ekf.state.velocity.x) - static_cast<double>(sim_plane.velocity_ef.x);
+            const double dvy = static_cast<double>(ekf.state.velocity.y) - static_cast<double>(sim_plane.velocity_ef.y);
+            const double dvz = static_cast<double>(ekf.state.velocity.z) - static_cast<double>(sim_plane.velocity_ef.z);
+            result.final_vel_err_mps = std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
         }
     }
 
@@ -1591,4 +1806,109 @@ TEST_CASE("CPP-064/CPP-065: closed-loop wind-state estimation, re-run after CPP-
     // measured values.
     REQUIRE(r.final_horiz_pos_err_m < 5.0);
     REQUIRE(r.final_att_err_deg < 5.0);
+}
+
+
+// ============================================================================
+// CPP-070, PHASE 16 (this ticket - the LAST sensor in the CPP-067/068/069/
+// 070 buffered/time-correct recall series): the SAME closed-loop
+// wind-estimation scenario as the TEST_CASE immediately above (real,
+// nonzero SimPlane wind, inhibit_wind_states cleared), but with the
+// airspeed path switched from the direct-fed pattern to the new
+// push_tas_sample()/recall_tas_sample() buffered path (see
+// run_wind_closed_loop()'s own "CPP-070 phase 16 addendum" comment for the
+// exact jitter scheme). THIS is the ticket's own central, real empirical
+// question, answered on the ONE scenario in this whole port that can
+// actually show a meaningful wind-state accuracy number (per the ticket's
+// own instruction) - not the default-inhibited pipeline TEST_CASE above,
+// which can only show a velocity/attitude effect.
+//
+// CPP-067 found GPS's horizontal position (an INTEGRATED state) got
+// measurably WORSE (~4.2x) under buffered/jittered timing; CPP-068 found
+// magnetometer's directly-corrected attitude was essentially unaffected
+// (~1.0x); CPP-069 found baro's own integrated state.position.z landed in
+// between (~1.78x). Airspeed fusion corrects state.velocity (indices 4-6,
+// ALREADY directly observed by GPS velocity fusion too) and state.wind_vel
+// (indices 22-23, a directly-observed scalar pair with nothing else
+// integrating it forward - structurally more like attitude than like
+// position). The a priori prediction, based on that structural argument,
+// is that airspeed/wind should pattern-match magnetometer (minimal
+// effect, ~1.0x) - answered empirically below with real measured numbers,
+// not assumed either way going in.
+// ============================================================================
+TEST_CASE("CPP-070: closed-loop wind-state estimation with jittered/buffered true-airspeed timing - "
+          "the final data point in the four-sensor buffered-recall series - does airspeed/wind "
+          "pattern-match GPS/baro's own 'integrated state degrades' finding, or magnetometer's own "
+          "'directly-corrected state is fine' finding?",
+          "[ekf_core][integration][wind][tas_buffer]") {
+    const WindClosedLoopResult direct = run_wind_closed_loop(false);
+    const WindClosedLoopResult buffered = run_wind_closed_loop(true);
+
+    INFO("true wind (N,E) = (" << direct.true_wind_n << ", " << direct.true_wind_e
+         << ") m/s, magnitude = " << direct.true_wind_mag << " m/s");
+    INFO("direct-fed:  airspeed fused " << direct.n_airspeed_fused_count << "/" << direct.n_airspeed_attempts
+         << " attempts, final vel err (m/s) = " << direct.final_vel_err_mps
+         << ", final horiz pos err (m) = " << direct.final_horiz_pos_err_m
+         << ", final att err (deg) = " << direct.final_att_err_deg);
+    INFO("buffered:    airspeed fused " << buffered.n_airspeed_fused_count << "/" << buffered.n_airspeed_attempts
+         << " attempts, final vel err (m/s) = " << buffered.final_vel_err_mps
+         << ", final horiz pos err (m) = " << buffered.final_horiz_pos_err_m
+         << ", final att err (deg) = " << buffered.final_att_err_deg);
+    for (std::size_t i = 0; i < direct.samples.size(); ++i) {
+        INFO("t=" << direct.samples[i].t_s << "s: direct wind err = " << direct.samples[i].wind_err_mag
+             << " m/s, buffered wind err = " << buffered.samples[i].wind_err_mag << " m/s");
+    }
+
+    // Sanity: both runs actually engaged airspeed fusion meaningfully and
+    // the wind itself is really nonzero - same convention as the TEST_CASE
+    // above.
+    REQUIRE(direct.n_airspeed_fused_count > static_cast<int>(0.8 * direct.n_airspeed_attempts));
+    REQUIRE(buffered.n_airspeed_fused_count > static_cast<int>(0.8 * buffered.n_airspeed_attempts));
+    REQUIRE(direct.true_wind_mag > 5.0);
+    REQUIRE(direct.had_first_call);
+    REQUIRE(buffered.had_first_call);
+
+    // THE REAL COMPARISON - MEASURED, in this test's own verification run
+    // (see this ticket's own commit message for the full four-sensor
+    // comparison table). Full wind_err_mag trajectory (direct-fed vs.
+    // buffered):
+    //   t=10s:  direct=6.00107,    buffered=6.00105    (-0.0003%)
+    //   t=30s:  direct=6.02309,    buffered=6.02305    (-0.0007%)
+    //   t=60s:  direct=0.635472,   buffered=0.637002   (+0.24%)
+    //   t=90s:  direct=0.0664002,  buffered=0.0674336  (+1.56%)
+    //   t=120s: direct=0.00159104, buffered=0.00286377 (+80.0%)
+    // final_vel_err_mps: direct=0.0148791, buffered=0.0148208 (-0.39%).
+    // final_horiz_pos_err_m: direct=buffered=0.0140996 (identical to 6 sig
+    // figs). final_att_err_deg: direct=0.0162968, buffered=0.0188377
+    // (+15.6%, on an already-negligible ~0.017deg absolute scale).
+    // HONEST FINDING: for the first 90s of this 120s run, while wind_vel is
+    // still genuinely converging, the buffered/jittered path tracks the
+    // direct-fed path to within 0.001-1.6% - essentially indistinguishable.
+    // The one large-looking relative shift (+80% at t=120s) is entirely a
+    // near-convergence artifact, not a real degradation: BOTH runs have
+    // already converged to within 0.05% of the true 6 m/s wind magnitude
+    // by t=120s (0.0016 m/s and 0.0029 m/s respectively, out of 6 m/s) -
+    // "80% worse" on a residual this close to the floating-point/
+    // covariance-noise floor is not a meaningful signal the way GPS's
+    // ~4.2x or baro's ~1.78x were, both measured on errors that were still
+    // substantial in absolute terms throughout their own runs. THIS
+    // CONFIRMS the a priori prediction (airspeed/wind should pattern-match
+    // magnetometer's ~1.0x, not GPS's ~4.2x or baro's ~1.78x): wind_vel
+    // (indices 22-23) is a directly-observed scalar pair with nothing else
+    // integrating it forward, structurally like attitude - not accumulated
+    // error the way GPS's horizontal position or baro's vertical position
+    // are. Bounds below use the SAME generous, order-of-magnitude margin
+    // CPP-067/068/069 all used (not tightened just because the real effect
+    // landed wherever it landed), so a real future regression would still
+    // be caught.
+    REQUIRE(buffered.samples[4].wind_err_mag < 2.0 * direct.samples[4].wind_err_mag + 0.5);
+    REQUIRE(buffered.final_vel_err_mps < 2.0 * direct.final_vel_err_mps + 0.5);
+
+    // And, in absolute terms, still comfortably convergent - same
+    // convention as the TEST_CASE above (loose bounds, not tightened just
+    // because the buffered run's real effect landed wherever it landed).
+    REQUIRE(buffered.samples[4].wind_err_mag < 1.0);
+    REQUIRE(buffered.final_vel_err_mps < 2.0);
+    REQUIRE(buffered.final_horiz_pos_err_m < 5.0);
+    REQUIRE(buffered.final_att_err_deg < 5.0);
 }
