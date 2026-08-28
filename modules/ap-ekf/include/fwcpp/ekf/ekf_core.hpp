@@ -2189,6 +2189,178 @@ public:
     bool inhibit_mag_states = true;            // upstream: inhibitMagStates
     bool inhibit_wind_states = true;           // upstream: inhibitWindStates
 
+    // ========================================================================
+    // CPP-077, PHASE 22 (this ticket): the first step toward the real
+    // aiding-mode/health state machine (AP_NavEKF3_Control.cpp's
+    // setAidingMode(), still entirely out of scope - see below). Read
+    // directly before writing any code, per the ticket's own instruction:
+    // NavEKF3_core::checkAttitudeAlignmentStatus() (AP_NavEKF3_Control.cpp
+    // ~line 509-527), NavEKF3_core::checkGyroCalStatus() (~line 754-780),
+    // and NavEKF3_core::calcTiltErrorVariance() (AP_NavEKF3_core.cpp
+    // ~line 2154-2183).
+    //
+    // WHAT THIS PHASE BUILDS: tilt_error_variance/tilt_align_complete/
+    // del_ang_bias_learned below, plus calc_tilt_error_variance()/
+    // check_attitude_alignment_status()/check_gyro_cal_status() (declared
+    // near covariance_prediction() below, defined in ekf_core.cpp) - both
+    // derivable purely from this port's existing covariance state, with no
+    // further hidden dependencies.
+    //
+    // LATCHING BEHAVIOR - VERIFIED DIRECTLY, NOT ASSUMED IDENTICAL BETWEEN
+    // THE TWO FLAGS (grepped every real write site across
+    // AP_NavEKF3_Control.cpp/AP_NavEKF3_core.cpp/AP_NavEKF3_core.h):
+    //   - tiltAlignComplete IS a real one-way latch. Its only two write
+    //     sites anywhere upstream are (1) the filter's reset-all-state
+    //     function (AP_NavEKF3_core.cpp ~line 289: `tiltAlignComplete =
+    //     false;`, alongside `tiltErrorVariance = sq(M_2PI);` - part of a
+    //     full filter reinit this port has no equivalent of) and (2)
+    //     checkAttitudeAlignmentStatus() itself, which only ever sets it
+    //     true, guarded by `if (!tiltAlignComplete)` - never reset back to
+    //     false from within that function. This port's tilt_align_complete
+    //     below therefore starts false and can only ever become true via
+    //     check_attitude_alignment_status(); nothing in this port resets
+    //     it back to false (no full-reinit equivalent exists - a real,
+    //     narrower divergence, harmless since nothing in this port yet
+    //     re-initialises a live EkfCore mid-flight).
+    //   - delAngBiasLearned is NOT a latch. checkGyroCalStatus()
+    //     unconditionally reassigns it every call on BOTH real upstream
+    //     branches (`delAngBiasLearned = (...)`) with no `if
+    //     (!delAngBiasLearned)` guard anywhere - it can genuinely toggle
+    //     both true->false and false->true as the gyro-bias covariance
+    //     grows and shrinks. This port's check_gyro_cal_status() below
+    //     reproduces that unconditional reassignment exactly - no latching
+    //     logic added.
+    //
+    // tilt_error_variance DEFAULT VALUE - a real, deliberate upstream
+    // choice reproduced here, not an arbitrary 0.0: upstream's reset-all-
+    // state function (AP_NavEKF3_core.cpp ~line 289, same function as
+    // tiltAlignComplete's reset above) sets `tiltErrorVariance =
+    // sq(M_2PI)` - a large defensive value - specifically so a freshly
+    // reset filter reads as "tilt not yet aligned" before the first real
+    // CovariancePrediction() call ever populates tiltErrorVariance from
+    // actual covariance data. A raw 0.0 default would be actively wrong
+    // here: it would read as "zero attitude-error variance" i.e. "already
+    // perfectly aligned" before any covariance state exists at all. This
+    // port reproduces the same defensive value: sq(M_2PI) is exactly
+    // sq(2*pi radians), and 2*pi radians is exactly 360 degrees, so
+    // `sq(fwcpp::math::radians(ftype(360.0)))` is bit-for-bit the same
+    // quantity via this port's own existing radians() helper, without
+    // introducing a new bare-pi constant.
+    //
+    // delAngBiasLearned BRANCH DECISION FOR THIS PORT'S OWN CONFIGURATION
+    // (ticket's own explicit instruction: "investigate ... and decide
+    // which real branch actually applies here, and justify the choice
+    // explicitly - don't silently pick one without checking"):
+    //
+    // Upstream's real branch condition is `!use_compass() &&
+    // (yaw_source_last != GPS) && (yaw_source_last != GPS_COMPASS_FALLBACK)
+    // && (yaw_source_last != EXTNAV)` -> rotate the bias-variance vector
+    // into earth frame via prevTnb and check only the horizontal (X/Y)
+    // terms (upstream's own comment: yaw is poorly observable without a
+    // yaw reference, which would make a body-frame Z check fail
+    // spuriously); otherwise (compass in use, or a GPS-derived yaw source)
+    // -> check all three body-frame axes directly.
+    //
+    // This port has NO yaw-source-selection machinery at all (no
+    // AP_NavEKF_Source::SourceYaw concept, no GPS-yaw, no GPS_COMPASS_
+    // FALLBACK, no EXTNAV) - already an established, disclosed gap since
+    // phases 5/6/9 (see yawAlignComplete exclusion below). So the
+    // `yaw_source_last != GPS/GPS_COMPASS_FALLBACK/EXTNAV` half of
+    // upstream's condition is vacuously true in this port's real
+    // configuration space (those sources don't exist to select), and the
+    // real question collapses to just `!use_compass()` vs `use_compass()`.
+    //
+    // This port ALSO has no use_compass() equivalent (upstream's
+    // use_compass() itself depends on yaw_source_last plus
+    // dal.compass().use_for_yaw()/allMagSensorsFailed - none of which this
+    // port has, for the same reason). But this port DOES have a real,
+    // already-built, already-tested magnetometer fusion capability
+    // (fuse_magnetometer(), CPP-059+) - 3-axis body-field fusion that,
+    // through its Jacobian's coupling into the quaternion covariance rows
+    // 0-3, is functionally this port's ONLY mechanism by which compass
+    // information can ever constrain yaw (matching upstream's own real
+    // 3-axis FuseMagnetometer() path - the one that use_compass()==true
+    // gates upstream too, as opposed to a separate yaw-only fusion type
+    // this port also doesn't have). Whether that mechanism is actually
+    // live at any given moment is exactly what inhibit_mag_states already
+    // tracks (real, wired into covariance_prediction()/
+    // constrain_variances() since CPP-065): inhibit_mag_states==true means
+    // no magnetometer information of any kind is currently entering the
+    // filter (mag states inhibited, P[16..21] zeroed every predict cycle -
+    // see this file's own phase-1 SIMPLIFICATION 1 banner) - i.e. no yaw
+    // reference is active, the same real-world condition that drives
+    // upstream's `!use_compass()` branch. inhibit_mag_states==false means
+    // fuse_magnetometer() is genuinely contributing - this port's
+    // equivalent of "compass in use for yaw".
+    //
+    // DECISION: check_gyro_cal_status() below branches dynamically on
+    // inhibit_mag_states (read at call time), NOT a hardcoded choice of
+    // either upstream branch - this is the honest, currently-correct
+    // proxy for "is a yaw reference active" given this port's real,
+    // already-existing configuration surface, and it stays correct
+    // whether or not a future phase flips inhibit_mag_states to false to
+    // enable live mag fusion (matching CPP-065's own precedent of wiring
+    // inhibit_mag_states dynamically rather than assuming a fixed state).
+    // At this port's real default settings (inhibit_mag_states == true),
+    // the earth-frame/horizontal-only branch applies today.
+    //
+    // EXPLICITLY OUT OF SCOPE (per the ticket's own list):
+    //   - yawAlignComplete: verified this round to be set ONLY via
+    //     recordYawResetsCompleted() (AP_NavEKF3_Control.cpp), itself tied
+    //     to the real magYawResetRequest/gpsYawResetRequest yaw-
+    //     realignment state machine - already an established exclusion
+    //     since phases 5/6/9 (no yaw-reset mechanism exists in this port
+    //     at all). This remains a REAL, DISCLOSED GAP: this port cannot
+    //     currently determine "yaw alignment is complete" the real way.
+    //     Any future consumer of this concept (e.g. a future aiding-mode
+    //     phase) will need either a simplified proxy for this port's own
+    //     configuration, or the yaw-reset machinery itself built first.
+    //     No fake/simplified yawAlignComplete is invented here.
+    //   - The full setAidingMode() state machine itself, readyToUseGPS()
+    //     and friends, and any CONSUMER of tilt_align_complete/
+    //     del_ang_bias_learned (e.g. upstream's own readyToUseOptFlow(),
+    //     readyToUseGPS(), readyToUseRangeBeacon() checks) - this ticket
+    //     only computes the flags themselves correctly; nothing in this
+    //     port yet reads them to gate fusion behavior.
+    //   - The magYawResetRequest-triggering second half of
+    //     checkAttitudeAlignmentStatus() itself (`if (!yawAlignComplete &&
+    //     tiltAlignComplete && use_compass()) magYawResetRequest = true;`)
+    //     - ties to the same excluded yaw-reset machinery.
+    //
+    // CALL-SITE WIRING DECISION: calc_tilt_error_variance()'s real
+    // upstream call sites (AP_NavEKF3_core.cpp ~line 1436 and ~1796) are
+    // BOTH inside CovariancePrediction() itself, called unconditionally
+    // every predict cycle regardless of fusion/health state - a real
+    // computation this port's own covariance_prediction() already runs
+    // every cycle, not a "consumer" of these flags. It is therefore wired
+    // directly into covariance_prediction() below (see that function's own
+    // "CPP-077" comment), matching upstream's real, unconditional
+    // placement - NOT new "wiring into fusion behavior".
+    // check_attitude_alignment_status() and check_gyro_cal_status(),
+    // by contrast, have NO real call site this port has built:
+    // upstream calls them from controlFilterModes()/setAidingMode()
+    // respectively (AP_NavEKF3_Control.cpp ~line 27-29, ~241-243) - both
+    // squarely inside the excluded aiding-mode/health state machine. They
+    // are therefore left as standalone public methods a caller (tests
+    // today; a future aiding-mode phase eventually) invokes directly -
+    // NOT auto-called from anywhere in this port yet.
+    // ========================================================================
+
+    // upstream: tiltErrorVariance (member, AP_NavEKF3_core.h) - see
+    // "tilt_error_variance DEFAULT VALUE" above for why this does not
+    // default to 0.0. Kept up to date every covariance_prediction() call
+    // (see that function's own CPP-077 comment) exactly as upstream keeps
+    // it up to date every real CovariancePrediction() call.
+    ftype tilt_error_variance = sq(fwcpp::math::radians(ftype(360.0)));  // upstream: tiltErrorVariance
+
+    // upstream: tiltAlignComplete (member, AP_NavEKF3_core.h) - a real
+    // one-way latch, see "LATCHING BEHAVIOR" above.
+    bool tilt_align_complete = false;  // upstream: tiltAlignComplete
+
+    // upstream: delAngBiasLearned (member, AP_NavEKF3_core.h) - NOT a
+    // latch, can toggle both ways, see "LATCHING BEHAVIOR" above.
+    bool del_ang_bias_learned = false;  // upstream: delAngBiasLearned
+
     // CPP-058 phase 4: upstream lastVelPassTime_ms/lastGpsPosPassTime_ms
     // (AP_NavEKF3_core.h:1137-1138), elapsed-time bookkeeping used to
     // detect a sustained GPS outage (see this file's "CPP-058, PHASE 4"
@@ -2591,6 +2763,45 @@ public:
     // per-tick prediction path (upstream's only caller: UpdateFilter()).
     void covariance_prediction(const GyroSample& gyro, const AccelSample& accel, ftype dt_ekf_avg,
                                 const Vector3F* rot_var_vec = nullptr);
+
+    // CPP-077, PHASE 22 (this ticket). upstream: NavEKF3_core::
+    // calcTiltErrorVariance(), AP_NavEKF3_core.cpp ~line 2154-2183 - the
+    // real, dense, self-contained, auto-generated formula (own comment:
+    // "equations generated by quaternion_error_propagation(): in
+    // derivation/generate_2.py"), transcribed verbatim (see this file's
+    // own "CPP-077, PHASE 22" banner above for the full reasoning and
+    // ekf_core.cpp for the transcription itself). Public - not just an
+    // internal covariance_prediction() helper - so a test can drive
+    // tilt_error_variance/tilt_align_complete directly from a
+    // deliberately-constructed P/quat without needing to run a full
+    // covariance_prediction() cycle first.
+    void calc_tilt_error_variance();
+
+    // CPP-077, PHASE 22 (this ticket). upstream: NavEKF3_core::
+    // checkAttitudeAlignmentStatus(), AP_NavEKF3_Control.cpp ~line
+    // 509-527 - EXCLUDING the magYawResetRequest-triggering second half
+    // (ties to the yaw-reset machinery this port doesn't have - see this
+    // file's own "CPP-077, PHASE 22" banner above). NOT auto-invoked from
+    // anywhere in this port yet - upstream's own real call site
+    // (controlFilterModes()) is part of the excluded aiding-mode/health
+    // state machine. Reads tilt_error_variance (see calc_tilt_error_
+    // variance() above) - callers that want a fresh answer must call
+    // calc_tilt_error_variance() first, exactly as upstream's real
+    // CovariancePrediction()->checkAttitudeAlignmentStatus() ordering
+    // does (both driven once per real filter-update cycle there).
+    void check_attitude_alignment_status();
+
+    // CPP-077, PHASE 22 (this ticket). upstream: NavEKF3_core::
+    // checkGyroCalStatus(), AP_NavEKF3_Control.cpp ~line 754-780 - see
+    // this file's own "CPP-077, PHASE 22" banner above for the real
+    // compass-available-vs-not branch investigation and this port's
+    // dynamic inhibit_mag_states-based decision. NOT auto-invoked from
+    // anywhere in this port yet - upstream's own real call site
+    // (setAidingMode()) is part of the excluded aiding-mode/health state
+    // machine. dt_ekf_avg: needed for delAngBiasVarMax = sq(radians(0.15 *
+    // dt_ekf_avg)), matching upstream's own per-call (not stored) local
+    // constant exactly.
+    void check_gyro_cal_status(ftype dt_ekf_avg);
 
     // CPP-056 phase 2. upstream: FuseVelPosNED()'s obsIndex loop body,
     // AP_NavEKF3_PosVelFusion.cpp ~line 1024-1163 - see this file's

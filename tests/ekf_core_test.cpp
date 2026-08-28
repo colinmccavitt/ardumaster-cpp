@@ -309,3 +309,242 @@ TEST_CASE("covariance_prediction: with inhibit_mag_states/inhibit_wind_states cl
     // statement that wind process noise is real and active.
     REQUIRE(ekf.P[22][22] > ftype(0.0));
 }
+
+// ============================================================================
+// CPP-077, PHASE 22: tilt-alignment and gyro-bias-convergence status
+// tracking. See fwcpp/ekf/ekf_core.hpp's own "CPP-077, PHASE 22" banner for
+// the full scope, branch-decision, and latching-behavior writeup these
+// tests verify directly against the real upstream source.
+// ============================================================================
+
+TEST_CASE("calc_tilt_error_variance: verbatim formula matches its own closed form at identity attitude",
+          "[ekf_core][cpp077]") {
+    // At an identity quaternion (q0=1, q1=q2=q3=0), the verbatim upstream
+    // formula's PS-intermediates collapse algebraically to
+    // tilt_error_variance == 4*(P[1][1] + P[2][2]) - hand-derived directly
+    // from the transcribed formula, not assumed. A wrong coefficient or
+    // wrong PS-index anywhere in the surviving terms would make this fail.
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.P[1][1] = ftype(0.01);
+    ekf.P[2][2] = ftype(0.02);
+
+    ekf.calc_tilt_error_variance();
+
+    REQUIRE(static_cast<double>(ekf.tilt_error_variance) == Catch::Approx(4.0 * (0.01 + 0.02)));
+}
+
+TEST_CASE("calc_tilt_error_variance: at identity attitude, P[0][0]/P[3][3] (w/yaw variance) do not contribute",
+          "[ekf_core][cpp077]") {
+    // Physically sensible and directly traceable from the transcribed
+    // formula: at identity attitude, tilt (roll+pitch) error is carried
+    // entirely by the x/y quaternion-error components, not by w or z
+    // (yaw) - exactly what a correct transcription of upstream's
+    // quaternion_error_propagation()-generated formula should produce.
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.P[0][0] = ftype(100.0);
+    ekf.P[3][3] = ftype(100.0);
+    ekf.P[1][1] = ftype(0.0);
+    ekf.P[2][2] = ftype(0.0);
+
+    ekf.calc_tilt_error_variance();
+
+    REQUIRE(static_cast<double>(ekf.tilt_error_variance) == Catch::Approx(0.0).margin(1e-12));
+}
+
+TEST_CASE("calc_tilt_error_variance: clamps to sq(radians(30)) per upstream's own constrain_ftype call",
+          "[ekf_core][cpp077]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.P[1][1] = ftype(1.0e6);
+    ekf.P[2][2] = ftype(1.0e6);
+
+    ekf.calc_tilt_error_variance();
+
+    const double expected_max = static_cast<double>(sq(fwcpp::math::radians(ftype(30.0))));
+    REQUIRE(static_cast<double>(ekf.tilt_error_variance) == Catch::Approx(expected_max));
+}
+
+TEST_CASE("EkfCore construction: tilt_error_variance defaults to upstream's own large defensive value, not 0.0",
+          "[ekf_core][cpp077]") {
+    // See ekf_core.hpp's own "tilt_error_variance DEFAULT VALUE" banner: a
+    // raw 0.0 default would read as "already perfectly aligned" before any
+    // real covariance has ever been computed - upstream's real reset-all-
+    // state function avoids this with `tiltErrorVariance = sq(M_2PI);`;
+    // this port reproduces the same value via radians(360.0).
+    EkfCore ekf;
+    REQUIRE(static_cast<double>(ekf.tilt_error_variance) > 1.0);
+
+    // Directly consequential: check_attitude_alignment_status() on a
+    // freshly-constructed EkfCore (before any calc_tilt_error_variance()
+    // call) must NOT spuriously report alignment complete.
+    ekf.check_attitude_alignment_status();
+    REQUIRE_FALSE(ekf.tilt_align_complete);
+}
+
+TEST_CASE("check_attitude_alignment_status: tilt_align_complete transitions false->true exactly at the real "
+          "tilt_error_variance threshold, then stays latched true even if covariance grows back above it",
+          "[ekf_core][cpp077]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    const double threshold = static_cast<double>(sq(fwcpp::math::radians(ftype(5.0))));
+
+    // ABOVE threshold: tilt_error_variance = 4*(P11+P22) = 1.5*threshold.
+    const ftype above_each = static_cast<ftype>(1.5 * threshold / 8.0);
+    ekf.P[1][1] = above_each;
+    ekf.P[2][2] = above_each;
+    ekf.calc_tilt_error_variance();
+    REQUIRE(static_cast<double>(ekf.tilt_error_variance) > threshold);
+    ekf.check_attitude_alignment_status();
+    REQUIRE_FALSE(ekf.tilt_align_complete);
+
+    // BELOW threshold: tilt_error_variance = 0.5*threshold - crosses to
+    // true.
+    const ftype below_each = static_cast<ftype>(0.5 * threshold / 8.0);
+    ekf.P[1][1] = below_each;
+    ekf.P[2][2] = below_each;
+    ekf.calc_tilt_error_variance();
+    REQUIRE(static_cast<double>(ekf.tilt_error_variance) < threshold);
+    ekf.check_attitude_alignment_status();
+    REQUIRE(ekf.tilt_align_complete);
+
+    // LATCH CHECK: grow covariance back above threshold and re-run both
+    // functions - a real one-way latch (verified directly against
+    // upstream, see ekf_core.hpp banner) must NOT clear tilt_align_complete.
+    ekf.P[1][1] = above_each;
+    ekf.P[2][2] = above_each;
+    ekf.calc_tilt_error_variance();
+    REQUIRE(static_cast<double>(ekf.tilt_error_variance) > threshold);
+    ekf.check_attitude_alignment_status();
+    REQUIRE(ekf.tilt_align_complete);
+}
+
+TEST_CASE("check_gyro_cal_status: with inhibit_mag_states (default), only X/Y gyro-bias variance (rotated by "
+          "prev_tnb) gates del_ang_bias_learned - Z is ignored, matching upstream's yaw-unobservable-without-a-"
+          "yaw-reference branch",
+          "[ekf_core][cpp077]") {
+    EkfCore ekf; // inhibit_mag_states defaults true; prev_tnb defaults identity
+    const ftype dt_ekf_avg = ftype(0.012);
+    const double max_val = static_cast<double>(sq(fwcpp::math::radians(ftype(0.15) * dt_ekf_avg)));
+    const ftype small = static_cast<ftype>(max_val * 0.1);
+    const ftype huge = static_cast<ftype>(max_val * 100.0);
+
+    ekf.P[10][10] = small;
+    ekf.P[11][11] = small;
+    ekf.P[12][12] = huge; // Z - must be ignored by this branch
+
+    ekf.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE(ekf.del_ang_bias_learned);
+
+    // Now put the huge value on X instead - the branch's horizontal check
+    // must catch it.
+    ekf.P[10][10] = huge;
+    ekf.P[12][12] = small;
+    ekf.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE_FALSE(ekf.del_ang_bias_learned);
+}
+
+TEST_CASE("check_gyro_cal_status: with inhibit_mag_states cleared, all three body-frame axes gate "
+          "del_ang_bias_learned directly, matching upstream's compass-in-use branch",
+          "[ekf_core][cpp077]") {
+    EkfCore ekf;
+    ekf.inhibit_mag_states = false;
+    const ftype dt_ekf_avg = ftype(0.012);
+    const double max_val = static_cast<double>(sq(fwcpp::math::radians(ftype(0.15) * dt_ekf_avg)));
+    const ftype small = static_cast<ftype>(max_val * 0.1);
+    const ftype huge = static_cast<ftype>(max_val * 100.0);
+
+    // All three axes small -> learned.
+    ekf.P[10][10] = small;
+    ekf.P[11][11] = small;
+    ekf.P[12][12] = small;
+    ekf.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE(ekf.del_ang_bias_learned);
+
+    // Z alone huge - this branch DOES check Z (unlike the inhibited branch
+    // above) - must now report not-learned.
+    ekf.P[12][12] = huge;
+    ekf.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE_FALSE(ekf.del_ang_bias_learned);
+}
+
+TEST_CASE("check_gyro_cal_status: del_ang_bias_learned is NOT a latch - it toggles both ways as covariance "
+          "grows and shrinks, unlike tilt_align_complete",
+          "[ekf_core][cpp077]") {
+    EkfCore ekf;
+    ekf.inhibit_mag_states = false; // simplest branch: direct body-frame check, all 3 axes
+    const ftype dt_ekf_avg = ftype(0.012);
+    const double max_val = static_cast<double>(sq(fwcpp::math::radians(ftype(0.15) * dt_ekf_avg)));
+    const ftype small = static_cast<ftype>(max_val * 0.1);
+    const ftype huge = static_cast<ftype>(max_val * 100.0);
+
+    ekf.P[10][10] = ekf.P[11][11] = ekf.P[12][12] = small;
+    ekf.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE(ekf.del_ang_bias_learned);
+
+    ekf.P[10][10] = huge; // covariance grows back up
+    ekf.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE_FALSE(ekf.del_ang_bias_learned); // real toggle back to false - no latch
+
+    ekf.P[10][10] = small; // shrinks again
+    ekf.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE(ekf.del_ang_bias_learned); // toggles back to true again
+}
+
+TEST_CASE("check_gyro_cal_status: the two real upstream branches use different comparators at the exact "
+          "threshold - the inhibited branch is strict '<', the direct branch is '<='",
+          "[ekf_core][cpp077]") {
+    const ftype dt_ekf_avg = ftype(0.012);
+    const ftype max_val = sq(fwcpp::math::radians(ftype(0.15) * dt_ekf_avg));
+
+    EkfCore ekf_inhibited; // default inhibit_mag_states = true, identity prev_tnb
+    ekf_inhibited.P[10][10] = max_val;
+    ekf_inhibited.P[11][11] = max_val;
+    ekf_inhibited.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE_FALSE(ekf_inhibited.del_ang_bias_learned); // strict '<' - exactly-at-threshold fails
+
+    EkfCore ekf_direct;
+    ekf_direct.inhibit_mag_states = false;
+    ekf_direct.P[10][10] = max_val;
+    ekf_direct.P[11][11] = max_val;
+    ekf_direct.P[12][12] = max_val;
+    ekf_direct.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE(ekf_direct.del_ang_bias_learned); // '<=' - exactly-at-threshold passes
+}
+
+TEST_CASE("check_gyro_cal_status: a genuinely non-identity prev_tnb is really applied, not a no-op - proves "
+          "the earth-frame rotation is wired correctly, not merely passed through by an identity default",
+          "[ekf_core][cpp077]") {
+    EkfCore ekf; // inhibit_mag_states defaults true
+    const ftype dt_ekf_avg = ftype(0.012);
+    const ftype max_val = sq(fwcpp::math::radians(ftype(0.15) * dt_ekf_avg));
+    const ftype small = max_val * ftype(0.1);
+    const ftype huge = max_val * ftype(100.0);
+
+    // A row-permutation of the identity: row a picks up P[11][11], row b
+    // picks up P[12][12], row c (unused by the horizontal-only check)
+    // picks up P[10][10]. With P[10][10] huge but P[11][11]/P[12][12]
+    // small, an IDENTITY prev_tnb would fail (temp.x = P[10][10] = huge),
+    // but this permuted prev_tnb must pass (temp.x = P[11][11], temp.y =
+    // P[12][12], both small; the huge P[10][10] lands in temp.z, which
+    // this branch never checks).
+    ekf.prev_tnb = Matrix3F(Vector3F(ftype(0), ftype(1), ftype(0)), Vector3F(ftype(0), ftype(0), ftype(1)),
+                             Vector3F(ftype(1), ftype(0), ftype(0)));
+    ekf.P[10][10] = huge;
+    ekf.P[11][11] = small;
+    ekf.P[12][12] = small;
+
+    ekf.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE(ekf.del_ang_bias_learned);
+
+    // Sanity: confirm an IDENTITY prev_tnb with the SAME P values really
+    // would fail (proves the permuted-matrix pass above is due to the
+    // rotation, not some other effect).
+    EkfCore ekf_identity;
+    ekf_identity.P[10][10] = huge;
+    ekf_identity.P[11][11] = small;
+    ekf_identity.P[12][12] = small;
+    ekf_identity.check_gyro_cal_status(dt_ekf_avg);
+    REQUIRE_FALSE(ekf_identity.del_ang_bias_learned);
+}
