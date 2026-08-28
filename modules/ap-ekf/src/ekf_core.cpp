@@ -2314,4 +2314,65 @@ bool EkfCore::recall_tas_sample(TasSample& out, ftype now_s) {
     return tas_buffer.recall(out, now_ms);
 }
 
+// ============================================================================
+// CPP-071, PHASE 17 (this ticket). See ekf_core.hpp's own "CPP-071,
+// PHASE 17" banner (above EkfCore::tick()'s declaration) for the full
+// upstream-verification, delay-depth-derivation, and pre-fill-strategy
+// discussion. This implementation is a thin, direct transcription of
+// upstream's real per-tick sequence (push_youngest_element() then
+// get_oldest_element(), unconditionally, every tick) plus the pre-fill
+// seeding that sequence needs on this port (see hpp banner) - nothing
+// here is a new algorithm.
+void EkfCore::tick(const GyroSample& gyro, const AccelSample& accel, ftype dt_ekf_avg) {
+    if (!imu_buffer_seeded) {
+        // One-time pre-fill: seed every slot with a stationary/level
+        // no-op sample shaped by THIS call's dt_ekf_avg - see hpp
+        // banner's "PRE-FILL STRATEGY" section for why (avoids the
+        // 0/0 = NaN hazard a raw zero-dt default ImuSample would create
+        // in update_strapdown_equations_ned()'s
+        // `vel_dot_ned = del_vel_nav / accel.delta_velocity_dt`, while
+        // still genuinely delaying - not short-circuiting - the pre-fill
+        // window, unlike upstream NavEKF2's own reset_history(imuDataNew)
+        // convention which seeds with the just-arrived REAL sample
+        // instead). Matches ekf_core_test.cpp's own already-verified
+        // "stationary vehicle" no-op convention exactly: zero
+        // delta_angle, delta_velocity = (0,0,-g*dt) (exactly cancels
+        // gravity), both dt fields = dt_ekf_avg.
+        GyroSample seed_gyro;
+        seed_gyro.delta_angle_dt = dt_ekf_avg;
+        AccelSample seed_accel;
+        seed_accel.delta_velocity = Vector3F(ftype(0), ftype(0), -kGravityMss * dt_ekf_avg);
+        seed_accel.delta_velocity_dt = dt_ekf_avg;
+        imu_buffer.reset_history(ImuSample{seed_gyro, seed_accel});
+        imu_buffer_seeded = true;
+    }
+
+    // upstream: storedIMU.push_youngest_element(imuDataDownSampledNew);
+    // immediately followed by imuDataDelayed = storedIMU.
+    // get_oldest_element(); - the SAME buffer, same order, every tick,
+    // unconditionally (downsampling gate moot per ADR-0012 - see hpp
+    // banner). ImuBuffer<T,N> is non-destructive (ekf_buffer.hpp): this
+    // read does not consume or remove the element, unlike ObsBuffer::
+    // recall()'s destructive semantics used elsewhere in this file for
+    // GPS/mag/baro/TAS - see ekf_buffer.hpp's own file banner for that
+    // distinction.
+    imu_buffer.push_youngest_element(ImuSample{gyro, accel});
+    const ImuSample delayed = imu_buffer.get_oldest_element();
+
+    // The EXISTING, UNCHANGED direct-call functions - called here with
+    // the delayed, buffer-sourced sample instead of an immediate one.
+    // Their own signatures/behavior are completely untouched by this
+    // ticket (see hpp banner) - every existing test/closed-loop phase
+    // keeps calling them directly and is unaffected.
+    update_strapdown_equations_ned(delayed.gyro, delayed.accel, dt_ekf_avg);
+    covariance_prediction(delayed.gyro, delayed.accel, dt_ekf_avg);
+
+    // upstream: imuDataDelayed's own timestamp concept, advanced by this
+    // tick's dt_ekf_avg - see hpp banner's own field doc comment for why
+    // this is the closest expressible equivalent under this port's
+    // caller-supplied-time convention (ADR-0012), and for what is/isn't
+    // wired to consume it yet (nothing, in this ticket).
+    delayed_time_s += dt_ekf_avg;
+}
+
 } // namespace fwcpp::ekf

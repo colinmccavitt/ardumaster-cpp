@@ -1745,6 +1745,32 @@ struct AccelSample {
 };
 
 // ============================================================================
+// CPP-071, PHASE 17: combined element type for the ImuBuffer<T,N> member
+// EkfCore::imu_buffer (below, near EkfCore::tick()). ImuBuffer<T,N>
+// (ekf_buffer.hpp, CPP-066/phase 12) requires ONE element type; this
+// file's own GyroSample/AccelSample split (above) is otherwise preserved
+// everywhere else (see this file's own "NO SINGLETONS" discussion) - this
+// wrapper exists SOLELY to satisfy ImuBuffer's single-element-type
+// requirement, the identical resolution GpsSample/MagSample/BaroSample/
+// TasSample (below) each already used for ObsBuffer<T,N>'s own
+// ObsElement requirement. No upstream name/type to trace: upstream's
+// storedIMU (EKF_IMU_buffer_t<imu_elements>) buffers ITS OWN single
+// combined imu_elements struct directly (delAng/delVel/delAngDT/
+// delVelDT/time_ms/gyro_index/accel_index all in one type,
+// AP_NavEKF3_core.h ~589); nesting GyroSample+AccelSample here instead of
+// re-merging them into one flat struct is this port's own structural
+// choice, not a divergence from any specific upstream field layout.
+// Unlike GpsSample/MagSample/BaroSample/TasSample, ImuSample does NOT
+// derive from ObsElement/carry a timestamp - ImuBuffer<T,N> has no such
+// requirement (see ekf_buffer.hpp's own file banner: ImuBuffer is a
+// fixed-depth positional history ring with no timestamp logic at all,
+// a genuinely different access pattern from ObsBuffer).
+struct ImuSample {
+    GyroSample gyro;
+    AccelSample accel;
+};
+
+// ============================================================================
 // CPP-067, PHASE 13 (this ticket): time-correct GPS sample recall via
 // ObsBuffer. Phase 12 (CPP-066) built fwcpp::ekf::ObsBuffer<T,N>/
 // ImuBuffer<T,N> (ekf_buffer.hpp) as standalone, UNWIRED infrastructure -
@@ -3054,6 +3080,206 @@ public:
     // fusion attempt for the tick is skipped entirely, not merely "the
     // gate failed inside fuse_airspeed()".
     bool recall_tas_sample(TasSample& out, ftype now_s);
+
+    // ========================================================================
+    // CPP-071, PHASE 17 (this ticket): IMU history buffering and
+    // delayed-state mechanization - the FIRST step of the real
+    // delayed-state architectural redesign named and deferred since
+    // phase 1 (see this file's own top banner, "AP_NavEKF3_Measurements.cpp
+    // - multi-IMU/multi-sensor sample buffering, the delayed fusion time
+    // horizon... This port has one IMU and no delay buffer") and
+    // repeatedly re-disclosed by every fusion phase since (phases 2-16).
+    //
+    // Read directly before writing any code (per the ticket's own
+    // instruction, and this file's own established practice): upstream's
+    // real per-tick sequence, AP_NavEKF3_Measurements.cpp
+    // readIMUData()'s tail (~line 493-527 of the pinned Plane-4.7.0
+    // worktree - verified directly, matching the ticket's own ~480-520
+    // estimate closely enough that no correction is needed):
+    //   storedIMU.push_youngest_element(imuDataDownSampledNew);
+    //   ...
+    //   imuDataDelayed = storedIMU.get_oldest_element();
+    //   imuDataDelayed.delAngDT = MAX(imuDataDelayed.delAngDT, minDT);
+    //   imuDataDelayed.delVelDT = MAX(imuDataDelayed.delVelDT, minDT);
+    // gated by `if ((imuDataDownSampledNew.delAngDT >= (EKF_TARGET_DT-
+    // (dtIMUavg*0.5f)) && startPredictEnabled) || (imuDataDownSampledNew.
+    // delAngDT >= 2.0f*EKF_TARGET_DT))` - the multi-IMU downsampling
+    // accumulation this gate exists for is MOOT for this port, already
+    // established by ADR-0012's explicit-input convention (this port's
+    // callers already supply one clean sample per tick, not a raw,
+    // faster-than-EKF-rate IMU stream to be downsampled) - so the real
+    // sequence collapses to "every tick, unconditionally: push, then
+    // read-oldest", exactly what tick() below does. The
+    // MAX(imuDataDelayed.delAngDT/delVelDT, minDT) divide-by-zero guard
+    // is NOT reproduced as a per-tick clamp here - see tick()'s own doc
+    // comment below for why the pre-fill seeding strategy makes it
+    // unnecessary for THIS port (a real, disclosed adaptation, not an
+    // oversight).
+    //
+    // DELAY DEPTH REASONING (kImuBufferCapacity below) - a real, named
+    // scenario, not an arbitrary number. Upstream's own real formula
+    // (NavEKF3_core::setup_core(), AP_NavEKF3_core.cpp ~line 88):
+    //   imu_buffer_length = maxTimeDelay_ms / EKF_TARGET_DT_MS + 1;
+    // using upstream's own EKF_TARGET_DT_MS=12 (83Hz) and a RUNTIME
+    // maxTimeDelay_ms (GPS driver-reported lag, clamped to <=250ms, MAX'd
+    // against mag/baro/TAS delay parameters - see ekf_buffer.hpp's own
+    // "CORRECTION TO THIS TICKET'S OWN PREMISE" for the full runtime-
+    // sizing discussion this port already disclosed adapting away from).
+    // This port's own real, already-established tick rate is 50Hz/20ms
+    // (dt_ekf_avg = kDt = 0.02f), NOT upstream's 83Hz/12ms - see
+    // ekf_closed_loop_test.cpp's own "Timing: 50Hz IMU/loop rate,
+    // matching every existing closed-loop test" constant and this file's
+    // own EkfCore::gps_buffer/mag_buffer/baro_buffer/tas_buffer capacity
+    // banners, which already establish this port's realistic sensor-rate
+    // scenario (GPS ~5-10Hz, i.e. 100-200ms period) as its standing
+    // precedent, reused here rather than invented fresh.
+    //
+    // NAMED SCENARIO: a representative real-world GPS receiver reporting
+    // ~200ms of processing lag (upstream's own clamp ceiling is 250ms;
+    // 200ms is a realistic mid-range value for a real GPS receiver's
+    // internal solution latency, not upstream's own worst-case bound) at
+    // this port's real 50Hz/20ms tick rate:
+    //   N = maxTimeDelay_ms / dt_tick_ms + 1 = 200 / 20 + 1 = 11.
+    // This falls squarely inside the ticket's own suggested "N around
+    // 10-12" range for exactly this scenario. kImuBufferCapacity=11 is
+    // chosen, not a rounder-looking 10 or 12, specifically to apply
+    // upstream's own "+1" formula literally rather than approximating it
+    // away - see the next paragraph for why that "+1" is not a rounding
+    // fudge but a real, load-bearing consequence of the ring buffer's own
+    // push-then-read-oldest mechanics.
+    //
+    // VERIFIED, EXACT DELAY-VS-CAPACITY RELATIONSHIP (not assumed - traced
+    // by hand against ekf_buffer_test.cpp's own existing ImuBuffer index
+    // tests, e.g. "ImuBuffer::get_oldest_element tracks (youngest + 1) %
+    // N positionally"): because get_oldest_element() is read IMMEDIATELY
+    // after push_youngest_element() writes the new sample (oldest_ is
+    // always (youngest_+1)%N, i.e. the NEXT slot due to be overwritten,
+    // one full lap away), the sample pushed on tick k is not returned as
+    // "oldest" until tick k+(N-1), NOT tick k+N. Concretely, with N=11:
+    // the very first real push (tick 1) is not read back until tick 11
+    // (11-1=10 ticks later), and every push after the buffer is filled
+    // is read back exactly 10 ticks later. So kImuBufferCapacity=11
+    // yields an EFFECTIVE delay, once filled, of exactly N-1=10 ticks =
+    // 10*20ms = 200ms - matching the named scenario exactly, and
+    // explaining upstream's own "+1" in imu_buffer_length's formula: it
+    // is not headroom, it is required to make an N-tick-old sample
+    // actually reachable via this exact push-then-immediately-read-oldest
+    // access pattern. tick()'s own test (ekf_tick_test.cpp) verifies this
+    // exact 10-tick relationship directly, not just "some" delay.
+    static constexpr std::size_t kImuBufferCapacity = 11;
+
+    // The actual buffer - see tick() below for how it's filled/drained.
+    // Public, matching this file's own established convention (gps_
+    // buffer/mag_buffer/baro_buffer/tas_buffer above) of exposing
+    // internal state for direct test verification.
+    ImuBuffer<ImuSample, kImuBufferCapacity> imu_buffer;
+
+    // upstream: imuDataDelayed's own timestamp concept - NOT a literal
+    // upstream field name (imuDataDelayed.time_ms is milliseconds, stamped
+    // from imuSampleTime_ms at push time, AP_NavEKF3_Measurements.cpp
+    // ~line 489); this port has no wall-clock IMU sample timestamps to
+    // carry through the buffer at all (ImuSample carries no timestamp -
+    // see its own doc comment above), so delayed_time_s instead
+    // represents the SAME underlying concept - "how far the delayed
+    // mechanization horizon has advanced" - the ONLY way this port's own
+    // caller-supplied-time convention (ADR-0012, dt_ekf_avg/now_s) can
+    // express it: accumulated elapsed seconds, advanced by dt_ekf_avg
+    // once per tick() call, exactly matching what upstream's real
+    // imuDataDelayed.time_ms would read if this port tracked wall-clock
+    // sample timestamps. Zero-initialized (no ticks yet).
+    //
+    // NOT YET WIRED TO ANYTHING (explicitly out of scope for this
+    // ticket, per the ticket's own "Explicitly out of scope" list):
+    // recall_gps_sample()/recall_mag_sample()/recall_baro_sample()/
+    // recall_tas_sample() above are UNCHANGED by this phase and still take
+    // each caller's own `now_s` - delayed_time_s is not read by any of
+    // them yet. Wiring those four call sites to use delayed_time_s
+    // instead of the caller's own now_s is real, substantial future work
+    // named explicitly here as the very next step (phases 18/19, not
+    // attempted in this ticket) - doing so is what would actually close
+    // the ~4.2x GPS / ~1.78x baro accuracy gap CPP-067-070's own
+    // empirical investigation measured (see this section's own opening
+    // banner), by finally fusing each recalled sample against the state
+    // AS IT WAS at the delayed mechanization horizon, rather than against
+    // whatever state a same-tick direct mechanization call happens to
+    // have already advanced to.
+    ftype delayed_time_s = 0;
+
+    // One-time pre-fill seeding flag for tick() below - see tick()'s own
+    // doc comment for the full pre-fill-vs-divide-by-zero discussion this
+    // guards. Public, matching this section's own "expose internal state
+    // for direct test verification" convention (a test can confirm
+    // seeding happened exactly once, on the first tick() call, not on
+    // every call).
+    bool imu_buffer_seeded = false;
+
+    // CPP-071, PHASE 17 (this ticket). upstream: the per-tick sequence
+    // documented in this section's own opening banner above -
+    // push_youngest_element() immediately followed by get_oldest_element()
+    // on the SAME buffer, every tick, unconditionally (multi-IMU
+    // downsampling gate moot per ADR-0012, see banner). A NEW, SEPARATE,
+    // PURELY ADDITIVE entry point: update_strapdown_equations_ned()'s and
+    // covariance_prediction()'s own direct-call signatures and behavior
+    // above are completely UNCHANGED by this method's existence - every
+    // existing test/closed-loop phase continues calling them directly,
+    // immediately, unaffected. tick() is a separate caller of the same
+    // two unchanged functions, using a delayed, buffer-sourced sample
+    // instead of an immediate one.
+    //
+    // PRE-FILL STRATEGY (ticket's own instruction: "handle the pre-fill
+    // case... sensibly and disclosed... check ImuBuffer::reset_history()'s
+    // existing semantics directly"). CORRECTION TO THE TICKET'S OWN
+    // IMPLIED PREMISE, found while implementing this: verified directly
+    // that upstream's real NavEKF3 (THIS ticket's own target - "NavEKF3-
+    // equivalent phase 17") never calls storedIMU.reset_history() at all
+    // (grepped across the full pinned AP_NavEKF3_core.cpp/
+    // AP_NavEKF3_Measurements.cpp - zero matches); only the SEPARATE,
+    // unrelated NavEKF2_core.cpp calls
+    // `storedIMU.reset_history(imuDataNew)` during its own
+    // InitialiseFilterBootstrap(). So a raw, upstream-faithful-to-NavEKF3
+    // pre-fill would leave every unwritten slot at its calloc/default-
+    // constructed zero (ImuSample{} - zero delta_angle/delta_velocity AND
+    // zero delta_angle_dt/delta_velocity_dt), exactly matching
+    // ImuBuffer<T,N>'s own default-constructed std::array<T,N> here.
+    // That raw zero IS what a literal port would do - but it is NOT safe
+    // to hand to update_strapdown_equations_ned() unmodified: that
+    // function computes `vel_dot_ned = del_vel_nav / accel.
+    // delta_velocity_dt` (ekf_core.cpp), an unguarded division that
+    // upstream's own MAX(imuDataDelayed.delVelDT, minDT) clamp (this
+    // section's own banner above) exists specifically to prevent -
+    // reproduced there as a real, disclosed simplification GAP in THIS
+    // port (that per-tick MAX-clamp is not yet ported - a future-phase
+    // item, since it only matters once real delayed fusion is wired,
+    // outside this ticket's own scope) rather than reproduced here as a
+    // per-call runtime clamp. Feeding a raw zero-dt ImuSample through
+    // update_strapdown_equations_ned() during pre-fill would produce a
+    // 0/0 = NaN vel_dot_ned that permanently poisons vel_dot_ned_filt's
+    // own exponential filter (NaN*x+NaN*y is NaN forever after) - not
+    // "garbage" in the sense of a wrong-but-finite number, but a
+    // silent, permanent NaN contamination the ticket's own "sensibly and
+    // disclosed, not garbage/undefined" instruction rules out.
+    //
+    // RESOLUTION: on the FIRST tick() call only (imu_buffer_seeded),
+    // reset_history() is used - not with upstream's NavEKF2-style
+    // "seed with the just-arrived real sample" (which would make the
+    // pre-fill window silently NOT delayed - a strictly worse divergence
+    // from the "genuinely produces a delayed state" property this ticket
+    // exists to build), but with a stationary/level NO-OP sample shaped
+    // by THIS call's own dt_ekf_avg: zero delta_angle (no rotation) and
+    // delta_velocity = (0, 0, -kGravityMss*dt_ekf_avg) (the exact
+    // gravity-cancelling convention this file's own existing test
+    // "update_strapdown_equations_ned: a stationary vehicle's IMU reading
+    // leaves the state unchanged", ekf_core_test.cpp, already establishes
+    // and verifies), both dt fields set to dt_ekf_avg (nonzero - no
+    // division hazard). Feeding this sample through
+    // update_strapdown_equations_ned()/covariance_prediction() during
+    // pre-fill is therefore a TRUE no-op mechanization step (state
+    // unchanged, matching that existing test's own verified behavior) -
+    // sane and explicitly disclosed, not an invented shortcut and not
+    // upstream's own real (NaN-hazardous, if literally copied) zero
+    // cold-start. See ekf_tick_test.cpp for the test verifying pre-fill
+    // ticks are true no-ops.
+    void tick(const GyroSample& gyro, const AccelSample& accel, ftype dt_ekf_avg);
 
 private:
     void constrain_states(ftype dt_ekf_avg);   // upstream: NavEKF3_core::ConstrainStates()

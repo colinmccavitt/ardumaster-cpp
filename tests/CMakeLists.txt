@@ -353,3 +353,13 @@ catch_discover_tests(ekf_airspeed_fusion_test)
 add_executable(ekf_buffer_test ekf_buffer_test.cpp)
 target_link_libraries(ekf_buffer_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_buffer_test)
+
+# CPP-071 phase 17: EkfCore::tick() - IMU history buffering and
+# delayed-state mechanization (see fwcpp/ekf/ekf_core.hpp's "CPP-071,
+# PHASE 17" scope banner). A NEW, standalone test file, touching nothing
+# in ekf_core_test.cpp - update_strapdown_equations_ned()/
+# covariance_prediction()'s own direct-call API and every existing test
+# using it are completely unaffected by tick()'s existence.
+add_executable(ekf_tick_test ekf_tick_test.cpp)
+target_link_libraries(ekf_tick_test PRIVATE ap-ekf Catch2::Catch2WithMain)
+catch_discover_tests(ekf_tick_test)
