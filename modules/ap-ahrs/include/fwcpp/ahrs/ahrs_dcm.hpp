@@ -419,12 +419,11 @@
 //     already implicitly out of scope under slice 1's "groundspeed/
 //     position...plumbing/GCS" exclusion before this slice existed, now
 //     made explicit against this specific block.
-//   - `_last_failure_ms` - write-only status bookkeeping upstream sets on
-//     every failure path; its only reader upstream (`healthy()`, AP_AHRS_
-//     DCM.cpp) is itself outside this class's current scope (no overall
-//     health-status accessor exists yet). Same precedent as slice 1's
-//     dropped _renorm_val_sum/_renorm_val_count. Every early-return site
-//     that would have set it here just returns instead.
+//   - `_last_failure_ms` is last_failure_ms_ (CPP-028/CPP-086). Stamped at
+//     the 4 upstream sites only: normalize() renorm failure, ga_e.is_inf(),
+//     !accel_healthy (single-instance collapse of besti==-1), and error
+//     nan/inf. ga_b.is_inf() is NOT a stamp site - upstream only continues
+//     the instance loop there (AP_AHRS_DCM.cpp ~854).
 //   - `_active_accel_instance` - purely a multi-instance bookkeeping index,
 //     meaningless with exactly one instance.
 //   - The dead `#if YAW_INDEPENDENT_DRIFT_CORRECTION` block - upstream's
@@ -1094,7 +1093,10 @@ public:
         }
         ga_b.normalize();
         if (ga_b.is_inf()) {
-            // wait for some non-zero acceleration information
+            // wait for some non-zero acceleration information.
+            // CPP-086: upstream only continues the instance loop here
+            // (AP_AHRS_DCM.cpp ~854) and does not assign _last_failure_ms.
+            // Do not stamp last_failure_ms_ at this numerical skip.
             return;
         }
 

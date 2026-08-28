@@ -52,7 +52,7 @@ inline constexpr AhrsPortItem kAhrsCompleteness[] = {
     {"AhrsBackend + EkfCoreBackend + Plane polymorphic ahrs", PortStatus::OnMain,
      "CPP-078-081: update_full_cycle, six getters, EkfCore adapter"},
     {"healthy / last_failure_ms", PortStatus::ThisSlice,
-     "AP_AHRS_DCM::healthy: no failure in the last 5s"},
+     "AP_AHRS_DCM::healthy: no failure in the last 5s; 4 upstream stamp sites; ga_b.is_inf() continue-only"},
     {"pre_arm_check", PortStatus::ThisSlice,
      "AP_AHRS_DCM::pre_arm_check: healthy() only; no GCS failure_msg"},
     {"groundspeed / groundspeed_vector from GPS", PortStatus::ThisSlice,
