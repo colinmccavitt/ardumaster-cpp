@@ -1237,3 +1237,168 @@ TEST_CASE("push_gps_sample/recall_gps_sample: recalls the correct sample under r
     // consumed by exactly one recall, none left stranded.
     REQUIRE(ekf.gps_buffer.empty());
 }
+
+// ============================================================================
+// CPP-069 PHASE 15: time-correct baro sample recall via ObsBuffer. See
+// ekf_core.hpp's "CPP-069, PHASE 15" banner (above EkfCore::baro_buffer)
+// and BaroSample's own banner (above its struct definition, near
+// GpsSample/MagSample) for the full scope/reasoning: the deliberately
+// narrower recall-against-caller's-own-now_s design (identical to CPP-067/
+// 068's own), the independently-derived buffer-size justification, the
+// real bare-scalar-vs-wrapper-struct tension this ticket resolves (unlike
+// GPS/mag, which already had a real struct to extend), why
+// fuse_baro_height() itself is kept completely unchanged, and why
+// recall_baro_sample() is the ONLY consumer of baro_buffer (verified: baro
+// has exactly one storedBaro.recall() call site upstream, simpler even
+// than mag's two-site situation).
+//
+// Test strategy - mirrors CPP-067/068's own shape exactly:
+//   22. BaroSample::set_time_s()/time_s() round-trip at millisecond
+//       resolution (the disclosed ObsElement::time_ms quantization).
+//   23. recall_baro_sample() on an empty buffer returns false and leaves
+//       `out` untouched.
+//   24. THE REAL, NEW CAPABILITY: push several baro readings at DIFFERENT,
+//       non-tick-aligned timestamps (arrival times that are not multiples
+//       of the 50Hz/20ms tick grid, modelling a real baro driver
+//       reporting on its own schedule, independent of the EKF's own),
+//       then confirm fusion at each 50Hz tick correctly recalls the
+//       most-recently-available reading and hands the unwrapped bare
+//       `ftype` to the completely-unchanged fuse_baro_height() - the test
+//       never calls push/recall at matching times, and never hand-feeds a
+//       fusion call "the right reading" the way every other
+//       fuse_baro_height() call above this section does.
+// ============================================================================
+
+TEST_CASE("BaroSample::set_time_s/time_s round-trips at millisecond resolution", "[ekf_core][fusion][baro_buffer]") {
+    BaroSample baro;
+    REQUIRE(static_cast<double>(baro.time_s()) == Catch::Approx(0.0));  // zero-initialized ObsElement::time_ms
+
+    baro.set_time_s(ftype(1.234));
+    REQUIRE(static_cast<double>(baro.time_s()) == Catch::Approx(1.234).margin(1e-6));
+
+    baro.set_time_s(ftype(0.0));
+    REQUIRE(static_cast<double>(baro.time_s()) == Catch::Approx(0.0));
+
+    // Defensive negative clamp (see BaroSample::set_time_s()'s own doc
+    // comment - now_s is never legitimately negative in this port's own
+    // convention, but the clamp avoids UB rather than assuming callers
+    // never pass one).
+    baro.set_time_s(ftype(-5.0));
+    REQUIRE(static_cast<double>(baro.time_s()) == Catch::Approx(0.0));
+}
+
+TEST_CASE("recall_baro_sample: returns false on an empty buffer", "[ekf_core][fusion][baro_buffer]") {
+    EkfCore ekf;
+    BaroSample out;
+    out.altitude_m = ftype(99.0);  // sentinel - must be untouched
+
+    REQUIRE_FALSE(ekf.recall_baro_sample(out, ftype(0.05)));
+    REQUIRE(ekf.baro_buffer.empty());
+    // Untouched on failure, matching ObsBuffer::recall()'s own documented
+    // contract (ekf_buffer.hpp).
+    REQUIRE(static_cast<double>(out.altitude_m) == Catch::Approx(99.0));
+}
+
+TEST_CASE("push_baro_sample/recall_baro_sample: recalls the correct sample under realistic "
+          "asynchronous (non-tick-aligned) baro arrival, without the caller hand-feeding "
+          "exactly the right reading synchronously, and hands the unwrapped bare ftype to the "
+          "unchanged fuse_baro_height()",
+          "[ekf_core][fusion][baro_buffer]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.covariance_init(ftype(0.01));
+
+    constexpr ftype kDt = ftype(0.02);  // 50Hz IMU tick, matching this port's own
+                                         // closed-loop-test precedent (ekf_closed_loop_test.cpp).
+
+    // Four baro readings, each carrying its own TRUE arrival timestamp -
+    // none of them a multiple of kDt (0.02s), i.e. none would ever land
+    // exactly on an IMU tick boundary (verified: 91, 293, 512, 741 mod 20
+    // are all nonzero). Each carries a distinct, tagged altitude_m value
+    // (deliberately close to the state's own initial altitude of 0, so
+    // every reading passes the real hgtTestRatio gate and actually fuses -
+    // this test is about recall correctness, not gate behavior, already
+    // covered above) so a successful recall can be matched back to exactly
+    // which reading it returned, not merely "some reading or other".
+    struct Reading {
+        ftype arrival_s;
+        ftype tag;
+        bool pushed = false;
+    };
+    std::array<Reading, 4> readings{{
+        {ftype(0.091), ftype(0.10)},
+        {ftype(0.293), ftype(0.20)},
+        {ftype(0.512), ftype(0.30)},
+        {ftype(0.741), ftype(0.40)},
+    }};
+
+    std::vector<ftype> recalled_tags;
+    std::vector<ftype> recall_latency_s;  // now_s at recall time - the sample's own arrival_s
+
+    for (int tick = 1; tick <= 60; ++tick) {  // 60 * 20ms = 1.2s, comfortably past the last reading
+        const ftype now_s = static_cast<ftype>(tick) * kDt;
+
+        // --- Sample arrival: modelled as an independently-scheduled event
+        // (upstream: readBaroData(), its own function, called on its own
+        // terms) that pushes into baro_buffer AS SOON AS it has arrived,
+        // stamped with its OWN true arrival time - NOT now_s, and NOT
+        // aligned to the tick grid at all. This is the realistic
+        // asynchronous-arrival part: the caller's EKF loop only gets a
+        // chance to call push_baro_sample() once per tick, but the sample
+        // it pushes carries whatever timestamp the baro driver itself
+        // reported. ---
+        for (Reading& reading : readings) {
+            if (!reading.pushed && now_s >= reading.arrival_s) {
+                BaroSample baro;
+                baro.set_time_s(reading.arrival_s);
+                baro.altitude_m = reading.tag;
+                ekf.push_baro_sample(baro);
+                reading.pushed = true;
+            }
+        }
+
+        // --- Fusion attempted EVERY tick (upstream: selectHeightForFusion()
+        // runs every EKF cycle) - recall_baro_sample() decides, purely from
+        // timestamps, whether a time-eligible reading exists yet. THE TEST
+        // NEVER TELLS IT WHICH TICK TO EXPECT A MATCH ON - that is exactly
+        // the capability this ticket adds (contrast with every
+        // fuse_baro_height(baro_altitude_m, ...) call above this section,
+        // which hands over a hand-built bare ftype directly, on the exact
+        // call the test chooses). ---
+        BaroSample recalled;
+        if (ekf.recall_baro_sample(recalled, now_s)) {
+            recalled_tags.push_back(recalled.altitude_m);
+            recall_latency_s.push_back(now_s - recalled.time_s());
+
+            // The full pipeline: unwrap the recalled BaroSample back to a
+            // bare ftype and fuse it exactly like any other reading -
+            // fuse_baro_height() itself is completely unchanged by this
+            // ticket (see BaroSample's own "THE BARE-SCALAR-VS-WRAPPER-
+            // STRUCT TENSION" banner).
+            ekf.fuse_baro_height(recalled.altitude_m, kDt, now_s);
+        }
+    }
+
+    // All 4 asynchronously-arriving readings were recalled exactly once
+    // each, in arrival order, none lost and none double-counted - the real
+    // acceptance criterion: fusion recalled the right reading at the right
+    // (later, tick-quantized) time without ever being handed it directly.
+    REQUIRE(recalled_tags.size() == 4);
+    REQUIRE(static_cast<double>(recalled_tags[0]) == Catch::Approx(0.10));
+    REQUIRE(static_cast<double>(recalled_tags[1]) == Catch::Approx(0.20));
+    REQUIRE(static_cast<double>(recalled_tags[2]) == Catch::Approx(0.30));
+    REQUIRE(static_cast<double>(recalled_tags[3]) == Catch::Approx(0.40));
+
+    // Each recall happened PROMPTLY after its sample's true arrival - at
+    // most one tick (kDt) of latency (the recalling tick is the first
+    // tick at/after arrival_s), and never before arrival (recall() would
+    // have left a strictly-newer element untouched - ekf_buffer.hpp).
+    for (const ftype latency : recall_latency_s) {
+        REQUIRE(static_cast<double>(latency) >= 0.0);
+        REQUIRE(static_cast<double>(latency) < static_cast<double>(kDt) + 1e-9);
+    }
+
+    // The buffer is drained back to empty - every pushed sample was
+    // consumed by exactly one recall, none left stranded.
+    REQUIRE(ekf.baro_buffer.empty());
+}

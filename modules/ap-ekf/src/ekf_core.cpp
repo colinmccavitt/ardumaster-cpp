@@ -2073,6 +2073,32 @@ bool EkfCore::fuse_baro_height(ftype baro_altitude_m, ftype dt_ekf_avg, ftype no
     return applied;
 }
 
+// CPP-069 phase 15. upstream: NavEKF3_core::readBaroData()'s
+// `storedBaro.push(baroDataNew);` (AP_NavEKF3_Measurements.cpp ~line 799).
+// See ekf_core.hpp's "CPP-069, PHASE 15" banner and push_baro_sample()'s
+// own doc comment for the full scope discussion - a thin pass-through,
+// identical in shape to push_gps_sample()/push_mag_sample() above, all the
+// real behavior lives in ObsBuffer::push() (ekf_buffer.hpp).
+void EkfCore::push_baro_sample(const BaroSample& sample) {
+    baro_buffer.push(sample);
+}
+
+// CPP-069 phase 15. upstream: selectHeightForFusion()'s
+// `baroDataToFuse = storedBaro.recall(baroDataDelayed,
+// imuDataDelayed.time_ms);` (AP_NavEKF3_PosVelFusion.cpp ~line 1207) - see
+// ekf_core.hpp's "CPP-069, PHASE 15" banner and recall_baro_sample()'s own
+// doc comment for the full now_s-vs-imuDataDelayed.time_ms discussion.
+// `now_s` is converted to milliseconds identically to recall_gps_sample()/
+// recall_mag_sample() above (clamp negative to zero before the cast,
+// matching BaroSample::set_time_s()'s own convention) - ObsBuffer::
+// recall()'s own 100ms window and dt arithmetic (ekf_buffer.hpp) then
+// decide the match.
+bool EkfCore::recall_baro_sample(BaroSample& out, ftype now_s) {
+    const ftype clamped_now_s = now_s > ftype(0) ? now_s : ftype(0);
+    const std::uint32_t now_ms = static_cast<std::uint32_t>(clamped_now_s * ftype(1000));
+    return baro_buffer.recall(out, now_ms);
+}
+
 // ============================================================================
 // CPP-063 PHASE 9: true airspeed / wind velocity fusion. See ekf_core.hpp's
 // "CPP-063, PHASE 9" banner for the full scope/exclusions/corrections

@@ -1840,6 +1840,14 @@ struct AccelSample {
 //     banner (above EkfCore::mag_buffer) for push_mag_sample()/
 //     recall_mag_sample(), the identical pattern applied to
 //     magnetometer fusion. baro/airspeed remain out of scope, unchanged.
+//     CPP-069 UPDATE (phase 15): the baro portion of this exclusion is
+//     now ALSO LIFTED - see this file's "CPP-069, PHASE 15" banner
+//     (above EkfCore::baro_buffer) for push_baro_sample()/
+//     recall_baro_sample(), the same pattern applied to baro height
+//     fusion (with a real, disclosed BaroSample-wrapper-vs-bare-scalar
+//     wrinkle that GPS/mag did not have - see BaroSample's own banner).
+//     airspeed remains out of scope, unchanged - a disclosed, likely
+//     next ticket, not this one.
 //   - The `waitingForGpsChecks`-gated startup logic (upstream:
 //     SelectVelPosFusion()'s own `&& !waitingForGpsChecks` conjunct on
 //     the recall-result line, verified directly, ~line 534) - ties to
@@ -1939,6 +1947,68 @@ struct MagSample : public ObsElement {
 
     // See GpsSample::set_time_s()/time_s() above - identical convention,
     // reused verbatim for MagSample.
+    void set_time_s(ftype t) {
+        const ftype clamped_s = t > ftype(0) ? t : ftype(0);
+        time_ms = static_cast<std::uint32_t>(clamped_s * ftype(1000));
+    }
+    [[nodiscard]] ftype time_s() const { return static_cast<ftype>(time_ms) / ftype(1000); }
+};
+
+// CPP-069 phase 15. upstream: baro_elements (AP_NavEKF3_core.h), the one
+// field (`hgt`) FuseVelPosNED()'s obsIndex==5 path actually reads via
+// baroDataDelayed.hgt - see AP_NavEKF3_Measurements.cpp readBaroData()
+// (~line 784, `baroDataNew.hgt = baro.get_altitude(selected_baro);`) and
+// AP_NavEKF3_PosVelFusion.cpp's baro branch (~line 1207,
+// `baroDataToFuse = storedBaro.recall(baroDataDelayed,
+// imuDataDelayed.time_ms);`), both verified directly this round (grepped
+// `storedBaro` across every AP_NavEKF3_*.cpp file in the pinned
+// Plane-4.7.0 worktree: exactly one push() call site and exactly one
+// recall() call site, confirming the ticket's own "simpler than
+// magnetometer's two-call-site situation" claim).
+//
+// THE BARE-SCALAR-VS-WRAPPER-STRUCT TENSION - A REAL DIFFERENCE FROM
+// CPP-067/068's OWN SITUATION, RESOLVED EXPLICITLY: CPP-062 (phase 8)
+// already checked GpsSample/MagSample's own precedent against baro's real
+// upstream shape and deliberately did NOT add a BaroSample struct back
+// then (see this file's "CPP-062, PHASE 8" banner, "BaroSample vs. a bare
+// scalar") - baro's one real upstream reading (`hgt`) is exactly ONE
+// ftype, with none of GpsSample's multi-field bundling or documented
+// convention decision to anchor a named type to, so fuse_baro_height()
+// takes a bare `ftype baro_altitude_m` directly, matching TECS's own
+// `TecsInputs::baro_altitude_m` field precedent. That decision is NOT
+// revisited or reversed here - fuse_baro_height()'s own signature stays
+// EXACTLY as it was (still a bare ftype, per this ticket's own explicit
+// instruction to leave it alone). But BUFFERING a bare scalar via
+// ObsBuffer<T, N> is impossible without SOME wrapping: ObsBuffer<T,N>
+// requires T to derive from ObsElement (ekf_buffer.hpp's own
+// static_assert), and a bare `ftype` cannot derive from anything - a
+// wrapper is not optional here the way it was an active choice for GPS/
+// mag (which already had a real multi-field struct to extend). This
+// struct exists SOLELY to satisfy that buffering-only requirement - a
+// single `ftype` reading plus the inherited ObsElement timestamp, nothing
+// else - not a reversal of CPP-062's own "no BaroSample" call for
+// fuse_baro_height() itself, but the minimum wrapping BUFFERING (as
+// opposed to fusing) a bare scalar actually demands. fuse_baro_height()
+// never sees a BaroSample; recall_baro_sample() (below, near
+// EkfCore::baro_buffer) unwraps it back to a bare `ftype` at the caller's
+// own call site, matching the identical "keep the existing fusion
+// function's signature untouched" precedent CPP-067/068 already
+// established for fuse_gps_velocity()/fuse_gps_position()/
+// fuse_magnetometer().
+//
+// Same set_time_s()/time_s() convention as GpsSample/MagSample above -
+// see GpsSample's own banner for the full ObsElement-time_ms-vs-seconds
+// discussion, reused verbatim here for the third time.
+struct BaroSample : public ObsElement {
+    // upstream: baroDataDelayed.hgt, positive-up metres - same sign
+    // convention as fuse_baro_height()'s own `baro_altitude_m` parameter
+    // (see this file's "CPP-062, PHASE 8" banner's sign-convention
+    // derivation); recall_baro_sample() hands this straight to
+    // fuse_baro_height() unchanged, no re-derivation here.
+    ftype altitude_m = ftype(0);
+
+    // See GpsSample::set_time_s()/time_s() above - identical convention,
+    // reused verbatim for BaroSample.
     void set_time_s(ftype t) {
         const ftype clamped_s = t > ftype(0) ? t : ftype(0);
         time_ms = static_cast<std::uint32_t>(clamped_s * ftype(1000));
@@ -2169,6 +2239,74 @@ public:
     // Public, matching gps_buffer's own established convention (direct
     // test inspection via mag_buffer.size()/.empty()).
     ObsBuffer<MagSample, kMagBufferCapacity> mag_buffer;
+    // ========================================================================
+
+    // ========================================================================
+    // CPP-069, PHASE 15 (this ticket): extends phase 13/14 (CPP-067/068)'s
+    // buffered, time-correct recall pattern to baro height fusion. Read
+    // directly before writing any code (per the ticket's own instruction):
+    // AP_NavEKF3_PosVelFusion.cpp's `baroDataToFuse = storedBaro.recall(
+    // baroDataDelayed, imuDataDelayed.time_ms);` (~line 1207, verified
+    // directly - matches the ticket's own ~1200-1215 estimate) and
+    // AP_NavEKF3_Measurements.cpp's `storedBaro.push(baroDataNew);` (~line
+    // 799, the last statement inside the baro-read rate-limiting `if`
+    // block - verified directly, matches the ticket's own ~790-806
+    // estimate).
+    //
+    // THE SINGLE storedBaro.recall() CALL SITE - VERIFIED DIRECTLY, NOT
+    // ASSUMED: grepped `storedBaro` across every AP_NavEKF3_*.cpp file in
+    // the pinned Plane-4.7.0 worktree - exactly ONE recall() call site
+    // (AP_NavEKF3_PosVelFusion.cpp ~line 1207, the one ported here),
+    // simpler than magnetometer's two-call-site situation CPP-068 had to
+    // check (SelectMagFusion() plus the separate learnMagBiasFromGPS()) -
+    // baro has no such second consumer anywhere in the source.
+    // recall_baro_sample() below is therefore the ONLY consumer of
+    // baro_buffer, so CPP-067's own destructive-recall/two-independent-
+    // callers correctness concern does not arise here either, matching
+    // GPS's own single-consumer precedent exactly.
+    //
+    // THE BARE-SCALAR-VS-WRAPPER-STRUCT TENSION: see BaroSample's own
+    // banner above (just above its struct definition, near GpsSample/
+    // MagSample) for the full discussion - a minimal BaroSample wrapper
+    // was introduced SOLELY to satisfy ObsBuffer<T,N>'s ObsElement
+    // requirement, while fuse_baro_height() itself keeps its existing
+    // bare-`ftype` signature completely unchanged, matching CPP-067/068's
+    // own "don't touch the existing fusion function" precedent exactly.
+    //
+    // BUFFER SIZE REASONING - INDEPENDENTLY RE-DERIVED FOR BARO, NOT
+    // COPIED FROM CPP-067/068's N=4: this port's own established
+    // closed-loop-test precedent (ekf_closed_loop_test.cpp's
+    // kBaroPeriodTicks = kTicksPerSecond/10 = 10Hz) is itself cited
+    // directly from the real upstream hgtAvg_ms=100 ("average number of
+    // msec between height measurements", AP_NavEKF3.h:502, CPP-062's own
+    // citation, re-verified this round) - the real, established baro rate
+    // this port has ever exercised baro fusion at, exactly the kind of
+    // real precedent the ticket asks this phase to independently derive
+    // from rather than copying GPS's or mag's N unexamined. Applying the
+    // IDENTICAL worst-case-plus-margin reasoning CPP-067/068 both used
+    // (up to 2 samples pushed back-to-back before an intervening
+    // successful recall - recall_baro_sample() is attempted every EKF
+    // tick, far faster than 10Hz - PLUS a 2x safety margin against a
+    // transient hiccup silently discarding valid readings via push()'s
+    // overwrite-oldest-at-capacity behavior) to baro's own real 100ms
+    // period independently lands on kBaroBufferCapacity=4 - the SAME
+    // numeral as kGpsBufferCapacity/kMagBufferCapacity, arrived at via
+    // baro's own real, cited 10Hz rate. This is, again, not a coincidence
+    // to be embarrassed by (CPP-068's own banner already made this point
+    // once for mag-vs-GPS): baro's own established 10Hz rate is
+    // numerically identical to mag's own established 10Hz rate (both cite
+    // a 100ms period), so the same worst-case-plus-margin arithmetic
+    // necessarily produces the same N - had baro's own cited upstream rate
+    // instead been, say, hgtAvg_ms=40 (25Hz), this independent derivation
+    // would have produced a different, larger N. A compile-time
+    // std::array size (no dynamic allocation, ADR-0012 decision 4), same
+    // as gps_buffer/mag_buffer.
+    static constexpr std::size_t kBaroBufferCapacity = 4;
+
+    // The actual buffer - see push_baro_sample()/recall_baro_sample()
+    // below. Public, matching gps_buffer/mag_buffer's own established
+    // convention (direct test inspection via baro_buffer.size()/.empty()).
+    ObsBuffer<BaroSample, kBaroBufferCapacity> baro_buffer;
     // ========================================================================
 
     // CPP-059 phase 5. upstream: innovMag/varInnovMag (NavEKF3_core
@@ -2653,6 +2791,58 @@ public:
     // that's the honest shape for a single-obsIndex primitive with exactly
     // one failure mode.
     bool fuse_baro_height(ftype baro_altitude_m, ftype dt_ekf_avg, ftype now_s = ftype(0));
+
+    // CPP-069 phase 15. upstream: NavEKF3_core::readBaroData()'s own
+    // `storedBaro.push(baroDataNew);` (AP_NavEKF3_Measurements.cpp ~line
+    // 799, verified directly) - the SAME new capability CPP-067/068 added
+    // for GPS/magnetometer, now for baro: callers push BaroSample readings
+    // into baro_buffer AS THEY ARRIVE, decoupled from the EKF's own
+    // per-tick fusion cadence, instead of having to hand fuse_baro_height()
+    // exactly the right reading synchronously every time (today's only
+    // option, still available unchanged - see this file's "CPP-069, PHASE
+    // 15" banner above baro_buffer for why both old and new paths are
+    // kept). The caller must stamp `sample`'s timestamp via
+    // BaroSample::set_time_s() before calling this (matching upstream's
+    // own `baroDataNew.time_ms = ...; ... storedBaro.push(baroDataNew)`
+    // sequence); this function does not stamp it itself.
+    void push_baro_sample(const BaroSample& sample);
+
+    // CPP-069 phase 15. upstream: selectHeightForFusion()'s own
+    // `baroDataToFuse = storedBaro.recall(baroDataDelayed,
+    // imuDataDelayed.time_ms);` (AP_NavEKF3_PosVelFusion.cpp ~line 1207,
+    // verified directly) - recalls the correct buffered sample by
+    // timestamp using `now_s`, THIS PORT'S OWN CALLER-SUPPLIED CURRENT
+    // TIME (ADR-0012/CPP-058 convention, identical to
+    // recall_gps_sample()'s/recall_mag_sample()'s own
+    // now_s-vs-imuDataDelayed.time_ms simplification - see this file's
+    // "CPP-069, PHASE 15" banner).
+    //
+    // Like recall_mag_sample() (and unlike recall_gps_sample(), which
+    // feeds ONE recalled sample to BOTH fuse_gps_velocity()/
+    // fuse_gps_position()), baro fusion has only ONE consumer of the
+    // recalled sample (fuse_baro_height() itself) - so there is no "two
+    // independent callers draining the same queue" hazard to design
+    // around here either. This is still deliberately a SEPARATE, ADDITIVE
+    // primitive rather than a change to fuse_baro_height()'s own
+    // signature/body, matching CPP-067/068's own kept-vs-replace reasoning
+    // exactly: zero of this port's existing fuse_baro_height() call sites
+    // (ekf_fusion_test.cpp, ekf_closed_loop_test.cpp) need to change.
+    //
+    // Unwraps the recalled BaroSample back to a bare `ftype` via
+    // `out.altitude_m` at the caller's own call site (see BaroSample's own
+    // banner "THE BARE-SCALAR-VS-WRAPPER-STRUCT TENSION") - `out` itself
+    // remains the wrapper type (matching recall_gps_sample()'s/
+    // recall_mag_sample()'s own `T& out` signature shape), the caller
+    // reads `out.altitude_m` to get the bare scalar fuse_baro_height()
+    // actually wants.
+    //
+    // Returns false (leaving `out` untouched) if baro_buffer has no
+    // sample within its hardcoded 100ms window of `now_s` (ekf_buffer.hpp's
+    // own upstream-derived recall() window) - matching upstream's own
+    // control flow: selectHeightForFusion()'s `baroDataToFuse` false means
+    // the baro branch's fusion attempt for the tick is skipped entirely,
+    // not merely "the gate failed inside fuse_baro_height()".
+    bool recall_baro_sample(BaroSample& out, ftype now_s);
 
     // CPP-063 phase 9. upstream: tasTestRatio, AP_NavEKF3_AirDataFusion.cpp
     // ~line 108-110 - `sq(innovVtas) / (sq(MAX(0.01*_tasInnovGate,1.0)) *

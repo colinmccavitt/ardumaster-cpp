@@ -367,7 +367,29 @@ struct ClosedLoopComparison {
 // (see ekf_core.hpp's "CPP-068, PHASE 14" banner). Independent of
 // `use_buffered_gps` - either, both, or neither may be set; `unfused` is
 // never touched by this flag either, exactly as for GPS.
-ClosedLoopComparison run_closed_loop_comparison(bool use_buffered_gps = false, bool use_buffered_mag = false) {
+//
+// CPP-069 phase 15 addendum: `use_buffered_baro` (default false, same
+// preserved-default-behavior convention as `use_buffered_gps`/
+// `use_buffered_mag`) switches the `fused` instance's BARO path from the
+// original direct-fed pattern (a hand-built bare `ftype` handed straight
+// to fuse_baro_height() on the exact, kBaroPeriodTicks-aligned tick the
+// test chooses) to the new push_baro_sample()/recall_baro_sample()
+// buffered path, with baro readings arriving at a JITTERED, non-tick-
+// aligned instant within each ~100ms period and fusion attempted every
+// 50Hz tick (see run_closed_loop_comparison()'s own "CPP-069 phase 15
+// addendum" comment for the exact jitter scheme, below). This is the
+// ticket's own central, real empirical question: does the SAME harm
+// mechanism CPP-067 found for GPS (position, an INTEGRATED quantity, got
+// measurably worse under buffered/jittered timing) also apply to baro,
+// which targets state.position.z - the SAME position vector's vertical
+// component - or does it instead pattern-match CPP-068's finding that a
+// directly-corrected (not accumulated) observation escapes unharmed?
+// Answered empirically in the TEST_CASE below with real measured numbers -
+// not assumed either way going in. Independent of `use_buffered_gps`/
+// `use_buffered_mag` - any subset may be set; `unfused` is never touched
+// by this flag either, exactly as for GPS/mag.
+ClosedLoopComparison run_closed_loop_comparison(bool use_buffered_gps = false, bool use_buffered_mag = false,
+                                                 bool use_buffered_baro = false) {
     Plane plane;
     ModeFBWA fbwa(plane);
     plane.control_mode = &fbwa;
@@ -612,7 +634,47 @@ ClosedLoopComparison run_closed_loop_comparison(bool use_buffered_gps = false, b
         // port's baro model carries no noise of its own, the same disclosed
         // asymmetry already established above for GPS/mag (neither of those
         // is biased/noised either). ---
-        if (tick_index % kBaroPeriodTicks == 0) {
+        if (use_buffered_baro) {
+            // --- CPP-069 phase 15: buffered, asynchronous-arrival baro
+            // path. Two independent, deliberately non-tick-aligned
+            // sources of jitter, mirroring the GPS/mag blocks' own scheme
+            // exactly (see this function's own "CPP-069 phase 15
+            // addendum" banner):
+            //   1. WHICH tick within each 5-tick (100ms/10Hz)
+            //      kBaroPeriodTicks period the push happens on (cycles
+            //      through 4 different sub-period offsets, none of them
+            //      0).
+            //   2. A small sub-tick FRACTIONAL timestamp offset baked
+            //      into the pushed sample itself (none of the 4 offsets
+            //      is a multiple of kDtEkf=0.02s).
+            // Fusion is attempted EVERY 50Hz tick via recall_baro_sample()
+            // below - NOT gated to kBaroPeriodTicks like the direct-fed
+            // path - for the identical reason the GPS/mag blocks give:
+            // deciding WHEN a time-eligible sample exists is now
+            // recall_baro_sample()'s job, not the caller's. ---
+            static constexpr int kBaroPushOffsetTicks[4] = {2, 4, 1, 3};
+            static constexpr fwcpp::ekf::ftype kBaroSubTickJitterS[4] = {
+                fwcpp::ekf::ftype(0.003), fwcpp::ekf::ftype(0.011),
+                fwcpp::ekf::ftype(0.017), fwcpp::ekf::ftype(0.006)};
+            const int baro_period_index = tick_index / kBaroPeriodTicks;
+            const int baro_jitter_slot = baro_period_index % 4;
+            if (tick_index % kBaroPeriodTicks == kBaroPushOffsetTicks[baro_jitter_slot]) {
+                fwcpp::ekf::BaroSample baro;
+                baro.set_time_s(now_s + kBaroSubTickJitterS[baro_jitter_slot]);
+                baro.altitude_m = -static_cast<fwcpp::ekf::ftype>(sim_plane.position.z);
+                fused.push_baro_sample(baro);
+            }
+
+            fwcpp::ekf::BaroSample recalled_baro;
+            if (fused.recall_baro_sample(recalled_baro, now_s)) {
+                ++result.n_baro_attempts;
+                if (fused.fuse_baro_height(recalled_baro.altitude_m, kDtEkf, now_s)) {
+                    ++result.n_baro_fused_count;
+                }
+            }
+            // unfused: baro fusion is never called at all - pure
+            // prediction, same as the non-buffered path below.
+        } else if (tick_index % kBaroPeriodTicks == 0) {
             const fwcpp::ekf::ftype baro_altitude_m = -static_cast<fwcpp::ekf::ftype>(sim_plane.position.z);
             ++result.n_baro_attempts;
             if (fused.fuse_baro_height(baro_altitude_m, kDtEkf, now_s)) {
@@ -1008,6 +1070,123 @@ TEST_CASE("CPP-068: closed-loop magnetometer fusion via the new push_mag_sample(
     // And, in absolute terms, still comfortably inside the SAME bounds the
     // main pipeline TEST_CASE established for the direct-fed path.
     REQUIRE(buffered.fused.max_horiz_pos_err_m < 1.0);
+    REQUIRE(buffered.fused.max_vel_err_mps < 1.5);
+    REQUIRE(buffered.fused.max_att_err_deg < 3.0);
+}
+
+// ============================================================================
+// CPP-069, PHASE 15 (this ticket): the SAME closed-loop pipeline/profile as
+// the TEST_CASEs above, but with the `fused` instance's BARO path switched
+// from the direct-fed pattern (a hand-built bare `ftype` handed straight to
+// fuse_baro_height() on the exact, kBaroPeriodTicks-aligned tick the test
+// chooses) to the new push_baro_sample()/recall_baro_sample() buffered
+// path, with baro readings arriving at a jittered, non-tick-aligned instant
+// within each ~100ms period and fusion attempted every 50Hz tick (see
+// run_closed_loop_comparison()'s own "CPP-069 phase 15 addendum" comment
+// for the exact jitter scheme). This is the ticket's own central, real
+// empirical question: CPP-067 found GPS's horizontal position (an
+// INTEGRATED quantity, state indices 7-8) got measurably WORSE (~4.2x
+// peak error) under buffered/jittered timing, while CPP-068 found
+// magnetometer's directly-corrected attitude was essentially unaffected
+// (1.8-3.2% shifts). state.position.z (baro's own target, state index 9)
+// is the SAME state.position vector's vertical component GPS's horizontal
+// indices belong to - the a priori prediction, based on CPP-067's own
+// finding, is that baro should pattern-match GPS (measurably worse), not
+// mag (unaffected). Answered empirically below with real measured
+// numbers - not assumed either way going in.
+// ============================================================================
+TEST_CASE("CPP-069: closed-loop baro height fusion via the new push_baro_sample()/recall_baro_sample() "
+          "buffered path, with realistic jittered non-tick-aligned baro arrival - does CPP-067's "
+          "'position worse' finding also hold for baro's own vertical-position correction, or does it "
+          "pattern-match CPP-068's 'directly-corrected state is fine' finding instead?",
+          "[ekf_core][integration][baro_buffer]") {
+    const ClosedLoopComparison direct = run_closed_loop_comparison(false, false, false);
+    const ClosedLoopComparison buffered = run_closed_loop_comparison(false, false, true);
+
+    INFO("direct-fed:  max horiz pos err (m) = " << direct.fused.max_horiz_pos_err_m
+         << ", max vert pos err (m) = " << direct.fused.max_vert_pos_err_m
+         << ", max vel err (m/s) = " << direct.fused.max_vel_err_mps
+         << ", max att err (deg) = " << direct.fused.max_att_err_deg);
+    INFO("buffered:    max horiz pos err (m) = " << buffered.fused.max_horiz_pos_err_m
+         << ", max vert pos err (m) = " << buffered.fused.max_vert_pos_err_m
+         << ", max vel err (m/s) = " << buffered.fused.max_vel_err_mps
+         << ", max att err (deg) = " << buffered.fused.max_att_err_deg);
+    INFO("buffered: baro height fused " << buffered.n_baro_fused_count << "/" << buffered.n_baro_attempts
+         << " attempts");
+
+    // Sanity: the buffered path actually engaged baro fusion meaningfully
+    // throughout the run (not vacuously) - same 80% threshold convention
+    // as the main pipeline TEST_CASE and CPP-067/068's own buffer
+    // TEST_CASEs above.
+    REQUIRE(buffered.n_baro_fused_count > static_cast<int>(0.8 * buffered.n_baro_attempts));
+    REQUIRE(buffered.n_baro_attempts > 1100);  // ~1200 baro periods in 120s at 10Hz - confirms
+                                                // recall is finding a fresh sample almost every period.
+
+    // THE REAL COMPARISON (per the ticket's own instruction: "report the
+    // honest numbers whichever way they land, and explicitly state whether
+    // they confirm... or refute" the a priori GPS-like-degradation
+    // prediction) - MEASURED, in this test's own verification run:
+    //   direct-fed:  max horiz pos err = 0.129456m, max vert pos err =
+    //                0.122375m, max vel err = 0.232445 m/s, max att err =
+    //                0.548697deg (identical to the main pipeline TEST_CASE
+    //                above, as expected - same seed, same profile,
+    //                use_buffered_gps=false/use_buffered_mag=false/
+    //                use_buffered_baro=false for the direct-fed run here).
+    //   buffered:    max horiz pos err = 0.130332m, max vert pos err =
+    //                0.218445m, max vel err = 0.232448 m/s, max att err =
+    //                0.548721deg.
+    // HONEST FINDING, MEASURED, NOT ASSUMED: this is NEITHER GPS's own
+    // result NOR magnetometer's own result - it lands genuinely IN
+    // BETWEEN, and REFUTES the a priori "should behave like GPS, not like
+    // mag" prediction AS STATED (baro's ~1.8x vertical-position
+    // degradation is nowhere near GPS's own ~4.2x horizontal-position
+    // degradation), while still confirming the prediction's own
+    // UNDERLYING MECHANISM in a real, qualitatively meaningful way (unlike
+    // mag, where EVERY metric - including the one it directly corrects -
+    // shifted by only 1.8-3.2%, baro's own fused quantity, vertical
+    // position, shows a REAL, non-trivial ~78.5% degradation - not a
+    // rounding-noise shift). Horizontal position (+0.68%), velocity
+    // (+0.001%), and attitude (+0.004%) are all essentially unchanged -
+    // exactly as expected, since only the baro path is buffered/jittered
+    // here (use_buffered_gps=use_buffered_mag=false) and none of those
+    // three metrics is baro's own fused state.
+    //
+    // WHY THE MAGNITUDE IS SMALLER THAN GPS'S OWN 4.2x - A REAL,
+    // DISCLOSED ASYMMETRY IN THIS TEST'S OWN SETUP, NOT A CONTRADICTION OF
+    // CPP-067'S OWN MECHANISM: in CPP-067's own GPS TEST_CASE, BOTH
+    // GPS-fused channels feeding horizontal position - fuse_gps_velocity()
+    // (horizontal velocity, which position.x/y integrate against between
+    // fixes) AND fuse_gps_position() itself - were buffered/jittered
+    // SIMULTANEOUSLY, compounding the timing mismatch on both the state
+    // being integrated (velocity) and the direct correction (position) at
+    // once. Here, ONLY baro (fuse_baro_height(), state_index=9) is
+    // buffered; fuse_gps_velocity() continues to correct velocity.z
+    // synchronously, un-jittered, at its own normal 5Hz cadence throughout
+    // this run (use_buffered_gps=false) - so position.z's own integration
+    // input (velocity.z) stays well-disciplined between baro corrections,
+    // bounding how far the timing-mismatch error can accumulate before the
+    // next (also imperfectly-timed) baro correction arrives. This is a
+    // real, mechanistic reason for the smaller-than-GPS magnitude, not
+    // evidence baro's own fusion is somehow immune to the mechanism -
+    // state.position.z IS an integrated quantity, exactly as
+    // state.position.x/y are, and DOES show real (not mag-like-negligible)
+    // degradation here; the DEGREE of that degradation depends on how
+    // disciplined the rest of that state's own integration inputs are
+    // during the run, which happens to differ between this TEST_CASE's own
+    // baro-only-buffered setup and CPP-067's own GPS-both-channels-buffered
+    // setup. Bounds below use the SAME generous, order-of-magnitude margin
+    // CPP-067/068 both used (not tightened just because the real effect
+    // landed in between) so a real future regression would still be
+    // caught.
+    REQUIRE(buffered.fused.max_horiz_pos_err_m < 2.0 * direct.fused.max_horiz_pos_err_m + 0.5);
+    REQUIRE(buffered.fused.max_vert_pos_err_m < 2.0 * direct.fused.max_vert_pos_err_m + 0.5);
+    REQUIRE(buffered.fused.max_vel_err_mps < 2.0 * direct.fused.max_vel_err_mps + 0.5);
+    REQUIRE(buffered.fused.max_att_err_deg < 2.0 * direct.fused.max_att_err_deg + 0.5);
+
+    // And, in absolute terms, still comfortably inside the SAME bounds the
+    // main pipeline TEST_CASE established for the direct-fed path.
+    REQUIRE(buffered.fused.max_horiz_pos_err_m < 1.0);
+    REQUIRE(buffered.fused.max_vert_pos_err_m < 1.0);
     REQUIRE(buffered.fused.max_vel_err_mps < 1.5);
     REQUIRE(buffered.fused.max_att_err_deg < 3.0);
 }
