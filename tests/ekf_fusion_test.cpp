@@ -107,6 +107,7 @@
 
 #include <array>
 #include <cmath>
+#include <vector>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -1078,4 +1079,161 @@ TEST_CASE("EkfCore: a sustained baro outage past the 10.0s hgtRetryTimeMode0_ms 
 
     const bool applied_after = ekf.fuse_baro_height(baro_altitude_after, dt, elapsed_s);
     REQUIRE(applied_after);
+}
+
+
+// ============================================================================
+// CPP-067 PHASE 13: time-correct GPS sample recall via ObsBuffer. See
+// ekf_core.hpp's "CPP-067, PHASE 13" banner for the full scope/reasoning
+// (the deliberately-narrower recall-against-caller's-own-now_s design,
+// the buffer-size justification, and why fuse_gps_velocity()/
+// fuse_gps_position() above are kept completely unchanged - the new
+// capability is delivered entirely by the two additions exercised here:
+// push_gps_sample()/recall_gps_sample()).
+//
+// Test strategy (per the ticket's own acceptance criteria):
+//   19. GpsSample::set_time_s()/time_s() round-trip at millisecond
+//       resolution (the disclosed ObsElement::time_ms quantization).
+//   20. recall_gps_sample() on an empty buffer returns false and leaves
+//       `out` untouched.
+//   21. THE REAL, NEW CAPABILITY: push several GPS samples at DIFFERENT,
+//       non-tick-aligned timestamps (arrival times that are not multiples
+//       of the 50Hz/20ms tick grid - simulating a real GPS driver
+//       callback firing asynchronously relative to the EKF's own
+//       scheduling, exactly as upstream's readGpsData()/
+//       SelectVelPosFusion() are two independently-scheduled functions),
+//       then confirm fusion at each 50Hz tick correctly recalls the
+//       most-recently-available sample - the test never calls
+//       push/recall at matching times, and never hand-feeds a fusion
+//       call "the right sample" the way every fuse_gps_velocity()/
+//       fuse_gps_position() call above this section does.
+// ============================================================================
+
+TEST_CASE("GpsSample::set_time_s/time_s round-trips at millisecond resolution", "[ekf_core][fusion][gps_buffer]") {
+    GpsSample gps;
+    REQUIRE(static_cast<double>(gps.time_s()) == Catch::Approx(0.0));  // zero-initialized ObsElement::time_ms
+
+    gps.set_time_s(ftype(1.234));
+    REQUIRE(static_cast<double>(gps.time_s()) == Catch::Approx(1.234).margin(1e-6));
+
+    gps.set_time_s(ftype(0.0));
+    REQUIRE(static_cast<double>(gps.time_s()) == Catch::Approx(0.0));
+
+    // Defensive negative clamp (see GpsSample::set_time_s()'s own doc
+    // comment - now_s is never legitimately negative in this port's own
+    // convention, but the clamp avoids UB rather than assuming callers
+    // never pass one).
+    gps.set_time_s(ftype(-5.0));
+    REQUIRE(static_cast<double>(gps.time_s()) == Catch::Approx(0.0));
+}
+
+TEST_CASE("recall_gps_sample: returns false on an empty buffer", "[ekf_core][fusion][gps_buffer]") {
+    EkfCore ekf;
+    GpsSample out;
+    out.velocity_ned = Vector3F(ftype(99.0), ftype(99.0), ftype(99.0));  // sentinel - must be untouched
+
+    REQUIRE_FALSE(ekf.recall_gps_sample(out, ftype(0.05)));
+    REQUIRE(ekf.gps_buffer.empty());
+    // Untouched on failure, matching ObsBuffer::recall()'s own documented
+    // contract (ekf_buffer.hpp).
+    REQUIRE(static_cast<double>(out.velocity_ned.x) == Catch::Approx(99.0));
+}
+
+TEST_CASE("push_gps_sample/recall_gps_sample: recalls the correct sample under realistic "
+          "asynchronous (non-tick-aligned) GPS arrival, without the caller hand-feeding "
+          "exactly the right sample synchronously",
+          "[ekf_core][fusion][gps_buffer]") {
+    EkfCore ekf;
+    ekf.state.quat = QuaternionF(ftype(1), ftype(0), ftype(0), ftype(0));
+    ekf.covariance_init(ftype(0.01));
+
+    constexpr ftype kDt = ftype(0.02);  // 50Hz IMU tick, matching this port's own
+                                         // closed-loop-test precedent (ekf_closed_loop_test.cpp).
+
+    // Four GPS fixes, each carrying its own TRUE arrival timestamp - none
+    // of them a multiple of kDt (0.02s), i.e. none would ever land exactly
+    // on an IMU tick boundary (verified: 83, 287, 501, 734 mod 20 are all
+    // nonzero). Each carries a distinct, tagged velocity_ned.x/position_ne.x
+    // value so a successful recall can be matched back to exactly which
+    // fix it returned, not merely "some fix or other".
+    struct Fix {
+        ftype arrival_s;
+        ftype tag;
+        bool pushed = false;
+    };
+    std::array<Fix, 4> fixes{{
+        {ftype(0.083), ftype(1.0)},
+        {ftype(0.287), ftype(2.0)},
+        {ftype(0.501), ftype(3.0)},
+        {ftype(0.734), ftype(4.0)},
+    }};
+
+    std::vector<ftype> recalled_tags;
+    std::vector<ftype> recall_latency_s;  // now_s at recall time - the sample's own arrival_s
+
+    for (int tick = 1; tick <= 60; ++tick) {  // 60 * 20ms = 1.2s, comfortably past the last fix
+        const ftype now_s = static_cast<ftype>(tick) * kDt;
+
+        // --- Sample arrival: modelled as an independently-scheduled event
+        // (upstream: readGpsData(), its own function, called on its own
+        // terms) that pushes into gps_buffer AS SOON AS it has arrived,
+        // stamped with its OWN true arrival time - NOT now_s, and NOT
+        // aligned to the tick grid at all. This is the realistic
+        // asynchronous-arrival part: the caller's EKF loop only gets a
+        // chance to call push_gps_sample() once per tick, but the sample
+        // it pushes carries whatever timestamp the GPS itself reported. ---
+        for (Fix& fix : fixes) {
+            if (!fix.pushed && now_s >= fix.arrival_s) {
+                GpsSample gps;
+                gps.set_time_s(fix.arrival_s);
+                gps.velocity_ned = Vector3F(fix.tag, ftype(0), ftype(0));
+                gps.position_ne = Vector2F(fix.tag, ftype(0));
+                ekf.push_gps_sample(gps);
+                fix.pushed = true;
+            }
+        }
+
+        // --- Fusion attempted EVERY tick (upstream: SelectVelPosFusion()
+        // runs every EKF cycle) - recall_gps_sample() decides, purely from
+        // timestamps, whether a time-eligible sample exists yet. THE TEST
+        // NEVER TELLS IT WHICH TICK TO EXPECT A MATCH ON - that is exactly
+        // the capability this ticket adds (contrast with every
+        // fuse_gps_velocity(gps, ...)/fuse_gps_position(gps, ...) call
+        // above this section, which hands over a hand-built GpsSample
+        // directly, on the exact call the test chooses). ---
+        GpsSample recalled;
+        if (ekf.recall_gps_sample(recalled, now_s)) {
+            recalled_tags.push_back(recalled.velocity_ned.x);
+            recall_latency_s.push_back(now_s - recalled.time_s());
+
+            // The full pipeline: fuse the recalled sample exactly like any
+            // other GpsSample - fuse_gps_velocity()/fuse_gps_position()
+            // themselves are completely unchanged by this ticket.
+            ekf.fuse_gps_velocity(recalled, kDt, now_s);
+            ekf.fuse_gps_position(recalled, kDt, now_s);
+        }
+    }
+
+    // All 4 asynchronously-arriving fixes were recalled exactly once each,
+    // in arrival order, none lost and none double-counted - the real
+    // acceptance criterion: fusion recalled the right sample at the right
+    // (later, tick-quantized) time without ever being handed it directly.
+    REQUIRE(recalled_tags.size() == 4);
+    REQUIRE(static_cast<double>(recalled_tags[0]) == Catch::Approx(1.0));
+    REQUIRE(static_cast<double>(recalled_tags[1]) == Catch::Approx(2.0));
+    REQUIRE(static_cast<double>(recalled_tags[2]) == Catch::Approx(3.0));
+    REQUIRE(static_cast<double>(recalled_tags[3]) == Catch::Approx(4.0));
+
+    // Each recall happened PROMPTLY after its sample's true arrival - at
+    // most one tick (kDt) of latency (the recalling tick is the first
+    // tick at/after arrival_s), and never before arrival (recall() would
+    // have left a strictly-newer element untouched - ekf_buffer.hpp).
+    for (const ftype latency : recall_latency_s) {
+        REQUIRE(static_cast<double>(latency) >= 0.0);
+        REQUIRE(static_cast<double>(latency) < static_cast<double>(kDt) + 1e-9);
+    }
+
+    // The buffer is drained back to empty - every pushed sample was
+    // consumed by exactly one recall, none left stranded.
+    REQUIRE(ekf.gps_buffer.empty());
 }

@@ -1549,6 +1549,38 @@ int EkfCore::fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg, ftype now
     return n_fused;
 }
 
+// CPP-067 phase 13. upstream: NavEKF3_core::readGpsData()'s
+// `storedGPS.push(gpsDataNew);` (AP_NavEKF3_Measurements.cpp ~line 733).
+// See ekf_core.hpp's "CPP-067, PHASE 13" banner and push_gps_sample()'s
+// own doc comment for the full scope discussion - a thin pass-through,
+// all the real behavior lives in ObsBuffer::push() (ekf_buffer.hpp).
+void EkfCore::push_gps_sample(const GpsSample& sample) {
+    gps_buffer.push(sample);
+}
+
+// CPP-067 phase 13. upstream: NavEKF3_core::SelectVelPosFusion()'s
+// `gpsDataToFuse = storedGPS.recall(gpsDataDelayed,
+// imuDataDelayed.time_ms) && !waitingForGpsChecks;` (AP_NavEKF3_
+// PosVelFusion.cpp ~line 534) - see ekf_core.hpp's "CPP-067, PHASE 13"
+// banner and recall_gps_sample()'s own doc comment for the full
+// now_s-vs-imuDataDelayed.time_ms discussion and why this is ONE combined
+// recall primitive rather than two independently-recalling functions.
+//
+// `now_s` is converted to milliseconds the same way GpsSample::
+// set_time_s() converts a timestamp INTO the buffer (clamp negative to
+// zero before the cast, avoiding an implementation-defined/UB-adjacent
+// negative-float-to-uint32_t conversion - `now_s` is never legitimately
+// negative in this port's own elapsed-simulated-time convention, so this
+// is a defensive clamp, not a real case this port expects to hit) -
+// ObsBuffer::recall()'s own 100ms window and dt arithmetic
+// (ekf_buffer.hpp) then decide the match, exactly as it would for
+// upstream's real millisecond-resolution imuDataDelayed.time_ms query.
+bool EkfCore::recall_gps_sample(GpsSample& out, ftype now_s) {
+    const ftype clamped_now_s = now_s > ftype(0) ? now_s : ftype(0);
+    const std::uint32_t now_ms = static_cast<std::uint32_t>(clamped_now_s * ftype(1000));
+    return gps_buffer.recall(out, now_ms);
+}
+
 // ============================================================================
 // CPP-059 PHASE 5: 3-axis magnetometer fusion. See ekf_core.hpp's
 // "CPP-059, PHASE 5" banner for the full scope/exclusions/corrections

@@ -1694,6 +1694,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include <fwcpp/ekf/ekf_buffer.hpp>
 #include <fwcpp/math/matrix3.hpp>
 #include <fwcpp/math/quaternion.hpp>
 #include <fwcpp/math/scalar.hpp>
@@ -1743,6 +1744,106 @@ struct AccelSample {
     ftype delta_velocity_dt = 0;  // upstream: imuDataDelayed.delVelDT, s
 };
 
+// ============================================================================
+// CPP-067, PHASE 13 (this ticket): time-correct GPS sample recall via
+// ObsBuffer. Phase 12 (CPP-066) built fwcpp::ekf::ObsBuffer<T,N>/
+// ImuBuffer<T,N> (ekf_buffer.hpp) as standalone, UNWIRED infrastructure -
+// this is its FIRST real consumer. Read directly before writing any code
+// (per the ticket's own instruction): AP_NavEKF3_Measurements.cpp
+// readGpsData() (~line 560-735, storedGPS.push(gpsDataNew) at the very end
+// of the `if (validOrigin && !waitingForGpsChecks)` block, ~line 733) and
+// AP_NavEKF3_PosVelFusion.cpp SelectVelPosFusion()'s `gpsDataToFuse =
+// storedGPS.recall(gpsDataDelayed, imuDataDelayed.time_ms) &&
+// !waitingForGpsChecks;` (~line 534) and its surrounding context
+// (~line 500-560). Both verified to match the ticket's own line-number
+// summary closely enough that no correction to those citations is needed.
+//
+// THE SCOPING DECISION ALREADY MADE (not revisited here): upstream's FULL
+// architecture - EkfCore's own state representing "now minus a fusion
+// delay", plus the output-state complementary-filter blending
+// (AP_NavEKF3_Outputs.cpp) that extrapolates the delayed state back to
+// present time for consumption - is a much larger, multi-phase
+// undertaking, deliberately deferred. This phase does something
+// narrower: use ObsBuffer to make GPS fusion recall the CORRECT sample by
+// timestamp relative to the CALLER'S OWN CURRENT TIME (`now_s`, this
+// port's existing CPP-058 convention), not upstream's real delayed-IMU-
+// time-horizon (`imuDataDelayed.time_ms`, which does not exist here). This
+// is a real, disclosed simplification relative to upstream's true
+// delayed-horizon recall - but a genuine, meaningful improvement over what
+// existed before this phase (fuse_gps_velocity()/fuse_gps_position()
+// could only fuse a GpsSample the caller handed them synchronously, on
+// the exact tick they wanted it fused, with zero tolerance for GPS
+// arriving asynchronously relative to the IMU tick).
+//
+// WHAT THIS PHASE BUILDS:
+//   - GpsSample now derives from ObsElement and gains time_s()/
+//     set_time_s() (see GpsSample's own comment below for the real,
+//     disclosed ms-vs-seconds tension this resolves).
+//   - EkfCore::gps_buffer, an ObsBuffer<GpsSample, kGpsBufferCapacity>
+//     member (see EkfCore's own comment next to it for the buffer-size
+//     reasoning: a realistic 5-10Hz GPS rate, this port's own
+//     kGpsPeriodTicks closed-loop-test precedent, times a buffering
+//     window sized to tolerate realistic push/recall cadence mismatch).
+//   - EkfCore::push_gps_sample(const GpsSample&): pushes a
+//     caller-timestamped sample into gps_buffer, decoupled from the
+//     EKF's own per-tick fusion cadence - the new thing callers do AS
+//     SAMPLES ARRIVE.
+//   - EkfCore::recall_gps_sample(GpsSample&, ftype now_s): recalls the
+//     time-correct sample from gps_buffer using now_s. See its own
+//     comment for why this is ONE combined recall primitive rather than
+//     two independently-recalling "fuse_gps_velocity_buffered()"/
+//     "fuse_gps_position_buffered()" methods (recall() is destructive;
+//     upstream itself recalls once per tick and feeds the one result to
+//     both the velocity and position fusion paths - two independent
+//     recalls against the same shared queue would be a real correctness
+//     bug, not a style choice).
+//
+// THE KEEP-VS-REPLACE DECISION FOR fuse_gps_velocity()/fuse_gps_position():
+// KEPT UNCHANGED, verbatim, both signature and behavior. ~20 existing call
+// sites across ekf_fusion_test.cpp/ekf_closed_loop_test.cpp call these
+// directly with a hand-built GpsSample - every one of them keeps compiling
+// and passing byte-for-byte, unmodified, with zero churn. The new
+// capability is delivered entirely through the two ADDITIONS above
+// (push_gps_sample()/recall_gps_sample()): a caller who wants buffered,
+// asynchronous-arrival-tolerant GPS fusion calls recall_gps_sample() once
+// per tick and, on success, feeds the recalled GpsSample to the SAME
+// unchanged fuse_gps_velocity()/fuse_gps_position() every other caller
+// already uses. This is the option the ticket itself asks to weigh
+// ("pick whichever delivers the real capability with the least
+// unnecessary churn") - replacing the two functions' signatures instead
+// would have forced every existing test to route through a buffer it
+// doesn't need, for no behavioral benefit.
+//
+// EXPLICITLY OUT OF SCOPE (each with its real upstream trigger, per the
+// ticket's own acceptance criterion):
+//   - Redefining EkfCore's own state/covariance as representing a delayed
+//     time horizon rather than "now" (upstream: the whole
+//     imuDataDelayed/output-complementary-filter mechanism) - the full
+//     architectural redesign, deliberately deferred to a future phase.
+//   - IMU sample buffering/downsampling/multi-instance switching
+//     (upstream: imuDataDownSampledNew, multiple IMU instances/lanes) -
+//     already established as moot for this port by ADR-0012's
+//     explicit-input convention (callers already supply one clean,
+//     single-instance, pre-downsampled sample per tick) - see
+//     ekf_buffer.hpp's own "CORRECTION TO THIS TICKET'S OWN PREMISE" for
+//     the full discussion of why upstream even needs this at all.
+//   - The output-state complementary-filter blending
+//     (AP_NavEKF3_Outputs.cpp) a true delayed-state architecture would
+//     need to produce a "present time" estimate for consumption - not
+//     needed here since this phase does not introduce a delayed state.
+//   - Applying this same buffered-recall pattern to magnetometer/baro/
+//     airspeed (upstream: storedMag/storedBaro/storedTAS, the same
+//     EKF_obs_buffer_t<T> machinery) - GPS only, in this phase, to keep
+//     it bounded. A likely, disclosed NEXT ticket, not this one.
+//   - The `waitingForGpsChecks`-gated startup logic (upstream:
+//     SelectVelPosFusion()'s own `&& !waitingForGpsChecks` conjunct on
+//     the recall-result line, verified directly, ~line 534) - ties to
+//     initial-alignment/pre-arm checking machinery this port does not
+//     model at all, an already-established exclusion pattern (same
+//     treatment as badIMUdata/EK3_FEATURE_EXTERNAL_NAV elsewhere in this
+//     file).
+// ============================================================================
+
 // CPP-056 phase 2. upstream: gps_elements (AP_NavEKF3_core.h), the subset
 // FuseVelPosNED()'s obsIndex 0-4 path actually reads (gpsDataDelayed.vel,
 // and the local-NE position AP_NavEKF3_PosVelFusion.cpp ~line 574-580
@@ -1757,9 +1858,53 @@ struct AccelSample {
 // scope for this phase (see banner) - the caller must have already done
 // that conversion, matching this port's general explicit-input
 // convention (ADR-0012).
-struct GpsSample {
+// CPP-067 phase 13 addendum: GpsSample now also satisfies fwcpp::ekf::
+// ObsElement (phase 12/CPP-066 ekf_buffer.hpp's ObsBuffer<T,N> element
+// contract - see that file's own static_assert) so it can be stored in
+// the EkfCore::gps_buffer member added below, letting GPS fusion RECALL
+// the correct sample by timestamp instead of requiring the caller to
+// hand-feed exactly the right sample synchronously on every fusion call
+// - see this file's "CPP-067, PHASE 13" banner and ticket CPP-067 for
+// the full scope/reasoning.
+//
+// A REAL TENSION, RESOLVED EXPLICITLY: the ticket asks for "a real
+// timestamp field... seconds as ftype, matching now_s/dt_ekf_avg... not
+// upstream's raw uint32_t milliseconds" AND "satisfy phase 12's
+// ObsElement contract". Those two asks are in genuine tension:
+// ObsElement's contract (ekf_buffer.hpp, matching upstream's real
+// EKF_obs_element_t) IS a `std::uint32_t time_ms` field, and
+// ObsBuffer<T,N>::recall()'s algorithm (a hardcoded 100ms acceptance
+// window, uint32_t-subtract-then-reinterpret-as-int32_t dt arithmetic)
+// is written in terms of that exact field, not a generic template
+// parameter - it is what upstream's real ring buffer does. Rather than
+// give GpsSample two independently-settable timestamp fields (a real
+// duplication/drift hazard - nothing would stop a caller from setting
+// one and not the other), GpsSample derives from ObsElement (inheriting
+// the one, literal `time_ms` field ObsBuffer's push()/recall() read and
+// write) and exposes time_s()/set_time_s() as the ONLY caller-facing
+// accessors, in this port's own now_s-style seconds convention
+// (ADR-0012/CPP-058 precedent). There is exactly one stored timestamp,
+// never two that could disagree; time_s()/set_time_s() are a millisecond-
+// quantized view over it (matching ObsBuffer/upstream's own ms
+// resolution - not sub-millisecond-precise, a disclosed quantization,
+// not a bug).
+struct GpsSample : public ObsElement {
     Vector3F velocity_ned;  // upstream: gpsDataDelayed.vel, NED m/s
     Vector2F position_ne;   // upstream: velPosObs[3]/[4] source value, local NE metres
+
+    // Caller-facing timestamp accessors - see banner above for why these
+    // exist instead of reading/writing the inherited `time_ms` directly.
+    // Negative `t` is clamped to 0 before conversion (rather than letting
+    // a cast-to-uint32_t of a negative value be implementation-defined/
+    // UB-adjacent) - `now_s` is never legitimately negative in this
+    // port's own convention (elapsed simulated time from an arbitrary
+    // zero, ADR-0012), so this is a defensive clamp, not a real case this
+    // port expects to hit.
+    void set_time_s(ftype t) {
+        const ftype clamped_s = t > ftype(0) ? t : ftype(0);
+        time_ms = static_cast<std::uint32_t>(clamped_s * ftype(1000));
+    }
+    [[nodiscard]] ftype time_s() const { return static_cast<ftype>(time_ms) / ftype(1000); }
 };
 
 // CPP-059 phase 5. upstream: mag_elements' `mag` field (AP_NavEKF3_core.h),
@@ -1877,6 +2022,52 @@ public:
     // (`lastVelPassTime_ms = 0; lastGpsPosPassTime_ms = 0;`).
     ftype last_vel_pass_time_s = 0;  // upstream: lastVelPassTime_ms
     ftype last_pos_pass_time_s = 0;  // upstream: lastGpsPosPassTime_ms
+
+    // CPP-067 phase 13. upstream: NavEKF3_core::storedGPS
+    // (EKF_obs_buffer_t<gps_elements>, AP_NavEKF3_core.h), sized at
+    // RUNTIME in setup_core() - see ekf_buffer.hpp's own "CORRECTION TO
+    // THIS TICKET'S OWN PREMISE" for why a runtime size is not
+    // reproduced here (compile-time N, ADR-0012 decision 4 - the same
+    // no-dynamic-allocation adaptation ekf_buffer.hpp itself already
+    // discloses).
+    //
+    // BUFFER SIZE REASONING (not an arbitrary round number): this port's
+    // own established closed-loop-test precedent
+    // (ekf_closed_loop_test.cpp: kGpsPeriodTicks) models GPS at 5Hz
+    // (200ms period) against a 50Hz IMU tick (20ms); the ticket's own
+    // stated realistic range is 5-10Hz (100-200ms period). A
+    // well-behaved caller calling push_gps_sample() once per real GPS
+    // fix and calling recall_gps_sample() once per EKF tick (far faster
+    // than either GPS rate) will, under normal operation, never have
+    // more than ONE unconsumed sample resident at a time - recall() is
+    // destructive (ekf_buffer.hpp) and, if attempted every tick, a
+    // freshly-pushed sample is consumed on the very next call that
+    // reaches it. kGpsBufferCapacity=4 is sized to comfortably absorb
+    // realistic deviations from that ideal case without silently losing
+    // data:
+    //   - up to 2 samples pushed back-to-back before an intervening
+    //     successful recall (e.g. a GPS driver emitting two fixes in
+    //     quick succession, or the caller skipping a tick or two before
+    //     calling recall_gps_sample() again) at the FASTER end of the
+    //     stated realistic range (10Hz = 100ms period - the worst case
+    //     for "how fast can samples pile up"),
+    //   - PLUS a 2x safety margin on top of that, so a transient hiccup
+    //     does not silently start discarding valid GPS fixes via push()'s
+    //     own overwrite-oldest-at-capacity behavior (ekf_buffer.hpp).
+    // This is intentionally generous relative to the "<=1 resident
+    // sample" steady-state case above; N is a compile-time std::array
+    // size (no dynamic allocation, ADR-0012), so a few extra
+    // GpsSample-sized ring slots cost negligible memory.
+    static constexpr std::size_t kGpsBufferCapacity = 4;
+
+    // The actual buffer - see push_gps_sample()/recall_gps_sample() below
+    // for how it's filled/drained. Public, matching this file's own
+    // established convention of exposing internal state for direct test
+    // verification (same treatment as P/state/last_vel_pass_time_s
+    // above) - a test can inspect gps_buffer.size()/.empty() directly
+    // rather than only observing recall's effect indirectly through
+    // fusion counts.
+    ObsBuffer<GpsSample, kGpsBufferCapacity> gps_buffer;
 
     // CPP-059 phase 5. upstream: innovMag/varInnovMag (NavEKF3_core
     // members) - see this file's "CPP-059, PHASE 5" banner. Public so
@@ -2122,6 +2313,73 @@ public:
     // last_pos_pass_time_s instead - see that function's doc comment and
     // this file's "CPP-058, PHASE 4" banner for the full detail.
     int fuse_gps_position(const GpsSample& gps, ftype dt_ekf_avg, ftype now_s = ftype(0));
+
+    // CPP-067 phase 13. upstream: NavEKF3_core::readGpsData()'s own
+    // `storedGPS.push(gpsDataNew)` call (AP_NavEKF3_Measurements.cpp
+    // ~line 735, verified directly) - the real, disclosed new capability
+    // this ticket adds: callers push GPS samples into gps_buffer AS THEY
+    // ARRIVE, decoupled from the EKF's own per-tick fusion cadence,
+    // instead of having to hand a fusion call exactly the right sample
+    // synchronously every time (today's only option, still available
+    // unchanged via the direct-sample fuse_gps_velocity()/
+    // fuse_gps_position() overloads above - see this file's "CPP-067,
+    // PHASE 13" banner for why both old and new paths are kept). The
+    // caller must stamp `sample`'s timestamp via GpsSample::set_time_s()
+    // before calling this (matching upstream's own `gpsDataNew.time_ms =
+    // ...; ... storedGPS.push(gpsDataNew)` sequence - assign the field,
+    // then push); this function does not stamp it itself.
+    void push_gps_sample(const GpsSample& sample);
+
+    // CPP-067 phase 13. upstream: NavEKF3_core::SelectVelPosFusion()'s own
+    // `gpsDataToFuse = storedGPS.recall(gpsDataDelayed,
+    // imuDataDelayed.time_ms)` (AP_NavEKF3_PosVelFusion.cpp ~line 537) -
+    // recalls the correct buffered sample by timestamp using `now_s`,
+    // THIS PORT'S OWN CALLER-SUPPLIED CURRENT TIME (ADR-0012/CPP-058
+    // convention), NOT upstream's delayed IMU time horizon
+    // (imuDataDelayed.time_ms), which does not exist in this port (the
+    // full delayed-state redesign is deliberately out of scope - see
+    // this file's "CPP-067, PHASE 13" banner). This is a real, disclosed,
+    // narrower simplification relative to upstream's true delayed-horizon
+    // recall, and still a genuine improvement over the fully-synchronous,
+    // hand-fed-only behavior that exists without it.
+    //
+    // WHY THIS IS ONE COMBINED RECALL PRIMITIVE, NOT TWO INDEPENDENT
+    // "fuse_gps_velocity_buffered()"/"fuse_gps_position_buffered()"
+    // METHODS (a shape considered and rejected): ObsBuffer::recall() is
+    // DESTRUCTIVE (ekf_buffer.hpp) - once a sample is recalled it is
+    // gone. Upstream itself calls storedGPS.recall() EXACTLY ONCE per
+    // tick and feeds that ONE recalled gpsDataDelayed to BOTH the
+    // velocity (obsIndex 0-2) and position (obsIndex 3-4) paths inside
+    // FuseVelPosNED() - never two separate recalls. Two independently-
+    // recalling wrapper methods would each try to drain the SAME shared
+    // queue: calling both in one tick could see the second call find the
+    // buffer already emptied by the first, or - worse - silently recall
+    // two DIFFERENT samples for what should be one consistent
+    // observation. Instead, recall_gps_sample() is called ONCE per tick
+    // and its result fed to the existing, UNCHANGED
+    // fuse_gps_velocity()/fuse_gps_position() overloads above for both
+    // axis groups - matching upstream's real recall-once-fuse-twice
+    // structure exactly, and meaning zero of this port's existing
+    // fuse_gps_velocity()/fuse_gps_position() call sites (~20 across
+    // ekf_fusion_test.cpp/ekf_closed_loop_test.cpp) need to change.
+    //
+    // Returns false (leaving `out` untouched) if gps_buffer has no
+    // sample within its hardcoded 100ms window of `now_s`
+    // (ekf_buffer.hpp's own upstream-derived recall() window) - matching
+    // upstream's own control flow exactly: SelectVelPosFusion()'s
+    // `gpsDataToFuse` false skips the ENTIRE fuseVelData/fusePosData
+    // decision for the tick, not merely "the gate failed". A sustained
+    // total GPS outage (buffer perpetually empty) therefore will NOT
+    // reach - and will not spuriously trigger - the now_s/timeout-driven
+    // reset_velocity()/reset_position() wiring inside
+    // fuse_gps_velocity()/fuse_gps_position() (CPP-058): that wiring only
+    // fires when a sample IS recalled but then fails the innovation
+    // gate. A real, sustained outage is handled upstream by
+    // gpsCheckStatus/dead-reckoning aiding-mode-switch machinery this
+    // port does not model at all (an already-established exclusion, not
+    // a new gap this ticket introduces - see this file's own "OUT OF
+    // SCOPE" precedent).
+    bool recall_gps_sample(GpsSample& out, ftype now_s);
 
     // CPP-056 phase 2. upstream: FuseVelPosNED()'s R_OBS[0]/[1]/[2] "no
     // reported accuracy" formula, AP_NavEKF3_PosVelFusion.cpp ~line
