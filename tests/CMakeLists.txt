@@ -384,3 +384,17 @@ catch_discover_tests(ekf_tick_test)
 add_executable(ekf_backend_test ekf_backend_test.cpp)
 target_link_libraries(ekf_backend_test PRIVATE ap-ekf ap-ahrs Catch2::Catch2WithMain)
 catch_discover_tests(ekf_backend_test)
+
+# CPP-084: SitlHarness (fwcpp::hal_sitl) - a real, reusable class
+# generalizing vehicle_test.cpp's own hand-rolled closed-loop sensor-
+# synthesis pattern (run_biased_closed_loop() etc). ap-hal-sitl already
+# links ap-sim publicly (SitlHarness's constructor takes a SimPlane&
+# directly, unlike ap-vehicle - see modules/ap-hal-sitl/CMakeLists.txt),
+# so this test target does not need to link ap-sim/ap-vehicle a second
+# time, but this test file itself uses fwcpp::vehicle:: and fwcpp::sim::
+# types directly (not just through ap-hal-sitl's own header), so both are
+# linked directly too - same precedent as ekf_backend_test's own direct
+# ap-ahrs link above.
+add_executable(sitl_harness_test sitl_harness_test.cpp)
+target_link_libraries(sitl_harness_test PRIVATE ap-hal-sitl ap-vehicle ap-sim Catch2::Catch2WithMain)
+catch_discover_tests(sitl_harness_test)
