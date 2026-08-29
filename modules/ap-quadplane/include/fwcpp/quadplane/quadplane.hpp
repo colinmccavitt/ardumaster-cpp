@@ -26,6 +26,7 @@
 #include <fwcpp/quadplane/quadplane_throttle.hpp>
 #include <fwcpp/quadplane/quadplane_guided.hpp>
 #include <fwcpp/quadplane/quadplane_landing.hpp>
+#include <fwcpp/quadplane/quadplane_assist.hpp>
 #include <fwcpp/quadplane/quadplane_takeoff_controller.hpp>
 #include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
 #include <fwcpp/quadplane/quadplane_vtol_subsystems.hpp>
@@ -640,6 +641,34 @@ public:
         return tick;
     }
 
+    [[nodiscard]] bool is_flying_vtol(FlyingVtolInputs in) const {
+        in.available = available();
+        in.air_mode_active = air_mode_active();
+        in.guided_takeoff = guided_takeoff_;
+        return fwcpp::quadplane::is_flying_vtol(poscontrol_land_, in);
+    }
+
+    [[nodiscard]] float assist_climb_rate_cms(AssistClimbInputs in) const {
+        if (wp_nav_inited_) {
+            in.default_speed_down_ms = wp_nav_.default_speed_down_ms();
+            in.default_speed_up_ms = wp_nav_.default_speed_up_ms();
+        }
+        return fwcpp::quadplane::assist_climb_rate_cms(z_ctrl_, in);
+    }
+
+    [[nodiscard]] float desired_auto_yaw_rate_cds(bool body_frame, const AutoYawRateInputs& in) const {
+        return fwcpp::quadplane::desired_auto_yaw_rate_cds(body_frame, in);
+    }
+
+    [[nodiscard]] WeathervaneYawTick get_weathervane_yaw_rate_cds(WeathervaneYawInputs in) {
+        in.available = available();
+        in.options = options_;
+        return fwcpp::quadplane::get_weathervane_yaw_rate_cds(weathervane_, poscontrol_land_, in);
+    }
+
+    [[nodiscard]] const WeathervaneStub& weathervane() const { return weathervane_; }
+    WeathervaneStub& weathervane_mut() { return weathervane_; }
+
     [[nodiscard]] UserTakeoffTick do_user_takeoff(float takeoff_altitude, UserTakeoffInputs in) {
         in.options = options_;
         in.start.target.correction_north_m = poscontrol_.correction_north_m;
@@ -751,6 +780,7 @@ private:
     float vel_forward_alt_cutoff_m_{0.0f};
     bool vfwd_enable_active_{false};
     FwdTiltState fwd_tilt_{};
+    WeathervaneStub weathervane_{};
 };
 
 }  // namespace fwcpp::quadplane

@@ -4,7 +4,7 @@ using namespace fwcpp::quadplane;
 TEST_CASE("catalog", "[quadplane][leftover]") {
     REQUIRE(on_main_count() == 0);
     REQUIRE(this_slice_count() >= 10);
-    REQUIRE(remaining_count() >= 3);
+    REQUIRE(remaining_count() >= 2);
     REQUIRE(completeness_has("setup / available / initialised", PortStatus::kThisSlice));
     REQUIRE(completeness_has("setup channels ahrs_view", PortStatus::kThisSlice));
     REQUIRE(completeness_has("wp_nav loiter_nav", PortStatus::kThisSlice));
@@ -34,7 +34,7 @@ TEST_CASE("catalog", "[quadplane][leftover]") {
     REQUIRE(completeness_has("landing_descent_rate_ms / abort_landing / update_land_positioning",
                              PortStatus::kThisSlice));
     REQUIRE(completeness_has("assist_climb_rate_cms / weathervane yaw / is_flying_vtol",
-                             PortStatus::kRemaining));
+                             PortStatus::kThisSlice));
     REQUIRE(completeness_has("vtol_position_controller body", PortStatus::kRemaining));
     REQUIRE(completeness_has("verify_vtol_land body leftovers", PortStatus::kRemaining));
     REQUIRE(completeness_has("Log_Write_*", PortStatus::kOutOfScope));
