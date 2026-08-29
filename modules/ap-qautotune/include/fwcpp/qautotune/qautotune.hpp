@@ -10,6 +10,8 @@
 #include <fwcpp/qautotune/qautotune_defaults.hpp>
 #include <fwcpp/qautotune/qautotune_enable.hpp>
 #include <fwcpp/qautotune/qautotune_init.hpp>
+#include <fwcpp/qautotune/qautotune_init_internals.hpp>
+#include <fwcpp/qautotune/qautotune_log_pids.hpp>
 #include <fwcpp/qautotune/qautotune_pilot_desired.hpp>
 #include <fwcpp/qautotune/qautotune_types.hpp>
 #include <fwcpp/qautotune/qautotune_z_limits.hpp>
