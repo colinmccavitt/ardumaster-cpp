@@ -36,6 +36,7 @@ struct PosControlSetStateInputs {
     float groundspeed_ms{0.f};
     float current_alt_m{0.f};
     std::uint16_t ahrs_position_ne_reset_count{0};
+    std::uint32_t last_pos_reset_ms{0};
 };
 
 inline void poscontrol_apply_set_state(PosControlState& pc,
@@ -68,6 +69,7 @@ inline void poscontrol_apply_set_state(PosControlState& pc,
                 break;
             case PositionControlState::kLandFinal:
                 pc.ahrs_position_ne_reset_count = in.ahrs_position_ne_reset_count;
+                pc.last_pos_reset_ms = in.last_pos_reset_ms;
                 sink.reset_landing_detect = true;
                 break;
             default:

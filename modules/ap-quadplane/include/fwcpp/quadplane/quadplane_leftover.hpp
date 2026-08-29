@@ -30,7 +30,7 @@ inline constexpr QuadPlanePortItem kQuadPlaneCompleteness[] = {
     {"mode_enter poscontrol FSM", PortStatus::kThisSlice, "set_state + init_approach prep"},
     {"update transition FSM", PortStatus::kThisSlice, "quadplane_update.hpp SLT wiring"},
     {"tailsitter tiltrotor", PortStatus::kThisSlice, "quadplane_vtol_subsystems.hpp"},
-    {"vtol controllers landing", PortStatus::kThisSlice, "vtol_position_controller stub"},
+    {"vtol controllers landing", PortStatus::kThisSlice, "vtol_position_controller body"},
     {"AUTO VTOL mission", PortStatus::kThisSlice, "quadplane_auto_vtol_mission.hpp"},
     {"motors_output motor_test", PortStatus::kThisSlice, "quadplane_motor_test.hpp gating"},
     {"guided in_vtol_mode", PortStatus::kThisSlice, "compute_in_vtol_mode"},
@@ -55,7 +55,7 @@ inline constexpr QuadPlanePortItem kQuadPlaneCompleteness[] = {
      "quadplane_landing.hpp ticks; persist override/thr_ctrl/reposition on stubs"},
     {"assist_climb_rate_cms / weathervane yaw / is_flying_vtol", PortStatus::kThisSlice,
      "quadplane_assist.hpp ticks; weathervane get_yaw_out injected"},
-    {"vtol_position_controller body", PortStatus::kRemaining, "stub exists; full landing/RTL body remaining"},
+    {"vtol_position_controller body", PortStatus::kThisSlice, "landing/RTL FSM ticks; no pos_control/nav/GCS objects"},
     {"verify_vtol_land body leftovers", PortStatus::kRemaining, "POSITION2/descend/abort/payload-place beyond land_detector"},
     {"Log_Write_*", PortStatus::kOutOfScope, "no logger"},
 };

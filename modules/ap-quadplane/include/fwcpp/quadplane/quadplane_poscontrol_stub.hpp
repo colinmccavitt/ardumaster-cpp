@@ -44,6 +44,7 @@ struct PosControlState {
     bool overshoot{false};
     float override_descent_rate_ms{0.f};
     std::uint32_t last_override_descent_ms{0};
+    std::uint32_t last_pos_reset_ms{0};
 
     void reset_on_mode_enter() {
         state = PositionControlState::kNone;
@@ -72,6 +73,7 @@ struct PosControlState {
         overshoot = false;
         override_descent_rate_ms = 0.f;
         last_override_descent_ms = 0;
+        last_pos_reset_ms = 0;
         mode_enter_cleared = true;
     }
 };
