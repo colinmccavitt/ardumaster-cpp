@@ -443,3 +443,15 @@ catch_discover_tests(thrust_linearization_test)
 add_executable(attitude_kinematics_test attitude_kinematics_test.cpp)
 target_link_libraries(attitude_kinematics_test PRIVATE ap-control Catch2::Catch2WithMain)
 catch_discover_tests(attitude_kinematics_test)
+
+# CCP-021 (copter-cpp effort, AC_AttitudeControl phase): fwcpp::math's
+# control.hpp - the scalar half of AP_Math/control.cpp (update_vel_accel/
+# update_pos_vel_accel/shape_accel/shape_vel_accel/shape_pos_vel_accel/
+# shape_angle_vel_accel/sqrt_controller/inv_sqrt_controller/
+# sqrt_controller_accel/stopping_distance). Header-only addition to the
+# existing ap-math module (no new .cpp, matching matrix3.hpp/postype.hpp/
+# rotations.hpp's own precedent - see modules/ap-math/CMakeLists.txt,
+# unchanged by this ticket), so only this new test target is registered.
+add_executable(control_test control_test.cpp)
+target_link_libraries(control_test PRIVATE ap-math Catch2::Catch2WithMain)
+catch_discover_tests(control_test)
