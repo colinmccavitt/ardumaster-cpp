@@ -998,3 +998,8 @@ catch_discover_tests(mode_stabilize_test)
 add_executable(mode_acro_test mode_acro_test.cpp)
 target_link_libraries(mode_acro_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_acro_test)
+
+# CCP-037 slice 3: AutoYaw get_heading PILOT_RATE vs HOLD.
+add_executable(autoyaw_test autoyaw_test.cpp)
+target_link_libraries(autoyaw_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(autoyaw_test)

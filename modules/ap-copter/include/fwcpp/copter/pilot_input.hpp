@@ -14,8 +14,9 @@
 //   ArduCopter/Attitude.cpp get_pilot_speed_dn_ms ~129-137
 //
 // Not copied from quadplane_pilot_input.hpp (different vehicle, cd-based
-// lean path). Mode::run() bodies stay CCP-039. AutoYaw / weathervane /
-// velocity stay leftover (see leftover catalog below).
+// lean path). Mode::run() bodies stay CCP-039. AutoYaw get_heading
+// PILOT_RATE vs HOLD is autoyaw.hpp (this slice). weathervane /
+// get_pilot_desired_velocity stay leftover (see leftover catalog below).
 
 #include <algorithm>
 #include <cmath>
@@ -185,12 +186,12 @@ inline constexpr PortItem kCompleteness[] = {
     {"input_expo", PortStatus::kOnMain, "AP_Math/control.cpp ~760-770"},
     {"set_accel_throttle_I", PortStatus::kOnMain,
      "Attitude.cpp ~120-127; returns integrator value"},
-    {"get_pilot_desired_climb_rate", PortStatus::kThisSlice,
+    {"get_pilot_desired_climb_rate", PortStatus::kOnMain,
      "Attitude.cpp ~69-112; deadband mid+/-dz; skip TOY_MODE"},
-    {"get_pilot_speed_dn", PortStatus::kThisSlice,
+    {"get_pilot_speed_dn", PortStatus::kOnMain,
      "Attitude.cpp ~129-137; zero dn uses |speed_up|"},
-    {"AutoYaw state machine", PortStatus::kRemaining,
-     "autoyaw.cpp update ~330-347 PILOT_RATE vs HOLD"},
+    {"AutoYaw state machine", PortStatus::kThisSlice,
+     "autoyaw.cpp get_heading ~330-347 PILOT_RATE vs HOLD"},
     {"weathervane", PortStatus::kRemaining, "update_weathervane; WEATHERVANE_ENABLED"},
     {"get_pilot_desired_velocity", PortStatus::kRemaining, "mode.cpp ~572"},
 };

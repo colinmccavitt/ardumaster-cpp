@@ -100,10 +100,10 @@ TEST_CASE("above deadband is positive climb using speed_up", "[copter][pilot]") 
 }
 
 TEST_CASE("leftover remaining_count", "[copter][pilot][leftover]") {
-    REQUIRE(remaining_count() == 3);
+    REQUIRE(remaining_count() == 2);
     REQUIRE(remaining_count() > 0);
-    REQUIRE(this_slice_count() == 3);
-    REQUIRE(on_main_count() == 6);
+    REQUIRE(this_slice_count() == 2);
+    REQUIRE(on_main_count() == 8);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -113,9 +113,9 @@ TEST_CASE("leftover remaining_count", "[copter][pilot][leftover]") {
     REQUIRE(completeness_has("rc_input_to_roll_pitch_rad", PortStatus::kOnMain));
     REQUIRE(completeness_has("input_expo", PortStatus::kOnMain));
     REQUIRE(completeness_has("set_accel_throttle_I", PortStatus::kOnMain));
-    REQUIRE(completeness_has("get_pilot_desired_climb_rate", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("get_pilot_speed_dn", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("AutoYaw state machine", PortStatus::kRemaining));
+    REQUIRE(completeness_has("get_pilot_desired_climb_rate", PortStatus::kOnMain));
+    REQUIRE(completeness_has("get_pilot_speed_dn", PortStatus::kOnMain));
+    REQUIRE(completeness_has("AutoYaw state machine", PortStatus::kThisSlice));
     REQUIRE(completeness_has("weathervane", PortStatus::kRemaining));
     REQUIRE(completeness_has("get_pilot_desired_velocity", PortStatus::kRemaining));
 }
