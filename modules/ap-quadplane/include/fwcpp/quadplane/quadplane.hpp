@@ -22,6 +22,7 @@
 #include <fwcpp/quadplane/quadplane_land_detector.hpp>
 #include <fwcpp/quadplane/quadplane_control_auto.hpp>
 #include <fwcpp/quadplane/quadplane_stabilize.hpp>
+#include <fwcpp/quadplane/quadplane_xy_controller.hpp>
 #include <fwcpp/quadplane/quadplane_takeoff_controller.hpp>
 #include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
 #include <fwcpp/quadplane/quadplane_vtol_subsystems.hpp>
@@ -492,6 +493,63 @@ public:
         return fwcpp::quadplane::run_z_controller(z_ctrl_, in);
     }
 
+    void set_q_fwd_thr_gain(float v) { q_fwd_thr_gain_ = v; }
+    [[nodiscard]] float q_fwd_thr_gain() const { return q_fwd_thr_gain_; }
+    void set_q_fwd_pitch_lim(float v) { q_fwd_pitch_lim_ = v; }
+    [[nodiscard]] float q_fwd_pitch_lim() const { return q_fwd_pitch_lim_; }
+    void set_q_bck_pitch_lim(float v) { q_bck_pitch_lim_ = v; }
+    [[nodiscard]] float q_bck_pitch_lim() const { return q_bck_pitch_lim_; }
+    void set_q_fwd_thr_use(FwdThrUse v) { q_fwd_thr_use_ = v; }
+    [[nodiscard]] FwdThrUse q_fwd_thr_use() const { return q_fwd_thr_use_; }
+    void set_vel_forward_gain(float v) { vel_forward_gain_ = v; }
+    [[nodiscard]] float vel_forward_gain() const { return vel_forward_gain_; }
+    void set_vel_forward_alt_cutoff_m(float v) { vel_forward_alt_cutoff_m_ = v; }
+    [[nodiscard]] float vel_forward_alt_cutoff_m() const { return vel_forward_alt_cutoff_m_; }
+    void set_vfwd_enable_active(bool v) { vfwd_enable_active_ = v; }
+    [[nodiscard]] bool vfwd_enable_active() const { return vfwd_enable_active_; }
+    [[nodiscard]] const FwdTiltState& fwd_tilt() const { return fwd_tilt_; }
+    FwdTiltState& fwd_tilt_mut() { return fwd_tilt_; }
+
+    [[nodiscard]] ClimbRateTick set_climb_rate_ms(float target_climb_rate_ms) const {
+        return fwcpp::quadplane::set_climb_rate_ms(target_climb_rate_ms);
+    }
+
+    [[nodiscard]] XyControllerTick run_xy_controller(XyControllerInputs in) const {
+        if (wp_nav_inited_) {
+            in.wp_accel_mss = wp_nav_.wp_acceleration_mss();
+            in.default_speed_ne_ms = wp_nav_.default_speed_ne_ms();
+        }
+        if (in.lean_angle_max_cd == 0.0f) {
+            in.lean_angle_max_cd = static_cast<float>(lean_angle_max_cd_);
+        }
+        in.q_fwd_throttle = fwd_tilt_.q_fwd_throttle;
+        return fwcpp::quadplane::run_xy_controller(in);
+    }
+
+    [[nodiscard]] ActiveFwdThr get_vfwd_method(VfwdMethodInputs in) const {
+        in.q_fwd_thr_gain = q_fwd_thr_gain_;
+        in.vfwd_enable_active = vfwd_enable_active_;
+        in.q_fwd_thr_use = q_fwd_thr_use_;
+        in.vel_forward_gain = vel_forward_gain_;
+        return fwcpp::quadplane::get_vfwd_method(in);
+    }
+
+    [[nodiscard]] AssignTiltTick assign_tilt_to_fwd_thr(AssignTiltInputs in) {
+        in.vfwd.q_fwd_thr_gain = q_fwd_thr_gain_;
+        in.vfwd.vfwd_enable_active = vfwd_enable_active_;
+        in.vfwd.q_fwd_thr_use = q_fwd_thr_use_;
+        in.vfwd.vel_forward_gain = vel_forward_gain_;
+        in.q_fwd_thr_gain = q_fwd_thr_gain_;
+        in.q_fwd_pitch_lim = q_fwd_pitch_lim_;
+        in.q_bck_pitch_lim = q_bck_pitch_lim_;
+        in.vel_forward_alt_cutoff_m = vel_forward_alt_cutoff_m_;
+        in.tiltrotor_enabled = subsystems_.tiltrotor.enabled();
+        if (in.angle_max_cd == 0.0f) {
+            in.angle_max_cd = static_cast<float>(lean_angle_max_cd_);
+        }
+        return fwcpp::quadplane::assign_tilt_to_fwd_thr(fwd_tilt_, in);
+    }
+
     [[nodiscard]] HoldHoverTick hold_hover(float target_climb_rate_cms, DesiredYawRateInputs yaw) const {
         yaw.assisted_flight = assisted_flight_;
         yaw.should_weathervane = false;
@@ -574,6 +632,14 @@ private:
     bool guided_takeoff_{false};
     TakeoffNavState takeoff_nav_{};
     ZCtrlState z_ctrl_{};
+    float q_fwd_thr_gain_{kQFwdThrGainDefault};
+    float q_fwd_pitch_lim_{kQFwdPitchLimDefault};
+    float q_bck_pitch_lim_{kQBckPitchLimDefault};
+    FwdThrUse q_fwd_thr_use_{FwdThrUse::kOff};
+    float vel_forward_gain_{0.0f};
+    float vel_forward_alt_cutoff_m_{0.0f};
+    bool vfwd_enable_active_{false};
+    FwdTiltState fwd_tilt_{};
 };
 
 }  // namespace fwcpp::quadplane
