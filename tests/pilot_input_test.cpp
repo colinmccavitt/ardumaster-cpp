@@ -7,9 +7,11 @@
 #include <fwcpp/math/scalar.hpp>
 
 using Catch::Approx;
+using fwcpp::copter::get_pilot_desired_climb_rate_ms;
 using fwcpp::copter::get_pilot_desired_lean_angles_rad;
 using fwcpp::copter::get_pilot_desired_throttle;
 using fwcpp::copter::get_pilot_desired_yaw_rate_rads;
+using fwcpp::copter::get_pilot_speed_dn_ms;
 using fwcpp::copter::input_expo;
 using fwcpp::copter::rc_input_to_roll_pitch_rad;
 using fwcpp::copter::set_accel_throttle_I_from_pilot_throttle;
@@ -71,24 +73,51 @@ TEST_CASE("set_accel_throttle_I sign", "[copter][pilot]") {
     REQUIRE(set_accel_throttle_I_from_pilot_throttle(1.5f, 0.5f) == Approx(-0.5f));
 }
 
+TEST_CASE("invalid RC zeros climb rate", "[copter][pilot]") {
+    REQUIRE(get_pilot_desired_climb_rate_ms(false, 800.0f, 500.0f, 100, 150.0f, 250.0f) == 0.0f);
+}
+
+TEST_CASE("mid stick in deadzone is zero climb rate", "[copter][pilot]") {
+    REQUIRE(get_pilot_desired_climb_rate_ms(true, 500.0f, 500.0f, 100, 150.0f, 250.0f) == 0.0f);
+    REQUIRE(get_pilot_desired_climb_rate_ms(true, 550.0f, 500.0f, 100, 150.0f, 250.0f) == 0.0f);
+    REQUIRE(get_pilot_desired_climb_rate_ms(true, 400.0f, 500.0f, 100, 150.0f, 250.0f) == 0.0f);
+    REQUIRE(get_pilot_desired_climb_rate_ms(true, 600.0f, 500.0f, 100, 150.0f, 250.0f) == 0.0f);
+}
+
+TEST_CASE("below deadband is negative climb using speed_dn", "[copter][pilot]") {
+    // mid=500 dz=100 -> bottom=400; thr=200: 150*(200-400)/400 = -75
+    REQUIRE(get_pilot_desired_climb_rate_ms(true, 200.0f, 500.0f, 100, 150.0f, 250.0f) ==
+            Approx(-75.0f));
+    REQUIRE(get_pilot_speed_dn_ms(0.0f, 250.0f) == Approx(250.0f));
+    REQUIRE(get_pilot_desired_climb_rate_ms(true, 200.0f, 500.0f, 100, 0.0f, 250.0f) ==
+            Approx(-125.0f));
+}
+
+TEST_CASE("above deadband is positive climb using speed_up", "[copter][pilot]") {
+    // mid=500 dz=100 -> top=600; thr=800: 250*(800-600)/(1000-600) = 125
+    REQUIRE(get_pilot_desired_climb_rate_ms(true, 800.0f, 500.0f, 100, 150.0f, 250.0f) ==
+            Approx(125.0f));
+}
+
 TEST_CASE("leftover remaining_count", "[copter][pilot][leftover]") {
-    REQUIRE(remaining_count() == 4);
+    REQUIRE(remaining_count() == 3);
     REQUIRE(remaining_count() > 0);
-    REQUIRE(this_slice_count() == 7);
-    REQUIRE(on_main_count() == 0);
+    REQUIRE(this_slice_count() == 3);
+    REQUIRE(on_main_count() == 6);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
-    REQUIRE(completeness_has("get_pilot_desired_lean_angles", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("get_pilot_desired_yaw_rate", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("get_pilot_desired_throttle", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("rc_input_to_roll_pitch_rad", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("input_expo", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("set_accel_throttle_I", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("get_pilot_desired_lean_angles", PortStatus::kOnMain));
+    REQUIRE(completeness_has("get_pilot_desired_yaw_rate", PortStatus::kOnMain));
+    REQUIRE(completeness_has("get_pilot_desired_throttle", PortStatus::kOnMain));
+    REQUIRE(completeness_has("rc_input_to_roll_pitch_rad", PortStatus::kOnMain));
+    REQUIRE(completeness_has("input_expo", PortStatus::kOnMain));
+    REQUIRE(completeness_has("set_accel_throttle_I", PortStatus::kOnMain));
+    REQUIRE(completeness_has("get_pilot_desired_climb_rate", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("get_pilot_speed_dn", PortStatus::kThisSlice));
     REQUIRE(completeness_has("AutoYaw state machine", PortStatus::kRemaining));
     REQUIRE(completeness_has("weathervane", PortStatus::kRemaining));
     REQUIRE(completeness_has("get_pilot_desired_velocity", PortStatus::kRemaining));
-    REQUIRE(completeness_has("get_pilot_desired_climb_rate", PortStatus::kRemaining));
 }
 
 TEST_CASE("rc_input_to_roll_pitch_rad matches tan/atan mapping", "[copter][pilot]") {
