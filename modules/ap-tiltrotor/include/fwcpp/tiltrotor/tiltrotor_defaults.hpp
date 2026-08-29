@@ -19,4 +19,12 @@ inline constexpr float kTiltFlapAngleDefaultDeg = 0.0f;
 
 inline constexpr float kDegreesPerTiltUnit = 1.0f / 90.0f;
 
+inline constexpr float kFastTiltMinRateDps = 90.0f;
+inline constexpr float kServoMotorTiltScale = 1000.0f;
+inline constexpr float kThrottleScaledToUnit = 0.01f;
+inline constexpr std::uint32_t kTransitionYawLockMs = 100u;
+inline constexpr float kGravityMss = 9.80665f;
+inline constexpr std::int32_t kNavRollTransitionThresholdCd = 1000;
+inline constexpr float kAirspeedMinTransitionMs = 5.0f;
+
 }  // namespace fwcpp::tiltrotor

@@ -10,10 +10,13 @@ using fwcpp::tiltrotor::this_slice_count;
 
 TEST_CASE("tiltrotor catalog", "[tiltrotor][catalog]") {
     REQUIRE(on_main_count() == 0);
-    REQUIRE(this_slice_count() == 10);
-    REQUIRE(remaining_count() == 20);
+    REQUIRE(this_slice_count() == 21);
+    REQUIRE(remaining_count() == 9);
     REQUIRE(tiltrotor_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + 3);
-    REQUIRE(completeness_has("setup enable heuristic", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Tiltrotor::update", PortStatus::kRemaining));
+    REQUIRE(completeness_has("tilt_max_change", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Tiltrotor_Transition yaw/view/vfwd", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Tiltrotor::continuous_update", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("tilt_over_max_angle", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Tiltrotor::vectoring", PortStatus::kRemaining));
 }

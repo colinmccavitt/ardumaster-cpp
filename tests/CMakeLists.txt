@@ -827,3 +827,12 @@ catch_discover_tests(mode_qautotune_run_test)
 add_executable(qautotune_completeness_test qautotune_completeness_test.cpp)
 target_link_libraries(qautotune_completeness_test PRIVATE ap-qautotune Catch2::Catch2WithMain)
 catch_discover_tests(qautotune_completeness_test)
+# VCP-008 slice 2: ap-tiltrotor control/transition.
+
+add_executable(tiltrotor_control_test tiltrotor_control_test.cpp)
+target_link_libraries(tiltrotor_control_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
+catch_discover_tests(tiltrotor_control_test)
+
+add_executable(tiltrotor_transition_test tiltrotor_transition_test.cpp)
+target_link_libraries(tiltrotor_transition_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
+catch_discover_tests(tiltrotor_transition_test)
