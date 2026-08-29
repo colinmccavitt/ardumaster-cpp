@@ -572,6 +572,12 @@ add_executable(quadplane_setup_navigators_test quadplane_setup_navigators_test.c
 target_link_libraries(quadplane_setup_navigators_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_setup_navigators_test)
 
+
+
+
+
+# VCP-002 slice 1: ap-vtol-assist enable/check + hysteresis + should_assist stubs.
+
 add_executable(quadplane_update_test quadplane_update_test.cpp)
 target_link_libraries(quadplane_update_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_update_test)
@@ -634,7 +640,6 @@ add_executable(circle_init_test circle_init_test.cpp)
 target_link_libraries(circle_init_test PRIVATE ap-wpnav ap-common Catch2::Catch2WithMain)
 catch_discover_tests(circle_init_test)
 
-# CCP-028 slice 6: set_spline_destination / set_wp_destination_next
 add_executable(set_spline_destination_test set_spline_destination_test.cpp)
 target_link_libraries(set_spline_destination_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
 catch_discover_tests(set_spline_destination_test)
@@ -655,6 +660,21 @@ add_executable(q_modes_completeness_test q_modes_completeness_test.cpp)
 target_link_libraries(q_modes_completeness_test PRIVATE ap-q-modes Catch2::Catch2WithMain)
 catch_discover_tests(q_modes_completeness_test)
 
+
+# VCP-006 slice 1: ap-qrtl QRTL mode enter scaffold.
+
 add_executable(transition_paths_test transition_paths_test.cpp)
 target_link_libraries(transition_paths_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
 catch_discover_tests(transition_paths_test)
+
+add_executable(qrtl_geometry_test qrtl_geometry_test.cpp)
+target_link_libraries(qrtl_geometry_test PRIVATE ap-qrtl Catch2::Catch2WithMain)
+catch_discover_tests(qrtl_geometry_test)
+
+add_executable(mode_qrtl_enter_test mode_qrtl_enter_test.cpp)
+target_link_libraries(mode_qrtl_enter_test PRIVATE ap-qrtl Catch2::Catch2WithMain)
+catch_discover_tests(mode_qrtl_enter_test)
+
+add_executable(qrtl_completeness_test qrtl_completeness_test.cpp)
+target_link_libraries(qrtl_completeness_test PRIVATE ap-qrtl Catch2::Catch2WithMain)
+catch_discover_tests(qrtl_completeness_test)
