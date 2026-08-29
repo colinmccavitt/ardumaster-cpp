@@ -5,3 +5,6 @@
 #include <fwcpp/tailsitter/tailsitter_input_type.hpp>
 #include <fwcpp/tailsitter/tailsitter_setup.hpp>
 #include <fwcpp/tailsitter/tailsitter_types.hpp>
+#include <fwcpp/tailsitter/tailsitter_transition_ramp.hpp>
+#include <fwcpp/tailsitter/tailsitter_transition.hpp>
+#include <fwcpp/tailsitter/tailsitter_control.hpp>

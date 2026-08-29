@@ -767,3 +767,11 @@ catch_discover_tests(tailsitter_input_type_test)
 add_executable(tailsitter_completeness_test tailsitter_completeness_test.cpp)
 target_link_libraries(tailsitter_completeness_test PRIVATE ap-tailsitter Catch2::Catch2WithMain)
 catch_discover_tests(tailsitter_completeness_test)
+
+add_executable(tailsitter_transition_test tailsitter_transition_test.cpp)
+target_link_libraries(tailsitter_transition_test PRIVATE ap-tailsitter Catch2::Catch2WithMain)
+catch_discover_tests(tailsitter_transition_test)
+
+add_executable(tailsitter_control_test tailsitter_control_test.cpp)
+target_link_libraries(tailsitter_control_test PRIVATE ap-tailsitter Catch2::Catch2WithMain)
+catch_discover_tests(tailsitter_control_test)
