@@ -10,9 +10,10 @@
 //   update_ms / update_cms (+ PosControl input leftovers recorded)
 //   calc_velocities, init_start_angle, is_active, option helpers
 //
-// DEFERRED (future CCP-028 slices):
-//   get_closest_point_on_circle_ned_m, NEU/cm wrappers, convert_parameters
-//   PosControl passthroughs (roll/pitch/thrust, distance/bearing)
+// CCP-028 slice 7: get_closest_point_on_circle_* , NEU/cm radius wrappers.
+//
+// DEFERRED (out of scope):
+//   convert_parameters, PosControl passthroughs (roll/pitch/thrust, distance/bearing)
 //
 // ADR-0004: no AHRS / PosControl / millis singletons — caller supplies yaw,
 // desired seat, NE speed/accel limits, dt_s, now_ms, and terrain height.
@@ -138,6 +139,14 @@ public:
         radius_m_ = math::constrain_value(radius_m, 0.0f, kCircleRadiusMaxM);
     }
 
+    [[nodiscard]] float get_radius_cm() const { return get_radius_m() * 100.0f; }
+    void set_radius_cm(float radius_cm) { set_radius_m(radius_cm * 0.01f); }
+
+    [[nodiscard]] math::Vector3<float> get_center_neu_cm() const {
+        return math::Vector3<float>{center_ned_m_.x * 100.0f, center_ned_m_.y * 100.0f,
+                                    -center_ned_m_.z * 100.0f};
+    }
+
     [[nodiscard]] float get_rate_degs() const { return rate_parm_degs_; }
     void set_rate_parm_degs(float rate_parm_degs) { rate_parm_degs_ = rate_parm_degs; }
     [[nodiscard]] float get_rate_current() const { return math::degrees(angular_vel_rads_); }
@@ -159,6 +168,49 @@ public:
         }
         set_center_ned_m(pos_estimate_ned_m, false);
         return SetCenterLeftover{.need_nav_error_log = true, .used_pos_estimate_fallback = true};
+    }
+
+
+    struct ClosestPointOnCircle {
+        math::Vector3<float> point_ned_m{};
+        float dist_to_edge_m{0.0f};
+    };
+
+    [[nodiscard]] ClosestPointOnCircle get_closest_point_on_circle_ned_m(
+        math::Vector3<float> stopping_point_ned_m, float cos_yaw, float sin_yaw) const {
+        const math::Vector3<float> vec_from_center = stopping_point_ned_m - center_ned_m_;
+        if (!math::is_positive(radius_m_)) {
+            return ClosestPointOnCircle{.point_ned_m = center_ned_m_, .dist_to_edge_m = 0.0f};
+        }
+        if (vec_from_center.length_squared() < 0.5f * 0.5f) {
+            const math::Vector3<float> point_ned_m{center_ned_m_.x - radius_m_ * cos_yaw,
+                                                   center_ned_m_.y - radius_m_ * sin_yaw,
+                                                   center_ned_m_.z};
+            return ClosestPointOnCircle{
+                .point_ned_m = point_ned_m,
+                .dist_to_edge_m = (stopping_point_ned_m - point_ned_m).length()};
+        }
+        const float dist_xy =
+            math::Vector2<float>{vec_from_center.x, vec_from_center.y}.length();
+        const math::Vector3<float> point_ned_m{
+            center_ned_m_.x + vec_from_center.x / dist_xy * radius_m_,
+            center_ned_m_.y + vec_from_center.y / dist_xy * radius_m_,
+            center_ned_m_.z};
+        return ClosestPointOnCircle{.point_ned_m = point_ned_m,
+                                    .dist_to_edge_m = (stopping_point_ned_m - point_ned_m).length()};
+    }
+
+    [[nodiscard]] std::pair<math::Vector3<float>, float> get_closest_point_on_circle_neu_cm(
+        math::Vector3<float> stopping_point_neu_cm, float cos_yaw, float sin_yaw) const {
+        const math::Vector3<float> stopping_ned{stopping_point_neu_cm.x * 0.01f,
+                                                stopping_point_neu_cm.y * 0.01f,
+                                                -stopping_point_neu_cm.z * 0.01f};
+        const ClosestPointOnCircle closest =
+            get_closest_point_on_circle_ned_m(stopping_ned, cos_yaw, sin_yaw);
+        const math::Vector3<float> neu_cm{closest.point_ned_m.x * 100.0f,
+                                          closest.point_ned_m.y * 100.0f,
+                                          -closest.point_ned_m.z * 100.0f};
+        return {neu_cm, closest.dist_to_edge_m * 100.0f};
     }
 
     [[nodiscard]] bool center_is_terrain_alt() const { return is_terrain_alt_; }

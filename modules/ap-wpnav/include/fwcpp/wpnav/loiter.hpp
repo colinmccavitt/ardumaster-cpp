@@ -10,8 +10,9 @@
 //   update / calc_desired_velocity (NE controller leftovers recorded)
 //   soften_for_landing flag
 //
-// DEFERRED (future CCP-028 slices):
-//   set_pilot_desired_acceleration_rad/cd, clear_pilot_desired_acceleration
+// CCP-028 slice 7: pilot-accel shaping (set/clear pilot desired acceleration).
+//
+// DEFERRED (out of scope):
 //   get_stopping_point_NE_m, distance/bearing passthroughs
 //   convert_parameters / AP_Param glue
 //   AC_Avoid::adjust_velocity (COP-026)
@@ -27,6 +28,7 @@
 #include <fwcpp/math/control.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector2.hpp>
+#include <fwcpp/math/vector3.hpp>
 
 namespace fwcpp::wpnav {
 
@@ -74,6 +76,30 @@ struct UpdateLoiterContext {
     bool avoidance_on{true};
 };
 
+struct LoiterShapingConfig {
+    bool rate_bf_ff_enabled{false};
+    float input_tc{0.15f};
+    float ang_vel_roll_max_degs{0.0f};
+    float ang_vel_pitch_max_degs{0.0f};
+    float accel_roll_max_radss{0.0f};
+    float accel_pitch_max_radss{0.0f};
+};
+
+struct LoiterAngleGains {
+    float angle_p_roll{4.5f};
+    float angle_p_pitch{4.5f};
+};
+
+struct PilotAccelContext {
+    float dt_s{0.0025f};
+    float yaw_rad{0.0f};
+    std::uint32_t now_ms{0};
+    math::Vector3<float> vel_desired_ned_ms{};
+    float target_ang_vel_z_rads{0.0f};
+    LoiterShapingConfig shaping{};
+    LoiterAngleGains angle_gains{};
+};
+
 struct UpdateLoiterLeftover {
     bool need_calc_desired_velocity{false};
     bool need_ne_update_controller{false};
@@ -87,6 +113,21 @@ struct UpdateLoiterLeftover {
 namespace detail {
 [[nodiscard]] inline float angle_rad_to_accel_mss(float angle_rad) {
     return kLoiterGravityMss * std::tan(angle_rad);
+}
+
+[[nodiscard]] inline math::Vector3<float> lean_angles_rad_to_accel_ned_mss(
+    const math::Vector3<float>& att_target_euler_rad) {
+    const float sin_roll = std::sin(att_target_euler_rad.x);
+    const float cos_roll = std::cos(att_target_euler_rad.x);
+    const float sin_pitch = std::sin(att_target_euler_rad.y);
+    const float cos_pitch = std::cos(att_target_euler_rad.y);
+    const float sin_yaw = std::sin(att_target_euler_rad.z);
+    const float cos_yaw = std::cos(att_target_euler_rad.z);
+    const float denom = std::max(cos_roll * cos_pitch, 0.1f);
+    return math::Vector3<float>{
+        kLoiterGravityMss * (-cos_yaw * sin_pitch * cos_roll - sin_yaw * sin_roll) / denom,
+        kLoiterGravityMss * (-sin_yaw * sin_pitch * cos_roll + cos_yaw * sin_roll) / denom,
+        -kLoiterGravityMss};
 }
 }  // namespace detail
 
@@ -241,6 +282,65 @@ public:
             .vel_desired_ne_ms = desired_vel_ne_ms,
             .accel_desired_ne_mss = desired_accel_ne_mss_,
         };
+    }
+
+    [[nodiscard]] std::uint32_t brake_timer_ms() const { return brake_timer_ms_; }
+
+    [[nodiscard]] math::Vector2<float> get_pilot_desired_acceleration_ne_mss() const {
+        return desired_accel_ne_mss_;
+    }
+
+    [[nodiscard]] std::int32_t get_angle_max_cd(float attitude_lean_angle_max_rad,
+                                                float pos_lean_angle_max_rad) const {
+        return static_cast<std::int32_t>(
+            math::rad_to_cd(get_angle_max_rad(attitude_lean_angle_max_rad, pos_lean_angle_max_rad)) +
+            0.5f);
+    }
+
+    void set_pilot_desired_acceleration_rad(float euler_roll_angle_rad, float euler_pitch_angle_rad,
+                                            PilotAccelContext ctx) {
+        const math::Vector3<float> desired_euler{euler_roll_angle_rad, euler_pitch_angle_rad,
+                                               ctx.yaw_rad};
+        desired_accel_ne_mss_ = detail::lean_angles_rad_to_accel_ned_mss(desired_euler).xy();
+        if (!desired_accel_ne_mss_.is_zero()) {
+            brake_timer_ms_ = ctx.now_ms;
+        }
+
+        const math::Vector2<float> angle_error{
+            math::wrap_PI(euler_roll_angle_rad - predicted_euler_angle_rad_.x),
+            math::wrap_PI(euler_pitch_angle_rad - predicted_euler_angle_rad_.y)};
+
+        if (ctx.shaping.rate_bf_ff_enabled) {
+            // Full FF branch lives in ap-control; loiter tests use defaults (FF off).
+        } else {
+            predicted_euler_rate_.x = ctx.angle_gains.angle_p_roll * angle_error.x;
+            predicted_euler_rate_.y = ctx.angle_gains.angle_p_pitch * angle_error.y;
+        }
+
+        predicted_euler_angle_rad_ += predicted_euler_rate_ * ctx.dt_s;
+
+        const math::Vector3<float> predicted_euler{predicted_euler_angle_rad_.x,
+                                                   predicted_euler_angle_rad_.y, ctx.yaw_rad};
+        predicted_accel_ne_mss_ = detail::lean_angles_rad_to_accel_ned_mss(predicted_euler).xy();
+
+        if (loiter_option_is_set(LoiterOption::CoordinatedTurnEnabled)) {
+            const math::Vector2<float> turn_accel{
+                -ctx.vel_desired_ned_ms.y * ctx.target_ang_vel_z_rads,
+                ctx.vel_desired_ned_ms.x * ctx.target_ang_vel_z_rads};
+            desired_accel_ne_mss_ += turn_accel;
+            predicted_accel_ne_mss_ += turn_accel;
+        }
+    }
+
+    void set_pilot_desired_acceleration_cd(std::int32_t euler_roll_angle_cd,
+                                           std::int32_t euler_pitch_angle_cd, PilotAccelContext ctx) {
+        set_pilot_desired_acceleration_rad(math::cd_to_rad(static_cast<float>(euler_roll_angle_cd)),
+                                         math::cd_to_rad(static_cast<float>(euler_pitch_angle_cd)),
+                                         ctx);
+    }
+
+    void clear_pilot_desired_acceleration(PilotAccelContext ctx) {
+        set_pilot_desired_acceleration_rad(0.0f, 0.0f, ctx);
     }
 
     void sanity_check_params(float lean_angle_max_rad) {

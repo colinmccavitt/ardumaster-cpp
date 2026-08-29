@@ -13,18 +13,15 @@
 //   update_wpnav (speed-param watch + advance/NE-controller leftovers)
 //   set_speed_NE/up/down_ms
 //
-// LEFTOVER / DEFERRED (future CCP-028 slices — do not assume present):
-//   convert_parameters, var_info / AP_Param glue
-//   force_stop_at_next_wp
-//   advance_wp_target_along_track, update_track_with_speed_accel_limits
-//   terrain get_terrain_* / rangefinder, Location wrappers
-//   get_vector_NED from Location, get_wp_stopping_point_* wrappers
-//   SCurve / SplineCurve object calls (live in ap-math when ported)
-//   AC_PosControl method calls (PosControlSpeedAccel recorded only)
-//   AC_WPNav_OA.{h,cpp} — obstacle avoidance variant, separate scope
-//   AC_Loiter → loiter.hpp ; AC_Circle → circle.hpp
+// CCP-028 slice 7: force_stop, terrain/rangefinder, Location wrappers,
+// stopping-point conversions, corner accel.
 //
-// Parity tests still to port (Rust): wpnav_leftover.rs (Location/terrain/force_stop)
+// DEFERRED (out of scope):
+//   convert_parameters, var_info / AP_Param glue
+//   SCurve / SplineCurve object calls (live in ap-math when ported)
+//   AC_PosControl method calls beyond recorded leftovers
+//   AC_WPNav_OA — obstacle avoidance variant
+//   AC_Loiter → loiter.hpp ; AC_Circle → circle.hpp
 //
 // ADR-0004: no AHRS / PosControl / HAL millis singletons — caller supplies
 // stopping point, attitude jerk inputs, now_ms, and pos estimate for queries.
@@ -39,6 +36,8 @@
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector2.hpp>
 #include <fwcpp/math/control.hpp>
+#include <fwcpp/location.hpp>
+#include <fwcpp/wpnav/circle.hpp>
 #include <fwcpp/math/vector3.hpp>
 
 namespace fwcpp::wpnav {
@@ -55,6 +54,17 @@ inline constexpr float kWpJerkDefault = 1.0f;
 inline constexpr float kTerrainMarginDefaultM = 10.0f;
 inline constexpr std::uint32_t kWpnavActiveTimeoutMs = 200;
 inline constexpr float kGravityMss = 9.80665f;
+
+enum class TerrainSource {
+    Unavailable,
+    FromRangefinder,
+    FromTerrainDatabase,
+};
+
+struct GetTerrainContext {
+    bool terrain_database_enabled{false};
+    std::optional<float> terrain_database_u_m{};
+};
 
 struct AttitudeJerkLimits {
     float ang_vel_roll_max_rads{0.0f};
@@ -220,6 +230,164 @@ public:
         return spline_next_destination_vel_ned_ms_;
     }
     [[nodiscard]] bool need_this_leg_dest_speed_max() const { return need_this_leg_dest_speed_max_; }
+    [[nodiscard]] bool need_this_leg_dest_speed_max_zero() const {
+        return need_this_leg_dest_speed_max_zero_;
+    }
+    [[nodiscard]] bool need_next_scurve_init() const { return need_next_scurve_init_; }
+    [[nodiscard]] float terrain_margin_m() const { return std::max(terrain_margin_m_, 0.1f); }
+    void set_terrain_margin_m(float margin_m) { terrain_margin_m_ = margin_m; }
+    void set_wp_accel_c_mss(float accel_c_mss) { wp_accel_c_mss_ = accel_c_mss; }
+    [[nodiscard]] float corner_acceleration_mss() const {
+        if (math::is_positive(wp_accel_c_mss_)) {
+            return wp_accel_c_mss_;
+        }
+        return 2.0f * wp_acceleration_mss();
+    }
+
+    [[nodiscard]] TerrainSource get_terrain_source(bool terrain_database_enabled) const {
+        if (rangefinder_available_ && rangefinder_use_) {
+            return TerrainSource::FromRangefinder;
+        }
+        if (terrain_database_enabled) {
+            return TerrainSource::FromTerrainDatabase;
+        }
+        return TerrainSource::Unavailable;
+    }
+    [[nodiscard]] bool rangefinder_used() const { return rangefinder_use_; }
+    [[nodiscard]] bool rangefinder_used_and_healthy() const {
+        return rangefinder_use_ && rangefinder_healthy_;
+    }
+
+    void set_rangefinder_terrain_u_m(bool available, bool healthy, float terrain_u_m) {
+        rangefinder_available_ = available;
+        rangefinder_healthy_ = healthy;
+        rangefinder_terrain_u_m_ = terrain_u_m;
+    }
+
+    void set_rangefinder_terrain_u_cm(bool available, bool healthy, float terrain_u_cm) {
+        set_rangefinder_terrain_u_m(available, healthy, terrain_u_cm * 0.01f);
+    }
+
+    [[nodiscard]] std::optional<float> get_terrain_u_m(GetTerrainContext ctx) const {
+        switch (get_terrain_source(ctx.terrain_database_enabled)) {
+            case TerrainSource::Unavailable:
+                return std::nullopt;
+            case TerrainSource::FromRangefinder:
+                if (rangefinder_healthy_) {
+                    return rangefinder_terrain_u_m_;
+                }
+                return std::nullopt;
+            case TerrainSource::FromTerrainDatabase:
+                return ctx.terrain_database_u_m;
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<float> get_terrain_d_m(GetTerrainContext ctx) const {
+        if (const auto u = get_terrain_u_m(ctx)) {
+            return -(*u);
+        }
+        return std::nullopt;
+    }
+
+    [[nodiscard]] static math::Vector3<float> get_wp_stopping_point_ned_m(
+        math::Vector3<float> pos_control_stopping_point_ned_m) {
+        return pos_control_stopping_point_ned_m;
+    }
+
+    [[nodiscard]] static math::Vector2<float> get_wp_stopping_point_ne_m(
+        math::Vector3<float> pos_control_stopping_point_ned_m) {
+        return get_wp_stopping_point_ned_m(pos_control_stopping_point_ned_m).xy();
+    }
+
+    [[nodiscard]] static math::Vector2<float> get_wp_stopping_point_ne_cm(
+        math::Vector3<float> pos_control_stopping_point_ned_m) {
+        const math::Vector2<float> ne_m = get_wp_stopping_point_ne_m(pos_control_stopping_point_ned_m);
+        return math::Vector2<float>{ne_m.x * 100.0f, ne_m.y * 100.0f};
+    }
+
+    [[nodiscard]] static math::Vector3<float> get_wp_stopping_point_neu_cm(
+        math::Vector3<float> pos_control_stopping_point_ned_m) {
+        const math::Vector3<float> ned = get_wp_stopping_point_ned_m(pos_control_stopping_point_ned_m);
+        return math::Vector3<float>{ned.x * 100.0f, ned.y * 100.0f, -ned.z * 100.0f};
+    }
+
+    [[nodiscard]] static std::optional<std::pair<math::Vector3<float>, bool>> get_vector_ned_m(
+        const fwcpp::Location& loc, GetVectorNedContext ctx) {
+        return fwcpp::wpnav::get_vector_ned_m(loc, ctx);
+    }
+
+    [[nodiscard]] bool set_wp_destination_loc(const fwcpp::Location& destination, float arc_rad,
+                                            GetVectorNedContext vec_ctx, SetWpDestinationContext ctx) {
+        const auto converted = get_vector_ned_m(destination, vec_ctx);
+        if (!converted) {
+            return false;
+        }
+        return set_wp_destination_ned_m(converted->first, converted->second, arc_rad, ctx);
+    }
+
+    [[nodiscard]] bool set_wp_destination_next_loc(const fwcpp::Location& destination, float arc_rad,
+                                                   GetVectorNedContext vec_ctx) {
+        const auto converted = get_vector_ned_m(destination, vec_ctx);
+        if (!converted) {
+            return false;
+        }
+        return set_wp_destination_next_ned_m(converted->first, converted->second, arc_rad);
+    }
+
+    [[nodiscard]] std::optional<fwcpp::Location> get_wp_destination_loc(fwcpp::Location origin) const {
+        if (!origin.initialised()) {
+            return std::nullopt;
+        }
+        const fwcpp::Location::AltFrame frame =
+            is_terrain_alt_ ? fwcpp::Location::AltFrame::ABOVE_TERRAIN
+                            : fwcpp::Location::AltFrame::ABOVE_ORIGIN;
+        fwcpp::Location destination = origin;
+        destination.set_alt_cm(static_cast<std::int32_t>(-destination_ned_m_.z * 100.0f), frame);
+        destination.offset(destination_ned_m_.x, destination_ned_m_.y);
+        return destination;
+    }
+
+    [[nodiscard]] bool set_spline_destination_loc(const fwcpp::Location& destination,
+                                                    const fwcpp::Location& next_destination,
+                                                    bool next_is_spline, GetVectorNedContext vec_ctx,
+                                                    SetWpDestinationContext ctx) {
+        const auto dest = get_vector_ned_m(destination, vec_ctx);
+        const auto next = get_vector_ned_m(next_destination, vec_ctx);
+        if (!dest || !next) {
+            return false;
+        }
+        return set_spline_destination_ned_m(dest->first, dest->second, next->first, next->second,
+                                            next_is_spline, ctx);
+    }
+
+    [[nodiscard]] bool set_spline_destination_next_loc(const fwcpp::Location& next_destination,
+                                                         const fwcpp::Location& next_next_destination,
+                                                         bool next_next_is_spline,
+                                                         GetVectorNedContext vec_ctx) {
+        const auto next = get_vector_ned_m(next_destination, vec_ctx);
+        const auto next_next = get_vector_ned_m(next_next_destination, vec_ctx);
+        if (!next || !next_next) {
+            return false;
+        }
+        return set_spline_destination_next_ned_m(next->first, next->second, next_next->first,
+                                                 next_next->second, next_next_is_spline);
+    }
+
+    [[nodiscard]] bool force_stop_at_next_wp() {
+        if (!flags_.fast_waypoint) {
+            return false;
+        }
+        flags_.fast_waypoint = false;
+        if (!this_leg_is_spline_) {
+            need_this_leg_dest_speed_max_zero_ = true;
+        }
+        if (!next_leg_is_spline_) {
+            need_next_scurve_init_ = true;
+            scurve_next_leg_calculated_ = false;
+        }
+        return true;
+    }
 
     void set_wp_radius_m(float radius_m) { wp_radius_m_ = radius_m; }
     void set_wp_speed_ms(float speed_ms) { wp_speed_ms_ = speed_ms; }
@@ -412,6 +580,40 @@ public:
         need_next_scurve_init_ = false;
         flags_.reached_destination = false;
 
+        return true;
+    }
+
+    [[nodiscard]] bool set_spline_destination_next_ned_m(
+        const math::Vector3<float>& next_destination_ned_m, bool next_is_terrain_alt,
+        const math::Vector3<float>& next_next_destination_ned_m, bool next_next_is_terrain_alt,
+        bool next_next_is_spline) {
+        if (next_is_terrain_alt != is_terrain_alt_) {
+            return true;
+        }
+
+        math::Vector3<float> origin_vector_ned_m{};
+        if (this_leg_is_spline_) {
+            origin_vector_ned_m = spline_destination_vel_ned_ms_;
+        } else {
+            origin_vector_ned_m = destination_ned_m_ - origin_ned_m_;
+        }
+
+        math::Vector3<float> destination_vector_ned_m{};
+        if (next_is_terrain_alt == next_next_is_terrain_alt) {
+            if (next_next_is_spline) {
+                destination_vector_ned_m = next_next_destination_ned_m - destination_ned_m_;
+            } else {
+                destination_vector_ned_m = next_next_destination_ned_m - next_destination_ned_m;
+            }
+        }
+
+        spline_next_destination_ned_m_ = next_destination_ned_m;
+        spline_next_origin_vel_ned_ms_ = origin_vector_ned_m;
+        spline_next_destination_vel_ned_ms_ = destination_vector_ned_m;
+        spline_next_leg_set_ = true;
+        next_leg_is_spline_ = true;
+        flags_.fast_waypoint = true;
+        need_this_leg_dest_speed_max_ = true;
         return true;
     }
 
@@ -675,7 +877,11 @@ private:
     bool need_this_leg_dest_speed_max_zero_{false};
     bool need_next_scurve_init_{false};
     bool rangefinder_use_{true};
+    bool rangefinder_available_{false};
+    bool rangefinder_healthy_{false};
+    float rangefinder_terrain_u_m_{0.0f};
 };
+
 
 }  // namespace fwcpp::wpnav
 

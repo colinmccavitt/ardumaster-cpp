@@ -640,6 +640,20 @@ target_link_libraries(transition_completeness_test PRIVATE ap-quadplane-transiti
 catch_discover_tests(transition_completeness_test)
 # VCP-004 slice 1: ap-q-modes QSTABILIZE / QHOVER / QACRO scaffold.
 
+
+# CCP-028 slice 7: loiter/circle/wpnav leftover parity
+add_executable(circle_leftover_test circle_leftover_test.cpp)
+target_link_libraries(circle_leftover_test PRIVATE ap-wpnav ap-common Catch2::Catch2WithMain)
+catch_discover_tests(circle_leftover_test)
+
+add_executable(loiter_pilot_accel_test loiter_pilot_accel_test.cpp)
+target_link_libraries(loiter_pilot_accel_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
+catch_discover_tests(loiter_pilot_accel_test)
+
+add_executable(wpnav_leftover_test wpnav_leftover_test.cpp)
+target_link_libraries(wpnav_leftover_test PRIVATE ap-wpnav ap-common Catch2::Catch2WithMain)
+catch_discover_tests(wpnav_leftover_test)
+
 add_executable(circle_init_test circle_init_test.cpp)
 target_link_libraries(circle_init_test PRIVATE ap-wpnav ap-common Catch2::Catch2WithMain)
 catch_discover_tests(circle_init_test)
