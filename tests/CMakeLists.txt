@@ -465,6 +465,12 @@ add_executable(pos_control_leftover_test pos_control_leftover_test.cpp)
 target_link_libraries(pos_control_leftover_test PRIVATE ap-poscontrol Catch2::Catch2WithMain)
 catch_discover_tests(pos_control_leftover_test)
 
+add_executable(pos_control_ne_update_test pos_control_ne_update_test.cpp)
+target_link_libraries(pos_control_ne_update_test PRIVATE ap-poscontrol Catch2::Catch2WithMain)
+catch_discover_tests(pos_control_ne_update_test)
+
+
+
 # CCP-028 (copter-cpp effort): fwcpp::wpnav — AC_WPNav first slice
 # (wp_and_spline_init_m + distance/bearing helpers). See
 # modules/ap-wpnav/include/fwcpp/wpnav/wpnav.hpp file banner.
