@@ -12,6 +12,8 @@
 // whole and counted (upstream _dropped when space < size). No unbounded
 // growth on the flight path.
 
+#include <fwcpp/logger/rate_limiter.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -60,6 +62,24 @@ public:
         }
     }
 
+    // WriteStreaming-style path: WritePrioritisedBlock's non-critical
+    // rate_limiter->should_log(msgbuf[2], writev_streaming) gate
+    // (Backend.cpp ~457-461), using should_log_streaming only. A failed
+    // gate drops the block without incrementing num_dropped (rate-limit
+    // is not a buffer-full drop). A pass is WriteBlock as usual.
+    [[nodiscard]] bool WriteStreaming(std::span<const std::uint8_t> bytes,
+                                      std::uint8_t msgid,
+                                      std::uint16_t now_ms16,
+                                      float rate_hz,
+                                      bool log_pause) {
+        if (!rate_limiter_.should_log_streaming(msgid, now_ms16, rate_hz, log_pause)) {
+            return false;
+        }
+        return WriteBlock(bytes);
+    }
+
+    [[nodiscard]] const RateLimiter& rate_limiter() const { return rate_limiter_; }
+
     [[nodiscard]] std::span<const std::uint8_t> recorded() const {
         return std::span<const std::uint8_t>(storage_.data(), len_);
     }
@@ -78,6 +98,7 @@ private:
     bool writing_{false};
     std::uint32_t ended_{0};
     std::uint32_t dropped_{0};
+    RateLimiter rate_limiter_{};
 };
 
 }  // namespace fwcpp::logger

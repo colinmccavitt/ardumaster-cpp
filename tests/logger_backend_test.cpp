@@ -155,3 +155,83 @@ TEST_CASE("FMT registry lookup by name and msg type", "[logger][fmt]") {
     REQUIRE(structure_for_name("NOPE") == nullptr);
     REQUIRE(structure_for_msg_type(255) == nullptr);
 }
+
+TEST_CASE("WriteStreaming pause blocks without incrementing num_dropped",
+          "[logger][streaming]") {
+    using fwcpp::logger::RateLimiter;
+
+    RateLimiter limiter;
+    REQUIRE_FALSE(limiter.should_log_streaming(1, 1000, 10.0f, true));
+    REQUIRE(limiter.last_send_ms(1) == 0);
+
+    MemoryBackend<32> log;
+    const std::uint8_t block[] = {0xA3, 0x95, 0x01, 0x00};
+    REQUIRE_FALSE(log.WriteStreaming(std::span<const std::uint8_t>(block, sizeof(block)),
+                                     1, 1000, 10.0f, true));
+    REQUIRE(log.size() == 0);
+    REQUIRE(log.num_dropped() == 0);
+}
+
+TEST_CASE("WriteStreaming too-soon at 10 Hz drops without incrementing num_dropped",
+          "[logger][streaming]") {
+    MemoryBackend<32> log;
+    const std::uint8_t first[] = {0xA3, 0x95, 0x02, 0x11};
+    const std::uint8_t second[] = {0xA3, 0x95, 0x02, 0x22};
+
+    REQUIRE(log.WriteStreaming(std::span<const std::uint8_t>(first, sizeof(first)),
+                               2, 1000, 10.0f, false));
+    REQUIRE(log.size() == sizeof(first));
+    REQUIRE(log.num_dropped() == 0);
+
+    // 10 Hz => 1000/rate_hz == 100 ms. delta 99 < 100 is too soon.
+    REQUIRE_FALSE(log.WriteStreaming(std::span<const std::uint8_t>(second, sizeof(second)),
+                                     2, 1099, 10.0f, false));
+    REQUIRE(log.size() == sizeof(first));
+    REQUIRE(log.num_dropped() == 0);
+
+    const auto rec = log.recorded();
+    REQUIRE(rec.size() == sizeof(first));
+    REQUIRE(std::equal(rec.begin(), rec.end(), first));
+}
+
+TEST_CASE("WriteStreaming millis16 wrap-around subtraction", "[logger][streaming]") {
+    using fwcpp::logger::RateLimiter;
+
+    RateLimiter limiter;
+    REQUIRE(limiter.should_log_streaming(3, 65530, 10.0f, false));
+    REQUIRE(limiter.last_send_ms(3) == 65530);
+
+    // now=44: uint16 (44 - 65530) == 50, 50 < 100 => too soon.
+    REQUIRE_FALSE(limiter.should_log_streaming(3, 44, 10.0f, false));
+    REQUIRE(limiter.last_send_ms(3) == 65530);
+
+    // now=94: uint16 (94 - 65530) == 100, 100 < 100 is false => pass.
+    REQUIRE(limiter.should_log_streaming(3, 94, 10.0f, false));
+    REQUIRE(limiter.last_send_ms(3) == 94);
+
+    MemoryBackend<32> log;
+    const std::uint8_t a[] = {0xA3, 0x95, 0x03, 0xAA};
+    const std::uint8_t b[] = {0xA3, 0x95, 0x03, 0xBB};
+    const std::uint8_t c[] = {0xA3, 0x95, 0x03, 0xCC};
+    REQUIRE(log.WriteStreaming(std::span<const std::uint8_t>(a, sizeof(a)),
+                               3, 65530, 10.0f, false));
+    REQUIRE_FALSE(log.WriteStreaming(std::span<const std::uint8_t>(b, sizeof(b)),
+                                     3, 44, 10.0f, false));
+    REQUIRE(log.num_dropped() == 0);
+    REQUIRE(log.WriteStreaming(std::span<const std::uint8_t>(c, sizeof(c)),
+                               3, 94, 10.0f, false));
+    REQUIRE(log.size() == sizeof(a) + sizeof(c));
+    REQUIRE(log.num_dropped() == 0);
+}
+
+TEST_CASE("WriteStreaming passing write lands in MemoryBackend", "[logger][streaming]") {
+    MemoryBackend<32> log;
+    const std::uint8_t block[] = {0xA3, 0x95, 0x04, 0x42};
+    REQUIRE(log.WriteStreaming(std::span<const std::uint8_t>(block, sizeof(block)),
+                               4, 1000, 10.0f, false));
+    REQUIRE(log.size() == sizeof(block));
+    REQUIRE(log.num_dropped() == 0);
+    const auto rec = log.recorded();
+    REQUIRE(std::equal(rec.begin(), rec.end(), block));
+    REQUIRE(log.rate_limiter().last_send_ms(4) == 1000);
+}

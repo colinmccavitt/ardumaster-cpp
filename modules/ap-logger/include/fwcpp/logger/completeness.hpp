@@ -1,8 +1,9 @@
 #pragma once
 
-// CPP-090 completeness: this slice (FMT registry + Fill_Format / Write_Format)
-// vs remaining AP_Logger / DataFlash surfaces. remaining_count() > 0 until
-// later slices land file backend, transfer, streaming, and erase/rotate.
+// CPP-090 completeness: this slice (WriteStreaming rate-limit gate) vs
+// remaining AP_Logger / DataFlash surfaces. remaining_count() > 0 until
+// later slices land the DataFlash page map, POSIX/SD, transfer, and
+// erase/rotate.
 
 #include <cstddef>
 #include <cstdint>
@@ -23,19 +24,19 @@ struct LoggerPortItem {
 };
 
 inline constexpr LoggerPortItem kLoggerCompleteness[] = {
-    {"backend", PortStatus::kThisSlice,
+    {"backend", PortStatus::kOnMain,
      "LogBackend WriteBlock/StartWrite/EndWrite + MemoryBackend"},
-    {"drop", PortStatus::kThisSlice,
+    {"drop", PortStatus::kOnMain,
      "buffer-full drop counter (upstream _dropped / num_dropped)"},
-    {"completeness catalog", PortStatus::kThisSlice, "this table"},
+    {"completeness catalog", PortStatus::kOnMain, "this table"},
     {"DataFlash page map", PortStatus::kRemaining,
-     "page-based DataFlash layout; this slice is an in-memory buffer"},
+     "page-based DataFlash layout; BufferToPage / PageToBuffer (NAND)"},
     {"POSIX/SD file backend", PortStatus::kRemaining,
      "AP_Logger_File on a real filesystem; no filesystem in this slice"},
-    {"FMT registry", PortStatus::kThisSlice,
+    {"FMT registry", PortStatus::kOnMain,
      "LogStructure / log_Format, Fill_Format, Write_Format, lookup by name/type"},
-    {"streaming", PortStatus::kRemaining,
-     "WriteStreaming rate-limit gate (1000/rate_hz ms)"},
+    {"streaming", PortStatus::kThisSlice,
+     "WriteStreaming rate-limit gate (should_log_streaming, 1000/rate_hz ms)"},
     {"transfer", PortStatus::kRemaining,
      "MAVLink LOG_REQUEST_LIST / LOG_ENTRY listing"},
     {"erase/rotate", PortStatus::kRemaining,
