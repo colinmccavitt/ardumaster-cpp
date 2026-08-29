@@ -10,8 +10,8 @@ using fwcpp::vtol_assist::vtol_assist_completeness_size;
 
 TEST_CASE("vtol assist catalog", "[vtol_assist][catalog]") {
     REQUIRE(on_main_count() == 0);
-    REQUIRE(this_slice_count() == 8);
-    REQUIRE(remaining_count() == 5);
+    REQUIRE(this_slice_count() == 10);
+    REQUIRE(remaining_count() == 3);
     REQUIRE(vtol_assist_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + 1);
     REQUIRE(completeness_has("enable/check gate", PortStatus::kThisSlice));
@@ -19,5 +19,6 @@ TEST_CASE("vtol assist catalog", "[vtol_assist][catalog]") {
     REQUIRE(completeness_has("altitude assist trigger", PortStatus::kThisSlice));
     REQUIRE(completeness_has("angle-error trigger", PortStatus::kThisSlice));
     REQUIRE(completeness_has("should_assist full OR latch", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("check_VTOL_recovery", PortStatus::kRemaining));
+    REQUIRE(completeness_has("check_VTOL_recovery", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("output_spin_recovery", PortStatus::kThisSlice));
 }

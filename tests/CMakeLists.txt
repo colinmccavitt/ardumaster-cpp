@@ -557,3 +557,9 @@ catch_discover_tests(vtol_assist_completeness_test)
 add_executable(vtol_assist_alt_angle_test vtol_assist_alt_angle_test.cpp)
 target_link_libraries(vtol_assist_alt_angle_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
 catch_discover_tests(vtol_assist_alt_angle_test)
+
+# VCP-002 slice 3: VTOL fw recovery FSM + spin surface outputs.
+add_executable(vtol_assist_recovery_test vtol_assist_recovery_test.cpp)
+target_link_libraries(vtol_assist_recovery_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
+catch_discover_tests(vtol_assist_recovery_test)
+
