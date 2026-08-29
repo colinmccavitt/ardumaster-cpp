@@ -21,6 +21,7 @@
 #include <fwcpp/quadplane/quadplane_auto_vtol_mission.hpp>
 #include <fwcpp/quadplane/quadplane_land_detector.hpp>
 #include <fwcpp/quadplane/quadplane_control_auto.hpp>
+#include <fwcpp/quadplane/quadplane_stabilize.hpp>
 #include <fwcpp/quadplane/quadplane_takeoff_controller.hpp>
 #include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
 #include <fwcpp/quadplane/quadplane_vtol_subsystems.hpp>
@@ -446,6 +447,51 @@ public:
         return fwcpp::quadplane::control_auto(poscontrol_, poscontrol_land_, last_set_state_sink_, in);
     }
 
+    [[nodiscard]] const ZCtrlState& z_ctrl() const { return z_ctrl_; }
+    ZCtrlState& z_ctrl_mut() { return z_ctrl_; }
+    [[nodiscard]] std::uint32_t last_pidz_active_ms() const { return z_ctrl_.last_pidz_active_ms; }
+    [[nodiscard]] std::uint32_t last_pidz_init_ms() const { return z_ctrl_.last_pidz_init_ms; }
+
+    [[nodiscard]] RelaxAttitudeTick relax_attitude_control(RelaxAttitudeInputs in) const {
+        in.tailsitter_enabled = tailsitter().enabled();
+        return fwcpp::quadplane::relax_attitude_control(in);
+    }
+
+    [[nodiscard]] AttitudeRateTick multicopter_attitude_rate_update(AttitudeRateInputs in) const {
+        in.tailsitter_enabled = tailsitter().enabled();
+        if (in.lean_angle_max_cd == 0.0f) {
+            in.lean_angle_max_cd = static_cast<float>(lean_angle_max_cd_);
+        }
+        return fwcpp::quadplane::multicopter_attitude_rate_update(in);
+    }
+
+    [[nodiscard]] HoldStabilizeTick hold_stabilize(float throttle_in, HoldStabilizeInputs in) const {
+        in.throttle_in = throttle_in;
+        in.air_mode_active = air_mode_active();
+        in.tailsitter_enabled = tailsitter().enabled();
+        in.assisted_flight = assisted_flight_;
+        in.yaw.assisted_flight = assisted_flight_;
+        in.yaw.should_weathervane = false;
+        in.yaw.pilot.air_mode_active = air_mode_active();
+        in.yaw.pilot.tailsitter_enabled = tailsitter().enabled();
+        in.yaw.pilot.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.yaw.pilot.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        in.attitude.tailsitter_enabled = tailsitter().enabled();
+        if (in.attitude.lean_angle_max_cd == 0.0f) {
+            in.attitude.lean_angle_max_cd = static_cast<float>(lean_angle_max_cd_);
+        }
+        in.relax.tailsitter_enabled = tailsitter().enabled();
+        return fwcpp::quadplane::hold_stabilize(in);
+    }
+
+    [[nodiscard]] ZCtrlTick run_z_controller(ZCtrlInputs in) {
+        in.tailsitter_enabled = tailsitter().enabled();
+        in.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        in.pilot_accel_z_mss = pilot_accel_z_mss_;
+        return fwcpp::quadplane::run_z_controller(z_ctrl_, in);
+    }
+
     [[nodiscard]] HoldHoverTick hold_hover(float target_climb_rate_cms, DesiredYawRateInputs yaw) const {
         yaw.assisted_flight = assisted_flight_;
         yaw.should_weathervane = false;
@@ -527,6 +573,7 @@ private:
     float takeoff_navalt_min_m_{0.f};
     bool guided_takeoff_{false};
     TakeoffNavState takeoff_nav_{};
+    ZCtrlState z_ctrl_{};
 };
 
 }  // namespace fwcpp::quadplane

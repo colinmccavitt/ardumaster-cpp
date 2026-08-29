@@ -20,6 +20,14 @@ enum class DesiredSpoolState : std::uint8_t {
     kThrottleUnlimited = 2,
 };
 
+enum class SpoolState : std::uint8_t {
+    kShutDown = 0,
+    kGroundIdle = 1,
+    kSpoolingUp = 2,
+    kThrottleUnlimited = 3,
+    kSpoolingDown = 4,
+};
+
 enum class MotorsOutputAction : std::uint8_t {
     kDelayArming = 0,
     kDisarmed = 1,
