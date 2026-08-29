@@ -780,6 +780,10 @@ add_executable(tailsitter_control_test tailsitter_control_test.cpp)
 target_link_libraries(tailsitter_control_test PRIVATE ap-tailsitter Catch2::Catch2WithMain)
 catch_discover_tests(tailsitter_control_test)
 
+add_executable(tailsitter_output_test tailsitter_output_test.cpp)
+target_link_libraries(tailsitter_output_test PRIVATE ap-tailsitter Catch2::Catch2WithMain)
+catch_discover_tests(tailsitter_output_test)
+
 # VCP-008 slice 1: ap-tiltrotor scaffold.
 
 add_executable(tiltrotor_enable_test tiltrotor_enable_test.cpp)

@@ -34,4 +34,12 @@ inline constexpr std::int32_t kInvertedRollCd = 18000;
 inline constexpr float kVtolZeroThrottle = 0.05f;
 inline constexpr float kVtolZeroGroundspeedMs = 1.0f;
 
+inline constexpr float kVectoredForwardGainDefault = 0.0f;
+inline constexpr float kVectoredHoverPowerDefault = 2.5f;
+inline constexpr float kThrottleScaleMaxDefault = 2.0f;
+inline constexpr float kGainScalingMinDefault = 0.4f;
+inline constexpr float kVtolRollScaleDefault = 1.0f;
+inline constexpr float kVtolPitchScaleDefault = 1.0f;
+inline constexpr float kVtolYawScaleDefault = 1.0f;
+
 }  // namespace fwcpp::tailsitter
