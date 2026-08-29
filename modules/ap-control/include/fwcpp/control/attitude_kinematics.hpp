@@ -1662,4 +1662,381 @@ inline void command_model_rate_predictor(const math::Vector2f& error_angle_rad, 
     target_ang_vel_rads.y = ang_vel_rads.y;
 }
 
+// ---------------------------------------------------------------------
+// CCP-029 ADDENDUM: input_euler_angle_roll_pitch_euler_rate_yaw_rad
+// (real lines 404-457, re-verified directly via `grep -n` against the
+// pinned upstream tree - the function opens at real line 404 and its
+// own closing brace is real line 457, essentially matching this
+// ticket's own claimed 404-458 range - 458 is a trailing blank line)
+// and its own trivial centidegree wrapper,
+// input_euler_angle_roll_pitch_euler_rate_yaw_cd (real lines 390-397,
+// confirmed exactly). This is the first real `input_*` ENTRY POINT
+// this port builds - the pilot/autopilot-facing surface every lower-
+// level building block in this whole AC_AttitudeControl phase (CCP-018
+// through CCP-026) has been leading toward.
+//
+// THE REAL CONCEPTUAL REASON THIS FUNCTION (AND EVERY OTHER `input_*`
+// ENTRY POINT) EXISTS AT ALL - reused verbatim from copter-rust's own
+// COP-007 investigation (ports/plane-fw-rust/crates/ap-control/src/
+// attitude_controller.rs's own file banner and its COP-007 ticket
+// notes): "a pilot's stick position is NOT the attitude target. It is
+// the attitude the target is shaped TOWARD, subject to rate and
+// acceleration limits, and the target moves there over many
+// iterations. The aircraft chases the target; the target chases the
+// stick. Skipping that indirection gives an aircraft that snaps to
+// stick inputs and cannot express a rate limit at all." REAL, LOAD-
+// BEARING TESTING CONSEQUENCE, reused directly: "the entry point is
+// stateful, so one call proves almost nothing: a shaping error
+// converges to the same place either way and differs only in how it
+// gets there." This module's own test file below drives the shaped
+// (`rate_bf_ff_enabled == true`) branch through hundreds of successive
+// calls for exactly this reason - see "a scripted stick sequence" test
+// below.
+//
+// THE REAL FRAME-CONVERSION RATIONALE, reused directly: "The limits are
+// converted body-frame to Euler-frame before shaping. Not a formality:
+// an aircraft leaning hard needs a much larger Euler yaw rate to
+// achieve a given body yaw rate, and limiting in the wrong frame would
+// either throttle it needlessly or let it exceed the airframe."
+// Re-verified directly below: body_to_euler_limit (CCP-018) is called
+// TWICE, using the CURRENT `state.attitude_target` - i.e. AFTER step 1
+// (update_attitude_target) has already advanced it for this call, but
+// BEFORE any of this function's own per-axis shaping runs - matching
+// real upstream's own real line 415-418 exactly (both calls read
+// `_attitude_target` as it stands at that point in the function, not a
+// value captured earlier or later).
+//
+// THE REAL ROLL/PITCH-VS-YAW ARGUMENT-SHAPE ASYMMETRY IN THE THREE
+// attitude_command_model CALLS - re-verified directly against real
+// lines 434-440, transcribed exactly, NOT assumed to share one shape:
+//   - roll: attitude_command_model(wrap_PI(euler_roll_angle_rad -
+//     euler_angle_target_rad.x), 0.0f, ..., input_tc, dt)
+//   - pitch: attitude_command_model(wrap_PI(euler_pitch_angle_rad -
+//     euler_angle_target_rad.y), 0.0f, ..., input_tc, dt)
+//   - yaw: attitude_command_model(0.0f, euler_yaw_rate_rads, ...,
+//     rate_y_tc, dt)
+// Roll/pitch pass a real, nonzero `error_angle` (the wrapped difference
+// between the commanded angle and the current Euler target) and a
+// literal `0.0f` `desired_ang_vel` - they are angle commands. Yaw does
+// the OPPOSITE: a literal `0.0f` `error_angle` and the real input yaw
+// RATE as `desired_ang_vel` - it is a rate command, carried entirely
+// through the shaper's velocity argument, never through its angle-error
+// argument. AND the yaw call's own time constant is a genuinely
+// DIFFERENT real parameter, `rate_y_tc` (upstream `_rate_y_tc`) - NOT
+// `input_tc` (upstream `_input_tc`), which only the roll/pitch calls
+// use. This port's own signature keeps both as two separate explicit
+// float fields on EulerAngleRateShapingGains below, matching real
+// upstream's own two genuinely separate member variables. This module's
+// own test file below has a dedicated test proving BOTH of these real
+// asymmetries with cases that would produce a measurably different
+// result under the "obvious" (but wrong) assumption that all three
+// calls share one argument shape, or that rate_y_tc and input_tc are
+// interchangeable.
+//
+// get_roll_trim_rad() - A REAL, CONFIRMED MULTIROTOR SIMPLIFICATION,
+// re-verified directly against both real headers this round:
+// get_roll_trim_cd() is a real, virtual AC_AttitudeControl method whose
+// BASE CLASS default is `return 0`; only the real, out-of-scope
+// AC_AttitudeControl_Heli subclass overrides it to compensate tail-rotor
+// thrust. Since this port's own charter is explicitly multirotor-first/
+// non-heli, this term is ALWAYS real, exact 0.0f in this port's own
+// actual scope. Per this ticket's own explicit instruction, this
+// simplification is stated here rather than silently dropped, and no
+// unused `virtual`-trim machinery is built for a heli case this port
+// will never exercise - the `euler_roll_angle_rad += get_roll_trim_rad()`
+// line upstream has at real line 419 simply has no equivalent below.
+//
+// THE REAL ARCHITECTURAL QUESTION THIS TICKET ASKS TO BE RESOLVED AND
+// DISCLOSED: this function calls the already-merged
+// attitude_controller_run_quat (CCP-025), which already has a
+// substantial explicit-parameter signature (23 parameters, counted
+// directly off its own real declaration above). Combined with this
+// function's OWN new persistent state (attitude_target,
+// euler_angle_target_rad, euler_rate_target_rads, ang_vel_target_rads -
+// shared with CCP-025 - plus NEW state: ang_accel_target_rads) and its
+// own new shaping-specific gains (rate_bf_ff_enabled, input_tc,
+// rate_y_tc, on top of the rate/accel limits CCP-025 already needed), a
+// fully-flattened single parameter list for THIS function would run to
+// roughly 30+ individual parameters - confirmed by actually counting
+// while drafting a flattened version before writing the version below.
+//
+// DECISION: two small, plain data-holding structs are introduced,
+// scoped to this ticket alone -
+//   - AttitudeTargetState bundles exactly the five real persistent
+//     Quaternion/Vector3f targets this function and CCP-025 share
+//     (attitude_target, euler_angle_target_rad, euler_rate_target_rads,
+//     ang_vel_target_rads, ang_accel_target_rads) - the same five
+//     fields copter-rust's own COP-007 AttitudeController struct
+//     carries (minus attitude_ang_error, which stays CCP-025's own
+//     separate output parameter below, matching that Rust struct's own
+//     precedent of keeping it out of the bundled target state too).
+//   - EulerAngleRateShapingGains bundles the mostly-constant-per-vehicle
+//     tuning parameters this function reads: its own shaping config
+//     (rate_bf_ff_enabled, input_tc, rate_y_tc, the three ang_vel_*_
+//     max_degs, the three accel_*_max_radss) plus every gain
+//     attitude_controller_run_quat itself needs downstream (rate_yaw_kp,
+//     angle_yaw_kp, angle_kp_roll/pitch/yaw, angle_p_scale,
+//     use_sqrt_controller) - mirroring copter-rust's own COP-007 split
+//     of ShapingConfig/YawLimitGains/AngleGains into one bundle, since
+//     this port has no existing per-purpose gains-struct precedent to
+//     match instead.
+// This does NOT violate this port's own ADR-0012 (which forbids
+// singletons and hidden/implicit global state, not explicit structs a
+// caller constructs and passes openly) - both structs are plain,
+// caller-owned data with no methods and no ownership of anything beyond
+// their own fields, passed by explicit reference exactly like every
+// other explicit-parameter convention this whole phase already
+// established (CCP-024's Vector3f angle_p_scale bundling three axes for
+// the identical "upstream already stores this as one member" reason).
+//
+// attitude_controller_run_quat's OWN existing CCP-025 signature is
+// LEFT AS-IS, NOT retrofitted to accept either struct. Three reasons:
+// (1) it is already-merged, already-tested, working code at 23
+// parameters - large, but meaningfully under the 25-30-parameter
+// threshold this ticket's own architectural question is actually
+// concerned with, so the problem this decision is solving does not
+// independently apply to it; (2) retrofitting it would touch stable,
+// already-verified control-loop code (CCP-025's own 8 existing tests)
+// purely for stylistic consistency with a sibling function, not to fix
+// a real problem in that function itself - a disproportionate risk for
+// "the most complex assembly function yet" per this ticket's own
+// framing; (3) this function's own body calls attitude_controller_run_
+// quat by simply forwarding individual struct MEMBERS
+// (state.attitude_target, gains.angle_kp_roll, etc.) as its already-
+// established individual arguments - the struct bundling buys this
+// ticket's own new function a real reduction (roughly 30+ down to 13
+// parameters) without requiring CCP-025's own signature to change at
+// all. If a THIRD entry point later needed the same gains bundle,
+// retrofitting CCP-025 at that point would earn its keep on genuine,
+// repeated duplication rather than a single caller's own preference.
+//
+// REAL STRUCTURE, each step re-verified directly against real lines
+// 404-457:
+//   1. update_attitude_target (CCP-025) - called FIRST, unconditionally,
+//      before anything else in this function, exactly matching real
+//      line 406.
+//   2. state.attitude_target.to_euler(state.euler_angle_target_rad) -
+//      this port's own existing Vector3f-overloaded to_euler (already
+//      in quaternion.hpp before this ticket).
+//   3. get_roll_trim_rad() - see the dedicated paragraph above; no code
+//      emitted for this term.
+//   4. The real top-level `if (rate_bf_ff_enabled)` branch:
+//      - true: body_to_euler_limit (CCP-018) TWICE (accel limits, then
+//        rate limits), both against the CURRENT state.attitude_target;
+//        body_to_euler_derivative (CCP-018) once, converting the
+//        current body-frame acceleration target
+//        (state.ang_accel_target_rads) into euler_accel_target_rads -
+//        re-verified upstream itself discards this call's own bool
+//        return value (real line 424 does not check it), reproduced
+//        here via an explicit `(void)`-discarded call rather than
+//        silently dropping the [[nodiscard]] result; attitude_command_
+//        model (CCP-022) THREE times with the real roll/pitch-vs-yaw
+//        asymmetry documented above; euler_derivative_to_body (CCP-018)
+//        TWICE, converting the shaped Euler rate and acceleration
+//        targets back to body-frame feedforward
+//        (state.ang_vel_target_rads, state.ang_accel_target_rads).
+//      - false: state.euler_angle_target_rad.x/y set directly from the
+//        input angles; state.euler_angle_target_rad.z INTEGRATED (`+=
+//        euler_yaw_rate_rads * dt`, plain Euler integration, NOT
+//        shaped, re-verified directly against real line 450);
+//        state.attitude_target recomputed fresh via from_euler; all
+//        three feedforward targets (euler_rate_target_rads,
+//        ang_vel_target_rads, ang_accel_target_rads) ZEROED via their
+//        own `.zero()` method, matching real upstream's own
+//        `.zero()`-style calls at real lines 454-456 exactly.
+//   5. attitude_controller_run_quat (CCP-025) - the REAL LAST STEP,
+//      called unconditionally regardless of which branch above ran,
+//      matching real line 457.
+//
+// TESTS (tests/attitude_kinematics_test.cpp): a real, multi-step (600
+// iterations at 400 Hz / 1.5s, matching copter-rust's own COP-007
+// stick-sequence rigor) scripted test for the shaped branch - a step in
+// roll,
+// a ramp in pitch, and a yaw rate that reverses sign partway through
+// (copter-rust's own real script shape, reused directly), asserting
+// convergence/tracking at multiple stages rather than only the final
+// value; a single-call test of the unshaped (`rate_bf_ff_enabled ==
+// false`) branch (legitimate here specifically, unlike the shaped
+// branch, since this branch's own output is a direct, one-step function
+// of its own inputs - re-verified this distinction directly against the
+// real source above); the real roll/pitch-vs-yaw argument-shape
+// asymmetry, and the real separate rate_y_tc/input_tc distinction, each
+// with a dedicated case that would produce a measurably different
+// result under the "obvious" but wrong assumption.
+//
+// DEFERRED, explicitly, as separate, deliberately deferred future
+// tickets, NOT started here (roughly 19 real `input_*` entry points
+// total in AC_AttitudeControl.cpp; most are thin unit-conversion or
+// argument-reordering wrappers around a smaller number of substantive
+// ones): input_euler_angle_roll_pitch_yaw_rad, input_euler_rate_roll_
+// pitch_yaw_rads, the several input_rate_bf_roll_pitch_yaw_* variants,
+// input_thrust_vector_rate_heading_rads, input_thrust_vector_heading_
+// rad, input_thrust_vector_xy, input_quaternion, input_angle_step_bf_
+// roll_pitch_yaw_rad, input_rate_step_bf_roll_pitch_yaw_rads, and the
+// relax/reset paths (relax, reset_target_and_rate, reset_yaw_target_
+// and_rate, inertial_frame_reset) - none retroactively unblocked by
+// this ticket's own one entry point plus its trivial _cd wrapper.
+// ---------------------------------------------------------------------
+
+// AttitudeTargetState - the controller's own real persistent target
+// state: upstream's _attitude_target/_euler_angle_target_rad/_euler_
+// rate_target_rads/_ang_vel_target_rads (shared with CCP-025's own
+// attitude_controller_run_quat above) plus this ticket's own new
+// _ang_accel_target_rads. See this file's own "CCP-029 ADDENDUM" above
+// for the full architectural writeup of why this struct exists and why
+// attitude_controller_run_quat's own signature is not retrofitted to
+// use it.
+struct AttitudeTargetState {
+    math::Quaternion attitude_target;
+    math::Vector3f euler_angle_target_rad;
+    math::Vector3f euler_rate_target_rads;
+    math::Vector3f ang_vel_target_rads;
+    math::Vector3f ang_accel_target_rads;
+};
+
+// EulerAngleRateShapingGains - the mostly-constant-per-vehicle tuning
+// parameters this entry point reads, plus every gain
+// attitude_controller_run_quat (CCP-025) itself needs downstream. See
+// this file's own "CCP-029 ADDENDUM" above for the full writeup.
+struct EulerAngleRateShapingGains {
+    // This entry point's own shaping config (upstream _rate_bf_ff_
+    // enabled/_input_tc/_rate_y_tc and the configured rate/accel
+    // limits).
+    bool rate_bf_ff_enabled = true;
+    float input_tc = 0.0f;
+    float rate_y_tc = 0.0f;
+    float ang_vel_roll_max_degs = 0.0f;
+    float ang_vel_pitch_max_degs = 0.0f;
+    float ang_vel_yaw_max_degs = 0.0f;
+    float accel_roll_max_radss = 0.0f;
+    float accel_pitch_max_radss = 0.0f;
+    float accel_yaw_max_radss = 0.0f;
+
+    // Forwarded straight through to attitude_controller_run_quat
+    // (CCP-025) - not read anywhere in this entry point's own body.
+    float rate_yaw_kp = 0.0f;
+    float angle_yaw_kp = 0.0f;
+    float angle_kp_roll = 0.0f;
+    float angle_kp_pitch = 0.0f;
+    float angle_kp_yaw = 0.0f;
+    math::Vector3f angle_p_scale{1.0f, 1.0f, 1.0f};
+    bool use_sqrt_controller = false;
+};
+
+// input_euler_angle_roll_pitch_euler_rate_yaw_rad - upstream
+// AC_AttitudeControl::input_euler_angle_roll_pitch_euler_rate_yaw_rad
+// (real lines 404-457). CCP-029 - see this file's own "CCP-029
+// ADDENDUM" above for the full design writeup: the real conceptual
+// framing this whole `input_*` family exists for, the frame-conversion
+// rationale, the real roll/pitch-vs-yaw argument-shape asymmetry, the
+// get_roll_trim_rad() multirotor simplification, and the architectural
+// decision behind AttitudeTargetState/EulerAngleRateShapingGains above.
+//
+// state is read AND, unconditionally, mutated in place (attitude_target
+// is additionally, conditionally mutated a second time inside the
+// attitude_controller_run_quat call at the end, via that function's own
+// established CCP-023 semantics). thrust_angle_rad, thrust_error_
+// angle_rad, feedforward_scalar, attitude_ang_error, and ang_vel_body_
+// rads are this function's own five real output parameters, forwarded
+// straight from attitude_controller_run_quat's own identically-named
+// five outputs - this entry point does not itself add any NEW output
+// beyond what CCP-025 already produces.
+inline void input_euler_angle_roll_pitch_euler_rate_yaw_rad(
+    float euler_roll_angle_rad, float euler_pitch_angle_rad, float euler_yaw_rate_rads, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    // Step 1: advance the target (CCP-025), unconditionally, before
+    // anything else - real line 406.
+    update_attitude_target(state.attitude_target, state.ang_vel_target_rads, dt);
+
+    // Step 2: real line 409.
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+
+    // Step 3: get_roll_trim_rad() - see this file's own "CCP-029
+    // ADDENDUM" above. Always exactly 0.0f on this port's own
+    // multirotor-only scope, so no term is added here.
+
+    if (gains.rate_bf_ff_enabled) {
+        // Body-frame accel/rate limits, converted to the Euler frame
+        // using the CURRENT (just-advanced) state.attitude_target -
+        // real lines 415-418.
+        const math::Vector3f euler_accel_radss = body_to_euler_limit(
+            state.attitude_target,
+            math::Vector3f{gains.accel_roll_max_radss, gains.accel_pitch_max_radss, gains.accel_yaw_max_radss});
+        const math::Vector3f euler_rate_max_rads = body_to_euler_limit(
+            state.attitude_target, math::Vector3f{math::radians(gains.ang_vel_roll_max_degs),
+                                                    math::radians(gains.ang_vel_pitch_max_degs),
+                                                    math::radians(gains.ang_vel_yaw_max_degs)});
+
+        // The current body-frame acceleration target, converted to its
+        // own Euler-frame equivalent - real lines 422-424. Upstream
+        // itself discards this call's own bool return value; reproduced
+        // here as an explicit (void)-discarded call rather than
+        // silently dropping the [[nodiscard]] result.
+        math::Vector3f euler_accel_target_rads;
+        (void)body_to_euler_derivative(state.attitude_target, state.ang_accel_target_rads, euler_accel_target_rads);
+
+        // Shape roll/pitch angle error and the yaw rate command into
+        // Euler rate/acceleration targets - real lines 428-440. See
+        // this file's own "CCP-029 ADDENDUM" above for the real roll/
+        // pitch-vs-yaw argument-shape asymmetry and the real separate
+        // rate_y_tc/input_tc distinction, both transcribed exactly
+        // here.
+        attitude_command_model(math::wrap_PI(euler_roll_angle_rad - state.euler_angle_target_rad.x), 0.0f,
+                                state.euler_rate_target_rads.x, euler_accel_target_rads.x,
+                                std::fabs(euler_rate_max_rads.x), euler_accel_radss.x, gains.input_tc, dt);
+        attitude_command_model(math::wrap_PI(euler_pitch_angle_rad - state.euler_angle_target_rad.y), 0.0f,
+                                state.euler_rate_target_rads.y, euler_accel_target_rads.y,
+                                std::fabs(euler_rate_max_rads.y), euler_accel_radss.y, gains.input_tc, dt);
+        attitude_command_model(0.0f, euler_yaw_rate_rads, state.euler_rate_target_rads.z, euler_accel_target_rads.z,
+                                std::fabs(euler_rate_max_rads.z), euler_accel_radss.z, gains.rate_y_tc, dt);
+
+        // Convert the shaped Euler rate/acceleration targets back to
+        // body-frame feedforward vectors - real lines 443-446.
+        state.ang_vel_target_rads = euler_derivative_to_body(state.attitude_target, state.euler_rate_target_rads);
+        state.ang_accel_target_rads = euler_derivative_to_body(state.attitude_target, euler_accel_target_rads);
+    } else {
+        // No shaping/feedforward - real lines 449-456: roll/pitch
+        // targets set directly, yaw target plain-Euler-integrated (NOT
+        // shaped), the attitude target rebuilt fresh from the result,
+        // and every feedforward target zeroed.
+        state.euler_angle_target_rad.x = euler_roll_angle_rad;
+        state.euler_angle_target_rad.y = euler_pitch_angle_rad;
+        state.euler_angle_target_rad.z += euler_yaw_rate_rads * dt;
+
+        state.attitude_target.from_euler(state.euler_angle_target_rad);
+
+        state.euler_rate_target_rads.zero();
+        state.ang_vel_target_rads.zero();
+        state.ang_accel_target_rads.zero();
+    }
+
+    // Step 5: the real last step, unconditional regardless of which
+    // branch ran above - real line 457.
+    attitude_controller_run_quat(state.attitude_target, attitude_body, state.ang_vel_target_rads, gyro_body_rads,
+                                  gains.rate_yaw_kp, gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                  gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                  gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+                                  gains.ang_vel_roll_max_degs, gains.ang_vel_pitch_max_degs,
+                                  gains.ang_vel_yaw_max_degs, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                  feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+}
+
+// input_euler_angle_roll_pitch_euler_rate_yaw_cd - upstream
+// AC_AttitudeControl::input_euler_angle_roll_pitch_euler_rate_yaw_cd
+// (real lines 390-397). Trivial centidegree wrapper: converts the two
+// angle inputs and the yaw-rate input via this port's own existing
+// math::cd_to_rad and forwards everything else unchanged.
+inline void input_euler_angle_roll_pitch_euler_rate_yaw_cd(
+    float euler_roll_angle_cd, float euler_pitch_angle_cd, float euler_yaw_rate_cds, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    input_euler_angle_roll_pitch_euler_rate_yaw_rad(
+        math::cd_to_rad(euler_roll_angle_cd), math::cd_to_rad(euler_pitch_angle_cd),
+        math::cd_to_rad(euler_yaw_rate_cds), state, attitude_body, gyro_body_rads, gains, dt, thrust_angle_rad,
+        thrust_error_angle_rad, feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+}
+
 } // namespace fwcpp::control
