@@ -1,8 +1,7 @@
 #pragma once
 
-// CPP-088 completeness: slice 2 (SITL I2C/SPI Device register access)
-// vs remaining AP_HAL Util / WSPI / CAN. remaining_count() == 3 until
-// later slices land those surfaces. Slice 1 GPIO + Semaphore is on main.
+// CPP-088 completeness: slice 3 (SITL Util). I2C/SPI Device register
+// access is on main. remaining: WSPI, CAN. remaining_count() == 2.
 
 #include <cstddef>
 #include <cstdint>
@@ -30,14 +29,14 @@ inline constexpr HalPortItem kHalCompleteness[] = {
     {"BinarySemaphore", PortStatus::kOnMain,
      "AP_HAL::BinarySemaphore wait/signal (pending flag, no OS thread)"},
     {"completeness catalog", PortStatus::kOnMain, "this table"},
-    {"I2CDevice", PortStatus::kThisSlice,
+    {"I2CDevice", PortStatus::kOnMain,
      "AP_HAL::I2CDevice in-memory bank transfers (no Linux ioctl)"},
-    {"SPIDevice", PortStatus::kThisSlice,
+    {"SPIDevice", PortStatus::kOnMain,
      "AP_HAL::SPIDevice in-memory bank transfers (no Linux ioctl)"},
-    {"Device register access", PortStatus::kThisSlice,
+    {"Device register access", PortStatus::kOnMain,
      "AP_HAL::Device read_registers/write_register, set_speed, periodic token"},
-    {"Util", PortStatus::kRemaining,
-     "AP_HAL::Util safety_switch, system_id, persistent_data"},
+    {"Util", PortStatus::kThisSlice,
+     "AP_HAL::Util SITL-subset: soft_armed, safety_switch, system_id, persistent_data"},
     {"WSPI", PortStatus::kRemaining, "AP_HAL::WSPIDevice wrap/quad SPI"},
     {"CAN", PortStatus::kRemaining, "AP_HAL::CANIface send/receive, bitrate, filter"},
 };

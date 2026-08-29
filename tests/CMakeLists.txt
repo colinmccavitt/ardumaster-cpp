@@ -951,3 +951,8 @@ catch_discover_tests(i2c_device_test)
 add_executable(spi_device_test spi_device_test.cpp)
 target_link_libraries(spi_device_test PRIVATE ap-hal Catch2::Catch2WithMain)
 catch_discover_tests(spi_device_test)
+
+# CPP-088 slice 3: SITL Util soft_armed / safety_switch / system_id.
+add_executable(util_test util_test.cpp)
+target_link_libraries(util_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(util_test)

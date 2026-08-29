@@ -40,6 +40,7 @@
 #include <fwcpp/hal/rc_output.hpp>
 #include <fwcpp/hal/semaphore.hpp>
 #include <fwcpp/hal/uart_driver.hpp>
+#include <fwcpp/hal/util.hpp>
 #include <fwcpp/param/storage.hpp>
 #include <fwcpp/scheduler/scheduler.hpp>
 
@@ -47,7 +48,8 @@ namespace fwcpp::hal {
 
 class HalContext {
 public:
-    explicit HalContext(std::uint16_t loop_rate_hz) : scheduler(loop_rate_hz) {}
+    explicit HalContext(std::uint16_t loop_rate_hz)
+        : util(rc_output), scheduler(loop_rate_hz) {}
 
     RcInput rc_input;
     RcOutput rc_output;
@@ -59,6 +61,11 @@ public:
     // Not used from Plane tick() — no invented locking on the flight path.
     Gpio gpio;
     Semaphore semaphore;
+
+    // CPP-088 slice 3: caller-owned SITL Util. Bound to rc_output so
+    // safety_switch_state follows force_safety_on/off (SITL defers to
+    // hal.rcout). Constructed after rc_output (declaration order).
+    Util util;
 
     // CPP-055: deliberately never called from Plane's production tick()
     // path (fwcpp::vehicle::tick(), mode.hpp) - investigated and judged

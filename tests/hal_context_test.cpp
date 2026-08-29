@@ -17,6 +17,9 @@ TEST_CASE("HalContext bundles independently-default-constructed peripherals", "[
     REQUIRE(hal.gpio.valid_pin(0));
     REQUIRE(hal.gpio.read(0) == 0);
     REQUIRE(hal.semaphore.depth() == 0);
+    REQUIRE_FALSE(hal.util.get_soft_armed());
+    REQUIRE(hal.util.available_memory() == 512U * 1024U);
+    REQUIRE(hal.util.safety_switch_state() == Util::SafetyState::kDisarmed);
 }
 
 TEST_CASE("HalContext's members are independently usable through the bundle", "[hal_context]") {
@@ -28,6 +31,7 @@ TEST_CASE("HalContext's members are independently usable through the bundle", "[
     hal.rc_output.force_safety_off();
     hal.rc_output.write(0, 1600);
     REQUIRE(hal.rc_output.read(0) == 1600);
+    REQUIRE(hal.util.safety_switch_state() == Util::SafetyState::kArmed);
 
     hal.analog_in.set_voltage_pin_voltage(11.1f);
     REQUIRE(hal.analog_in.voltage_latest(fwcpp::hal::kAnalogPinVoltage) == 11.1f);
