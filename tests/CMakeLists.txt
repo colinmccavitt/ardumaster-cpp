@@ -563,3 +563,11 @@ add_executable(vtol_assist_recovery_test vtol_assist_recovery_test.cpp)
 target_link_libraries(vtol_assist_recovery_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
 catch_discover_tests(vtol_assist_recovery_test)
 
+# VCP-003 slice 1: ap-quadplane-transition FSM scaffold.
+add_executable(transition_fsm_test transition_fsm_test.cpp)
+target_link_libraries(transition_fsm_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
+catch_discover_tests(transition_fsm_test)
+
+add_executable(transition_completeness_test transition_completeness_test.cpp)
+target_link_libraries(transition_completeness_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
+catch_discover_tests(transition_completeness_test)

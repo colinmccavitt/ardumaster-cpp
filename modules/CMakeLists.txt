@@ -47,3 +47,6 @@ add_subdirectory(ap-quadplane)
 
 # ap-vtol-assist (VCP-002): VTOL_Assist slice 1 scaffold.
 add_subdirectory(ap-vtol-assist)
+
+# ap-quadplane-transition (VCP-003): SLT transition FSM slice 1 scaffold.
+add_subdirectory(ap-quadplane-transition)
