@@ -1059,3 +1059,311 @@ TEST_CASE("thrust_heading_rotation_angles: the three named constants are exactly
     REQUIRE(kAccelYControllerMaxRadss == fwcpp::math::radians(120.0f));
     REQUIRE(kYawMaxErrorAngleRad == fwcpp::math::radians(45.0f));
 }
+
+// =======================================================================
+// attitude_from_thrust_vector + update_ang_vel_target_from_att_error
+// (CCP-024). See attitude_kinematics.hpp's own "CCP-024 ADDENDUM" comment
+// block for the full design writeup: the load-bearing composition order,
+// the opposite Z signs, the round-trip test methodology reused directly
+// from copter-rust's own COP-007, the real per-axis (not per-vehicle)
+// strategy choice, the acceleration-halving, and the axis-different clamp
+// bounds.
+// =======================================================================
+
+// (1) The real round-trip test methodology, reused directly from
+// copter-rust's own COP-007 rather than invented independently: build an
+// attitude from a 0.3 rad tilt, run it back through CCP-020's own
+// already-verified thrust_vector_rotation_angles against level, and
+// require the recovered lean to come out at exactly 0.3. A nonzero
+// heading is included on the construction side specifically to also
+// prove heading does not leak into the recovered lean (either direction
+// alone - the construction or the decomposition - could be
+// self-consistently wrong; tying them together via round-trip catches
+// what an isolated check can't).
+TEST_CASE("attitude_from_thrust_vector: round-trips through thrust_vector_rotation_angles decomposition",
+          "[control][attitude_kinematics][attitude_from_thrust_vector]") {
+    const float tilt = 0.3f;
+    const float heading = 0.4f; // nonzero: proves heading does not leak into the recovered lean
+    const Vector3f thrust_vector{std::sin(tilt), 0.0f, -std::cos(tilt)};
+
+    const Quaternion attitude_target = attitude_from_thrust_vector(thrust_vector, heading);
+    const Quaternion level; // identity - level, per this test's own methodology
+
+    Quaternion thrust_vector_correction;
+    Vector3f attitude_error{};
+    float thrust_angle_rad = 0.0f;
+    float thrust_error_angle_rad = 0.0f;
+    thrust_vector_rotation_angles(attitude_target, level, thrust_vector_correction, attitude_error, thrust_angle_rad,
+                                   thrust_error_angle_rad);
+
+    // thrust_error_angle_rad is the angle between the two thrust vectors
+    // (target vs. level/body) - the recovered lean.
+    REQUIRE(thrust_error_angle_rad == Approx(tilt).margin(1e-5f));
+}
+
+// (2) The real, load-bearing composition order (thrust_vec_quat on the
+// LEFT, yaw_quat on the RIGHT) - a non-trivial tilt AND a non-zero
+// heading together, confirming the result matches the real forward order
+// exactly, and genuinely differs from the reversed order and from either
+// rotation taken alone.
+TEST_CASE("attitude_from_thrust_vector: composes as thrust_quat * yaw_quat, and the order is load-bearing",
+          "[control][attitude_kinematics][attitude_from_thrust_vector]") {
+    const float tilt = 0.3f;
+    const float heading = 0.6f;
+    const Vector3f thrust_vector{std::sin(tilt), 0.0f, -std::cos(tilt)};
+
+    // Independently-built reference quaternions, matching the real
+    // formula's own construction by hand (the cross product of
+    // (0,0,-1) and thrust_vector is (0,-sin(tilt),0), normalizing to
+    // (0,-1,0)) rather than calling the function under test for either
+    // half.
+    Quaternion thrust_vec_quat_ref;
+    thrust_vec_quat_ref.from_axis_angle(Vector3f{0.0f, -1.0f, 0.0f}, tilt);
+    Quaternion yaw_quat_ref;
+    yaw_quat_ref.from_axis_angle(Vector3f{0.0f, 0.0f, 1.0f}, heading);
+
+    const Quaternion expected_forward = thrust_vec_quat_ref * yaw_quat_ref;
+    const Quaternion reversed = yaw_quat_ref * thrust_vec_quat_ref;
+    // Sanity: the two orders really do differ (the axes are not
+    // parallel), so a port that silently swapped them would be caught.
+    REQUIRE(std::fabs(expected_forward.q2 - reversed.q2) > 1e-3f);
+
+    const Quaternion result = attitude_from_thrust_vector(thrust_vector, heading);
+
+    // Matches the real forward order exactly.
+    REQUIRE(result.q1 == Approx(expected_forward.q1).margin(1e-6f));
+    REQUIRE(result.q2 == Approx(expected_forward.q2).margin(1e-6f));
+    REQUIRE(result.q3 == Approx(expected_forward.q3).margin(1e-6f));
+    REQUIRE(result.q4 == Approx(expected_forward.q4).margin(1e-6f));
+
+    // And genuinely differs from the reversed composition order.
+    REQUIRE(std::fabs(result.q2 - reversed.q2) > 1e-3f);
+
+    // And differs from either rotation taken alone (pure tilt, no
+    // heading; pure heading, no tilt).
+    const Quaternion tilt_only = attitude_from_thrust_vector(thrust_vector, 0.0f);
+    const Quaternion heading_only = attitude_from_thrust_vector(Vector3f{0.0f, 0.0f, -1.0f}, heading);
+    REQUIRE(std::fabs(result.q2 - tilt_only.q2) > 1e-3f);
+    REQUIRE(std::fabs(result.q4 - heading_only.q4) > 1e-6f);
+}
+
+// (2b) A dedicated, direct test of the opposite-Z-sign asymmetry itself:
+// thrust rotates about the cross-product axis derived from the real -Z
+// "up" convention, but heading rotates about +Z - a genuinely different
+// axis, not a sign that happens to cancel out. Constructed so that
+// swapping the heading axis to -Z (the same sign as thrust's own up
+// vector) would produce a measurably different, wrong result.
+TEST_CASE("attitude_from_thrust_vector: heading rotates about +Z, the opposite sign from thrust's own -Z convention",
+          "[control][attitude_kinematics][attitude_from_thrust_vector]") {
+    const float tilt = 0.3f;
+    const float heading = 0.6f;
+    const Vector3f thrust_vector{std::sin(tilt), 0.0f, -std::cos(tilt)};
+
+    Quaternion thrust_vec_quat_ref;
+    thrust_vec_quat_ref.from_axis_angle(Vector3f{0.0f, -1.0f, 0.0f}, tilt);
+
+    Quaternion yaw_quat_correct;
+    yaw_quat_correct.from_axis_angle(Vector3f{0.0f, 0.0f, 1.0f}, heading);
+    Quaternion yaw_quat_wrong_sign;
+    yaw_quat_wrong_sign.from_axis_angle(Vector3f{0.0f, 0.0f, -1.0f}, heading);
+
+    const Quaternion expected_correct = thrust_vec_quat_ref * yaw_quat_correct;
+    const Quaternion expected_wrong_sign = thrust_vec_quat_ref * yaw_quat_wrong_sign;
+    // Sanity: the two sign conventions really do produce different
+    // results for this non-trivial tilt+heading pair.
+    REQUIRE(std::fabs(expected_correct.q4 - expected_wrong_sign.q4) > 1e-3f);
+
+    const Quaternion result = attitude_from_thrust_vector(thrust_vector, heading);
+    REQUIRE(result.q1 == Approx(expected_correct.q1).margin(1e-6f));
+    REQUIRE(result.q2 == Approx(expected_correct.q2).margin(1e-6f));
+    REQUIRE(result.q3 == Approx(expected_correct.q3).margin(1e-6f));
+    REQUIRE(result.q4 == Approx(expected_correct.q4).margin(1e-6f));
+    REQUIRE(std::fabs(result.q4 - expected_wrong_sign.q4) > 1e-3f);
+}
+
+// (3) The real per-axis (not per-vehicle) sqrt-vs-proportional strategy
+// choice - a MIXED case in one call: roll/pitch have a non-zero
+// acceleration max (sqrt-eligible), yaw has a zero acceleration max
+// (forced proportional regardless of use_sqrt_controller). error.x/.y are
+// picked large enough relative to their own linear_dist to land in the
+// sqrt branch, not merely the linear region of the hybrid model, so the
+// sqrt-vs-proportional distinction is actually exercised.
+TEST_CASE("update_ang_vel_target_from_att_error: chooses sqrt vs proportional per axis, not per vehicle",
+          "[control][attitude_kinematics][update_ang_vel_target_from_att_error]") {
+    const Vector3f error{0.2f, -0.25f, 0.1f};
+    const float angle_kp_roll = 4.5f;
+    const float angle_kp_pitch = 4.5f;
+    const float angle_kp_yaw = 4.5f;
+    const Vector3f angle_p_scale{1.0f, 1.0f, 1.0f};
+    const float accel_roll_max = fwcpp::math::radians(400.0f);  // non-zero: sqrt-eligible
+    const float accel_pitch_max = fwcpp::math::radians(400.0f); // non-zero: sqrt-eligible
+    const float accel_yaw_max = 0.0f;                           // zero: forces proportional regardless of the flag
+    const float dt = 0.0025f;
+
+    const Vector3f result = update_ang_vel_target_from_att_error(error, angle_kp_roll, angle_kp_pitch, angle_kp_yaw,
+                                                                   angle_p_scale, accel_roll_max, accel_pitch_max,
+                                                                   accel_yaw_max, /*use_sqrt_controller=*/true, dt);
+
+    const float expected_roll = fwcpp::math::sqrt_controller(
+        error.x, angle_kp_roll * angle_p_scale.x,
+        fwcpp::math::constrain_value(accel_roll_max / 2.0f, kAccelRpControllerMinRadss, kAccelRpControllerMaxRadss),
+        dt);
+    const float expected_pitch = fwcpp::math::sqrt_controller(
+        error.y, angle_kp_pitch * angle_p_scale.y,
+        fwcpp::math::constrain_value(accel_pitch_max / 2.0f, kAccelRpControllerMinRadss, kAccelRpControllerMaxRadss),
+        dt);
+    const float expected_yaw = (angle_kp_yaw * angle_p_scale.z) * error.z; // plain proportional, forced by zero accel max
+
+    REQUIRE(result.x == Approx(expected_roll).margin(1e-6f));
+    REQUIRE(result.y == Approx(expected_pitch).margin(1e-6f));
+    REQUIRE(result.z == Approx(expected_yaw).margin(1e-6f));
+
+    // Sanity: roll/pitch's sqrt-branch results are genuinely different
+    // from what plain proportional would have given on those same axes -
+    // proving the sqrt branch actually ran there, not merely compiled.
+    const float plain_roll = (angle_kp_roll * angle_p_scale.x) * error.x;
+    const float plain_pitch = (angle_kp_pitch * angle_p_scale.y) * error.y;
+    REQUIRE(result.x != Approx(plain_roll).margin(1e-9f));
+    REQUIRE(result.y != Approx(plain_pitch).margin(1e-9f));
+}
+
+// (3b) The per-axis choice also holds with use_sqrt_controller == false:
+// every axis falls back to plain proportional regardless of its own
+// acceleration max, since the shared flag gates ALL axes off together
+// (only the acceleration-max half of the gate is per-axis).
+TEST_CASE("update_ang_vel_target_from_att_error: use_sqrt_controller == false forces plain proportional on every axis",
+          "[control][attitude_kinematics][update_ang_vel_target_from_att_error]") {
+    const Vector3f error{0.2f, -0.25f, 0.1f};
+    const float angle_kp = 4.5f;
+    const Vector3f angle_p_scale{1.0f, 1.0f, 1.0f};
+    const float accel_max = fwcpp::math::radians(400.0f); // non-zero on every axis
+    const float dt = 0.0025f;
+
+    const Vector3f result = update_ang_vel_target_from_att_error(
+        error, angle_kp, angle_kp, angle_kp, angle_p_scale, accel_max, accel_max, accel_max,
+        /*use_sqrt_controller=*/false, dt);
+
+    REQUIRE(result.x == Approx(angle_kp * error.x).margin(1e-6f));
+    REQUIRE(result.y == Approx(angle_kp * error.y).margin(1e-6f));
+    REQUIRE(result.z == Approx(angle_kp * error.z).margin(1e-6f));
+}
+
+// (4) The real acceleration-halving fed to sqrt_controller, confirmed via
+// a hand-computed expected sqrt_controller output on the pitch axis - the
+// halved value (100 deg/s^2) sits comfortably inside [40,720], so this
+// test isolates the /2.0f itself, not the clamp bounds (those get their
+// own dedicated tests below).
+TEST_CASE("update_ang_vel_target_from_att_error: the acceleration fed to sqrt_controller is HALF the axis max",
+          "[control][attitude_kinematics][update_ang_vel_target_from_att_error]") {
+    const Vector3f error{0.0f, 0.3f, 0.0f};
+    const float angle_kp_pitch = 4.5f;
+    const float accel_pitch_max = fwcpp::math::radians(200.0f); // /2 = 100 deg/s^2, inside [40,720]
+    const float dt = 0.0025f;
+
+    const Vector3f result = update_ang_vel_target_from_att_error(
+        error, /*angle_kp_roll=*/0.0f, angle_kp_pitch, /*angle_kp_yaw=*/0.0f, Vector3f{1.0f, 1.0f, 1.0f},
+        /*accel_roll_max_radss=*/0.0f, accel_pitch_max, /*accel_yaw_max_radss=*/0.0f,
+        /*use_sqrt_controller=*/true, dt);
+
+    const float expected_pitch = fwcpp::math::sqrt_controller(
+        error.y, angle_kp_pitch,
+        fwcpp::math::constrain_value(accel_pitch_max / 2.0f, kAccelRpControllerMinRadss, kAccelRpControllerMaxRadss),
+        dt);
+    REQUIRE(result.y == Approx(expected_pitch).margin(1e-6f));
+
+    // And that really is different from what the UN-halved (full) axis
+    // maximum would have produced, proving the /2.0f genuinely ran.
+    const float unhalved = fwcpp::math::sqrt_controller(
+        error.y, angle_kp_pitch,
+        fwcpp::math::constrain_value(accel_pitch_max, kAccelRpControllerMinRadss, kAccelRpControllerMaxRadss), dt);
+    REQUIRE(expected_pitch != Approx(unhalved).margin(1e-6f));
+}
+
+// (5a) Roll/pitch's own clamp UPPER bound (720 deg/s^2) - accel_roll_max
+// chosen so its own /2.0f genuinely exceeds the ceiling, confirmed both
+// by a sanity check on the pre-clamp arithmetic and by comparing the
+// actual result against a reference built from the clamped constant.
+TEST_CASE("update_ang_vel_target_from_att_error: roll/pitch clamp binds at its own 720 deg/s^2 upper bound",
+          "[control][attitude_kinematics][update_ang_vel_target_from_att_error]") {
+    const Vector3f error{0.3f, 0.0f, 0.0f};
+    const float angle_kp_roll = 4.5f;
+    const float accel_roll_max = fwcpp::math::radians(2000.0f); // /2 = 1000 deg/s^2, above the 720 ceiling
+    const float dt = 0.0025f;
+    REQUIRE(accel_roll_max / 2.0f > kAccelRpControllerMaxRadss); // sanity: genuinely exceeds the ceiling
+
+    const Vector3f result = update_ang_vel_target_from_att_error(
+        error, angle_kp_roll, 0.0f, 0.0f, Vector3f{1.0f, 1.0f, 1.0f}, accel_roll_max, 0.0f, 0.0f,
+        /*use_sqrt_controller=*/true, dt);
+
+    const float expected = fwcpp::math::sqrt_controller(error.x, angle_kp_roll, kAccelRpControllerMaxRadss, dt);
+    REQUIRE(result.x == Approx(expected).margin(1e-6f));
+}
+
+// (5b) Roll/pitch's own clamp LOWER bound (40 deg/s^2) - accel_pitch_max
+// chosen so its own /2.0f genuinely falls below the floor.
+TEST_CASE("update_ang_vel_target_from_att_error: roll/pitch clamp binds at its own 40 deg/s^2 lower bound",
+          "[control][attitude_kinematics][update_ang_vel_target_from_att_error]") {
+    const Vector3f error{0.0f, 0.3f, 0.0f};
+    const float angle_kp_pitch = 4.5f;
+    const float accel_pitch_max = fwcpp::math::radians(2.0f); // /2 = 1 deg/s^2, below the 40 deg/s^2 floor
+    const float dt = 0.0025f;
+    REQUIRE(accel_pitch_max / 2.0f < kAccelRpControllerMinRadss); // sanity: genuinely below the floor
+
+    const Vector3f result = update_ang_vel_target_from_att_error(
+        error, 0.0f, angle_kp_pitch, 0.0f, Vector3f{1.0f, 1.0f, 1.0f}, 0.0f, accel_pitch_max, 0.0f,
+        /*use_sqrt_controller=*/true, dt);
+
+    const float expected = fwcpp::math::sqrt_controller(error.y, angle_kp_pitch, kAccelRpControllerMinRadss, dt);
+    REQUIRE(result.y == Approx(expected).margin(1e-6f));
+}
+
+// (5c) Yaw's own, DIFFERENT clamp UPPER bound (120 deg/s^2, not roll/
+// pitch's 720) - accel_yaw_max chosen so its own /2.0f exceeds yaw's own
+// ceiling while staying nowhere near roll/pitch's much wider range,
+// proving the axis-different bounds are genuinely independent constants,
+// not the same pair reused for every axis.
+TEST_CASE("update_ang_vel_target_from_att_error: yaw clamps at its OWN 120 deg/s^2 upper bound, not roll/pitch's 720",
+          "[control][attitude_kinematics][update_ang_vel_target_from_att_error]") {
+    const Vector3f error{0.0f, 0.0f, 0.3f};
+    const float angle_kp_yaw = 4.5f;
+    const float accel_yaw_max = fwcpp::math::radians(300.0f); // /2 = 150 deg/s^2: above yaw's 120 ceiling
+    const float dt = 0.0025f;
+    REQUIRE(accel_yaw_max / 2.0f > kAccelYControllerMaxRadss);      // sanity: exceeds yaw's own ceiling
+    REQUIRE(accel_yaw_max / 2.0f < kAccelRpControllerMaxRadss);     // and stays well inside roll/pitch's own range
+
+    const Vector3f result = update_ang_vel_target_from_att_error(
+        error, 0.0f, 0.0f, angle_kp_yaw, Vector3f{1.0f, 1.0f, 1.0f}, 0.0f, 0.0f, accel_yaw_max,
+        /*use_sqrt_controller=*/true, dt);
+
+    const float expected = fwcpp::math::sqrt_controller(error.z, angle_kp_yaw, kAccelYControllerMaxRadss, dt);
+    REQUIRE(result.z == Approx(expected).margin(1e-6f));
+}
+
+// (5d) Yaw's own, DIFFERENT clamp LOWER bound (10 deg/s^2, not roll/
+// pitch's 40).
+TEST_CASE("update_ang_vel_target_from_att_error: yaw clamps at its OWN 10 deg/s^2 lower bound, not roll/pitch's 40",
+          "[control][attitude_kinematics][update_ang_vel_target_from_att_error]") {
+    const Vector3f error{0.0f, 0.0f, 0.3f};
+    const float angle_kp_yaw = 4.5f;
+    const float accel_yaw_max = fwcpp::math::radians(4.0f); // /2 = 2 deg/s^2: below yaw's own 10 deg/s^2 floor
+    const float dt = 0.0025f;
+    REQUIRE(accel_yaw_max / 2.0f < kAccelYControllerMinRadss);  // sanity: below yaw's own floor
+    REQUIRE(accel_yaw_max / 2.0f < kAccelRpControllerMinRadss); // and also below roll/pitch's own floor
+
+    const Vector3f result = update_ang_vel_target_from_att_error(
+        error, 0.0f, 0.0f, angle_kp_yaw, Vector3f{1.0f, 1.0f, 1.0f}, 0.0f, 0.0f, accel_yaw_max,
+        /*use_sqrt_controller=*/true, dt);
+
+    const float expected = fwcpp::math::sqrt_controller(error.z, angle_kp_yaw, kAccelYControllerMinRadss, dt);
+    REQUIRE(result.z == Approx(expected).margin(1e-6f));
+}
+
+// (6) The two new roll/pitch acceleration-clamp constants are exactly
+// radians()'s own output - matching CCP-022/023's own established
+// ULP-precision test discipline, not a separately hand-typed
+// approximation.
+TEST_CASE("update_ang_vel_target_from_att_error: the two new roll/pitch clamp constants are exactly radians()'s own output",
+          "[control][attitude_kinematics][update_ang_vel_target_from_att_error]") {
+    REQUIRE(kAccelRpControllerMinRadss == fwcpp::math::radians(40.0f));
+    REQUIRE(kAccelRpControllerMaxRadss == fwcpp::math::radians(720.0f));
+}

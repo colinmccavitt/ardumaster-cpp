@@ -493,6 +493,134 @@
 // different, still-real gap from this ticket's own now-corrected
 // understanding of thrust_heading_rotation_angles's own dependencies.
 // ---------------------------------------------------------------------
+//
+// ---------------------------------------------------------------------
+// CCP-024 ADDENDUM: attitude_from_thrust_vector (real lines 947-973) and
+// update_ang_vel_target_from_att_error (real lines 1345-1371), both
+// re-verified directly via `grep -n` against the pinned upstream tree -
+// matches this ticket's own claimed ranges exactly. Two real,
+// mutually-independent functions, bundled into one ticket since both are
+// small and self-contained now that CCP-019/020/021 exist.
+//
+// REUSED INVESTIGATION: copter-rust's own COP-007 ticket already ported
+// this exact real function pair together (ports/plane-fw-rust/crates/
+// ap-control/src/attitude_error.rs - attitude_from_thrust_vector,
+// update_ang_vel_target_from_att_error, ACCEL_RP_MIN_DEGSS/MAX_DEGSS) -
+// read in full before writing anything here, every finding below
+// independently re-verified against the real C++ source rather than
+// trusted on faith.
+//
+// THE REAL COMPOSITION ORDER IS LOAD-BEARING, reused directly from
+// copter-rust's own words: "composes as thrust * yaw, and the order is
+// load-bearing: reversed, it would yaw in the earth frame before leaning,
+// which puts the lean on the wrong axis for any non-zero heading."
+// Re-verified this exact real multiplication order directly at real line
+// 973: `return thrust_vec_quat*yaw_quat;` - thrust quaternion on the
+// LEFT, yaw quaternion on the RIGHT. This module's own test file proves
+// this two ways: a round-trip test (below) and a direct composition-order
+// comparison against the reversed product.
+//
+// THE TWO ROTATIONS USE OPPOSITE Z SIGNS, reused directly: "thrust about
+// -Z, heading about +Z - because one is the thrust direction and the
+// other is earth-frame down." Re-verified directly: step 1 builds
+// thrust_vector_up as the same real (0,0,-1) body-frame-thrust-direction
+// constant CCP-020's own thrust_vector_rotation_angles already
+// establishes (real line 949); the SEPARATE yaw_quat at real line 972 is
+// built from a real, different (0,0,1) axis - genuinely opposite signs,
+// not a transcription slip.
+//
+// THE REAL ROUND-TRIP TEST METHODOLOGY, reused directly rather than
+// invented independently: "A test ties this to the decomposition rather
+// than checking it alone: build an attitude from a 0.3 rad tilt, run it
+// back through thrust_vector_rotation_angles against level, and require
+// the lean to come out at 0.3. Either direction alone can be
+// self-consistently wrong; together they cannot." This module's own test
+// file includes exactly this round-trip, through CCP-020's own
+// already-merged thrust_vector_rotation_angles, not merely an isolated
+// formula check.
+//
+// update_ang_vel_target_from_att_error's REAL PER-AXIS (NOT PER-VEHICLE)
+// STRATEGY CHOICE, reused directly: "chooses between a proportional gain
+// and the square-root controller PER AXIS, not per vehicle - the choice
+// depends on whether that axis has an acceleration limit, so a vehicle
+// can legitimately run sqrt on roll and pitch and proportional on yaw."
+// Re-verified directly at real lines 1349-1369: each of the three axes
+// gets its own independent `if (_use_sqrt_controller &&
+// !is_zero(get_accel_<axis>_max_radss()))` - a single shared
+// use_sqrt_controller bool (taken here as one explicit bool parameter)
+// combined with a PER-AXIS zero-check on that axis's own acceleration-max
+// value, not a single combined per-vehicle branch. This module's own test
+// file exercises this directly with a MIXED case in one call (roll/pitch
+// sqrt, yaw proportional).
+//
+// THE REAL ACCELERATION-HALVING FED TO sqrt_controller, reused directly:
+// "The acceleration handed to the square-root controller is HALF the
+// axis maximum, clamped. The halving leaves headroom for the rate
+// controller underneath, which needs authority of its own to track the
+// target this produces; giving it the full limit would let the attitude
+// loop consume all of it." Re-verified directly: all three axes divide
+// their own accel_<axis>_max_radss by exactly 2.0f before clamping (real
+// lines 1350, 1357, 1364). This module's own test file confirms this via
+// a hand-computed expected sqrt_controller output for at least one axis,
+// not merely a plausible-looking result.
+//
+// THE REAL, AXIS-DIFFERENT CLAMP BOUNDS, reused directly: "The clamp
+// bounds differ by axis - roll and pitch get 40 to 720 deg/s^2 against
+// yaw's 10 to 120 - because thrust vectoring gives large roll and pitch
+// authority while yaw comes only from rotor drag differences."
+// Re-verified directly against AC_AttitudeControl.h real lines 17-18:
+// AC_ATTITUDE_ACCEL_RP_CONTROLLER_MIN_RADSS = radians(40.0f),
+// AC_ATTITUDE_ACCEL_RP_CONTROLLER_MAX_RADSS = radians(720.0f) - both NEW
+// this ticket, named below kAccelRpControllerMinRadss/
+// kAccelRpControllerMaxRadss, matching CCP-023's own established
+// k-prefixed naming/computation convention for the analogous yaw
+// constants. Yaw continues to reuse CCP-023's own already-merged
+// kAccelYControllerMinRadss/kAccelYControllerMaxRadss directly (defined
+// above) - NOT redeclared here, matching real upstream's own reuse of
+// AC_ATTITUDE_ACCEL_Y_CONTROLLER_MIN_RADSS/_MAX_RADSS at real line 1368.
+// Both new constants are computed via this port's own real
+// math::radians(), not hand-typed radian literals - same ULP-precision
+// discipline CCP-022/023 already established, and for the identical
+// reason: math::radians() is not constexpr-callable (declared in
+// scalar.hpp, defined out-of-line in scalar.cpp), so these are real,
+// runtime-initialized `inline const float`, not `inline constexpr`.
+//
+// attitude_from_thrust_vector TAKES thrust_vector BY VALUE, not by
+// reference - re-verified directly against the real signature at line
+// 947: `Quaternion AC_AttitudeControl::attitude_from_thrust_vector
+// (Vector3f thrust_vector, float heading_angle_rad) const` - the
+// function's own body reassigns/normalizes a LOCAL copy, invisible to
+// the caller. This port's own parameter is likewise a plain math::Vector3f
+// by value, matching that exactly (not a `const Vector3f&`, which would
+// be a plausible-looking but real signature mismatch since it would make
+// the in-place normalize/reset a compile error rather than a silent
+// local-only mutation).
+//
+// update_ang_vel_target_from_att_error's `_angle_P_scale` is taken here as
+// a single explicit math::Vector3f parameter, not three separate float
+// parameters - the natural, non-arbitrary choice since real upstream
+// itself stores it as one Vector3f member (AC_AttitudeControl.h), and
+// this same file already takes other naturally-vector-shaped quantities
+// (attitude_error_rad, thrust_vector_up) as Vector3f rather than
+// decomposed floats elsewhere. angle_kp_roll/angle_kp_pitch/angle_kp_yaw
+// remain three separate explicit float parameters (matching
+// thrust_heading_rotation_angles's own established precedent just above
+// of taking each axis's own real upstream `.kP()` gain as its own
+// explicit float, per ADR-0012), since real upstream reads each from a
+// genuinely separate _p_angle_roll/_p_angle_pitch/_p_angle_yaw
+// gain-owning object with no shared vector-shaped counterpart.
+//
+// DEFERRED, explicitly, still NOT started here: command_model_rate_
+// predictor (real lines 1134-1152 - still needs real per-axis STATE this
+// port has nowhere to source from, per this file's own CCP-022/023
+// addenda above), the input_* entry points (input_thrust_vector_rate_
+// heading, input_thrust_vector_heading, input_quaternion, etc.),
+// update_attitude_target/attitude_controller_run_quat, and the
+// relax/reset paths (relax, reset_target_and_rate,
+// reset_yaw_target_and_rate, inertial_frame_reset) - all separate,
+// deliberately deferred future phases, none retroactively unblocked by
+// this ticket's own two functions.
+// ---------------------------------------------------------------------
 
 #include <algorithm>
 #include <cmath>
@@ -837,6 +965,141 @@ inline void attitude_command_model(float error_angle, float desired_ang_vel, flo
     // separate from shape_angle_vel_accel's own internal behavior, not
     // a redundant double-integration.
     target_ang_vel += target_ang_accel * dt;
+}
+
+// kAccelRpControllerMinRadss / kAccelRpControllerMaxRadss -
+// AC_ATTITUDE_ACCEL_RP_CONTROLLER_MIN_RADSS / _MAX_RADSS
+// (AC_AttitudeControl.h real lines 17-18) - see this file's own "CCP-024
+// ADDENDUM" banner above for why these are real, runtime-initialized
+// `inline const float` (not `inline constexpr`) and why yaw's own
+// analogous kAccelYControllerMinRadss/kAccelYControllerMaxRadss (defined
+// above, CCP-023) are reused rather than redeclared here.
+inline const float kAccelRpControllerMinRadss = math::radians(40.0f);
+inline const float kAccelRpControllerMaxRadss = math::radians(720.0f);
+
+// attitude_from_thrust_vector - upstream AC_AttitudeControl::
+// attitude_from_thrust_vector (real lines 947-973). CCP-024 - see this
+// file's own "CCP-024 ADDENDUM" banner above for the full design writeup
+// (the load-bearing composition order, the opposite Z signs, and the
+// by-value parameter).
+//
+// Builds a target attitude from a desired thrust direction plus a
+// heading: the thrust rotation is composed first, the heading rotation
+// second (`thrust_vec_quat * yaw_quat`) - reversing this order would
+// yaw in the earth frame before leaning, putting the lean on the wrong
+// axis for any non-zero heading. thrust_vector is taken BY VALUE (real
+// upstream's own signature, not a reference) since the body normalizes/
+// resets a local copy.
+[[nodiscard]] inline math::Quaternion attitude_from_thrust_vector(math::Vector3f thrust_vector,
+                                                                    float heading_angle_rad) {
+    // The direction of thrust is [0,0,-1] in any body-fixed frame - the
+    // same real constant CCP-020's own thrust_vector_rotation_angles
+    // already uses.
+    const math::Vector3f thrust_vector_up{0.0f, 0.0f, -1.0f};
+
+    if (math::is_zero(thrust_vector.length_squared())) {
+        thrust_vector = thrust_vector_up;
+    } else {
+        thrust_vector.normalize();
+    }
+
+    // The cross product of the desired and target thrust vector defines
+    // the rotation vector; the dot product gives the angle between them.
+    math::Vector3f thrust_vec_cross = thrust_vector_up % thrust_vector;
+    const float thrust_vector_angle =
+        std::acos(math::constrain_value(thrust_vector_up * thrust_vector, -1.0f, 1.0f));
+
+    // Same real degenerate-case fallback shape as thrust_vector_rotation_
+    // angles above: reset to the thrust axis itself, not a zero vector,
+    // when the cross product has no direction to offer or the angle is
+    // already zero.
+    const float thrust_vector_length = thrust_vec_cross.length();
+    if (math::is_zero(thrust_vector_length) || math::is_zero(thrust_vector_angle)) {
+        thrust_vec_cross = thrust_vector_up;
+    } else {
+        thrust_vec_cross /= thrust_vector_length;
+    }
+
+    math::Quaternion thrust_vec_quat;
+    thrust_vec_quat.from_axis_angle(thrust_vec_cross, thrust_vector_angle);
+
+    // Heading is about earth-frame down, (0,0,1) - the OPPOSITE real sign
+    // from thrust_vector_up above (0,0,-1). Not a transcription slip: one
+    // is the thrust direction, the other is earth-frame down.
+    math::Quaternion yaw_quat;
+    yaw_quat.from_axis_angle(math::Vector3f{0.0f, 0.0f, 1.0f}, heading_angle_rad);
+
+    // Real, load-bearing composition order: thrust quaternion LEFT, yaw
+    // quaternion RIGHT. See this file's own "CCP-024 ADDENDUM" banner.
+    return thrust_vec_quat * yaw_quat;
+}
+
+// update_ang_vel_target_from_att_error - upstream AC_AttitudeControl::
+// update_ang_vel_target_from_att_error (real lines 1345-1371). CCP-024 -
+// see this file's own "CCP-024 ADDENDUM" banner above for the full design
+// writeup (the real per-axis, not per-vehicle, strategy choice; the
+// acceleration-halving fed to sqrt_controller; and the real,
+// axis-different clamp bounds).
+//
+// Turns an attitude error rotation vector into a body-frame angular
+// velocity target, one axis at a time. Each axis independently chooses
+// between the square-root controller (CCP-021) and a plain proportional
+// gain, based on whether use_sqrt_controller is set AND that SAME axis's
+// own acceleration limit is non-zero - a vehicle can legitimately run
+// sqrt on roll/pitch while running plain proportional on yaw in the same
+// call.
+//
+// angle_p_scale is taken as a single explicit math::Vector3f (matching
+// real upstream's own _angle_P_scale Vector3f member shape directly -
+// see this file's own "CCP-024 ADDENDUM" banner for why); angle_kp_roll/
+// angle_kp_pitch/angle_kp_yaw remain three separate explicit float
+// parameters, standing in for upstream's own three separate
+// _p_angle_roll/_p_angle_pitch/_p_angle_yaw .kP() accessors, per
+// ADR-0012.
+[[nodiscard]] inline math::Vector3f update_ang_vel_target_from_att_error(
+    const math::Vector3f& attitude_error_rot_vec_rad, float angle_kp_roll, float angle_kp_pitch, float angle_kp_yaw,
+    const math::Vector3f& angle_p_scale, float accel_roll_max_radss, float accel_pitch_max_radss,
+    float accel_yaw_max_radss, bool use_sqrt_controller, float dt) {
+    math::Vector3f rate_target_ang_vel;
+
+    // Compute the roll angular velocity demand from the roll angle error.
+    const float angleP_roll = angle_kp_roll * angle_p_scale.x;
+    if (use_sqrt_controller && !math::is_zero(accel_roll_max_radss)) {
+        rate_target_ang_vel.x = math::sqrt_controller(
+            attitude_error_rot_vec_rad.x, angleP_roll,
+            math::constrain_value(accel_roll_max_radss / 2.0f, kAccelRpControllerMinRadss,
+                                   kAccelRpControllerMaxRadss),
+            dt);
+    } else {
+        rate_target_ang_vel.x = angleP_roll * attitude_error_rot_vec_rad.x;
+    }
+
+    // Compute the pitch angular velocity demand from the pitch angle error.
+    const float angleP_pitch = angle_kp_pitch * angle_p_scale.y;
+    if (use_sqrt_controller && !math::is_zero(accel_pitch_max_radss)) {
+        rate_target_ang_vel.y = math::sqrt_controller(
+            attitude_error_rot_vec_rad.y, angleP_pitch,
+            math::constrain_value(accel_pitch_max_radss / 2.0f, kAccelRpControllerMinRadss,
+                                   kAccelRpControllerMaxRadss),
+            dt);
+    } else {
+        rate_target_ang_vel.y = angleP_pitch * attitude_error_rot_vec_rad.y;
+    }
+
+    // Compute the yaw angular velocity demand from the yaw angle error -
+    // reuses CCP-023's own already-merged kAccelYControllerMinRadss/
+    // kAccelYControllerMaxRadss, NOT the roll/pitch bounds above.
+    const float angleP_yaw = angle_kp_yaw * angle_p_scale.z;
+    if (use_sqrt_controller && !math::is_zero(accel_yaw_max_radss)) {
+        rate_target_ang_vel.z = math::sqrt_controller(
+            attitude_error_rot_vec_rad.z, angleP_yaw,
+            math::constrain_value(accel_yaw_max_radss / 2.0f, kAccelYControllerMinRadss, kAccelYControllerMaxRadss),
+            dt);
+    } else {
+        rate_target_ang_vel.z = angleP_yaw * attitude_error_rot_vec_rad.z;
+    }
+
+    return rate_target_ang_vel;
 }
 
 } // namespace fwcpp::control
