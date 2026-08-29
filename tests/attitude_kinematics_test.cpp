@@ -65,12 +65,34 @@
 // having to independently replicate the jerk-limiting arithmetic by
 // hand and risk a reordering-induced rounding mismatch of its own.
 
+// CCP-023 added the thrust_heading_rotation_angles tests below (real
+// lines 1033-1050) - see attitude_kinematics.hpp's own "CCP-023
+// ADDENDUM" comment block for the full design writeup: the corrected
+// CCP-020 deferral, the real two-level nested guard, the 1.0f/
+// rate_yaw_kp reciprocal, and the three named radians()-computed
+// constants.
+//
+// Every case below reuses the same "pure heading" construction
+// established above for thrust_vector_rotation_angles - `body *
+// Quaternion::from_axis_angle((0,0,-1), delta)` - specifically because
+// it drives the CCP-020 thrust correction to its own degenerate
+// (near-identity) fallback, isolating attitude_error_rad.z as (up to
+// sign) the whole real heading delta with no roll/pitch coupling to
+// account for by hand. The RAW (pre-clamp) attitude_error_rad.z for a
+// given body/delta pair is obtained directly from an independent call
+// to thrust_vector_rotation_angles - CCP-020's own already-verified
+// function - not hand-derived from quaternion algebra, so these tests
+// stay focused on this ticket's own new clamping/recomposition logic
+// rather than re-litigating CCP-020's own already-tested decomposition.
+
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/control/attitude_kinematics.hpp>
+#include <fwcpp/math/control.hpp>
 #include <fwcpp/math/quaternion.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector3.hpp>
@@ -788,4 +810,252 @@ TEST_CASE("attitude_command_model: target_ang_vel gets a real, separate final +=
     // final step (leaving target_ang_vel at its pre-call value) would
     // have produced.
     REQUIRE(target_ang_vel != starting_target_ang_vel);
+}
+
+// =======================================================================
+// thrust_heading_rotation_angles (CCP-023) - the yaw-error-limiting
+// wrapper around thrust_vector_rotation_angles. See this file's own
+// header comment and attitude_kinematics.hpp's own "CCP-023 ADDENDUM"
+// for the full design writeup, including the corrected CCP-020 deferral.
+// =======================================================================
+
+// (1) The real outer guard: rate_yaw_kp == 0 leaves attitude_target
+// COMPLETELY UNCHANGED - a real, enclosing `if`, not a subsequent early
+// `return` (attitude_error_rad.x/.y/.z are still computed by the CCP-020
+// call underneath, which runs unconditionally BEFORE this guard).
+TEST_CASE("thrust_heading_rotation_angles: rate_yaw_kp == 0 leaves attitude_target completely unchanged",
+          "[control][attitude_kinematics][thrust_heading_rotation_angles]") {
+    const Quaternion body = attitude(0.3f, -0.25f, 0.6f);
+    const float heading_change = 0.65f; // large enough it would clamp if the guard did not block it
+    Quaternion heading_delta;
+    heading_delta.from_axis_angle(Vector3f{0.0f, 0.0f, -1.0f}, heading_change);
+    Quaternion target = body * heading_delta;
+    const Quaternion original_target = target;
+
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_heading_rotation_angles(target, body, error, thrust_angle, thrust_error_angle,
+                                    /*rate_yaw_kp=*/0.0f, /*angle_yaw_kp=*/1.0f,
+                                    /*accel_yaw_max_radss=*/fwcpp::math::radians(270.0f));
+
+    // Bit-exact, not merely "close" - attitude_target is never touched
+    // at all when this guard fires.
+    REQUIRE(target.q1 == original_target.q1);
+    REQUIRE(target.q2 == original_target.q2);
+    REQUIRE(target.q3 == original_target.q3);
+    REQUIRE(target.q4 == original_target.q4);
+    // The CCP-020 decomposition underneath still ran and populated a
+    // real, finite heading error - proving this guard skips only the
+    // clamp/recomposition, not the whole function.
+    REQUIRE(std::isfinite(error.z));
+    REQUIRE(std::fabs(error.z) > 1e-3f);
+}
+
+// (2a) The second guard's own first half, tested independently:
+// angle_yaw_kp == 0 skips clamping even though the actual yaw error is
+// large enough that it otherwise would have clamped.
+TEST_CASE("thrust_heading_rotation_angles: angle_yaw_kp == 0 skips clamping despite a large yaw error",
+          "[control][attitude_kinematics][thrust_heading_rotation_angles]") {
+    const Quaternion body = attitude(0.3f, -0.25f, 0.6f);
+    const float heading_change = 1.2f; // well beyond AC_ATTITUDE_YAW_MAX_ERROR_ANGLE_RAD (45 deg) on its own
+    Quaternion heading_delta;
+    heading_delta.from_axis_angle(Vector3f{0.0f, 0.0f, -1.0f}, heading_change);
+    Quaternion target = body * heading_delta;
+    const Quaternion original_target = target;
+
+    // Ground truth for the raw (unclamped) error, from CCP-020's own
+    // already-verified thrust_vector_rotation_angles.
+    Quaternion unused_correction;
+    Vector3f raw_error{};
+    float unused_thrust_angle = 0.0f;
+    float unused_thrust_error_angle = 0.0f;
+    thrust_vector_rotation_angles(target, body, unused_correction, raw_error, unused_thrust_angle,
+                                   unused_thrust_error_angle);
+    REQUIRE(std::fabs(raw_error.z) > kYawMaxErrorAngleRad); // sanity: this really would clamp otherwise
+
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_heading_rotation_angles(target, body, error, thrust_angle, thrust_error_angle,
+                                    /*rate_yaw_kp=*/2.0f, /*angle_yaw_kp=*/0.0f,
+                                    /*accel_yaw_max_radss=*/fwcpp::math::radians(270.0f));
+
+    // Unclamped: error.z is exactly the raw value, and attitude_target
+    // is completely untouched (the mutating line sits inside this same
+    // guard).
+    REQUIRE(error.z == raw_error.z);
+    REQUIRE(target.q1 == original_target.q1);
+    REQUIRE(target.q2 == original_target.q2);
+    REQUIRE(target.q3 == original_target.q3);
+    REQUIRE(target.q4 == original_target.q4);
+}
+
+// (2b) The second guard's own other half, tested independently: a yaw
+// error already within heading_error_max skips clamping despite a
+// genuinely non-zero angle_yaw_kp.
+TEST_CASE("thrust_heading_rotation_angles: a yaw error already within heading_error_max skips clamping",
+          "[control][attitude_kinematics][thrust_heading_rotation_angles]") {
+    const Quaternion body = attitude(0.3f, -0.25f, 0.6f);
+    const float heading_change = 0.1f; // small, comfortably inside any real heading_error_max
+    Quaternion heading_delta;
+    heading_delta.from_axis_angle(Vector3f{0.0f, 0.0f, -1.0f}, heading_change);
+    Quaternion target = body * heading_delta;
+    const Quaternion original_target = target;
+
+    Quaternion unused_correction;
+    Vector3f raw_error{};
+    float unused_thrust_angle = 0.0f;
+    float unused_thrust_error_angle = 0.0f;
+    thrust_vector_rotation_angles(target, body, unused_correction, raw_error, unused_thrust_angle,
+                                   unused_thrust_error_angle);
+
+    const float rate_yaw_kp = 2.0f;
+    const float angle_yaw_kp = 1.0f;
+    const float accel_yaw_max_radss = fwcpp::math::radians(270.0f);
+    const float heading_accel_max_ref = fwcpp::math::constrain_value(
+        accel_yaw_max_radss / 2.0f, kAccelYControllerMinRadss, kAccelYControllerMaxRadss);
+    const float heading_error_max_ref =
+        std::min(fwcpp::math::inv_sqrt_controller(1.0f / rate_yaw_kp, angle_yaw_kp, heading_accel_max_ref),
+                 kYawMaxErrorAngleRad);
+    REQUIRE(std::fabs(raw_error.z) < heading_error_max_ref); // sanity: really is within limit
+
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_heading_rotation_angles(target, body, error, thrust_angle, thrust_error_angle, rate_yaw_kp, angle_yaw_kp,
+                                    accel_yaw_max_radss);
+
+    REQUIRE(error.z == raw_error.z);
+    REQUIRE(target.q1 == original_target.q1);
+    REQUIRE(target.q2 == original_target.q2);
+    REQUIRE(target.q3 == original_target.q3);
+    REQUIRE(target.q4 == original_target.q4);
+}
+
+// (3) Both guard conditions satisfied: attitude_error_rad.z genuinely
+// clamps to +-heading_error_max AND attitude_target is genuinely
+// reassigned to the real three-way composition
+// (attitude_body * thrust_vector_correction * heading_vec_correction_quat),
+// verified against an independently-computed reference quaternion built
+// from CCP-020's own already-verified thrust_vector_rotation_angles
+// output plus a hand-built heading correction quaternion - not merely
+// "some quaternion changed value".
+TEST_CASE("thrust_heading_rotation_angles: both guards satisfied clamps attitude_error_rad.z and reassigns "
+          "attitude_target via the real three-way composition",
+          "[control][attitude_kinematics][thrust_heading_rotation_angles]") {
+    const Quaternion body = attitude(0.3f, -0.25f, 0.6f);
+    const float heading_change = 0.65f;
+    Quaternion heading_delta;
+    heading_delta.from_axis_angle(Vector3f{0.0f, 0.0f, -1.0f}, heading_change);
+    const Quaternion original_target = body * heading_delta;
+
+    // Ground truth for the raw (unclamped) error and the thrust
+    // correction quaternion, from CCP-020's own already-verified
+    // thrust_vector_rotation_angles - independent of anything this
+    // ticket's own new clamping/recomposition logic does.
+    Quaternion thrust_vector_correction_ref;
+    Vector3f raw_error{};
+    float ref_thrust_angle = 0.0f;
+    float ref_thrust_error_angle = 0.0f;
+    thrust_vector_rotation_angles(original_target, body, thrust_vector_correction_ref, raw_error, ref_thrust_angle,
+                                   ref_thrust_error_angle);
+
+    const float rate_yaw_kp = 2.0f;
+    const float angle_yaw_kp = 1.0f;
+    const float accel_yaw_max_radss = fwcpp::math::radians(270.0f);
+
+    // Independently-derived heading_error_max, computed by hand from the
+    // real formula rather than trusted from the function under test.
+    const float heading_accel_max_ref = fwcpp::math::constrain_value(
+        accel_yaw_max_radss / 2.0f, kAccelYControllerMinRadss, kAccelYControllerMaxRadss);
+    const float heading_error_max_ref =
+        std::min(fwcpp::math::inv_sqrt_controller(1.0f / rate_yaw_kp, angle_yaw_kp, heading_accel_max_ref),
+                 kYawMaxErrorAngleRad);
+    REQUIRE(std::fabs(raw_error.z) > heading_error_max_ref); // sanity: this case really does need clamping
+
+    const float clamped_z = fwcpp::math::constrain_value(fwcpp::math::wrap_PI(raw_error.z), -heading_error_max_ref,
+                                                           heading_error_max_ref);
+
+    Quaternion heading_vec_correction_ref;
+    heading_vec_correction_ref.from_axis_angle(Vector3f{0.0f, 0.0f, clamped_z});
+    const Quaternion expected_target = body * thrust_vector_correction_ref * heading_vec_correction_ref;
+
+    Quaternion target = original_target;
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_heading_rotation_angles(target, body, error, thrust_angle, thrust_error_angle, rate_yaw_kp, angle_yaw_kp,
+                                    accel_yaw_max_radss);
+
+    REQUIRE(error.z == Approx(clamped_z).margin(1e-6f));
+    REQUIRE(std::fabs(error.z) == Approx(heading_error_max_ref).margin(1e-6f));
+    REQUIRE(target.q1 == Approx(expected_target.q1).margin(1e-6f));
+    REQUIRE(target.q2 == Approx(expected_target.q2).margin(1e-6f));
+    REQUIRE(target.q3 == Approx(expected_target.q3).margin(1e-6f));
+    REQUIRE(target.q4 == Approx(expected_target.q4).margin(1e-6f));
+    // Genuinely reassigned, not merely still valid - differs from the
+    // unclamped original target.
+    REQUIRE(target.q1 != original_target.q1);
+}
+
+// (4) The real 1.0f / rate_yaw_kp reciprocal, specifically: constructed
+// so that passing rate_yaw_kp itself (2.0) instead of its reciprocal
+// (0.5) into inv_sqrt_controller would resolve heading_error_max to a
+// DIFFERENT value (the AC_ATTITUDE_YAW_MAX_ERROR_ANGLE_RAD ceiling, since
+// the un-reciprocated computation overshoots it) than the real, correct
+// computation does - and a yaw error picked strictly between the two
+// candidate limits clamps under the correct reciprocal but would NOT
+// clamp at all under the reciprocal-omitted bug, making attitude_
+// target's own mutation status itself the discriminator.
+TEST_CASE("thrust_heading_rotation_angles: the 1.0f / rate_yaw_kp reciprocal is exercised, not the raw gain",
+          "[control][attitude_kinematics][thrust_heading_rotation_angles]") {
+    const Quaternion body = attitude(0.3f, -0.25f, 0.6f);
+    const float heading_change = 0.65f;
+    Quaternion heading_delta;
+    heading_delta.from_axis_angle(Vector3f{0.0f, 0.0f, -1.0f}, heading_change);
+    Quaternion target = body * heading_delta;
+    const Quaternion original_target = target;
+
+    const float rate_yaw_kp = 2.0f; // reciprocal = 0.5
+    const float angle_yaw_kp = 1.0f;
+    const float accel_yaw_max_radss = fwcpp::math::radians(270.0f);
+
+    const float heading_accel_max_ref = fwcpp::math::constrain_value(
+        accel_yaw_max_radss / 2.0f, kAccelYControllerMinRadss, kAccelYControllerMaxRadss);
+    const float correct_heading_error_max =
+        std::min(fwcpp::math::inv_sqrt_controller(1.0f / rate_yaw_kp, angle_yaw_kp, heading_accel_max_ref),
+                 kYawMaxErrorAngleRad);
+    // What heading_error_max would resolve to if the reciprocal were
+    // accidentally omitted (rate_yaw_kp passed directly).
+    const float buggy_heading_error_max =
+        std::min(fwcpp::math::inv_sqrt_controller(rate_yaw_kp, angle_yaw_kp, heading_accel_max_ref),
+                 kYawMaxErrorAngleRad);
+    REQUIRE(correct_heading_error_max != buggy_heading_error_max);
+    REQUIRE(heading_change > correct_heading_error_max);
+    REQUIRE(heading_change < buggy_heading_error_max);
+
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_heading_rotation_angles(target, body, error, thrust_angle, thrust_error_angle, rate_yaw_kp, angle_yaw_kp,
+                                    accel_yaw_max_radss);
+
+    // The real implementation clamps (proving the reciprocal, not the
+    // raw gain, was used) - a reciprocal-omitted port would leave
+    // attitude_target completely unchanged here instead, since
+    // heading_change (0.65) sits below buggy_heading_error_max.
+    REQUIRE(std::fabs(error.z) == Approx(correct_heading_error_max).margin(1e-6f));
+    REQUIRE(target.q1 != original_target.q1);
+}
+
+// (5) The three named constants, each confirmed against radians()'s own
+// real output directly - not a separately hand-typed approximation,
+// matching CCP-022's own established ULP-precision test discipline for
+// its radians(1800.0f) fallback.
+TEST_CASE("thrust_heading_rotation_angles: the three named constants are exactly radians()'s own output",
+          "[control][attitude_kinematics][thrust_heading_rotation_angles]") {
+    REQUIRE(kAccelYControllerMinRadss == fwcpp::math::radians(10.0f));
+    REQUIRE(kAccelYControllerMaxRadss == fwcpp::math::radians(120.0f));
+    REQUIRE(kYawMaxErrorAngleRad == fwcpp::math::radians(45.0f));
 }

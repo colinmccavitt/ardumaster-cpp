@@ -371,9 +371,16 @@
 // proportional-gain accessors (_p_angle_roll.kP()/_p_angle_pitch.kP()),
 // a real _rate_bf_ff_enabled flag, get_accel_roll_max_radss()/get_
 // accel_pitch_max_radss() accessors, and a real _angle_P_scale member -
-// none of which this port has wired into AC_AttitudeControl yet, the
-// same real, disclosed gap CCP-020 already found and deferred for
-// thrust_heading_rotation_angles above.
+// none of which this port has wired into AC_AttitudeControl yet.
+// NOTE, corrected by CCP-023 below: this sentence originally claimed
+// this was "the same real, disclosed gap CCP-020 already found and
+// deferred for thrust_heading_rotation_angles above" - CCP-023's own
+// addendum below explains why that comparison no longer holds:
+// thrust_heading_rotation_angles turned out to need only plain gain
+// VALUES (unblocked by explicit float parameters), while command_model_
+// rate_predictor genuinely needs real per-axis STATE
+// (_rate_bf_ff_enabled, _angle_P_scale) this port has nowhere to source
+// from yet - a different, still-real kind of gap.
 //
 // A REAL, ALREADY-CONFIRMED LATENT HAZARD in that DEFERRED function,
 // noted here (without acting on it, since it is out of this ticket's
@@ -389,6 +396,102 @@
 // attitude_command_model's own dt parameter IS genuinely used, both in
 // the is_positive(dt) guard and passed straight through to
 // shape_angle_vel_accel below.
+// ---------------------------------------------------------------------
+//
+// ---------------------------------------------------------------------
+// CCP-023 ADDENDUM: thrust_heading_rotation_angles, the yaw-error-limiting
+// wrapper around CCP-020's own thrust_vector_rotation_angles (real lines
+// 1033-1050, re-verified directly via `grep -n` against the pinned
+// upstream tree - it is the real function immediately BEFORE thrust_
+// vector_rotation_angles at real line 1056, i.e. upstream declares these
+// two in the opposite order from this port's own file).
+//
+// A REAL, DISCLOSED CORRECTION TO THIS EFFORT'S OWN EARLIER SCOPING
+// DECISION: CCP-020's own addendum above (see its "DEFERRED, explicitly"
+// paragraph) deferred this exact function, reasoning that it needed real,
+// stateful rate-PID/angle-P gain-OWNING objects (get_rate_yaw_pid(),
+// _p_angle_yaw) wired into a real AC_AttitudeControl class before it
+// could be ported at all. Re-reading the real function this round shows
+// that reasoning over-scoped the dependency: the function's own body
+// only ever calls `.kP()` on those objects - it needs their current
+// scalar GAIN VALUES, not the objects themselves, and no stateful
+// integrator/filter machinery of theirs is touched anywhere in this
+// function. Per ADR-0012 (explicit context over singletons/hidden
+// state) - the same convention already used successfully throughout this
+// whole effort (CCP-011's air_density_ratio, CCP-013's spool-machine
+// parameters, CCP-016's roll_in/pitch_in/etc.) - each needed gain is
+// simply taken as an explicit `float` parameter instead:
+// `rate_yaw_kp` (upstream `get_rate_yaw_pid().kP()`), `angle_yaw_kp`
+// (upstream `_p_angle_yaw.kP()`), and `accel_yaw_max_radss` (upstream
+// `get_accel_yaw_max_radss()`). CCP-021 already finished inv_sqrt_
+// controller (modules/ap-math/include/fwcpp/math/control.hpp) as a pure
+// function of plain floats, needing no PID object either. This function
+// was therefore genuinely fully unblocked already once CCP-021 landed -
+// no new "PID wiring" ticket was actually needed first.
+//
+// THE THREE NAMED CONSTANTS - AC_ATTITUDE_ACCEL_Y_CONTROLLER_MIN_RADSS/
+// _MAX_RADSS and AC_ATTITUDE_YAW_MAX_ERROR_ANGLE_RAD (AC_AttitudeControl.h
+// real lines 19-20, 30, re-verified directly) - are each real upstream
+// `#define`s computed via upstream's own `radians()`, not hand-typed
+// degree-to-radian literals. Reproduced here the same way CCP-022 already
+// flagged for its own `radians(1800.0f)` fallback: computed via this
+// port's own real `fwcpp::math::radians()`, pinned by a dedicated test
+// comparing directly against `radians()`'s own output, not a separately
+// hand-typed approximation. `radians()` itself is NOT constexpr-callable
+// here (declared in scalar.hpp, defined out-of-line in scalar.cpp -
+// re-verified directly), so unlike ap-motors's own kMaxNumMotors-style
+// pure-literal `inline constexpr` constants, these three are real,
+// runtime-initialized `inline const float` constants (computed once, at
+// static-initialization time) - the same k-prefixed naming convention,
+// just not constexpr, because the value genuinely cannot be produced at
+// compile time from a non-constexpr function.
+//
+// THE REAL TWO-LEVEL NESTED GUARD, re-verified directly - NOT a single
+// combined condition, and NOT an early `return` at either level:
+//   - OUTER: `if (!is_zero(rate_yaw_kp))` wraps the function's ENTIRE
+//     remaining body. If the rate-yaw P-gain is exactly zero,
+//     `attitude_target` is left COMPLETELY UNCHANGED - the thrust
+//     correction computed just above this guard is discarded, not
+//     applied on its own.
+//   - INNER, independent second condition: `if (!is_zero(angle_yaw_kp)
+//     && fabs(attitude_error_rad.z) > heading_error_max)` - both the
+//     angle-yaw gain must be non-zero AND the actual yaw error must
+//     already exceed the computed limit before the clamp/recomposition
+//     below executes.
+//
+// THE REAL `1.0f / rate_yaw_kp` RECIPROCAL, re-verified directly against
+// inv_sqrt_controller's own real parameter names (CCP-021): `heading_
+// error_max = min(inv_sqrt_controller(1.0f / rate_yaw_kp, angle_yaw_kp,
+// heading_accel_max), AC_ATTITUDE_YAW_MAX_ERROR_ANGLE_RAD)` - the
+// RECIPROCAL of the rate-yaw gain is inv_sqrt_controller's own `output`
+// argument, `angle_yaw_kp` is its `p`, `heading_accel_max` is its
+// `D_max`. Passing `rate_yaw_kp` itself here instead of its reciprocal
+// would still compile and still produce some finite result - only a test
+// exercising a value where the reciprocal and the raw gain diverge
+// numerically (this file's own test file picks rate_yaw_kp != 1) can
+// catch that swap.
+//
+// THE REAL MUTATION SHAPE: real upstream takes `attitude_target` as a
+// non-const `Quaternion&` specifically so this function can overwrite it
+// (`attitude_target = attitude_body * thrust_vector_correction *
+// heading_vec_correction_quat`) - the exact three-way composition order,
+// `attitude_body` leftmost, `heading_vec_correction_quat` rightmost, only
+// when the inner guard fires. This port's own signature keeps that same
+// non-const `Quaternion&` in/out parameter shape (matching thrust_vector_
+// rotation_angles's own out-parameter convention directly above, rather
+// than inventing a separate output parameter) - `attitude_target` is
+// both read (as an input to the CCP-020 call) and, conditionally,
+// reassigned by this same function.
+//
+// DEFERRED, explicitly, still NOT started here, and NOT retroactively
+// unblocked by this ticket's own correction above: command_model_rate_
+// predictor (real lines 1134-1152) - see this file's own CCP-022
+// addendum's "DELIBERATELY EXCLUDED" paragraph, now corrected in place
+// just above it. That function genuinely still needs real per-axis
+// STATE this port has nowhere to source from yet (`_rate_bf_ff_enabled`,
+// `_angle_P_scale`), not merely a scalar gain value - a materially
+// different, still-real gap from this ticket's own now-corrected
+// understanding of thrust_heading_rotation_angles's own dependencies.
 // ---------------------------------------------------------------------
 
 #include <algorithm>
@@ -622,6 +725,63 @@ inline void thrust_vector_rotation_angles(const math::Quaternion& attitude_targe
     // dedicated assertion, not just a trusted comment).
     heading_vec_correction_quat.to_axis_angle(rotation_rad);
     attitude_error_rad.z = rotation_rad.z;
+}
+
+// AC_ATTITUDE_ACCEL_Y_CONTROLLER_MIN_RADSS / _MAX_RADSS / AC_ATTITUDE_
+// YAW_MAX_ERROR_ANGLE_RAD (AC_AttitudeControl.h real lines 19-20, 30) -
+// see this file's own "CCP-023 ADDENDUM" banner above for why these are
+// real, runtime-initialized `inline const float` (not `inline
+// constexpr`, unlike ap-motors's own kMaxNumMotors-style pure-literal
+// constants): math::radians() is not constexpr-callable.
+inline const float kAccelYControllerMinRadss = math::radians(10.0f);
+inline const float kAccelYControllerMaxRadss = math::radians(120.0f);
+inline const float kYawMaxErrorAngleRad = math::radians(45.0f);
+
+// thrust_heading_rotation_angles - upstream AC_AttitudeControl::
+// thrust_heading_rotation_angles (real lines 1033-1050). CCP-023 - see
+// this file's own "CCP-023 ADDENDUM" banner above for the full design
+// writeup (the corrected CCP-020 deferral, the two-level nested guard,
+// the 1.0f/rate_yaw_kp reciprocal, and the real mutation shape - all
+// re-verified directly against the real upstream source, not trusted
+// from any summary).
+//
+// Wraps thrust_vector_rotation_angles (CCP-020) with real yaw-error
+// limiting: the maximum yaw error is limited based on static output
+// saturation (upstream's own doc comment).
+//
+// rate_yaw_kp/angle_yaw_kp/accel_yaw_max_radss are explicit float
+// parameters standing in for upstream's own get_rate_yaw_pid().kP()/
+// _p_angle_yaw.kP()/get_accel_yaw_max_radss() member accessors - see
+// this file's own banner addendum for why plain gain VALUES are all
+// this function actually needs, not stateful gain-owning objects.
+inline void thrust_heading_rotation_angles(math::Quaternion& attitude_target, const math::Quaternion& attitude_body,
+                                            math::Vector3f& attitude_error_rad, float& thrust_angle_rad,
+                                            float& thrust_error_angle_rad, float rate_yaw_kp, float angle_yaw_kp,
+                                            float accel_yaw_max_radss) {
+    math::Quaternion thrust_vector_correction;
+    thrust_vector_rotation_angles(attitude_target, attitude_body, thrust_vector_correction, attitude_error_rad,
+                                   thrust_angle_rad, thrust_error_angle_rad);
+
+    // Todo: Limit roll an pitch error based on output saturation and maximum error.
+
+    // Limit Yaw Error based to the maximum that would saturate the output when yaw rate is zero.
+    math::Quaternion heading_vec_correction_quat;
+
+    const float heading_accel_max =
+        math::constrain_value(accel_yaw_max_radss / 2.0f, kAccelYControllerMinRadss, kAccelYControllerMaxRadss);
+    if (!math::is_zero(rate_yaw_kp)) {
+        // Real, easy-to-miss reciprocal: 1.0f / rate_yaw_kp is inv_sqrt_
+        // controller's own `output` argument, NOT rate_yaw_kp itself -
+        // see this file's own banner addendum.
+        const float heading_error_max = std::min(
+            math::inv_sqrt_controller(1.0f / rate_yaw_kp, angle_yaw_kp, heading_accel_max), kYawMaxErrorAngleRad);
+        if (!math::is_zero(angle_yaw_kp) && std::fabs(attitude_error_rad.z) > heading_error_max) {
+            attitude_error_rad.z =
+                math::constrain_value(math::wrap_PI(attitude_error_rad.z), -heading_error_max, heading_error_max);
+            heading_vec_correction_quat.from_axis_angle(math::Vector3f{0.0f, 0.0f, attitude_error_rad.z});
+            attitude_target = attitude_body * thrust_vector_correction * heading_vec_correction_quat;
+        }
+    }
 }
 
 // attitude_command_model - upstream AC_AttitudeControl::
