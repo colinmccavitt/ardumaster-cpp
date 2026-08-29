@@ -41,3 +41,6 @@ add_subdirectory(ap-poscontrol)
 
 # ap-wpnav (CCP-028): AC_WPNav, AC_Loiter, AC_Circle.
 add_subdirectory(ap-wpnav)
+
+# ap-quadplane (VCP-001): QuadPlane slice 1 scaffold.
+add_subdirectory(ap-quadplane)

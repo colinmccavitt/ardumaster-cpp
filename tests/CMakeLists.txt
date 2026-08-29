@@ -478,3 +478,11 @@ add_executable(wp_and_spline_init_test wp_and_spline_init_test.cpp)
 target_link_libraries(wp_and_spline_init_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
 catch_discover_tests(wp_and_spline_init_test)
 
+
+add_executable(quadplane_setup_test quadplane_setup_test.cpp)
+target_link_libraries(quadplane_setup_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_setup_test)
+
+add_executable(quadplane_leftover_test quadplane_leftover_test.cpp)
+target_link_libraries(quadplane_leftover_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_leftover_test)

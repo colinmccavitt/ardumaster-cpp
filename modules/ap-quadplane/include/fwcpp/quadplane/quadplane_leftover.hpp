@@ -1,0 +1,67 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace fwcpp::quadplane {
+
+enum class PortStatus : std::uint8_t { kOnMain = 0, kThisSlice = 1, kRemaining = 2, kOutOfScope = 3 };
+
+struct QuadPlanePortItem {
+    const char* name;
+    PortStatus status;
+    const char* note;
+};
+
+inline constexpr QuadPlanePortItem kQuadPlaneCompleteness[] = {
+    {"Q_ENABLE / enabled", PortStatus::kThisSlice, "enable != 0"},
+    {"setup / available / initialised", PortStatus::kThisSlice, "QuadPlaneSetupInputs ADR-0012"},
+    {"Q_FRAME_CLASS defaults", PortStatus::kThisSlice, "quadplane_defaults.hpp"},
+    {"classify_frame", PortStatus::kThisSlice, "quadplane_frame.hpp"},
+    {"motors_kind stub flags", PortStatus::kThisSlice, "post-setup queries"},
+    {"leftover catalog", PortStatus::kThisSlice, "this table"},
+    {"get_singleton", PortStatus::kRemaining, "ADR-0012 no singleton"},
+    {"AP_Param var_info", PortStatus::kRemaining, "parameter tree"},
+    {"setup channels ahrs_view", PortStatus::kRemaining, "full setup after motors"},
+    {"wp_nav loiter_nav", PortStatus::kRemaining, "navigator objects in setup"},
+    {"mode_enter poscontrol", PortStatus::kRemaining, "QPOS state"},
+    {"update transition FSM", PortStatus::kRemaining, "main loop"},
+    {"tailsitter tiltrotor", PortStatus::kRemaining, "subsystems"},
+    {"vtol controllers landing", PortStatus::kRemaining, "position + landing"},
+    {"AUTO VTOL mission", PortStatus::kRemaining, "do_vtol verify"},
+    {"motors_output motor_test", PortStatus::kRemaining, "output path"},
+    {"guided in_vtol_mode", PortStatus::kRemaining, "mode predicates"},
+    {"air_mode Q_OPTIONS", PortStatus::kRemaining, "options"},
+    {"TECS stick mixing", PortStatus::kRemaining, "should_disable_TECS"},
+    {"logging QControl", PortStatus::kOutOfScope, "no logger"},
+    {"scripting dynamic motors", PortStatus::kOutOfScope, "no scripting"},
+};
+
+[[nodiscard]] inline constexpr std::size_t quadplane_completeness_size() {
+    return sizeof(kQuadPlaneCompleteness) / sizeof(kQuadPlaneCompleteness[0]);
+}
+
+[[nodiscard]] inline constexpr std::size_t count_status(PortStatus status) {
+    std::size_t n = 0;
+    for (const auto& item : kQuadPlaneCompleteness) {
+        if (item.status == status) ++n;
+    }
+    return n;
+}
+
+[[nodiscard]] inline constexpr bool completeness_has(const char* name, PortStatus status) {
+    for (const auto& item : kQuadPlaneCompleteness) {
+        const char* a = item.name;
+        const char* b = name;
+        while (*a && *b && *a == *b) { ++a; ++b; }
+        if (*a == *b && item.status == status) return true;
+    }
+    return false;
+}
+
+[[nodiscard]] inline constexpr std::size_t remaining_count() { return count_status(PortStatus::kRemaining); }
+[[nodiscard]] inline constexpr std::size_t on_main_count() { return count_status(PortStatus::kOnMain); }
+[[nodiscard]] inline constexpr std::size_t this_slice_count() { return count_status(PortStatus::kThisSlice); }
+[[nodiscard]] inline constexpr std::size_t out_of_scope_count() { return count_status(PortStatus::kOutOfScope); }
+
+}
