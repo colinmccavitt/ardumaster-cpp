@@ -133,4 +133,22 @@ struct QAcroRunResult {
     return out;
 }
 
+struct QAcroUpdateInputs {
+    float att_target_roll_cd{0.0f};
+    float att_target_pitch_cd{0.0f};
+    float att_target_yaw_cd{0.0f};
+};
+
+struct QAcroUpdateResult {
+    float nav_roll_cd{0.0f};
+    float nav_pitch_cd{0.0f};
+};
+
+[[nodiscard]] inline QAcroUpdateResult qacro_update(const QAcroUpdateInputs& in) {
+    QAcroUpdateResult out{};
+    out.nav_roll_cd = in.att_target_roll_cd;
+    out.nav_pitch_cd = in.att_target_pitch_cd;
+    return out;
+}
+
 }  // namespace fwcpp::q_modes

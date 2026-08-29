@@ -1,10 +1,27 @@
 #pragma once
 
+#include <fwcpp/q_modes/mode_qstabilize.hpp>
 #include <fwcpp/q_modes/q_run_common.hpp>
 
 #include <cstdint>
 
 namespace fwcpp::q_modes {
+
+struct QHoverEnterEffects {
+    bool set_d_max_speed_accel{false};
+    bool set_d_correction_speed_accel{false};
+    float pilot_velocity_z_max_dn_ms{0.0f};
+    float pilot_speed_z_max_up_ms{0.0f};
+    float pilot_accel_z_mss{0.0f};
+    bool set_climb_rate_zero{false};
+    bool init_throttle_wait{false};
+};
+
+struct QHoverEnterInputs {
+    float pilot_velocity_z_max_dn_ms{1.0f};
+    float pilot_speed_z_max_up_ms{2.5f};
+    float pilot_accel_z_mss{1.0f};
+};
 
 struct QHoverEnterResult {
     bool entered{true};
@@ -12,10 +29,25 @@ struct QHoverEnterResult {
     float climb_rate_ms{0.0f};
 };
 
-[[nodiscard]] inline QHoverEnterResult qhover_enter() {
+[[nodiscard]] inline QHoverEnterResult qhover_enter(const QHoverEnterInputs& in, QHoverEnterEffects& effects) {
+    effects = QHoverEnterEffects{};
+    effects.set_d_max_speed_accel = true;
+    effects.set_d_correction_speed_accel = true;
+    effects.pilot_velocity_z_max_dn_ms = in.pilot_velocity_z_max_dn_ms;
+    effects.pilot_speed_z_max_up_ms = in.pilot_speed_z_max_up_ms;
+    effects.pilot_accel_z_mss = in.pilot_accel_z_mss;
+    effects.set_climb_rate_zero = true;
+    effects.init_throttle_wait = true;
+
     QHoverEnterResult out{};
     out.climb_rate_ms = 0.0f;
     return out;
+}
+
+[[nodiscard]] inline QHoverEnterResult qhover_enter() {
+    QHoverEnterEffects effects{};
+    QHoverEnterInputs in{};
+    return qhover_enter(in, effects);
 }
 
 enum class QHoverRunPhase : std::uint8_t {
@@ -97,6 +129,10 @@ struct QHoverRunResult {
         out.fw_followup = q_run_fw_surface_followup();
     }
     return out;
+}
+
+[[nodiscard]] inline QStabilizeUpdateResult qhover_update(const QStabilizeUpdateInputs& in) {
+    return qstabilize_update(in);
 }
 
 }  // namespace fwcpp::q_modes

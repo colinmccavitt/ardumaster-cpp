@@ -4,6 +4,8 @@
 
 #include <cstdint>
 
+#include <algorithm>
+
 namespace fwcpp::q_modes {
 
 struct QStabilizeEnterResult {
@@ -90,5 +92,101 @@ struct QStabilizeRunResult {
     }
     return out;
 }
+
+
+struct QStabilizeNavTargets {
+    float nav_roll_cd{0.0f};
+    float nav_pitch_cd{0.0f};
+};
+
+struct LimitedRollPitchInputs {
+    float roll_input{0.0f};
+    float pitch_input{0.0f};
+    float roll_limit_cd{4500.0f};
+    float pitch_limit_max_deg{20.0f};
+    float pitch_limit_min_deg{25.0f};
+    float lean_angle_max_cd{4500.0f};
+};
+
+[[nodiscard]] inline QStabilizeNavTargets set_limited_roll_pitch(const LimitedRollPitchInputs& in) {
+    QStabilizeNavTargets out{};
+    const float angle_max_cd = in.lean_angle_max_cd;
+    out.nav_roll_cd = in.roll_input * std::min(in.roll_limit_cd, angle_max_cd);
+    if (in.pitch_input > 0.0f) {
+        out.nav_pitch_cd =
+            in.pitch_input * std::min(in.pitch_limit_max_deg * 100.0f, angle_max_cd);
+    } else {
+        out.nav_pitch_cd =
+            in.pitch_input * std::min(-in.pitch_limit_min_deg * 100.0f, angle_max_cd);
+    }
+    return out;
+}
+
+struct TailsitterRollPitchInputs {
+    float roll_input{0.0f};
+    float pitch_input{0.0f};
+    float tailsitter_max_roll_angle_deg{0.0f};
+    float lean_angle_max_cd{4500.0f};
+};
+
+struct TailsitterRollPitchResult {
+    QStabilizeNavTargets nav{};
+    bool apply_vtol_roll_pitch_limit{false};
+};
+
+[[nodiscard]] inline TailsitterRollPitchResult set_tailsitter_roll_pitch(const TailsitterRollPitchInputs& in) {
+    TailsitterRollPitchResult out{};
+    if (in.tailsitter_max_roll_angle_deg > 0.0f) {
+        out.nav.nav_roll_cd = in.tailsitter_max_roll_angle_deg * 100.0f * in.roll_input;
+    } else {
+        out.nav.nav_roll_cd = in.roll_input * in.lean_angle_max_cd;
+    }
+    out.nav.nav_pitch_cd = in.pitch_input * in.lean_angle_max_cd;
+    out.apply_vtol_roll_pitch_limit = true;
+    return out;
+}
+
+struct QStabilizeUpdateInputs {
+    float roll_control_in{0.0f};
+    float roll_range{4500.0f};
+    float pitch_control_in{0.0f};
+    float pitch_range{4500.0f};
+    bool tailsitter_active{false};
+    bool ignore_fw_angle_limits_in_q_modes{false};
+    float roll_limit_cd{4500.0f};
+    float pitch_limit_max_deg{20.0f};
+    float pitch_limit_min_deg{25.0f};
+    float lean_angle_max_cd{4500.0f};
+    float tailsitter_max_roll_angle_deg{0.0f};
+};
+
+struct QStabilizeUpdateResult {
+    QStabilizeNavTargets nav{};
+    bool apply_vtol_roll_pitch_limit{false};
+};
+
+[[nodiscard]] inline QStabilizeUpdateResult qstabilize_update(const QStabilizeUpdateInputs& in) {
+    QStabilizeUpdateResult out{};
+    const float roll_input = in.roll_control_in / in.roll_range;
+    const float pitch_input = in.pitch_control_in / in.pitch_range;
+
+    if (in.tailsitter_active) {
+        const auto ts = set_tailsitter_roll_pitch(
+            {roll_input, pitch_input, in.tailsitter_max_roll_angle_deg, in.lean_angle_max_cd});
+        out.nav = ts.nav;
+        out.apply_vtol_roll_pitch_limit = ts.apply_vtol_roll_pitch_limit;
+        return out;
+    }
+
+    if (!in.ignore_fw_angle_limits_in_q_modes) {
+        out.nav = set_limited_roll_pitch({roll_input, pitch_input, in.roll_limit_cd, in.pitch_limit_max_deg,
+                                          in.pitch_limit_min_deg, in.lean_angle_max_cd});
+    } else {
+        out.nav.nav_roll_cd = roll_input * in.lean_angle_max_cd;
+        out.nav.nav_pitch_cd = pitch_input * in.lean_angle_max_cd;
+    }
+    return out;
+}
+
 
 }  // namespace fwcpp::q_modes

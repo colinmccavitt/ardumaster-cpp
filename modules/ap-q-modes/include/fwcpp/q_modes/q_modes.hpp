@@ -5,4 +5,5 @@
 #include <fwcpp/q_modes/mode_qstabilize.hpp>
 #include <fwcpp/q_modes/q_mode_meta.hpp>
 #include <fwcpp/q_modes/q_modes_completeness.hpp>
+#include <fwcpp/q_modes/qhover_enter_d_limits.hpp>
 #include <fwcpp/q_modes/q_run_common.hpp>

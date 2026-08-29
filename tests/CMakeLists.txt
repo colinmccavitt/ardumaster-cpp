@@ -689,7 +689,7 @@ target_link_libraries(transition_update_test PRIVATE ap-quadplane-transition Cat
 catch_discover_tests(transition_update_test)
 
 add_executable(mode_q_run_test mode_q_run_test.cpp)
-target_link_libraries(mode_q_run_test PRIVATE ap-q-modes Catch2::Catch2WithMain)
+target_link_libraries(mode_q_run_test PRIVATE ap-q-modes ap-poscontrol ap-pid Catch2::Catch2WithMain)
 catch_discover_tests(mode_q_run_test)
 
 add_executable(q_modes_completeness_test q_modes_completeness_test.cpp)
