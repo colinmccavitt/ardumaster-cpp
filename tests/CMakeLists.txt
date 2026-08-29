@@ -977,3 +977,8 @@ catch_discover_tests(logger_rotation_test)
 add_executable(wspi_test wspi_test.cpp)
 target_link_libraries(wspi_test PRIVATE ap-hal Catch2::Catch2WithMain)
 catch_discover_tests(wspi_test)
+
+# CCP-037 slice 1: Copter pilot lean / yaw / throttle expo helpers.
+add_executable(pilot_input_test pilot_input_test.cpp)
+target_link_libraries(pilot_input_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(pilot_input_test)
