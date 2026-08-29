@@ -5,3 +5,5 @@
 #include <fwcpp/quadplane_transition/transition_state.hpp>
 #include <fwcpp/quadplane_transition/transition_timing.hpp>
 #include <fwcpp/quadplane_transition/transition_paths.hpp>
+#include <fwcpp/quadplane_transition/transition_update_loop.hpp>
+#include <fwcpp/quadplane_transition/transition_base.hpp>

@@ -10,6 +10,7 @@ inline constexpr std::int16_t kQTransitionMsMax = 30000;
 inline constexpr float kQTransDecelDefault = 2.0f;
 inline constexpr std::int16_t kQTransFailDefault = 0;
 inline constexpr std::int16_t kQTransFailActDefault = 0;
+inline constexpr std::int32_t kQOptionsLevelTransition = 1 << 0;
 inline constexpr std::int32_t kQOptionsTransFailToFw = 1 << 19;
 
 inline constexpr std::uint8_t kModeQstabilize = 17;

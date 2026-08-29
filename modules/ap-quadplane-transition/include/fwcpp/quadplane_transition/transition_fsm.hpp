@@ -61,6 +61,7 @@ public:
     [[nodiscard]] std::uint32_t last_fw_mode_ms() const { return last_fw_mode_ms_; }
     [[nodiscard]] std::int32_t last_fw_nav_pitch_cd() const { return last_fw_nav_pitch_cd_; }
     [[nodiscard]] float last_throttle() const { return last_throttle_; }
+    void record_motor_throttle(float throttle) { last_throttle_ = throttle; }
     [[nodiscard]] bool assist_reset_pending() const { return assist_reset_pending_; }
     void clear_assist_reset_pending() { assist_reset_pending_ = false; }
 

@@ -695,6 +695,14 @@ add_executable(transition_paths_test transition_paths_test.cpp)
 target_link_libraries(transition_paths_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
 catch_discover_tests(transition_paths_test)
 
+add_executable(transition_base_test transition_base_test.cpp)
+target_link_libraries(transition_base_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
+catch_discover_tests(transition_base_test)
+
+add_executable(transition_update_loop_test transition_update_loop_test.cpp)
+target_link_libraries(transition_update_loop_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
+catch_discover_tests(transition_update_loop_test)
+
 add_executable(qrtl_geometry_test qrtl_geometry_test.cpp)
 target_link_libraries(qrtl_geometry_test PRIVATE ap-qrtl Catch2::Catch2WithMain)
 catch_discover_tests(qrtl_geometry_test)
