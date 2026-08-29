@@ -2064,6 +2064,7 @@ struct EntryPointGains {
         g.rate_bf_ff_enabled = true;
         g.input_tc = input_tc;
         g.rate_y_tc = rate_y_tc;
+        g.rate_rp_tc = rate_rp_tc;
         g.ang_vel_roll_max_degs = ang_vel_roll_max_degs;
         g.ang_vel_pitch_max_degs = ang_vel_pitch_max_degs;
         g.ang_vel_yaw_max_degs = ang_vel_yaw_max_degs;
@@ -2083,6 +2084,7 @@ struct EntryPointGains {
 
     float input_tc = 0.15f;
     float rate_y_tc = 0.2f;
+    float rate_rp_tc = 0.15f;
     float ang_vel_roll_max_degs = 220.0f;
     float ang_vel_pitch_max_degs = 220.0f;
     float ang_vel_yaw_max_degs = 200.0f;
@@ -2688,5 +2690,301 @@ TEST_CASE("input_euler_angle_roll_pitch_yaw_cd: converts centidegrees and forwar
                                           t_rad, te_rad, ff_rad, err_rad, av_rad);
 
     REQUIRE(state_cd.euler_rate_target_rads.z == Approx(state_rad.euler_rate_target_rads.z).margin(1e-6f));
+}
+
+
+// =======================================================================
+// CCP-031: input_euler_rate_roll_pitch_yaw_rads
+// Acro-style entry: every axis is a RATE. No _cd wrapper in upstream.
+// =======================================================================
+
+void step_euler_rate(float roll_rate_rads, float pitch_rate_rads, float yaw_rate_rads, AttitudeTargetState& state,
+                     const EulerAngleRateShapingGains& gains, float dt) {
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    float thrust_angle = 0.0f, thrust_error_angle = 0.0f, feedforward_scalar = 0.0f;
+    Quaternion attitude_ang_error;
+    Vector3f ang_vel_body_rads;
+    input_euler_rate_roll_pitch_yaw_rads(roll_rate_rads, pitch_rate_rads, yaw_rate_rads, state, body, gyro, gains, dt,
+                                          thrust_angle, thrust_error_angle, feedforward_scalar, attitude_ang_error,
+                                          ang_vel_body_rads);
+}
+
+TEST_CASE("input_euler_rate_roll_pitch_yaw_rads: shaped sequence settles, tracks and turns around",
+          "[control][attitude_kinematics][input_euler_rate_roll_pitch_yaw][CCP-031][sequence]") {
+    EntryPointGains eg;
+    eg.rate_rp_tc = 0.15f;
+    eg.rate_y_tc = 0.25f;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.0025f; // 400 Hz
+    const int kSteps = 600;   // 1.5 s
+
+    const float roll_rate_rads = 0.4f;
+    const float pitch_rate_rads = 0.3f;
+    const float yaw_rate_rads = 0.5f;
+    const int kReversalStep = kSteps / 2;
+
+    AttitudeTargetState state = fresh_state();
+
+    float roll_rate_at_10 = 0.0f, pitch_rate_at_10 = 0.0f, yaw_rate_at_10 = 0.0f;
+    float roll_rate_at_300 = 0.0f, pitch_rate_at_300 = 0.0f, yaw_rate_at_300 = 0.0f;
+    float roll_rate_at_350 = 0.0f, pitch_rate_at_350 = 0.0f, yaw_rate_at_350 = 0.0f;
+    float roll_rate_at_600 = 0.0f, pitch_rate_at_600 = 0.0f, yaw_rate_at_600 = 0.0f;
+
+    for (int i = 1; i <= kSteps; ++i) {
+        const float roll_cmd = (i <= kReversalStep) ? roll_rate_rads : -roll_rate_rads;
+        const float pitch_cmd = (i <= kReversalStep) ? pitch_rate_rads : -pitch_rate_rads;
+        const float yaw_cmd = (i <= kReversalStep) ? yaw_rate_rads : -yaw_rate_rads;
+
+        step_euler_rate(roll_cmd, pitch_cmd, yaw_cmd, state, gains, dt);
+
+        if (i == 10) {
+            roll_rate_at_10 = state.euler_rate_target_rads.x;
+            pitch_rate_at_10 = state.euler_rate_target_rads.y;
+            yaw_rate_at_10 = state.euler_rate_target_rads.z;
+        }
+        if (i == 300) {
+            roll_rate_at_300 = state.euler_rate_target_rads.x;
+            pitch_rate_at_300 = state.euler_rate_target_rads.y;
+            yaw_rate_at_300 = state.euler_rate_target_rads.z;
+        }
+        if (i == 350) {
+            roll_rate_at_350 = state.euler_rate_target_rads.x;
+            pitch_rate_at_350 = state.euler_rate_target_rads.y;
+            yaw_rate_at_350 = state.euler_rate_target_rads.z;
+        }
+        if (i == 600) {
+            roll_rate_at_600 = state.euler_rate_target_rads.x;
+            pitch_rate_at_600 = state.euler_rate_target_rads.y;
+            yaw_rate_at_600 = state.euler_rate_target_rads.z;
+        }
+    }
+
+    // Early: motion has started but has not snapped to the command.
+    REQUIRE(roll_rate_at_10 > 0.0f);
+    REQUIRE(roll_rate_at_10 < roll_rate_rads * 0.5f);
+    REQUIRE(pitch_rate_at_10 > 0.0f);
+    REQUIRE(pitch_rate_at_10 < pitch_rate_rads * 0.5f);
+    REQUIRE(yaw_rate_at_10 > 0.0f);
+    REQUIRE(yaw_rate_at_10 < yaw_rate_rads * 0.5f);
+
+    // Mid: all three rate targets have settled toward the command.
+    REQUIRE(roll_rate_at_300 == Approx(roll_rate_rads).margin(0.05f));
+    REQUIRE(pitch_rate_at_300 == Approx(pitch_rate_rads).margin(0.05f));
+    REQUIRE(yaw_rate_at_300 == Approx(yaw_rate_rads).margin(0.05f));
+
+    // Shortly after reversal: all three axes are genuinely turning around.
+    REQUIRE(roll_rate_at_350 < roll_rate_at_300 - 0.05f);
+    REQUIRE(pitch_rate_at_350 < pitch_rate_at_300 - 0.05f);
+    REQUIRE(yaw_rate_at_350 < yaw_rate_at_300 - 0.05f);
+
+    // End: reversed rates settled. Yaw uses the slower rate_y_tc (0.25)
+    // and a smaller accel limit, so it is given a slightly wider settle
+    // band than roll/pitch.
+    REQUIRE(roll_rate_at_600 == Approx(-roll_rate_rads).margin(0.05f));
+    REQUIRE(pitch_rate_at_600 == Approx(-pitch_rate_rads).margin(0.05f));
+    REQUIRE(yaw_rate_at_600 == Approx(-yaw_rate_rads).margin(0.10f));
+}
+
+TEST_CASE("input_euler_rate_roll_pitch_yaw_rads: unshaped wrap_2PI yaw, wrap_PI roll, 85deg pitch clamp",
+          "[control][attitude_kinematics][input_euler_rate_roll_pitch_yaw][CCP-031][unshaped]") {
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    EntryPointGains eg;
+    EulerAngleRateShapingGains gains = eg.gains();
+    gains.rate_bf_ff_enabled = false;
+
+    // Yaw: start at 3.0 rad (still in to_euler's [-pi, pi] range) and
+    // step +0.5 so the result is 3.5, which is > pi. wrap_2PI keeps 3.5;
+    // wrap_PI would fold it to ~-2.78. Pitch/roll held at zero.
+    {
+        AttitudeTargetState state = fresh_state();
+        state.attitude_target = attitude(0.0f, 0.0f, 3.0f);
+
+        float t = 0.0f, te = 0.0f, ff = 0.0f;
+        Quaternion err;
+        Vector3f av;
+        input_euler_rate_roll_pitch_yaw_rads(0.0f, 0.0f, 10.0f, state, body, gyro, gains, 0.05f, t, te, ff, err, av);
+
+        const float expected_yaw = fwcpp::math::wrap_2PI(3.0f + 10.0f * 0.05f);
+        REQUIRE(state.euler_angle_target_rad.z == Approx(expected_yaw).margin(1e-5f));
+        REQUIRE(expected_yaw == Approx(3.5f).margin(1e-5f));
+        REQUIRE(std::fabs(state.euler_angle_target_rad.z - fwcpp::math::wrap_PI(3.5f)) > 1.0f);
+    }
+
+    // Pitch clamp: a 2 rad/s step of 1 s would be 2 rad (~114 deg); the
+    // unshaped branch clamps to ±radians(85).
+    {
+        AttitudeTargetState pos = fresh_state();
+        AttitudeTargetState neg = fresh_state();
+        float t = 0.0f, te = 0.0f, ff = 0.0f;
+        Quaternion err;
+        Vector3f av;
+        input_euler_rate_roll_pitch_yaw_rads(0.0f, 2.0f, 0.0f, pos, body, gyro, gains, 1.0f, t, te, ff, err, av);
+        input_euler_rate_roll_pitch_yaw_rads(0.0f, -2.0f, 0.0f, neg, body, gyro, gains, 1.0f, t, te, ff, err, av);
+
+        const float pitch_lim = fwcpp::math::radians(85.0f);
+        REQUIRE(pos.euler_angle_target_rad.y == Approx(pitch_lim).margin(1e-5f));
+        REQUIRE(neg.euler_angle_target_rad.y == Approx(-pitch_lim).margin(1e-5f));
+        REQUIRE(pos.euler_angle_target_rad.y < 2.0f);
+    }
+
+    // Roll: wrap_PI, not wrap_2PI. A 4 rad step from 0 is ~-2.28 under
+    // wrap_PI and 4.0 under wrap_2PI.
+    {
+        AttitudeTargetState state = fresh_state();
+        float t = 0.0f, te = 0.0f, ff = 0.0f;
+        Quaternion err;
+        Vector3f av;
+        input_euler_rate_roll_pitch_yaw_rads(4.0f, 0.0f, 0.0f, state, body, gyro, gains, 1.0f, t, te, ff, err, av);
+
+        REQUIRE(state.euler_angle_target_rad.x == Approx(fwcpp::math::wrap_PI(4.0f)).margin(1e-5f));
+        REQUIRE(std::fabs(state.euler_angle_target_rad.x - fwcpp::math::wrap_2PI(4.0f)) > 1.0f);
+    }
+
+    // Feedforward targets are zeroed; run_quat still runs.
+    {
+        AttitudeTargetState state = fresh_state();
+        state.euler_rate_target_rads = Vector3f{1.0f, -1.0f, 1.0f};
+        state.ang_vel_target_rads = Vector3f{2.0f, -2.0f, 2.0f};
+        state.ang_accel_target_rads = Vector3f{3.0f, -3.0f, 3.0f};
+
+        float thrust_angle = 0.0f, thrust_error_angle = 0.0f, feedforward_scalar = 0.0f;
+        Quaternion attitude_ang_error;
+        Vector3f ang_vel_body_rads;
+        input_euler_rate_roll_pitch_yaw_rads(0.1f, -0.1f, 0.2f, state, body, gyro, gains, 0.01f, thrust_angle,
+                                              thrust_error_angle, feedforward_scalar, attitude_ang_error,
+                                              ang_vel_body_rads);
+
+        REQUIRE(state.euler_rate_target_rads.x == 0.0f);
+        REQUIRE(state.euler_rate_target_rads.y == 0.0f);
+        REQUIRE(state.euler_rate_target_rads.z == 0.0f);
+        REQUIRE(state.ang_vel_target_rads.x == 0.0f);
+        REQUIRE(state.ang_vel_target_rads.y == 0.0f);
+        REQUIRE(state.ang_vel_target_rads.z == 0.0f);
+        REQUIRE(state.ang_accel_target_rads.x == 0.0f);
+        REQUIRE(state.ang_accel_target_rads.y == 0.0f);
+        REQUIRE(state.ang_accel_target_rads.z == 0.0f);
+
+        Quaternion reference_target = state.attitude_target;
+        float ref_thrust_angle = 0.0f, ref_thrust_error_angle = 0.0f, ref_feedforward_scalar = 0.0f;
+        Quaternion ref_attitude_ang_error;
+        Vector3f ref_ang_vel_body_rads;
+        attitude_controller_run_quat(reference_target, body, state.ang_vel_target_rads, gyro, gains.rate_yaw_kp,
+                                      gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                      gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                      gains.accel_pitch_max_radss, gains.accel_yaw_max_radss,
+                                      gains.use_sqrt_controller, gains.ang_vel_roll_max_degs,
+                                      gains.ang_vel_pitch_max_degs, gains.ang_vel_yaw_max_degs, 0.01f,
+                                      ref_thrust_angle, ref_thrust_error_angle, ref_feedforward_scalar,
+                                      ref_attitude_ang_error, ref_ang_vel_body_rads);
+        REQUIRE(ang_vel_body_rads.x == Approx(ref_ang_vel_body_rads.x).margin(1e-6f));
+        REQUIRE(ang_vel_body_rads.y == Approx(ref_ang_vel_body_rads.y).margin(1e-6f));
+        REQUIRE(ang_vel_body_rads.z == Approx(ref_ang_vel_body_rads.z).margin(1e-6f));
+    }
+}
+
+TEST_CASE("input_euler_rate_roll_pitch_yaw_rads: rate_rp_tc shapes roll+pitch, rate_y_tc shapes yaw, not input_tc",
+          "[control][attitude_kinematics][input_euler_rate_roll_pitch_yaw][CCP-031][rate_rp_tc]") {
+    const float dt = 0.0025f;
+    const float cmd = 1.0f;
+    const int kSteps = 20;
+
+    auto run = [&](float rate_rp_tc, float rate_y_tc, float input_tc, float roll_cmd, float pitch_cmd,
+                   float yaw_cmd) {
+        EntryPointGains eg;
+        eg.rate_rp_tc = rate_rp_tc;
+        eg.rate_y_tc = rate_y_tc;
+        eg.input_tc = input_tc;
+        const EulerAngleRateShapingGains gains = eg.gains();
+        AttitudeTargetState state = fresh_state();
+        for (int i = 0; i < kSteps; ++i) {
+            step_euler_rate(roll_cmd, pitch_cmd, yaw_cmd, state, gains, dt);
+        }
+        return state;
+    };
+
+    // Roll-only: different rate_rp_tc, same rate_y_tc and input_tc.
+    const AttitudeTargetState sharp_rp = run(0.02f, 0.30f, 0.40f, cmd, 0.0f, 0.0f);
+    const AttitudeTargetState slow_rp = run(0.30f, 0.30f, 0.40f, cmd, 0.0f, 0.0f);
+    REQUIRE(sharp_rp.euler_rate_target_rads.x < cmd);
+    REQUIRE(slow_rp.euler_rate_target_rads.x < cmd);
+    REQUIRE(sharp_rp.euler_rate_target_rads.x > slow_rp.euler_rate_target_rads.x + 0.08f);
+
+    // Yaw-only, same rate_y_tc, different rate_rp_tc: yaw must match. A
+    // port that reused rate_rp_tc for yaw would diverge. Commanding
+    // yaw-only keeps body_to_euler_limit stable (heading does not
+    // change phi/theta), so this is not an attitude-coupling artifact.
+    const AttitudeTargetState yaw_rp_a = run(0.02f, 0.30f, 0.40f, 0.0f, 0.0f, cmd);
+    const AttitudeTargetState yaw_rp_b = run(0.30f, 0.30f, 0.40f, 0.0f, 0.0f, cmd);
+    REQUIRE(yaw_rp_a.euler_rate_target_rads.z == Approx(yaw_rp_b.euler_rate_target_rads.z).margin(1e-5f));
+
+    // Yaw-only: sharper rate_y_tc converges further. Roll-only with the
+    // same rate_rp_tc is unaffected by rate_y_tc.
+    const AttitudeTargetState sharp_y = run(0.30f, 0.02f, 0.40f, 0.0f, 0.0f, cmd);
+    const AttitudeTargetState slow_y = run(0.30f, 0.30f, 0.40f, 0.0f, 0.0f, cmd);
+    REQUIRE(sharp_y.euler_rate_target_rads.z > slow_y.euler_rate_target_rads.z + 0.08f);
+    const AttitudeTargetState roll_y_a = run(0.30f, 0.02f, 0.40f, cmd, 0.0f, 0.0f);
+    const AttitudeTargetState roll_y_b = run(0.30f, 0.30f, 0.40f, cmd, 0.0f, 0.0f);
+    REQUIRE(roll_y_a.euler_rate_target_rads.x == Approx(roll_y_b.euler_rate_target_rads.x).margin(1e-5f));
+
+    // input_tc is unused on this path: swapping it must not change any axis.
+    const AttitudeTargetState input_sharp = run(0.15f, 0.25f, 0.02f, cmd, cmd, cmd);
+    const AttitudeTargetState input_slow = run(0.15f, 0.25f, 0.40f, cmd, cmd, cmd);
+    REQUIRE(input_sharp.euler_rate_target_rads.x == Approx(input_slow.euler_rate_target_rads.x).margin(1e-5f));
+    REQUIRE(input_sharp.euler_rate_target_rads.y == Approx(input_slow.euler_rate_target_rads.y).margin(1e-5f));
+    REQUIRE(input_sharp.euler_rate_target_rads.z == Approx(input_slow.euler_rate_target_rads.z).margin(1e-5f));
+}
+
+TEST_CASE("input_euler_rate_roll_pitch_yaw_rads: all three axes are rate-shaped, not angle-error shaped",
+          "[control][attitude_kinematics][input_euler_rate_roll_pitch_yaw][CCP-031][rate-shape]") {
+    EntryPointGains eg;
+    eg.rate_rp_tc = 0.15f;
+    eg.rate_y_tc = 0.25f;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.0025f;
+    const float rate_cmd = 0.3f;
+
+    // Yaw-only: heading does not change body_to_euler_limit, so an
+    // independent attitude_command_model loop with rate_y_tc and the
+    // yaw accel limit must match the entry point. The naive
+    // angle-error shape (CCP-029/030 roll/pitch argument order) must
+    // not.
+    const int kYawSteps = 150;
+    AttitudeTargetState yaw_state = fresh_state();
+    for (int i = 0; i < kYawSteps; ++i) {
+        step_euler_rate(0.0f, 0.0f, rate_cmd, yaw_state, gains, dt);
+    }
+
+    float correct_y = 0.0f, correct_y_accel = 0.0f;
+    for (int i = 0; i < kYawSteps; ++i) {
+        attitude_command_model(0.0f, rate_cmd, correct_y, correct_y_accel, 0.0f, gains.accel_yaw_max_radss,
+                                gains.rate_y_tc, dt);
+    }
+
+    float naive_rate = 0.0f, naive_accel = 0.0f;
+    for (int i = 0; i < kYawSteps; ++i) {
+        attitude_command_model(fwcpp::math::wrap_PI(rate_cmd - 0.0f), 0.0f, naive_rate, naive_accel, 0.0f,
+                                gains.accel_yaw_max_radss, gains.rate_y_tc, dt);
+    }
+
+    REQUIRE(std::fabs(correct_y - naive_rate) > 0.2f);
+    REQUIRE(yaw_state.euler_rate_target_rads.z == Approx(correct_y).margin(1e-4f));
+    REQUIRE(std::fabs(yaw_state.euler_rate_target_rads.z - naive_rate) > 0.2f);
+
+    // Roll-only, short enough that |phi| stays inside body_to_euler_limit's
+    // 0.1 sin-floor, so the roll accel limit is still accel_roll_max.
+    const int kRpSteps = 20;
+    AttitudeTargetState roll_state = fresh_state();
+    for (int i = 0; i < kRpSteps; ++i) {
+        step_euler_rate(rate_cmd, 0.0f, 0.0f, roll_state, gains, dt);
+    }
+    float correct_r = 0.0f, correct_r_accel = 0.0f;
+    for (int i = 0; i < kRpSteps; ++i) {
+        attitude_command_model(0.0f, rate_cmd, correct_r, correct_r_accel, 0.0f, gains.accel_roll_max_radss,
+                                gains.rate_rp_tc, dt);
+    }
+    REQUIRE(roll_state.euler_rate_target_rads.x == Approx(correct_r).margin(1e-4f));
+    REQUIRE(roll_state.euler_rate_target_rads.x > 0.0f);
 }
 

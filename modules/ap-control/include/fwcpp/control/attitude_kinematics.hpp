@@ -1905,6 +1905,11 @@ struct EulerAngleRateShapingGains {
     bool rate_bf_ff_enabled = true;
     float input_tc = 0.0f;
     float rate_y_tc = 0.0f;
+    // CCP-031: roll/pitch rate-shaping time constant (upstream
+    // `_rate_rp_tc`). Distinct from `input_tc` (angle commands) and
+    // `rate_y_tc` (yaw rate). Default 0 so the shaper's own
+    // `dt * 10` fallback applies unless a caller sets it.
+    float rate_rp_tc = 0.0f;
     float ang_vel_roll_max_degs = 0.0f;
     float ang_vel_pitch_max_degs = 0.0f;
     float ang_vel_yaw_max_degs = 0.0f;
@@ -2153,6 +2158,86 @@ inline void input_euler_angle_roll_pitch_yaw_cd(
                                           math::cd_to_rad(euler_yaw_angle_cd), slew_yaw, state, attitude_body,
                                           gyro_body_rads, gains, dt, thrust_angle_rad, thrust_error_angle_rad,
                                           feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+}
+
+// ---------------------------------------------------------------------
+// CCP-031 ADDENDUM: input_euler_rate_roll_pitch_yaw_rads (real lines
+// 543-589). Acro-style entry point: every axis is a RATE command.
+// Upstream has no `_cd` wrapper for this function.
+//
+// LOAD-BEARING DIFFERENCES FROM CCP-029:
+//   - All three attitude_command_model calls use error_angle=0 and the
+//     input rate as desired_ang_vel. Roll/pitch are NOT angle-error
+//     shaped here.
+//   - Roll and pitch use rate_rp_tc (upstream `_rate_rp_tc`); yaw uses
+//     rate_y_tc. Neither is input_tc (that shapes commanded ANGLES).
+//   - The shaper's max_ang_vel argument is the literal 0.0 (unlimited).
+//     The command already is a rate; limiting it here would apply the
+//     constraint twice. attitude_controller_run_quat still bounds the
+//     result. There is no body_to_euler_limit of ang_vel_*_max.
+//
+// Unshaped branch (rate_bf_ff_enabled false) treats each axis
+// differently, and each is correct for that axis:
+//   - roll: wrap_PI (signed lean)
+//   - pitch: constrain to ±radians(85) — clamp, not wrap, to avoid
+//     jumping through the Euler singularity past 90 deg
+//   - yaw: wrap_2PI (compass heading), NOT wrap_PI
+// Then zero euler_rate / ang_vel / ang_accel targets and from_euler.
+//
+// Always ends with attitude_controller_run_quat (real line 588).
+// ---------------------------------------------------------------------
+
+inline void input_euler_rate_roll_pitch_yaw_rads(
+    float euler_roll_rate_rads, float euler_pitch_rate_rads, float euler_yaw_rate_rads, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    update_attitude_target(state.attitude_target, state.ang_vel_target_rads, dt);
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+
+    if (gains.rate_bf_ff_enabled) {
+        const math::Vector3f euler_accel_radss = body_to_euler_limit(
+            state.attitude_target,
+            math::Vector3f{gains.accel_roll_max_radss, gains.accel_pitch_max_radss, gains.accel_yaw_max_radss});
+
+        math::Vector3f euler_accel_target_rads;
+        (void)body_to_euler_derivative(state.attitude_target, state.ang_accel_target_rads, euler_accel_target_rads);
+
+        // All three axes are rate commands (error_angle=0). Roll/pitch
+        // use rate_rp_tc; yaw uses rate_y_tc. max_ang_vel is 0.0
+        // (unlimited) — real lines 562-564.
+        attitude_command_model(0.0f, euler_roll_rate_rads, state.euler_rate_target_rads.x, euler_accel_target_rads.x,
+                                0.0f, euler_accel_radss.x, gains.rate_rp_tc, dt);
+        attitude_command_model(0.0f, euler_pitch_rate_rads, state.euler_rate_target_rads.y, euler_accel_target_rads.y,
+                                0.0f, euler_accel_radss.y, gains.rate_rp_tc, dt);
+        attitude_command_model(0.0f, euler_yaw_rate_rads, state.euler_rate_target_rads.z, euler_accel_target_rads.z,
+                                0.0f, euler_accel_radss.z, gains.rate_y_tc, dt);
+
+        state.ang_vel_target_rads = euler_derivative_to_body(state.attitude_target, state.euler_rate_target_rads);
+        state.ang_accel_target_rads = euler_derivative_to_body(state.attitude_target, euler_accel_target_rads);
+    } else {
+        state.euler_angle_target_rad.x =
+            math::wrap_PI(state.euler_angle_target_rad.x + euler_roll_rate_rads * dt);
+        state.euler_angle_target_rad.y =
+            math::constrain_value(state.euler_angle_target_rad.y + euler_pitch_rate_rads * dt,
+                                  math::radians(-85.0f), math::radians(85.0f));
+        state.euler_angle_target_rad.z =
+            math::wrap_2PI(state.euler_angle_target_rad.z + euler_yaw_rate_rads * dt);
+
+        state.euler_rate_target_rads.zero();
+        state.ang_vel_target_rads.zero();
+        state.ang_accel_target_rads.zero();
+
+        state.attitude_target.from_euler(state.euler_angle_target_rad);
+    }
+
+    attitude_controller_run_quat(state.attitude_target, attitude_body, state.ang_vel_target_rads, gyro_body_rads,
+                                  gains.rate_yaw_kp, gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                  gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                  gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+                                  gains.ang_vel_roll_max_degs, gains.ang_vel_pitch_max_degs,
+                                  gains.ang_vel_yaw_max_degs, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                  feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
 }
 
 } // namespace fwcpp::control
