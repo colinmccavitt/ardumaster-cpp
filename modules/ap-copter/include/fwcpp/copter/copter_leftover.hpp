@@ -1,8 +1,8 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 5 lands
-// check_ekf_reset as a leftover tick. remaining_count() > 0 is
+// (Copter.cpp / Copter.h / system.cpp). Slice 6 lands
+// update_flight_mode as a leftover tick. remaining_count() > 0 is
 // expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
@@ -45,9 +45,10 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
      "run_rate_controller.hpp; set_dt_s + rate_controller_run iff !rate thread"},
     {"Copter::read_inertia", PortStatus::kOnMain,
      "read_inertia.hpp; pos_control estimates, lat/lng, alt-above-home"},
-    {"Copter::check_ekf_reset", PortStatus::kThisSlice,
+    {"Copter::check_ekf_reset", PortStatus::kOnMain,
      "check_ekf_reset.hpp; yaw-reset + primary-core leftover flags"},
-    {"Copter::update_flight_mode", PortStatus::kRemaining, "FAST_TASK body"},
+    {"Copter::update_flight_mode", PortStatus::kThisSlice,
+     "update_flight_mode.hpp; surface-tracking + landed-gain + EKF method + run"},
     {"Copter::update_home_from_EKF", PortStatus::kRemaining, "FAST_TASK body"},
     {"Copter::update_land_and_crash_detectors", PortStatus::kRemaining, "FAST_TASK body"},
     {"Copter::update_rangefinder_terrain_offset", PortStatus::kRemaining, "FAST_TASK body"},

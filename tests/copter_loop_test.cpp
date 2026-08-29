@@ -8,6 +8,10 @@
 using fwcpp::AltitudeContext;
 using fwcpp::Location;
 using fwcpp::copter::CheckEkfResetInputs;
+using fwcpp::copter::EKFResetMethod;
+using fwcpp::copter::Mode;
+using fwcpp::copter::ModeAltHold;
+using fwcpp::copter::ModeStabilize;
 using fwcpp::copter::ModeSwitchReadInputs;
 using fwcpp::copter::ModeSwitchReadLeftover;
 using fwcpp::copter::MotorsOutputInputs;
@@ -16,6 +20,7 @@ using fwcpp::copter::PortStatus;
 using fwcpp::copter::RateControllerMainInputs;
 using fwcpp::copter::ReadInertiaInputs;
 using fwcpp::copter::TaskKind;
+using fwcpp::copter::UpdateFlightModeInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -42,11 +47,26 @@ using fwcpp::copter::run_rate_controller_main;
 using fwcpp::copter::scheduler_task_count;
 using fwcpp::copter::this_slice_count;
 using fwcpp::copter::throttle_loop;
+using fwcpp::copter::update_flight_mode;
 
-TEST_CASE("catalog remaining_count stays open after slice 5", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 26);
+namespace {
+
+class TestRunMode : public Mode {
+public:
+    int run_count{0};
+
+    [[nodiscard]] Number mode_number() const override { return Number::STABILIZE; }
+    void run() override { ++run_count; }
+    [[nodiscard]] bool requires_position() const override { return false; }
+    [[nodiscard]] bool has_manual_throttle() const override { return true; }
+};
+
+}  // namespace
+
+TEST_CASE("catalog remaining_count stays open after slice 6", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 25);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 9);
+    REQUIRE(on_main_count() == 10);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -58,11 +78,11 @@ TEST_CASE("catalog remaining_count stays open after slice 5", "[copter][leftover
     REQUIRE(completeness_has("Copter::throttle_loop", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::run_rate_controller_main", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::read_inertia", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::check_ekf_reset", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::check_ekf_reset", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::update_flight_mode", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
-    REQUIRE(completeness_has("Copter::update_flight_mode", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
 }
 
@@ -497,4 +517,62 @@ TEST_CASE("check_ekf_reset primary change logs EKF_PRIMARY and gcs_text",
     REQUIRE(fx.primary_core_index == 1);
     REQUIRE(fx.log_ekf_primary_error);
     REQUIRE(fx.gcs_text);
+}
+
+TEST_CASE("update_flight_mode land_complete drives landed_gain_reduction",
+          "[copter][update_flight_mode]") {
+    TestRunMode mode;
+    UpdateFlightModeInputs in{};
+    in.current = &mode;
+    in.land_complete = true;
+
+    const auto landed = update_flight_mode(in);
+    REQUIRE(landed.invalidate_surface_tracking);
+    REQUIRE(landed.landed_gain_reduction);
+    REQUIRE(landed.ekf_reset_method == EKFResetMethod::MoveTarget);
+
+    in.land_complete = false;
+    const auto airborne = update_flight_mode(in);
+    REQUIRE(airborne.invalidate_surface_tracking);
+    REQUIRE_FALSE(airborne.landed_gain_reduction);
+
+    const auto* row = find_scheduler_task("update_flight_mode");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kFast);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("update_flight_mode ekf reset method MoveVehicle vs MoveTarget",
+          "[copter][update_flight_mode]") {
+    TestRunMode mode;
+    UpdateFlightModeInputs in{};
+    in.current = &mode;
+    in.move_vehicle_on_ekf_reset = true;
+
+    const auto move_vehicle = update_flight_mode(in);
+    REQUIRE(move_vehicle.ekf_reset_method == EKFResetMethod::MoveVehicle);
+
+    in.move_vehicle_on_ekf_reset = false;
+    const auto move_target = update_flight_mode(in);
+    REQUIRE(move_target.ekf_reset_method == EKFResetMethod::MoveTarget);
+}
+
+TEST_CASE("update_flight_mode invokes current run including Stabilize AltHold no-ops",
+          "[copter][update_flight_mode]") {
+    TestRunMode mode;
+    UpdateFlightModeInputs in{};
+    in.current = &mode;
+
+    const auto counted = update_flight_mode(in);
+    REQUIRE(counted.run_called);
+    REQUIRE(mode.run_count == 1);
+    (void)update_flight_mode(in);
+    REQUIRE(mode.run_count == 2);
+
+    ModeStabilize stabilize;
+    ModeAltHold althold;
+    in.current = &stabilize;
+    REQUIRE(update_flight_mode(in).run_called);
+    in.current = &althold;
+    REQUIRE(update_flight_mode(in).run_called);
 }

@@ -11,3 +11,4 @@
 #include <fwcpp/copter/run_rate_controller.hpp>
 #include <fwcpp/copter/scheduler_tasks.hpp>
 #include <fwcpp/copter/throttle_loop.hpp>
+#include <fwcpp/copter/update_flight_mode.hpp>
