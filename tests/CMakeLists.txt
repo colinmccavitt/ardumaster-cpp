@@ -909,3 +909,12 @@ catch_discover_tests(tiltrotor_setup_flags_test)
 add_executable(tiltrotor_output_test tiltrotor_output_test.cpp)
 target_link_libraries(tiltrotor_output_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
 catch_discover_tests(tiltrotor_output_test)
+
+# CPP-090 slice 1: AP_Logger memory backend WriteBlock.
+add_executable(logger_backend_test logger_backend_test.cpp)
+target_link_libraries(logger_backend_test PRIVATE ap-logger Catch2::Catch2WithMain)
+catch_discover_tests(logger_backend_test)
+
+add_executable(logger_completeness_test logger_completeness_test.cpp)
+target_link_libraries(logger_completeness_test PRIVATE ap-logger Catch2::Catch2WithMain)
+catch_discover_tests(logger_completeness_test)
