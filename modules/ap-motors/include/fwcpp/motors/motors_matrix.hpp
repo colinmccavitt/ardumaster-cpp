@@ -2828,25 +2828,24 @@ public:
         return math::constrain_value(spin_up_ratio, 0.0f, 1.0f) * spin_min;
     }
 
-    // output_logic (PART 1 ONLY) - CCP-013 port of upstream
-    // AP_MotorsMulticopter::output_logic, real function body lines
-    // 591-768 of the real 591-884 span (re-verified directly against the
-    // pinned worktree). Covers the safety preamble (597-622),
+    // output_logic (PARTS 1 AND 2, COMPLETE) - CCP-013 ported upstream
+    // AP_MotorsMulticopter::output_logic's real function body lines
+    // 591-768 of the real 591-884 span (the safety preamble (597-622),
     // SpoolState::SHUT_DOWN (633-663), and SpoolState::GROUND_IDLE
-    // (665-768, including its own nested switch on DesiredSpoolState).
-    // The remaining three SpoolState cases (SPOOLING_UP/
-    // THROTTLE_UNLIMITED/SPOOLING_DOWN, real lines 769-884) are
-    // explicitly OUT OF SCOPE - a separate, deliberately deferred future
-    // ticket (CCP-014 or similar), since they depend on real,
-    // not-yet-built current-limiting (get_current_limit_max_throttle)
-    // and filtered-throttle (get_throttle) infrastructure this ticket's
-    // own scope does not need. See file banner's "CCP-013 ADDITION" for
-    // the full structure, the corrected spool_state_/spool_desired_
-    // investigation (suspected uninitialized-read bug, found NOT to be
-    // one - see the private member declarations below), the SIX-member
-    // uninitialized-read bug that WAS confirmed and fixed instead, the
-    // real same-call spoolup_block read-after-write finding, and the
-    // parameter-shape rationale.
+    // (665-768, including its own nested switch on DesiredSpoolState)).
+    // CCP-014 completes the same method with the remaining three real
+    // cases, re-verified directly against the pinned worktree:
+    // SpoolState::SPOOLING_UP (769-804), SpoolState::THROTTLE_UNLIMITED
+    // (805-839), SpoolState::SPOOLING_DOWN (840-883) - replacing CCP-013's
+    // own explicit `default:` no-op placeholder (see that ticket's own
+    // comment, now removed) with the three real case bodies below. See
+    // file banner's "CCP-013 ADDITION" for the full Part 1 structure, the
+    // corrected spool_state_/spool_desired_ investigation (suspected
+    // uninitialized-read bug, found NOT to be one - see the private
+    // member declarations below), the SIX-member uninitialized-read bug
+    // that WAS confirmed and fixed instead, the real same-call
+    // spoolup_block read-after-write finding, and the parameter-shape
+    // rationale.
     //
     // Every real external dependency (armed/interlock/spoolup_block/
     // limit flags/etc.) is an explicit parameter or explicit output, per
@@ -2858,12 +2857,39 @@ public:
     // explicit `bool&` outputs (this port has no `limit` flags struct
     // and no vehicle-level spoolup-block gate to call a setter on - see
     // file banner's "OUTPUT SHAPE" section): both are set to `false` at
-    // the top of every call and only ever raised to `true` within the
-    // branches that would have called `limit.set_all(true)` /
-    // `set_spoolup_block(true)` in real upstream.
+    // the top of every call and only ever raised to `true`/kept `false`
+    // within the branches that would have called `limit.set_all(true)`/
+    // `limit.set_all(false)` / `set_spoolup_block(true)` in real
+    // upstream - Part 1's own SHUT_DOWN/GROUND_IDLE cases only ever call
+    // `set_all(true)`, and Part 2's own three cases below only ever call
+    // `set_all(false)`, so this single bool still captures every real
+    // behavior the complete function exercises.
+    //
+    // CCP-014 ADDITION (Part 2, two new explicit parameters) - real
+    // upstream's own `get_throttle()` (SPOOLING_UP/THROTTLE_UNLIMITED,
+    // real lines 791/831) and `get_current_limit_max_throttle()`
+    // (SPOOLING_UP/THROTTLE_UNLIMITED/SPOOLING_DOWN, real lines
+    // 791-792/831-832/875-877) are neither built in this port -
+    // `get_throttle()` needs a real `update_throttle_filter()` this port
+    // has not built (returns the FILTERED throttle command, NOT the raw
+    // value most recently set - copter-rust's own COP-004 flagged this
+    // exact trap), and `get_current_limit_max_throttle()` needs a real
+    // `AP_BattMonitor` this port has no `ap-battery` module for at all
+    // (COP-004 again: "a battery-less harness can only run with
+    // MOT_BAT_CURR_MAX at 0 and the ceiling pinned to 1.0"). Per
+    // ADR-0012, both become explicit `float` parameters -
+    // `filtered_throttle` (the caller supplies an already-filtered value;
+    // a future ticket building `update_throttle_filter` is responsible
+    // for feeding a real one) and `current_limit_max_throttle` (tests
+    // exercise both the real no-limiting default of `1.0f` COP-004
+    // identified and a range of lower ceilings) - added to the existing
+    // parameter list rather than as a new method, per this ticket's own
+    // explicit instruction that this is an EDIT to CCP-013's real
+    // single-switch method, not a second one.
     void output_logic(bool armed, bool interlock, bool disarm_disable_pwm, float safe_time, float& spool_up_time,
                        float spool_down_time, float spin_arm, float idle_time_delay_s, float spin_min, bool spoolup_block,
-                       float dt_s, bool& limits_all_engaged, bool& should_set_spoolup_block) {
+                       float filtered_throttle, float current_limit_max_throttle, float dt_s, bool& limits_all_engaged,
+                       bool& should_set_spoolup_block) {
         limits_all_engaged = false;
         should_set_spoolup_block = false;
 
@@ -3029,14 +3055,141 @@ public:
             break;
         }
 
-        default:
-            // SpoolState::SpoolingUp/ThrottleUnlimited/SpoolingDown -
-            // explicitly OUT OF SCOPE for this ticket (real lines
-            // 769-884) - see this method's own banner comment above. A
-            // machine that reaches SpoolingUp via the GroundIdle ->
-            // SpoolingUp transition above simply does not advance
-            // further until a future ticket implements these cases.
+        case SpoolState::SpoolingUp: {
+            // CCP-014, real lines 769-804. Spin is already at 1.0 by the
+            // time this state is reached; only the throttle ceiling ramps
+            // here.
+            const float spool_step = dt_s / spool_up_time;
+
+            // "All limits RELEASED" output - the SAME bool CCP-013 added
+            // for ShutDown/GroundIdle's own "all limits engaged", set to
+            // the OPPOSITE value here (real upstream `limit.set_all
+            // (false)`, re-verified: normal attitude/throttle authority
+            // during the ramp).
+            limits_all_engaged = false;
+
+            // Direction-correction (real lines 777-780) - a genuine EARLY
+            // BREAK, re-verified directly: if desired has dropped below
+            // ThrottleUnlimited, reverse immediately and skip the rest of
+            // this case for this call.
+            if (spool_desired_ != DesiredSpoolState::ThrottleUnlimited) {
+                spool_state_ = SpoolState::SpoolingDown;
+                break;
+            }
+
+            spin_up_ratio_ = 1.0f;
+            throttle_thrust_max_ += spool_step;
+
+            // Transition once the moving ceiling no longer limits the
+            // commanded (filtered) throttle, snapping the ceiling EXACTLY
+            // to current_limit_max_throttle at that moment (real lines
+            // 791-794, re-verified: the snap target is
+            // current_limit_max_throttle itself, not the min() used only
+            // for the comparison). The else-if lower-bound guard below is
+            // re-verified to apply ONLY when this transition did NOT
+            // fire, never in addition to it.
+            if (throttle_thrust_max_ >= std::min(filtered_throttle, current_limit_max_throttle)) {
+                throttle_thrust_max_ = current_limit_max_throttle;
+                spool_state_ = SpoolState::ThrottleUnlimited;
+            } else if (throttle_thrust_max_ < 0.0f) {
+                throttle_thrust_max_ = 0.0f;
+            }
+
+            // Fade any thrust boost during spool-up (real lines 802-803).
+            thrust_boost_ = false;
+            thrust_boost_ratio_ = std::max(0.0f, thrust_boost_ratio_ - spool_step);
             break;
+        }
+
+        case SpoolState::ThrottleUnlimited: {
+            // CCP-014, real lines 805-839. `spool_step` here IS genuinely
+            // used, despite real upstream's own comment "not used for
+            // throttle in this state" - re-verified directly: it drives
+            // the thrust-boost-ratio ramp below, just not the throttle
+            // ceiling. A port that dropped this variable because of the
+            // comment alone would be wrong.
+            const float spool_step = dt_s / spool_up_time;
+
+            limits_all_engaged = false;
+
+            // Same direction-correction as SpoolingUp above - a SEPARATE,
+            // textually-duplicated check in real upstream, not shared
+            // code (re-verified directly).
+            if (spool_desired_ != DesiredSpoolState::ThrottleUnlimited) {
+                spool_state_ = SpoolState::SpoolingDown;
+                break;
+            }
+
+            spin_up_ratio_ = 1.0f;
+            // Plain assignment, NOT incremental (re-verified directly):
+            // the ceiling tracks the current limit instantaneously in
+            // this state, no ramping.
+            throttle_thrust_max_ = current_limit_max_throttle;
+
+            // Real if/else (re-verified directly - NOT two independent
+            // ifs, a genuinely different shape from check_for_failed_
+            // motor's own CCP-011 hysteresis): ramp UP toward 1.0 while
+            // boost is requested and not yet balanced, else ramp DOWN
+            // toward 0.
+            if (thrust_boost_ && !thrust_balanced_) {
+                thrust_boost_ratio_ = std::min(1.0f, thrust_boost_ratio_ + spool_step);
+            } else {
+                thrust_boost_ratio_ = std::max(0.0f, thrust_boost_ratio_ - spool_step);
+            }
+            break;
+        }
+
+        case SpoolState::SpoolingDown: {
+            // CCP-014, real lines 840-883.
+            limits_all_engaged = false;
+
+            // REVERSE direction-correction from SpoolingUp/
+            // ThrottleUnlimited above (re-verified directly): if desired
+            // has come BACK UP to ThrottleUnlimited, reverse immediately.
+            if (spool_desired_ == DesiredSpoolState::ThrottleUnlimited) {
+                spool_state_ = SpoolState::SpoolingUp;
+                break;
+            }
+
+            // Spin stays at 1.0 through the whole down-ramp; spin
+            // reduction happens only in GroundIdle, not here - real
+            // upstream's own comment, re-verified directly.
+            spin_up_ratio_ = 1.0f;
+
+            // SAME symmetry-fallback formula as GroundIdle's own
+            // ShutDown-desired case above, re-verified directly to be
+            // identical - reusing the SAME minimum_spool_time local
+            // constant already in scope at the top of this method, not
+            // redeclared.
+            const float spool_time = spool_down_time > minimum_spool_time ? spool_down_time : spool_up_time;
+            const float spool_step = dt_s / spool_time;
+            throttle_thrust_max_ -= spool_step;
+
+            if (throttle_thrust_max_ <= 0.0f) {
+                throttle_thrust_max_ = 0.0f;
+            }
+
+            // Real if/else-if (re-verified directly to be genuinely
+            // mutually exclusive, not two independent ifs - transcribed
+            // faithfully as the real structure rather than assumed
+            // equivalent): snap DOWN to current_limit_max_throttle if the
+            // ramp is still at/above it (can only matter if the limit
+            // itself dropped below the already-ramping-down ceiling
+            // mid-ramp); ELSE, transition to GroundIdle once the ceiling
+            // has reached exactly zero.
+            if (throttle_thrust_max_ >= current_limit_max_throttle) {
+                throttle_thrust_max_ = current_limit_max_throttle;
+            } else if (math::is_zero(throttle_thrust_max_)) {
+                spool_state_ = SpoolState::GroundIdle;
+            }
+
+            // Fades thrust_boost_ratio_ only (real line 882) - re-verified
+            // directly that thrust_boost_ itself (the bool) is NOT
+            // touched anywhere in this case, unlike SpoolingUp's own
+            // explicit `thrust_boost_ = false`.
+            thrust_boost_ratio_ = std::max(0.0f, thrust_boost_ratio_ - spool_step);
+            break;
+        }
         }
     }
 
