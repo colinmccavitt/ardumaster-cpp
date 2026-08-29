@@ -7,6 +7,7 @@
 #include <fwcpp/q_loiter/mode_qland_run.hpp>
 #include <fwcpp/q_loiter/mode_qloiter_enter.hpp>
 #include <fwcpp/q_loiter/mode_qloiter_meta.hpp>
+#include <fwcpp/q_loiter/mode_qloiter_precland_run.hpp>
 #include <fwcpp/q_loiter/mode_qloiter_run.hpp>
 #include <fwcpp/q_loiter/q_loiter_completeness.hpp>
 #include <fwcpp/q_loiter/q_loiter_defaults.hpp>

@@ -9,11 +9,18 @@ struct QLandRunResult {
     QLoiterRunResult qloiter{};
 };
 
-[[nodiscard]] inline QLandRunResult qland_run(QLoiterRunInputs in) {
+/// Port of ModeQLand::run — delegates to ModeQLoiter::run with QLAND vertical branch.
+[[nodiscard]] inline QLandRunResult qland_run(QLoiterRunInputs in, PosControlState& pc) {
     QLandRunResult out{};
     in.active_control_is_qland = true;
-    out.qloiter = qloiter_run(in);
+    out.qloiter = qloiter_run(in, pc);
     return out;
+}
+
+[[nodiscard]] inline QLandRunResult qland_run(QLoiterRunInputs in) {
+    PosControlState pc{};
+    pc.state = in.poscontrol_state;
+    return qland_run(in, pc);
 }
 
 }  // namespace fwcpp::q_loiter
