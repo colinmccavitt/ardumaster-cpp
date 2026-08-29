@@ -7,8 +7,8 @@ using namespace fwcpp::poscontrol;
 
 TEST_CASE("poscontrol catalog counts", "[poscontrol][leftover][catalog]") {
     REQUIRE(on_main_count() == 0);
-    REQUIRE(this_slice_count() >= 16);
-    REQUIRE(remaining_count() >= 3);
+    REQUIRE(this_slice_count() >= 18);
+    REQUIRE(remaining_count() >= 2);
     REQUIRE(out_of_scope_count() >= 2);
     REQUIRE(pos_control_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -21,4 +21,6 @@ TEST_CASE("poscontrol catalog counts", "[poscontrol][leftover][catalog]") {
     REQUIRE(completeness_has("yaw_from_ne_motion", PortStatus::kThisSlice));
     REQUIRE(completeness_has("get_thrust_vector", PortStatus::kThisSlice));
     REQUIRE(completeness_has("AP_SCRIPTING_ENABLED LUA offsets", PortStatus::kOutOfScope));
+    REQUIRE(completeness_has("update_estimates", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Offsets / terrain / stopping point accessors", PortStatus::kThisSlice));
 }
