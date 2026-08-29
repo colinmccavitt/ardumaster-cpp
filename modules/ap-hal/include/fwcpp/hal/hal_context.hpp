@@ -35,8 +35,10 @@
 #include <cstdint>
 
 #include <fwcpp/hal/analog_in.hpp>
+#include <fwcpp/hal/gpio.hpp>
 #include <fwcpp/hal/rc_input.hpp>
 #include <fwcpp/hal/rc_output.hpp>
+#include <fwcpp/hal/semaphore.hpp>
 #include <fwcpp/hal/uart_driver.hpp>
 #include <fwcpp/param/storage.hpp>
 #include <fwcpp/scheduler/scheduler.hpp>
@@ -52,6 +54,11 @@ public:
     AnalogIn analog_in;
     UartDriver<> console;
     storage::RawStorage storage;
+
+    // CPP-088 slice 1: SITL in-memory GPIO bank and recursive semaphore.
+    // Not used from Plane tick() — no invented locking on the flight path.
+    Gpio gpio;
+    Semaphore semaphore;
 
     // CPP-055: deliberately never called from Plane's production tick()
     // path (fwcpp::vehicle::tick(), mode.hpp) - investigated and judged

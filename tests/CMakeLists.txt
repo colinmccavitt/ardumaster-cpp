@@ -928,3 +928,16 @@ catch_discover_tests(copter_loop_test)
 add_executable(gcs_test gcs_test.cpp)
 target_link_libraries(gcs_test PRIVATE ap-gcs Catch2::Catch2WithMain)
 catch_discover_tests(gcs_test)
+
+# CPP-088 slice 1: SITL GPIO and Semaphore.
+add_executable(gpio_test gpio_test.cpp)
+target_link_libraries(gpio_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(gpio_test)
+
+add_executable(semaphore_test semaphore_test.cpp)
+target_link_libraries(semaphore_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(semaphore_test)
+
+add_executable(hal_leftover_test hal_leftover_test.cpp)
+target_link_libraries(hal_leftover_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(hal_leftover_test)

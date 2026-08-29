@@ -14,6 +14,9 @@ TEST_CASE("HalContext bundles independently-default-constructed peripherals", "[
     REQUIRE(hal.console.available() == 0);
     REQUIRE(hal.storage.size() == 16384);
     REQUIRE(hal.scheduler.loop_rate_hz() == 400);
+    REQUIRE(hal.gpio.valid_pin(0));
+    REQUIRE(hal.gpio.read(0) == 0);
+    REQUIRE(hal.semaphore.depth() == 0);
 }
 
 TEST_CASE("HalContext's members are independently usable through the bundle", "[hal_context]") {
@@ -34,6 +37,12 @@ TEST_CASE("HalContext's members are independently usable through the bundle", "[
     REQUIRE(hal.console.available() == 3);
 
     REQUIRE(hal.storage.write_block(0, injected, 3));
+
+    hal.gpio.set_pin_mode(1, PinMode::kOutput);
+    hal.gpio.write(1, 1);
+    REQUIRE(hal.gpio.read(1) == 1);
+    REQUIRE(hal.semaphore.take_nonblocking());
+    REQUIRE(hal.semaphore.give());
 
     hal.scheduler.tick();
     REQUIRE(hal.scheduler.ticks() == 1);
