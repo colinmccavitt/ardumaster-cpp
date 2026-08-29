@@ -10,3 +10,4 @@
 #include <fwcpp/tailsitter/tailsitter_transition_complete.hpp>
 #include <fwcpp/tailsitter/tailsitter_control.hpp>
 #include <fwcpp/tailsitter/tailsitter_output.hpp>
+#include <fwcpp/tailsitter/tailsitter_speed_scaling.hpp>
