@@ -5,3 +5,4 @@
 #include <fwcpp/copter/rc_loop.hpp>
 #include <fwcpp/copter/read_ahrs.hpp>
 #include <fwcpp/copter/scheduler_tasks.hpp>
+#include <fwcpp/copter/throttle_loop.hpp>

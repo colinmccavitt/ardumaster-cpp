@@ -32,19 +32,22 @@ using fwcpp::copter::read_mode_switch;
 using fwcpp::copter::remaining_count;
 using fwcpp::copter::scheduler_task_count;
 using fwcpp::copter::this_slice_count;
+using fwcpp::copter::throttle_loop;
 
-TEST_CASE("catalog remaining_count stays open after slice 2", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 30);
+TEST_CASE("catalog remaining_count stays open after slice 3", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 29);
     REQUIRE(this_slice_count() >= 1);
-    REQUIRE(on_main_count() == 0);
+    REQUIRE(on_main_count() == 6);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
-    REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("RC_Channels::read_mode_switch", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::scheduler_tasks[]", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::motors_output / motors_output_main", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::read_AHRS", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::throttle_loop", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
+    REQUIRE(completeness_has("RC_Channels::read_mode_switch", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::scheduler_tasks[]", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::get_scheduler_tasks", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::motors_output / motors_output_main", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::read_AHRS", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::throttle_loop", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
 }
@@ -229,4 +232,23 @@ TEST_CASE("motors_output arming delay timeout and THROW", "[copter][motors_outpu
 TEST_CASE("read_AHRS skip_ins_update is always true", "[copter][read_ahrs]") {
     const auto leftover = read_ahrs();
     REQUIRE(leftover.skip_ins_update);
+}
+
+TEST_CASE("throttle_loop leftover always-on mix auto_armed gnd-effect ekf-terrain",
+          "[copter][throttle_loop]") {
+    const auto leftover = throttle_loop();
+    REQUIRE(leftover.update_throttle_mix);
+    REQUIRE(leftover.update_auto_armed);
+    REQUIRE(leftover.update_ground_effect_detector);
+    REQUIRE(leftover.update_ekf_terrain_height_stable);
+    REQUIRE_FALSE(leftover.heli_update_rotor_speed_targets);
+    REQUIRE_FALSE(leftover.heli_update_landing_swash);
+
+    const auto* row = find_scheduler_task("throttle_loop");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 50.0f);
+    REQUIRE(row->max_time_micros == 75);
+    REQUIRE(row->priority == 6);
+    REQUIRE(row->gate == nullptr);
 }

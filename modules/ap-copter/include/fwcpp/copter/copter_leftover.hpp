@@ -1,9 +1,9 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 2 lands motors_output /
-// motors_output_main and read_AHRS. remaining_count() > 0 is expected
-// after this slice.
+// (Copter.cpp / Copter.h / system.cpp). Slice 3 lands throttle_loop
+// as a leftover dispatcher. remaining_count() > 0 is expected after
+// this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
 // Subsystem objects are injected as inputs on later leftover ticks.
@@ -28,17 +28,18 @@ struct CopterPortItem {
 
 inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"leftover catalog", PortStatus::kThisSlice, "this table"},
-    {"Copter::scheduler_tasks[]", PortStatus::kThisSlice,
+    {"Copter::scheduler_tasks[]", PortStatus::kOnMain,
      "scheduler_tasks.hpp; gated rows stay with gate string"},
-    {"Copter::get_scheduler_tasks", PortStatus::kThisSlice, "MASK_LOG_PM view"},
-    {"Copter::rc_loop", PortStatus::kThisSlice,
+    {"Copter::get_scheduler_tasks", PortStatus::kOnMain, "MASK_LOG_PM view"},
+    {"Copter::rc_loop", PortStatus::kOnMain,
      "rc_loop.hpp; always read_radio then read_mode_switch"},
-    {"RC_Channels::read_mode_switch", PortStatus::kThisSlice,
+    {"RC_Channels::read_mode_switch", PortStatus::kOnMain,
      "NoValidInput / NoChannel / Read; inject has_valid_input + channel"},
-    {"Copter::motors_output / motors_output_main", PortStatus::kThisSlice,
+    {"Copter::motors_output / motors_output_main", PortStatus::kOnMain,
      "motors_output.hpp; AFS skip, arming delay, interlock, drive, push"},
-    {"Copter::read_AHRS", PortStatus::kThisSlice, "read_ahrs.hpp; skip_ins_update"},
-    {"Copter::throttle_loop", PortStatus::kRemaining, "50 Hz leftover"},
+    {"Copter::read_AHRS", PortStatus::kOnMain, "read_ahrs.hpp; skip_ins_update"},
+    {"Copter::throttle_loop", PortStatus::kThisSlice,
+     "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
     {"Copter::init_ardupilot", PortStatus::kRemaining, "system.cpp init"},
     {"Copter::run_rate_controller_main", PortStatus::kRemaining, "FAST_TASK body"},
     {"Copter::read_inertia", PortStatus::kRemaining, "FAST_TASK body"},
