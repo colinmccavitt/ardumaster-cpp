@@ -2988,3 +2988,473 @@ TEST_CASE("input_euler_rate_roll_pitch_yaw_rads: all three axes are rate-shaped,
     REQUIRE(roll_state.euler_rate_target_rads.x > 0.0f);
 }
 
+
+// =======================================================================
+// CCP-032: input_rate_bf_roll_pitch_yaw family
+// Four distinct body-frame rate laws + each _cds wrapper.
+// =======================================================================
+
+void step_rate_bf(float roll_rate_bf_rads, float pitch_rate_bf_rads, float yaw_rate_bf_rads,
+                  AttitudeTargetState& state, const EulerAngleRateShapingGains& gains, float dt) {
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    float thrust_angle = 0.0f, thrust_error_angle = 0.0f, feedforward_scalar = 0.0f;
+    Quaternion attitude_ang_error;
+    Vector3f ang_vel_body_rads;
+    input_rate_bf_roll_pitch_yaw_rads(roll_rate_bf_rads, pitch_rate_bf_rads, yaw_rate_bf_rads, state, body, gyro, gains,
+                                      dt, thrust_angle, thrust_error_angle, feedforward_scalar, attitude_ang_error,
+                                      ang_vel_body_rads);
+}
+
+TEST_CASE("input_rate_bf_roll_pitch_yaw_rads: unshaped right-multiplies from_axis_angle(rates*dt) and zeros ff",
+          "[control][attitude_kinematics][input_rate_bf][CCP-032][v1-unshaped]") {
+    const Quaternion body = attitude(0.15f, -0.10f, 0.40f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    EntryPointGains eg;
+    EulerAngleRateShapingGains gains = eg.gains();
+    gains.rate_bf_ff_enabled = false;
+
+    const float dt = 0.01f;
+    const float roll_rate = 0.8f;
+    const float pitch_rate = -0.5f;
+    const float yaw_rate = 1.2f;
+
+    AttitudeTargetState state = fresh_state();
+    state.attitude_target = attitude(0.20f, 0.10f, 0.30f);
+    state.euler_rate_target_rads = Vector3f{1.0f, -1.0f, 1.0f};
+    state.ang_vel_target_rads = Vector3f{0.0f, 0.0f, 0.0f};
+    state.ang_accel_target_rads = Vector3f{3.0f, -3.0f, 3.0f};
+
+    Quaternion expected_multiply = state.attitude_target;
+    Quaternion update;
+    update.from_axis_angle(Vector3f{roll_rate, pitch_rate, yaw_rate} * dt);
+    expected_multiply = expected_multiply * update;
+    expected_multiply.normalize();
+
+    float thrust_angle = 0.0f, thrust_error_angle = 0.0f, feedforward_scalar = 0.0f;
+    Quaternion attitude_ang_error;
+    Vector3f ang_vel_body_rads;
+    input_rate_bf_roll_pitch_yaw_rads(roll_rate, pitch_rate, yaw_rate, state, body, gyro, gains, dt, thrust_angle,
+                                      thrust_error_angle, feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+
+    // run_quat may rewrite attitude_target; the multiply is the input to it.
+    Quaternion expected_target = expected_multiply;
+    float ref_t = 0.0f, ref_te = 0.0f, ref_ff = 0.0f;
+    Quaternion ref_err;
+    Vector3f ref_av;
+    attitude_controller_run_quat(expected_target, body, Vector3f{0.0f, 0.0f, 0.0f}, gyro, gains.rate_yaw_kp,
+                                  gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch, gains.angle_kp_yaw,
+                                  gains.angle_p_scale, gains.accel_roll_max_radss, gains.accel_pitch_max_radss,
+                                  gains.accel_yaw_max_radss, gains.use_sqrt_controller, gains.ang_vel_roll_max_degs,
+                                  gains.ang_vel_pitch_max_degs, gains.ang_vel_yaw_max_degs, dt, ref_t, ref_te, ref_ff,
+                                  ref_err, ref_av);
+    REQUIRE(state.attitude_target.q1 == Approx(expected_target.q1).margin(1e-6f));
+    REQUIRE(state.attitude_target.q2 == Approx(expected_target.q2).margin(1e-6f));
+    REQUIRE(state.attitude_target.q3 == Approx(expected_target.q3).margin(1e-6f));
+    REQUIRE(state.attitude_target.q4 == Approx(expected_target.q4).margin(1e-6f));
+
+    REQUIRE(state.euler_rate_target_rads.x == 0.0f);
+    REQUIRE(state.euler_rate_target_rads.y == 0.0f);
+    REQUIRE(state.euler_rate_target_rads.z == 0.0f);
+    REQUIRE(state.ang_vel_target_rads.x == 0.0f);
+    REQUIRE(state.ang_vel_target_rads.y == 0.0f);
+    REQUIRE(state.ang_vel_target_rads.z == 0.0f);
+    REQUIRE(state.ang_accel_target_rads.x == 0.0f);
+    REQUIRE(state.ang_accel_target_rads.y == 0.0f);
+    REQUIRE(state.ang_accel_target_rads.z == 0.0f);
+
+    // Body-frame axis-angle, not CCP-031's Euler wrap/clamp. Unshaped v1
+    // leaves euler_angle_target at the pre-multiply to_euler (here 0)
+    // rather than writing constrain(pitch, ±85deg). The multiply itself
+    // is identity * from_axis_angle((0,2,0)), which is not from_euler of
+    // the 85 deg clamp.
+    {
+        AttitudeTargetState pitch_state = fresh_state();
+        pitch_state.ang_vel_target_rads.zero();
+        float t = 0.0f, te = 0.0f, ff = 0.0f;
+        Quaternion err;
+        Vector3f av;
+        input_rate_bf_roll_pitch_yaw_rads(0.0f, 2.0f, 0.0f, pitch_state, body, gyro, gains, 1.0f, t, te, ff, err, av);
+        REQUIRE(std::fabs(pitch_state.euler_angle_target_rad.y) < 0.01f);
+
+        Quaternion axis;
+        axis.from_axis_angle(Vector3f{0.0f, 2.0f, 0.0f});
+        Quaternion clamped;
+        clamped.from_euler(0.0f, fwcpp::math::radians(85.0f), 0.0f);
+        REQUIRE(std::fabs(axis.q1 - clamped.q1) + std::fabs(axis.q2 - clamped.q2) + std::fabs(axis.q3 - clamped.q3) +
+                    std::fabs(axis.q4 - clamped.q4) >
+                0.05f);
+
+        Quaternion after_run = axis;
+        float rt = 0.0f, rte = 0.0f, rff = 0.0f;
+        Quaternion rerr;
+        Vector3f rav;
+        attitude_controller_run_quat(after_run, body, Vector3f{0.0f, 0.0f, 0.0f}, gyro, gains.rate_yaw_kp,
+                                      gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                      gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                      gains.accel_pitch_max_radss, gains.accel_yaw_max_radss,
+                                      gains.use_sqrt_controller, gains.ang_vel_roll_max_degs,
+                                      gains.ang_vel_pitch_max_degs, gains.ang_vel_yaw_max_degs, 1.0f, rt, rte, rff,
+                                      rerr, rav);
+        REQUIRE(pitch_state.attitude_target.q1 == Approx(after_run.q1).margin(1e-5f));
+        REQUIRE(pitch_state.attitude_target.q2 == Approx(after_run.q2).margin(1e-5f));
+        REQUIRE(pitch_state.attitude_target.q3 == Approx(after_run.q3).margin(1e-5f));
+        REQUIRE(pitch_state.attitude_target.q4 == Approx(after_run.q4).margin(1e-5f));
+    }
+
+    // run_quat still runs on the post-multiply target with zeroed ff.
+    Quaternion reference_target = state.attitude_target;
+    float ref_thrust_angle = 0.0f, ref_thrust_error_angle = 0.0f, ref_feedforward_scalar = 0.0f;
+    Quaternion ref_attitude_ang_error;
+    Vector3f ref_ang_vel_body_rads;
+    attitude_controller_run_quat(reference_target, body, state.ang_vel_target_rads, gyro, gains.rate_yaw_kp,
+                                  gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch, gains.angle_kp_yaw,
+                                  gains.angle_p_scale, gains.accel_roll_max_radss, gains.accel_pitch_max_radss,
+                                  gains.accel_yaw_max_radss, gains.use_sqrt_controller, gains.ang_vel_roll_max_degs,
+                                  gains.ang_vel_pitch_max_degs, gains.ang_vel_yaw_max_degs, dt, ref_thrust_angle,
+                                  ref_thrust_error_angle, ref_feedforward_scalar, ref_attitude_ang_error,
+                                  ref_ang_vel_body_rads);
+    REQUIRE(ang_vel_body_rads.x == Approx(ref_ang_vel_body_rads.x).margin(1e-6f));
+    REQUIRE(ang_vel_body_rads.y == Approx(ref_ang_vel_body_rads.y).margin(1e-6f));
+    REQUIRE(ang_vel_body_rads.z == Approx(ref_ang_vel_body_rads.z).margin(1e-6f));
+}
+
+TEST_CASE("input_rate_bf_roll_pitch_yaw_rads: shaped path is body-frame command_model, then body_to_euler_derivative",
+          "[control][attitude_kinematics][input_rate_bf][CCP-032][v1-shaped]") {
+    EntryPointGains eg;
+    eg.rate_rp_tc = 0.15f;
+    eg.rate_y_tc = 0.25f;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.0025f;
+    const float cmd = 0.8f;
+    const int kSteps = 40;
+
+    AttitudeTargetState state = fresh_state();
+    for (int i = 0; i < kSteps; ++i) {
+        step_rate_bf(cmd, 0.0f, cmd, state, gains, dt);
+    }
+
+    float body_roll = 0.0f, body_roll_accel = 0.0f;
+    float body_yaw = 0.0f, body_yaw_accel = 0.0f;
+    for (int i = 0; i < kSteps; ++i) {
+        attitude_command_model(0.0f, cmd, body_roll, body_roll_accel, 0.0f, gains.accel_roll_max_radss,
+                                gains.rate_rp_tc, dt);
+        attitude_command_model(0.0f, cmd, body_yaw, body_yaw_accel, 0.0f, gains.accel_yaw_max_radss, gains.rate_y_tc,
+                                dt);
+    }
+
+    REQUIRE(state.ang_vel_target_rads.x == Approx(body_roll).margin(1e-5f));
+    REQUIRE(state.ang_vel_target_rads.z == Approx(body_yaw).margin(1e-5f));
+    REQUIRE(state.ang_vel_target_rads.x > state.ang_vel_target_rads.z + 0.02f);
+
+    Vector3f expected_euler;
+    REQUIRE(body_to_euler_derivative(state.attitude_target, state.ang_vel_target_rads, expected_euler));
+    REQUIRE(state.euler_rate_target_rads.x == Approx(expected_euler.x).margin(1e-5f));
+    REQUIRE(state.euler_rate_target_rads.y == Approx(expected_euler.y).margin(1e-5f));
+    REQUIRE(state.euler_rate_target_rads.z == Approx(expected_euler.z).margin(1e-5f));
+}
+
+TEST_CASE("input_rate_bf_roll_pitch_yaw_2_rads: always shapes, copies AHRS, no run_quat",
+          "[control][attitude_kinematics][input_rate_bf][CCP-032][v2]") {
+    EntryPointGains eg;
+    eg.rate_rp_tc = 0.15f;
+    eg.rate_y_tc = 0.25f;
+    EulerAngleRateShapingGains gains = eg.gains();
+    gains.rate_bf_ff_enabled = false;
+
+    const Quaternion ahrs = attitude(0.25f, -0.15f, 0.80f);
+    const float dt = 0.0025f;
+    const float cmd = 1.0f;
+
+    AttitudeTargetState state = fresh_state();
+    state.attitude_target = attitude(0.05f, 0.05f, 0.05f);
+    state.ang_vel_target_rads = Vector3f{0.1f, -0.1f, 0.2f};
+
+    Vector3f ang_vel_body;
+    input_rate_bf_roll_pitch_yaw_2_rads(cmd, 0.0f, 0.0f, state, ahrs, gains, dt, ang_vel_body);
+
+    // AHRS copy, not the previous target and not a run_quat rewrite.
+    REQUIRE(state.attitude_target.q1 == Approx(ahrs.q1).margin(1e-6f));
+    REQUIRE(state.attitude_target.q2 == Approx(ahrs.q2).margin(1e-6f));
+    REQUIRE(state.attitude_target.q3 == Approx(ahrs.q3).margin(1e-6f));
+    REQUIRE(state.attitude_target.q4 == Approx(ahrs.q4).margin(1e-6f));
+
+    Vector3f euler_from_ahrs;
+    ahrs.to_euler(euler_from_ahrs);
+    REQUIRE(state.euler_angle_target_rad.x == Approx(euler_from_ahrs.x).margin(1e-6f));
+    REQUIRE(state.euler_angle_target_rad.y == Approx(euler_from_ahrs.y).margin(1e-6f));
+    REQUIRE(state.euler_angle_target_rad.z == Approx(euler_from_ahrs.z).margin(1e-6f));
+
+    // Always shapes: first-step body rate is not the raw command, even
+    // with rate_bf_ff_enabled false.
+    REQUIRE(state.ang_vel_target_rads.x > 0.1f);
+    REQUIRE(state.ang_vel_target_rads.x < cmd * 0.5f);
+
+    float shaped = 0.1f, shaped_accel = 0.0f;
+    attitude_command_model(0.0f, cmd, shaped, shaped_accel, 0.0f, gains.accel_roll_max_radss, gains.rate_rp_tc, dt);
+    REQUIRE(state.ang_vel_target_rads.x == Approx(shaped).margin(1e-6f));
+
+    // No run_quat: body rate is the shaped target, not the error-based
+    // run_quat correction that a mismatched AHRS/target pair would produce.
+    REQUIRE(ang_vel_body.x == Approx(state.ang_vel_target_rads.x).margin(1e-6f));
+    REQUIRE(ang_vel_body.y == Approx(state.ang_vel_target_rads.y).margin(1e-6f));
+    REQUIRE(ang_vel_body.z == Approx(state.ang_vel_target_rads.z).margin(1e-6f));
+
+    AttitudeTargetState run_state = fresh_state();
+    run_state.attitude_target = attitude(0.05f, 0.05f, 0.05f);
+    float t = 0.0f, te = 0.0f, ff = 0.0f;
+    Quaternion err;
+    Vector3f run_quat_body;
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    attitude_controller_run_quat(run_state.attitude_target, ahrs, state.ang_vel_target_rads, gyro, gains.rate_yaw_kp,
+                                  gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch, gains.angle_kp_yaw,
+                                  gains.angle_p_scale, gains.accel_roll_max_radss, gains.accel_pitch_max_radss,
+                                  gains.accel_yaw_max_radss, gains.use_sqrt_controller, gains.ang_vel_roll_max_degs,
+                                  gains.ang_vel_pitch_max_degs, gains.ang_vel_yaw_max_degs, dt, t, te, ff, err,
+                                  run_quat_body);
+    REQUIRE(std::fabs(ang_vel_body.x - run_quat_body.x) + std::fabs(ang_vel_body.y - run_quat_body.y) +
+                std::fabs(ang_vel_body.z - run_quat_body.z) >
+            0.05f);
+
+    // rate_bf_ff_enabled true vs false is identical on this path.
+    EulerAngleRateShapingGains gains_ff = gains;
+    gains_ff.rate_bf_ff_enabled = true;
+    AttitudeTargetState state_ff = fresh_state();
+    state_ff.ang_vel_target_rads = Vector3f{0.1f, -0.1f, 0.2f};
+    Vector3f ang_vel_ff;
+    input_rate_bf_roll_pitch_yaw_2_rads(cmd, 0.0f, 0.0f, state_ff, ahrs, gains_ff, dt, ang_vel_ff);
+    REQUIRE(state_ff.ang_vel_target_rads.x == Approx(state.ang_vel_target_rads.x).margin(1e-6f));
+    REQUIRE(ang_vel_ff.x == Approx(ang_vel_body.x).margin(1e-6f));
+}
+
+TEST_CASE("input_rate_bf_roll_pitch_yaw_3_rads: integrator path differs from v1",
+          "[control][attitude_kinematics][input_rate_bf][CCP-032][v3]") {
+    EntryPointGains eg;
+    eg.rate_rp_tc = 0.15f;
+    eg.rate_y_tc = 0.25f;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    const Quaternion ahrs = attitude(0.20f, -0.10f, 0.50f);
+    const Vector3f gyro{0.3f, -0.2f, 0.1f};
+    const float dt = 0.01f;
+    const float cmd = 0.6f;
+
+    AttitudeTargetState v3_state = fresh_state();
+    v3_state.ang_vel_target_rads = Vector3f{0.4f, 0.0f, 0.0f};
+    Quaternion v3_error;
+    v3_error.from_axis_angle(Vector3f{0.12f, -0.08f, 0.05f});
+    Vector3f v3_body;
+    input_rate_bf_roll_pitch_yaw_3_rads(cmd, 0.0f, 0.0f, v3_state, ahrs, gyro, gains, dt, v3_error, v3_body);
+
+    AttitudeTargetState v1_state = fresh_state();
+    v1_state.ang_vel_target_rads = Vector3f{0.4f, 0.0f, 0.0f};
+    float t = 0.0f, te = 0.0f, ff = 0.0f;
+    Quaternion v1_error;
+    Vector3f v1_body;
+    input_rate_bf_roll_pitch_yaw_rads(cmd, 0.0f, 0.0f, v1_state, ahrs, gyro, gains, dt, t, te, ff, v1_error, v1_body);
+
+    REQUIRE(std::fabs(v3_state.attitude_target.q1 - v1_state.attitude_target.q1) +
+                std::fabs(v3_state.attitude_target.q2 - v1_state.attitude_target.q2) +
+                std::fabs(v3_state.attitude_target.q3 - v1_state.attitude_target.q3) +
+                std::fabs(v3_state.attitude_target.q4 - v1_state.attitude_target.q4) >
+            0.01f);
+    REQUIRE(std::fabs(v3_body.x - v1_body.x) + std::fabs(v3_body.y - v1_body.y) + std::fabs(v3_body.z - v1_body.z) >
+            0.05f);
+
+    // Reconstruct the integrator: clamp, then left-multiply
+    // from_axis_angle((pre_shape_target - gyro) * dt).
+    Quaternion expected_error;
+    expected_error.from_axis_angle(Vector3f{0.12f, -0.08f, 0.05f});
+    Vector3f err_vec;
+    expected_error.to_axis_angle(err_vec);
+    const float err_mag = err_vec.length();
+    if (err_mag > kAttitudeThrustErrorAngleRad) {
+        err_vec *= kAttitudeThrustErrorAngleRad / err_mag;
+        expected_error.from_axis_angle(err_vec);
+    }
+    Quaternion update;
+    update.from_axis_angle((Vector3f{0.4f, 0.0f, 0.0f} - gyro) * dt);
+    expected_error = update * expected_error;
+    expected_error.normalize();
+
+    REQUIRE(v3_error.q1 == Approx(expected_error.q1).margin(1e-6f));
+    REQUIRE(v3_error.q2 == Approx(expected_error.q2).margin(1e-6f));
+    REQUIRE(v3_error.q3 == Approx(expected_error.q3).margin(1e-6f));
+    REQUIRE(v3_error.q4 == Approx(expected_error.q4).margin(1e-6f));
+
+    Quaternion expected_target = ahrs * expected_error;
+    expected_target.normalize();
+    REQUIRE(v3_state.attitude_target.q1 == Approx(expected_target.q1).margin(1e-6f));
+    REQUIRE(v3_state.attitude_target.q2 == Approx(expected_target.q2).margin(1e-6f));
+    REQUIRE(v3_state.attitude_target.q3 == Approx(expected_target.q3).margin(1e-6f));
+    REQUIRE(v3_state.attitude_target.q4 == Approx(expected_target.q4).margin(1e-6f));
+
+    // Left multiply is load-bearing: right multiply does not commute.
+    Quaternion right = expected_error;
+    // Rebuild the pre-compose expected_error path's update against the
+    // original (post-clamp) error, then compose the other way.
+    Quaternion original;
+    original.from_axis_angle(Vector3f{0.12f, -0.08f, 0.05f});
+    Vector3f orig_vec;
+    original.to_axis_angle(orig_vec);
+    const float orig_mag = orig_vec.length();
+    if (orig_mag > kAttitudeThrustErrorAngleRad) {
+        orig_vec *= kAttitudeThrustErrorAngleRad / orig_mag;
+        original.from_axis_angle(orig_vec);
+    }
+    right = original * update;
+    right.normalize();
+    REQUIRE(std::fabs(v3_error.q2 - right.q2) + std::fabs(v3_error.q3 - right.q3) +
+                std::fabs(v3_error.q4 - right.q4) >
+            1e-5f);
+
+    // ang_vel_body = P(error) + shaped ang_vel_target, not run_quat.
+    Vector3f post_err;
+    expected_error.to_axis_angle(post_err);
+    const Vector3f p_term = update_ang_vel_target_from_att_error(
+        post_err, gains.angle_kp_roll, gains.angle_kp_pitch, gains.angle_kp_yaw, gains.angle_p_scale,
+        gains.accel_roll_max_radss, gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+        dt);
+    REQUIRE(v3_body.x == Approx(p_term.x + v3_state.ang_vel_target_rads.x).margin(1e-5f));
+    REQUIRE(v3_body.y == Approx(p_term.y + v3_state.ang_vel_target_rads.y).margin(1e-5f));
+    REQUIRE(v3_body.z == Approx(p_term.z + v3_state.ang_vel_target_rads.z).margin(1e-5f));
+
+    // Windup clamp: a 1.2 rad error is pulled back to 30 deg before integrate.
+    {
+        AttitudeTargetState clamp_state = fresh_state();
+        Quaternion huge;
+        huge.from_axis_angle(Vector3f{1.2f, 0.0f, 0.0f});
+        Vector3f body_out;
+        const Vector3f zero_gyro{0.0f, 0.0f, 0.0f};
+        input_rate_bf_roll_pitch_yaw_3_rads(0.0f, 0.0f, 0.0f, clamp_state, ahrs, zero_gyro, gains, dt, huge, body_out);
+        Vector3f clamped;
+        huge.to_axis_angle(clamped);
+        REQUIRE(clamped.length() == Approx(kAttitudeThrustErrorAngleRad).margin(1e-4f));
+        REQUIRE(clamped.length() < 1.0f);
+    }
+}
+
+TEST_CASE("input_rate_bf_roll_pitch_yaw_no_shaping_rads: writes rates directly, copies AHRS, no run_quat",
+          "[control][attitude_kinematics][input_rate_bf][CCP-032][no-shaping]") {
+    const Quaternion ahrs = attitude(-0.18f, 0.22f, 1.10f);
+    const float roll = 1.5f;
+    const float pitch = -0.7f;
+    const float yaw = 0.4f;
+
+    AttitudeTargetState state = fresh_state();
+    state.attitude_target = attitude(0.3f, -0.2f, 0.1f);
+    state.ang_vel_target_rads = Vector3f{9.0f, 9.0f, 9.0f};
+    state.ang_accel_target_rads = Vector3f{4.0f, 4.0f, 4.0f};
+
+    Vector3f ang_vel_body;
+    input_rate_bf_roll_pitch_yaw_no_shaping_rads(roll, pitch, yaw, state, ahrs, ang_vel_body);
+
+    REQUIRE(state.ang_vel_target_rads.x == roll);
+    REQUIRE(state.ang_vel_target_rads.y == pitch);
+    REQUIRE(state.ang_vel_target_rads.z == yaw);
+    REQUIRE(ang_vel_body.x == roll);
+    REQUIRE(ang_vel_body.y == pitch);
+    REQUIRE(ang_vel_body.z == yaw);
+
+    REQUIRE(state.attitude_target.q1 == Approx(ahrs.q1).margin(1e-6f));
+    REQUIRE(state.attitude_target.q2 == Approx(ahrs.q2).margin(1e-6f));
+    REQUIRE(state.attitude_target.q3 == Approx(ahrs.q3).margin(1e-6f));
+    REQUIRE(state.attitude_target.q4 == Approx(ahrs.q4).margin(1e-6f));
+
+    Vector3f expected_euler;
+    REQUIRE(body_to_euler_derivative(ahrs, Vector3f{roll, pitch, yaw}, expected_euler));
+    REQUIRE(state.euler_rate_target_rads.x == Approx(expected_euler.x).margin(1e-6f));
+    REQUIRE(state.euler_rate_target_rads.y == Approx(expected_euler.y).margin(1e-6f));
+    REQUIRE(state.euler_rate_target_rads.z == Approx(expected_euler.z).margin(1e-6f));
+
+    // Distinct from v2: first-step v2 would shape 1.5 rad/s down.
+    EntryPointGains eg;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    AttitudeTargetState v2_state = fresh_state();
+    Vector3f v2_body;
+    input_rate_bf_roll_pitch_yaw_2_rads(roll, pitch, yaw, v2_state, ahrs, gains, 0.0025f, v2_body);
+    REQUIRE(v2_state.ang_vel_target_rads.x < roll * 0.5f);
+    REQUIRE(state.ang_vel_target_rads.x == roll);
+
+    // ang_accel is not zeroed (v1 unshaped would zero it).
+    REQUIRE(state.ang_accel_target_rads.x == 4.0f);
+}
+
+TEST_CASE("input_rate_bf _cds wrappers convert via cd_to_rad and call the rads entry points",
+          "[control][attitude_kinematics][input_rate_bf][CCP-032][cds]") {
+    EntryPointGains eg;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.0025f;
+    const Quaternion body = attitude(0.10f, -0.05f, 0.20f);
+    const Vector3f gyro{0.05f, -0.02f, 0.01f};
+    const float roll_cds = 800.0f;
+    const float pitch_cds = -400.0f;
+    const float yaw_cds = 250.0f;
+
+    // Variant 1.
+    {
+        AttitudeTargetState cd_state = fresh_state();
+        AttitudeTargetState rad_state = fresh_state();
+        float t_cd = 0.0f, te_cd = 0.0f, ff_cd = 0.0f;
+        float t_rad = 0.0f, te_rad = 0.0f, ff_rad = 0.0f;
+        Quaternion err_cd, err_rad;
+        Vector3f av_cd, av_rad;
+        input_rate_bf_roll_pitch_yaw_cds(roll_cds, pitch_cds, yaw_cds, cd_state, body, gyro, gains, dt, t_cd, te_cd,
+                                          ff_cd, err_cd, av_cd);
+        input_rate_bf_roll_pitch_yaw_rads(fwcpp::math::cd_to_rad(roll_cds), fwcpp::math::cd_to_rad(pitch_cds),
+                                          fwcpp::math::cd_to_rad(yaw_cds), rad_state, body, gyro, gains, dt, t_rad,
+                                          te_rad, ff_rad, err_rad, av_rad);
+        REQUIRE(cd_state.ang_vel_target_rads.x == Approx(rad_state.ang_vel_target_rads.x).margin(1e-6f));
+        REQUIRE(cd_state.ang_vel_target_rads.y == Approx(rad_state.ang_vel_target_rads.y).margin(1e-6f));
+        REQUIRE(cd_state.ang_vel_target_rads.z == Approx(rad_state.ang_vel_target_rads.z).margin(1e-6f));
+        REQUIRE(av_cd.x == Approx(av_rad.x).margin(1e-6f));
+    }
+
+    // Variant 2.
+    {
+        AttitudeTargetState cd_state = fresh_state();
+        AttitudeTargetState rad_state = fresh_state();
+        Vector3f av_cd, av_rad;
+        input_rate_bf_roll_pitch_yaw_2_cds(roll_cds, pitch_cds, yaw_cds, cd_state, body, gains, dt, av_cd);
+        input_rate_bf_roll_pitch_yaw_2_rads(fwcpp::math::cd_to_rad(roll_cds), fwcpp::math::cd_to_rad(pitch_cds),
+                                            fwcpp::math::cd_to_rad(yaw_cds), rad_state, body, gains, dt, av_rad);
+        REQUIRE(cd_state.ang_vel_target_rads.x == Approx(rad_state.ang_vel_target_rads.x).margin(1e-6f));
+        REQUIRE(cd_state.attitude_target.q1 == Approx(rad_state.attitude_target.q1).margin(1e-6f));
+        REQUIRE(av_cd.x == Approx(av_rad.x).margin(1e-6f));
+    }
+
+    // Variant 3.
+    {
+        AttitudeTargetState cd_state = fresh_state();
+        AttitudeTargetState rad_state = fresh_state();
+        cd_state.ang_vel_target_rads = Vector3f{0.2f, 0.0f, 0.0f};
+        rad_state.ang_vel_target_rads = Vector3f{0.2f, 0.0f, 0.0f};
+        Quaternion err_cd, err_rad;
+        err_cd.from_axis_angle(Vector3f{0.05f, 0.0f, 0.0f});
+        err_rad.from_axis_angle(Vector3f{0.05f, 0.0f, 0.0f});
+        Vector3f av_cd, av_rad;
+        input_rate_bf_roll_pitch_yaw_3_cds(roll_cds, pitch_cds, yaw_cds, cd_state, body, gyro, gains, dt, err_cd,
+                                            av_cd);
+        input_rate_bf_roll_pitch_yaw_3_rads(fwcpp::math::cd_to_rad(roll_cds), fwcpp::math::cd_to_rad(pitch_cds),
+                                            fwcpp::math::cd_to_rad(yaw_cds), rad_state, body, gyro, gains, dt, err_rad,
+                                            av_rad);
+        REQUIRE(cd_state.ang_vel_target_rads.x == Approx(rad_state.ang_vel_target_rads.x).margin(1e-6f));
+        REQUIRE(err_cd.q1 == Approx(err_rad.q1).margin(1e-6f));
+        REQUIRE(av_cd.x == Approx(av_rad.x).margin(1e-6f));
+        REQUIRE(cd_state.attitude_target.q2 == Approx(rad_state.attitude_target.q2).margin(1e-6f));
+    }
+
+    // no_shaping.
+    {
+        AttitudeTargetState cd_state = fresh_state();
+        AttitudeTargetState rad_state = fresh_state();
+        Vector3f av_cd, av_rad;
+        input_rate_bf_roll_pitch_yaw_no_shaping_cds(roll_cds, pitch_cds, yaw_cds, cd_state, body, av_cd);
+        input_rate_bf_roll_pitch_yaw_no_shaping_rads(fwcpp::math::cd_to_rad(roll_cds), fwcpp::math::cd_to_rad(pitch_cds),
+                                                     fwcpp::math::cd_to_rad(yaw_cds), rad_state, body, av_rad);
+        REQUIRE(cd_state.ang_vel_target_rads.x == Approx(rad_state.ang_vel_target_rads.x).margin(1e-6f));
+        REQUIRE(cd_state.ang_vel_target_rads.y == Approx(rad_state.ang_vel_target_rads.y).margin(1e-6f));
+        REQUIRE(cd_state.ang_vel_target_rads.z == Approx(rad_state.ang_vel_target_rads.z).margin(1e-6f));
+        REQUIRE(av_cd.z == Approx(av_rad.z).margin(1e-6f));
+    }
+}
+

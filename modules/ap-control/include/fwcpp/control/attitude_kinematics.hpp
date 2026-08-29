@@ -2240,4 +2240,201 @@ inline void input_euler_rate_roll_pitch_yaw_rads(
                                   feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
 }
 
+// ---------------------------------------------------------------------
+// CCP-032 ADDENDUM: the body-frame rate family used by ACRO
+// (input_rate_bf_roll_pitch_yaw_rads / _2_rads / _3_rads /
+// no_shaping_rads and each one's trivial _cds wrapper). Upstream
+// AC_AttitudeControl.cpp real lines 594-782.
+//
+// Four real variants, not one function with a mode flag. Each is a
+// distinct control law:
+//
+//   1. Stabilized acro (input_rate_bf_roll_pitch_yaw_rads). Shapes
+//      BODY-FRAME ang_vel / ang_accel targets (rate_rp_tc on roll+pitch,
+//      rate_y_tc on yaw, max_ang_vel 0.0), then body_to_euler_derivative
+//      into euler_rate_target. Unshaped: right-multiply
+//      from_axis_angle(rates * dt) onto attitude_target and zero every
+//      feedforward vector. Always ends in attitude_controller_run_quat.
+//      Opposite of CCP-031, which shapes Euler rates then converts to
+//      body, and whose unshaped path is per-axis Euler wrap/clamp.
+//
+//   2. Rate-only acro (_2_rads). ALWAYS shapes (no rate_bf_ff_enabled
+//      branch). Copies the injected AHRS body-to-ned quat into
+//      attitude_target (ADR-0012: do not call AHRS). Sets
+//      ang_vel_body_rads = ang_vel_target. Does NOT call run_quat.
+//
+//   3. Plane acro with rate-error integration (_3_rads). Clamps the
+//      integrated attitude_ang_error to kAttitudeThrustErrorAngleRad,
+//      then left-multiplies from_axis_angle((ang_vel_target - gyro) * dt)
+//      using THIS frame's pre-shape ang_vel_target (last command). Then
+//      shapes, sets attitude_target = attitude_body * attitude_ang_error,
+//      and ang_vel_body = update_ang_vel_target_from_att_error(error)
+//      + shaped ang_vel_target. No run_quat. gyro_latest_rads stands in
+//      for get_latest_gyro(); attitude_body stands in for
+//      _ahrs.get_quat_body_to_ned.
+//
+//   4. no_shaping_rads. Writes the three rate inputs straight into
+//      ang_vel_target (no command_model). Copies AHRS into
+//      attitude_target. ang_vel_body = ang_vel_target. No run_quat.
+// ---------------------------------------------------------------------
+
+inline void input_rate_bf_roll_pitch_yaw_rads(
+    float roll_rate_bf_rads, float pitch_rate_bf_rads, float yaw_rate_bf_rads, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    update_attitude_target(state.attitude_target, state.ang_vel_target_rads, dt);
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+
+    if (gains.rate_bf_ff_enabled) {
+        // Body-frame rate commands into body-frame ang_vel / ang_accel
+        // targets. max_ang_vel is the literal 0.0 (unlimited) — real
+        // lines 620-622. Roll/pitch use rate_rp_tc; yaw uses rate_y_tc.
+        attitude_command_model(0.0f, roll_rate_bf_rads, state.ang_vel_target_rads.x, state.ang_accel_target_rads.x,
+                                0.0f, gains.accel_roll_max_radss, gains.rate_rp_tc, dt);
+        attitude_command_model(0.0f, pitch_rate_bf_rads, state.ang_vel_target_rads.y, state.ang_accel_target_rads.y,
+                                0.0f, gains.accel_pitch_max_radss, gains.rate_rp_tc, dt);
+        attitude_command_model(0.0f, yaw_rate_bf_rads, state.ang_vel_target_rads.z, state.ang_accel_target_rads.z,
+                                0.0f, gains.accel_yaw_max_radss, gains.rate_y_tc, dt);
+
+        (void)body_to_euler_derivative(state.attitude_target, state.ang_vel_target_rads, state.euler_rate_target_rads);
+    } else {
+        math::Quaternion attitude_target_update;
+        attitude_target_update.from_axis_angle(
+            math::Vector3f{roll_rate_bf_rads, pitch_rate_bf_rads, yaw_rate_bf_rads} * dt);
+        state.attitude_target = state.attitude_target * attitude_target_update;
+        state.attitude_target.normalize();
+
+        state.euler_rate_target_rads.zero();
+        state.ang_vel_target_rads.zero();
+        state.ang_accel_target_rads.zero();
+    }
+
+    attitude_controller_run_quat(state.attitude_target, attitude_body, state.ang_vel_target_rads, gyro_body_rads,
+                                  gains.rate_yaw_kp, gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                  gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                  gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+                                  gains.ang_vel_roll_max_degs, gains.ang_vel_pitch_max_degs,
+                                  gains.ang_vel_yaw_max_degs, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                  feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+}
+
+inline void input_rate_bf_roll_pitch_yaw_cds(
+    float roll_rate_bf_cds, float pitch_rate_bf_cds, float yaw_rate_bf_cds, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    input_rate_bf_roll_pitch_yaw_rads(math::cd_to_rad(roll_rate_bf_cds), math::cd_to_rad(pitch_rate_bf_cds),
+                                      math::cd_to_rad(yaw_rate_bf_cds), state, attitude_body, gyro_body_rads, gains,
+                                      dt, thrust_angle_rad, thrust_error_angle_rad, feedforward_scalar,
+                                      attitude_ang_error, ang_vel_body_rads);
+}
+
+inline void input_rate_bf_roll_pitch_yaw_2_rads(
+    float roll_rate_bf_rads, float pitch_rate_bf_rads, float yaw_rate_bf_rads, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const EulerAngleRateShapingGains& gains, float dt,
+    math::Vector3f& ang_vel_body_rads) {
+    // Always shapes — no rate_bf_ff_enabled branch. Real lines 664-666.
+    attitude_command_model(0.0f, roll_rate_bf_rads, state.ang_vel_target_rads.x, state.ang_accel_target_rads.x, 0.0f,
+                            gains.accel_roll_max_radss, gains.rate_rp_tc, dt);
+    attitude_command_model(0.0f, pitch_rate_bf_rads, state.ang_vel_target_rads.y, state.ang_accel_target_rads.y, 0.0f,
+                            gains.accel_pitch_max_radss, gains.rate_rp_tc, dt);
+    attitude_command_model(0.0f, yaw_rate_bf_rads, state.ang_vel_target_rads.z, state.ang_accel_target_rads.z, 0.0f,
+                            gains.accel_yaw_max_radss, gains.rate_y_tc, dt);
+
+    // Injected AHRS body-to-ned quat, not an AHRS call. Real lines 669-672.
+    state.attitude_target = attitude_body;
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+    (void)body_to_euler_derivative(state.attitude_target, state.ang_vel_target_rads, state.euler_rate_target_rads);
+
+    ang_vel_body_rads = state.ang_vel_target_rads;
+}
+
+inline void input_rate_bf_roll_pitch_yaw_2_cds(float roll_rate_bf_cds, float pitch_rate_bf_cds, float yaw_rate_bf_cds,
+                                               AttitudeTargetState& state, const math::Quaternion& attitude_body,
+                                               const EulerAngleRateShapingGains& gains, float dt,
+                                               math::Vector3f& ang_vel_body_rads) {
+    input_rate_bf_roll_pitch_yaw_2_rads(math::cd_to_rad(roll_rate_bf_cds), math::cd_to_rad(pitch_rate_bf_cds),
+                                        math::cd_to_rad(yaw_rate_bf_cds), state, attitude_body, gains, dt,
+                                        ang_vel_body_rads);
+}
+
+inline void input_rate_bf_roll_pitch_yaw_3_rads(
+    float roll_rate_bf_rads, float pitch_rate_bf_rads, float yaw_rate_bf_rads, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const math::Vector3f& gyro_latest_rads,
+    const EulerAngleRateShapingGains& gains, float dt, math::Quaternion& attitude_ang_error,
+    math::Vector3f& ang_vel_body_rads) {
+    math::Vector3f attitude_error;
+    attitude_ang_error.to_axis_angle(attitude_error);
+
+    const float err_mag = attitude_error.length();
+    if (err_mag > kAttitudeThrustErrorAngleRad) {
+        attitude_error *= kAttitudeThrustErrorAngleRad / err_mag;
+        attitude_ang_error.from_axis_angle(attitude_error);
+    }
+
+    // Rate-error integration uses the PRE-shape ang_vel_target (last
+    // frame's command) minus the injected latest gyro. Composition is
+    // update * error (left multiply). Real lines 710-713.
+    math::Quaternion attitude_ang_error_update_quat;
+    attitude_ang_error_update_quat.from_axis_angle((state.ang_vel_target_rads - gyro_latest_rads) * dt);
+    attitude_ang_error = attitude_ang_error_update_quat * attitude_ang_error;
+    attitude_ang_error.normalize();
+
+    attitude_command_model(0.0f, roll_rate_bf_rads, state.ang_vel_target_rads.x, state.ang_accel_target_rads.x, 0.0f,
+                            gains.accel_roll_max_radss, gains.rate_rp_tc, dt);
+    attitude_command_model(0.0f, pitch_rate_bf_rads, state.ang_vel_target_rads.y, state.ang_accel_target_rads.y, 0.0f,
+                            gains.accel_pitch_max_radss, gains.rate_rp_tc, dt);
+    attitude_command_model(0.0f, yaw_rate_bf_rads, state.ang_vel_target_rads.z, state.ang_accel_target_rads.z, 0.0f,
+                            gains.accel_yaw_max_radss, gains.rate_y_tc, dt);
+
+    state.attitude_target = attitude_body * attitude_ang_error;
+    state.attitude_target.normalize();
+
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+    (void)body_to_euler_derivative(state.attitude_target, state.ang_vel_target_rads, state.euler_rate_target_rads);
+
+    attitude_ang_error.to_axis_angle(attitude_error);
+    ang_vel_body_rads = update_ang_vel_target_from_att_error(
+        attitude_error, gains.angle_kp_roll, gains.angle_kp_pitch, gains.angle_kp_yaw, gains.angle_p_scale,
+        gains.accel_roll_max_radss, gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+        dt);
+    ang_vel_body_rads += state.ang_vel_target_rads;
+}
+
+inline void input_rate_bf_roll_pitch_yaw_3_cds(float roll_rate_bf_cds, float pitch_rate_bf_cds, float yaw_rate_bf_cds,
+                                               AttitudeTargetState& state, const math::Quaternion& attitude_body,
+                                               const math::Vector3f& gyro_latest_rads,
+                                               const EulerAngleRateShapingGains& gains, float dt,
+                                               math::Quaternion& attitude_ang_error,
+                                               math::Vector3f& ang_vel_body_rads) {
+    input_rate_bf_roll_pitch_yaw_3_rads(math::cd_to_rad(roll_rate_bf_cds), math::cd_to_rad(pitch_rate_bf_cds),
+                                        math::cd_to_rad(yaw_rate_bf_cds), state, attitude_body, gyro_latest_rads,
+                                        gains, dt, attitude_ang_error, ang_vel_body_rads);
+}
+
+inline void input_rate_bf_roll_pitch_yaw_no_shaping_rads(float roll_rate_bf_rads, float pitch_rate_bf_rads,
+                                                         float yaw_rate_bf_rads, AttitudeTargetState& state,
+                                                         const math::Quaternion& attitude_body,
+                                                         math::Vector3f& ang_vel_body_rads) {
+    state.ang_vel_target_rads.x = roll_rate_bf_rads;
+    state.ang_vel_target_rads.y = pitch_rate_bf_rads;
+    state.ang_vel_target_rads.z = yaw_rate_bf_rads;
+
+    state.attitude_target = attitude_body;
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+    (void)body_to_euler_derivative(state.attitude_target, state.ang_vel_target_rads, state.euler_rate_target_rads);
+
+    ang_vel_body_rads = state.ang_vel_target_rads;
+}
+
+inline void input_rate_bf_roll_pitch_yaw_no_shaping_cds(float roll_rate_bf_cds, float pitch_rate_bf_cds,
+                                                        float yaw_rate_bf_cds, AttitudeTargetState& state,
+                                                        const math::Quaternion& attitude_body,
+                                                        math::Vector3f& ang_vel_body_rads) {
+    input_rate_bf_roll_pitch_yaw_no_shaping_rads(math::cd_to_rad(roll_rate_bf_cds), math::cd_to_rad(pitch_rate_bf_cds),
+                                                 math::cd_to_rad(yaw_rate_bf_cds), state, attitude_body,
+                                                 ang_vel_body_rads);
+}
+
 } // namespace fwcpp::control
