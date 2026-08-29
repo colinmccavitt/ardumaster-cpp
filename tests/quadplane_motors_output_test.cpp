@@ -14,9 +14,11 @@ using fwcpp::quadplane::kAttControlRelaxMs;
 using fwcpp::quadplane::kMotorsActiveThrottle;
 using fwcpp::quadplane::kMotorsInactiveMs;
 using fwcpp::quadplane::motors_inactive;
+using fwcpp::quadplane::MotorsOutputState;
 using fwcpp::quadplane::motors_output_skip_tailsitter_transition;
 using fwcpp::quadplane::motors_were_active;
 using fwcpp::quadplane::option_is_set;
+using fwcpp::quadplane::run_motors_output;
 
 namespace {
 
@@ -90,4 +92,16 @@ TEST_CASE("motors_output gating", "[quadplane][motors_output]") {
     REQUIRE(motors_were_active(kMotorsActiveThrottle + 0.001f, false));
     REQUIRE(motors_were_active(0.f, true));
     REQUIRE_FALSE(motors_were_active(kMotorsActiveThrottle, false));
+}
+
+TEST_CASE("motors_output motor_test.running view gate", "[quadplane][motors_output]") {
+    MotorsOutputView view{};
+    view.armed_and_safety_off = true;
+    view.now_ms = 20;
+    view.motor_test_running = true;
+    fwcpp::quadplane::MotorsOutputState state{};
+    const auto tick = run_motors_output(view, 0, false, state);
+    REQUIRE(tick.action == MotorsOutputAction::kMotorTest);
+    REQUIRE(tick.desired_spool == DesiredSpoolState::kShutDown);
+    REQUIRE(tick.motors_output_ran);
 }

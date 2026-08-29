@@ -9,6 +9,7 @@
 #include <fwcpp/quadplane/quadplane_vtol_position_controller.hpp>
 #include <fwcpp/quadplane/quadplane_frame.hpp>
 #include <fwcpp/quadplane/quadplane_motors_init.hpp>
+#include <fwcpp/quadplane/quadplane_motor_test.hpp>
 #include <fwcpp/quadplane/quadplane_motors_output.hpp>
 #include <fwcpp/quadplane/quadplane_options.hpp>
 #include <fwcpp/quadplane/quadplane_poscontrol_approach.hpp>
@@ -18,7 +19,10 @@
 #include <fwcpp/quadplane/quadplane_setup_navigators.hpp>
 #include <fwcpp/quadplane/quadplane_auto_vtol_mission.hpp>
 #include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
+#include <fwcpp/quadplane/quadplane_vtol_subsystems.hpp>
+#include <fwcpp/quadplane/quadplane_subsystems.hpp>
 #include <fwcpp/quadplane/quadplane_update.hpp>
+#include <fwcpp/tiltrotor/tiltrotor_types.hpp>
 #include <fwcpp/quadplane_transition/transition_fsm.hpp>
 
 namespace fwcpp::quadplane {
@@ -28,6 +32,9 @@ struct QuadPlaneSetupInputs {
     std::uint32_t available_memory_bytes{kSetupMinMemoryBytes};
     AhrsViewCreateInputs ahrs_view{};
     SetupChannelsSink channels_sink{};
+    std::uint16_t motor_mask{0};
+    std::uint16_t tilt_mask{0};
+    fwcpp::tiltrotor::TiltType tilt_type{fwcpp::tiltrotor::TiltType::kContinuous};
     WpNavSetupInputs wp_nav{};
 };
 
@@ -88,6 +95,18 @@ public:
         if (inputs.soft_armed) return false;
         if (inputs.available_memory_bytes < kSetupMinMemoryBytes) return false;
         if (!enabled()) return false;
+        const VtolSubsystemWireInputs sub_in{
+            .tailsit_enable = tailsit_enable_,
+            .tilt_enable = tilt_enable_,
+            .frame_class = frame_class_,
+            .motor_mask = inputs.motor_mask,
+            .tilt_mask = inputs.tilt_mask,
+            .tilt_type = inputs.tilt_type,
+        };
+        const auto sub = wire_vtol_subsystems(sub_in);
+        if (!sub.ok) return false;
+        tailsit_enable_ = sub.resolved_tailsit_enable;
+        tilt_enable_ = sub.resolved_tilt_enable;
         const auto sel = classify_frame(frame_class_, tailsit_enable_, tilt_enable_);
         if (!sel) return false;
 
@@ -120,6 +139,9 @@ public:
         loiter_nav_inited_ = nav.loiter_nav.created;
 
         weathervane_inited_ = true;
+
+        apply_vtol_subsystem_wire(subsystems_, sub);
+
         initialised_ = true;
         return true;
     }
@@ -178,9 +200,30 @@ public:
 
     [[nodiscard]] bool assisted_flight() const { return assisted_flight_; }
 
+    [[nodiscard]] const VtolSubsystemsState& subsystems() const { return subsystems_; }
+
     [[nodiscard]] const MotorsOutputState& motors_output_state() const { return motors_output_state_; }
 
+    [[nodiscard]] const fwcpp::tailsitter::TailsitterGate& tailsitter() const {
+        return subsystems_.tailsitter;
+    }
+    [[nodiscard]] const fwcpp::tiltrotor::TiltrotorGate& tiltrotor() const {
+        return subsystems_.tiltrotor;
+    }
+    [[nodiscard]] const MotorTestState& motor_test_state() const { return motor_test_; }
+    [[nodiscard]] bool motor_test_running() const {
+        return fwcpp::quadplane::motor_test_running(motor_test_);
+    }
+
+    bool start_motor_test() {
+        if (!available()) return false;
+        return motor_test_start(motor_test_);
+    }
+
+    void stop_motor_test() { motor_test_stop(motor_test_); }
+
     MotorsOutputTick motors_output(MotorsOutputView view) {
+        view.motor_test_running = fwcpp::quadplane::motor_test_running(motor_test_);
         return run_motors_output(view, options_, assisted_flight_, motors_output_state_);
     }
 
@@ -270,7 +313,10 @@ public:
     }
 
     QuadPlaneUpdateTick update(const QuadPlaneUpdateView& view) {
-        return run_quadplane_update(slt_transition_, available(), assisted_flight_, options_, view);
+        QuadPlaneUpdateView wired = view;
+        wired.motor_test_running = fwcpp::quadplane::motor_test_running(motor_test_);
+        return run_quadplane_update(slt_transition_, subsystems_, available(), assisted_flight_, options_,
+                                    wired);
     }
 
     void mode_enter() {
@@ -309,6 +355,8 @@ private:
     AirMode air_mode_{AirMode::kOff};
     bool throttle_wait_{false};
     PosControlSetStateSink vtol_pos_sink_{};
+    VtolSubsystemsState subsystems_{};
+    MotorTestState motor_test_{};
     MotorsOutputState motors_output_state_{};
     std::int32_t lean_angle_max_cd_{0};
     PosControlState poscontrol_{};

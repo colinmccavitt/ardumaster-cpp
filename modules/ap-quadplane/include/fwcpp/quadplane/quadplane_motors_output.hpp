@@ -26,6 +26,7 @@ enum class MotorsOutputAction : std::uint8_t {
     kEscCalibration = 2,
     kTailsitterTransition = 3,
     kOutput = 4,
+    kMotorTest = 5,
 };
 
 struct MotorsOutputTick {
@@ -48,6 +49,7 @@ struct MotorsOutputView {
     std::uint32_t now_ms{0};
     float motors_throttle{0.f};
     bool tiltrotor_motors_active{false};
+    bool motor_test_running{false};
 };
 
 struct MotorsOutputState {
@@ -98,6 +100,9 @@ inline MotorsOutputTick motors_output_shutdown(MotorsOutputAction action, Motors
 
 inline MotorsOutputTick run_motors_output(MotorsOutputView view, std::int32_t options,
                                             bool assisted_flight, MotorsOutputState& state) {
+    if (view.motor_test_running) {
+        return motors_output_shutdown(MotorsOutputAction::kMotorTest, view, state);
+    }
     if (motors_delay_arming_gate(options, view.arming_delay_active)) {
         return motors_output_shutdown(MotorsOutputAction::kDelayArming, view, state);
     }

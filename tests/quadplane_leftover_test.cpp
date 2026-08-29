@@ -16,5 +16,10 @@ TEST_CASE("catalog", "[quadplane][leftover]") {
     REQUIRE(completeness_has("air_mode active latch", PortStatus::kThisSlice));
     REQUIRE(completeness_has("AUTO VTOL mission", PortStatus::kThisSlice));
     REQUIRE(completeness_has("TECS stick mixing", PortStatus::kThisSlice));
-    REQUIRE(remaining_count() >= 3);
+    REQUIRE(completeness_has("tailsitter tiltrotor", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("get_singleton", PortStatus::kOutOfScope));
+    REQUIRE(completeness_has("AP_Param var_info", PortStatus::kOutOfScope));
+    REQUIRE(completeness_has("hover/pilot-input", PortStatus::kRemaining));
+    REQUIRE(completeness_has("land detector", PortStatus::kRemaining));
+    REQUIRE(completeness_has("takeoff_controller", PortStatus::kRemaining));
 }

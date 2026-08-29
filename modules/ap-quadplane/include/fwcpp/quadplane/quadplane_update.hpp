@@ -3,6 +3,7 @@
 #include <fwcpp/quadplane_transition/transition_fsm.hpp>
 #include <fwcpp/quadplane_transition/transition_state.hpp>
 #include <fwcpp/quadplane_transition/transition_timing.hpp>
+#include <fwcpp/quadplane/quadplane_subsystems.hpp>
 
 #include <cstdint>
 
@@ -18,6 +19,7 @@ struct QuadPlaneUpdateView {
     bool should_assist{false};
     bool tilt_forward_complete{false};
     bool tiltrotor_with_ground_speed{false};
+    bool motor_test_running{false};
 };
 
 struct QuadPlaneUpdateTick {
@@ -26,6 +28,7 @@ struct QuadPlaneUpdateTick {
     fwcpp::quadplane_transition::TransitionPhase phase{
         fwcpp::quadplane_transition::TransitionPhase::kVtol};
     bool ran_transition_update{false};
+    bool ran_tiltrotor_update{false};
 };
 
 [[nodiscard]] inline fwcpp::quadplane_transition::TransitionPhase mav_vtol_phase(
@@ -48,12 +51,17 @@ inline void wire_slt_options(fwcpp::quadplane_transition::SltTransition& slt, st
 
 [[nodiscard]] inline QuadPlaneUpdateTick run_quadplane_update(
     fwcpp::quadplane_transition::SltTransition& slt,
+    VtolSubsystemsState& subsystems,
     bool available,
     bool assisted_flight,
     std::int32_t q_options,
     const QuadPlaneUpdateView& view) {
     QuadPlaneUpdateTick tick{};
     if (!available) {
+        return tick;
+    }
+    // QuadPlane::update ~1739: motor_test.running skips transition and tiltrotor.update.
+    if (view.motor_test_running) {
         return tick;
     }
     wire_slt_options(slt, q_options);
@@ -69,6 +77,8 @@ inline void wire_slt_options(fwcpp::quadplane_transition::SltTransition& slt, st
     }
 
     tick.phase = mav_vtol_phase(view.in_vtol_mode, slt);
+    const auto sub = wire_vtol_subsystems_update(subsystems);
+    tick.ran_tiltrotor_update = sub.ran_tiltrotor_update;
     return tick;
 }
 

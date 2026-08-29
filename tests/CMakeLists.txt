@@ -568,6 +568,18 @@ add_executable(quadplane_motors_output_test quadplane_motors_output_test.cpp)
 target_link_libraries(quadplane_motors_output_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_motors_output_test)
 
+add_executable(quadplane_motor_test_test quadplane_motor_test_test.cpp)
+target_link_libraries(quadplane_motor_test_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_motor_test_test)
+
+add_executable(quadplane_subsystems_test quadplane_subsystems_test.cpp)
+target_link_libraries(quadplane_subsystems_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_subsystems_test)
+
+add_executable(quadplane_vtol_subsystems_test quadplane_vtol_subsystems_test.cpp)
+target_link_libraries(quadplane_vtol_subsystems_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_vtol_subsystems_test)
+
 add_executable(quadplane_setup_channels_test quadplane_setup_channels_test.cpp)
 target_link_libraries(quadplane_setup_channels_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_setup_channels_test)
