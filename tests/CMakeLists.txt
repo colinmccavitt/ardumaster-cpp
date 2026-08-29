@@ -575,3 +575,8 @@ catch_discover_tests(transition_fsm_test)
 add_executable(transition_completeness_test transition_completeness_test.cpp)
 target_link_libraries(transition_completeness_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
 catch_discover_tests(transition_completeness_test)
+
+# CCP-028 slice 5: AC_Circle init / set_center / update leftovers
+add_executable(circle_init_test circle_init_test.cpp)
+target_link_libraries(circle_init_test PRIVATE ap-wpnav ap-common Catch2::Catch2WithMain)
+catch_discover_tests(circle_init_test)
