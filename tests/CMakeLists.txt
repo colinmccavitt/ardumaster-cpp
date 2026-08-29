@@ -775,3 +775,17 @@ catch_discover_tests(tailsitter_transition_test)
 add_executable(tailsitter_control_test tailsitter_control_test.cpp)
 target_link_libraries(tailsitter_control_test PRIVATE ap-tailsitter Catch2::Catch2WithMain)
 catch_discover_tests(tailsitter_control_test)
+
+# VCP-008 slice 1: ap-tiltrotor scaffold.
+
+add_executable(tiltrotor_enable_test tiltrotor_enable_test.cpp)
+target_link_libraries(tiltrotor_enable_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
+catch_discover_tests(tiltrotor_enable_test)
+
+add_executable(tiltrotor_predicates_test tiltrotor_predicates_test.cpp)
+target_link_libraries(tiltrotor_predicates_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
+catch_discover_tests(tiltrotor_predicates_test)
+
+add_executable(tiltrotor_completeness_test tiltrotor_completeness_test.cpp)
+target_link_libraries(tiltrotor_completeness_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
+catch_discover_tests(tiltrotor_completeness_test)
