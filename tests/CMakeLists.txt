@@ -923,3 +923,8 @@ catch_discover_tests(logger_completeness_test)
 add_executable(copter_loop_test copter_loop_test.cpp)
 target_link_libraries(copter_loop_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(copter_loop_test)
+
+# CPP-087 slice 1: ap-gcs MAVLink2 framing + HEARTBEAT.
+add_executable(gcs_test gcs_test.cpp)
+target_link_libraries(gcs_test PRIVATE ap-gcs Catch2::Catch2WithMain)
+catch_discover_tests(gcs_test)
