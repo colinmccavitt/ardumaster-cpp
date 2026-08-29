@@ -3,6 +3,7 @@
 // file banner for exactly what upstream behavior this reproduces and what
 // is deferred (frame tables, output stage).
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 
@@ -3669,4 +3670,83 @@ TEST_CASE("output_logic: a full, multi-state, multi-step integration test drives
     step();
     REQUIRE(m.spin_up_ratio() == Approx(0.8f)); // diff (0.2-1.0=-0.8) clamped to the -0.2 down-step
     REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::GroundIdle);
+}
+
+// ---------------------------------------------------------------------
+// output_to_pwm (CCP-015) - upstream AP_MotorsMulticopter::output_to_pwm,
+// real function body lines 457-472. A static, pure function (see
+// motors_matrix.hpp's own "CCP-015 ADDITION" comment) - no MotorsMatrix
+// instance is needed to call it.
+// ---------------------------------------------------------------------
+
+TEST_CASE("output_to_pwm: SHUT_DOWN with disarm_disable_pwm=true and armed=false returns exactly 0, the "
+          "real PWM-off case",
+          "[motors][output_to_pwm][shut_down]") {
+    const auto result = MotorsMatrix::output_to_pwm(/*actuator=*/0.5f, MotorsMatrix::SpoolState::ShutDown,
+                                                     /*armed=*/false, /*disarm_disable_pwm=*/true,
+                                                     /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+    REQUIRE(result == 0);
+}
+
+TEST_CASE("output_to_pwm: SHUT_DOWN with disarm_disable_pwm=false returns exactly pwm_output_min, not 0, "
+          "even while disarmed",
+          "[motors][output_to_pwm][shut_down]") {
+    const auto result = MotorsMatrix::output_to_pwm(/*actuator=*/0.5f, MotorsMatrix::SpoolState::ShutDown,
+                                                     /*armed=*/false, /*disarm_disable_pwm=*/false,
+                                                     /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+    REQUIRE(result == 1000);
+}
+
+TEST_CASE("output_to_pwm: SHUT_DOWN with armed=true returns exactly pwm_output_min regardless of "
+          "disarm_disable_pwm - the real `!armed()` condition, not `disarm_disable_pwm` alone, gates the "
+          "PWM-off case",
+          "[motors][output_to_pwm][shut_down]") {
+    const auto result = MotorsMatrix::output_to_pwm(/*actuator=*/0.5f, MotorsMatrix::SpoolState::ShutDown,
+                                                     /*armed=*/true, /*disarm_disable_pwm=*/true,
+                                                     /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+    REQUIRE(result == 1000);
+}
+
+TEST_CASE("output_to_pwm: every non-SHUT_DOWN SpoolState performs the identical real linear remap - "
+          "actuator=0.0 returns exactly pwm_output_min and actuator=1.0 returns exactly pwm_output_max, for "
+          "GROUND_IDLE, SPOOLING_UP, THROTTLE_UNLIMITED, and SPOOLING_DOWN alike",
+          "[motors][output_to_pwm][remap]") {
+    const std::array<MotorsMatrix::SpoolState, 4> non_shut_down_states = {
+        MotorsMatrix::SpoolState::GroundIdle,
+        MotorsMatrix::SpoolState::SpoolingUp,
+        MotorsMatrix::SpoolState::ThrottleUnlimited,
+        MotorsMatrix::SpoolState::SpoolingDown,
+    };
+    for (const auto state : non_shut_down_states) {
+        REQUIRE(MotorsMatrix::output_to_pwm(/*actuator=*/0.0f, state, /*armed=*/true,
+                                             /*disarm_disable_pwm=*/true, /*pwm_output_min=*/1000,
+                                             /*pwm_output_max=*/2000) == 1000);
+        REQUIRE(MotorsMatrix::output_to_pwm(/*actuator=*/1.0f, state, /*armed=*/true,
+                                             /*disarm_disable_pwm=*/true, /*pwm_output_min=*/1000,
+                                             /*pwm_output_max=*/2000) == 2000);
+    }
+}
+
+TEST_CASE("output_to_pwm: an interior actuator value matches the hand-computed real linear remap exactly - "
+          "pwm_output_min=1000 + (2000-1000)*0.25 = 1250.0, no fractional remainder to truncate",
+          "[motors][output_to_pwm][remap]") {
+    const auto result = MotorsMatrix::output_to_pwm(/*actuator=*/0.25f, MotorsMatrix::SpoolState::ThrottleUnlimited,
+                                                     /*armed=*/true, /*disarm_disable_pwm=*/true,
+                                                     /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+    REQUIRE(result == 1250);
+}
+
+TEST_CASE("output_to_pwm: TRUNCATION, NOT ROUNDING - copter-rust's own COP-004 finding, independently "
+          "re-verified directly against the real C++ source: real upstream's own `return pwm_output;` is an "
+          "IMPLICIT float-to-int16_t conversion, which truncates toward zero rather than rounding to "
+          "nearest. pwm_output_min=1000 + (2000-1000)*0.5007 = 1500.7 (fractional part 0.7, well above the "
+          "0.5 rounding boundary) - a faithful truncating port returns exactly 1500. A port that used "
+          "std::round()/std::lround() as an 'improvement' would return 1501 here instead and this assertion "
+          "would fail, which is the entire point of this test",
+          "[motors][output_to_pwm][truncation]") {
+    const auto result = MotorsMatrix::output_to_pwm(/*actuator=*/0.5007f, MotorsMatrix::SpoolState::ThrottleUnlimited,
+                                                     /*armed=*/true, /*disarm_disable_pwm=*/true,
+                                                     /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+    REQUIRE(result == 1500);
+    REQUIRE(result != 1501);
 }

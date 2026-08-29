@@ -1289,17 +1289,20 @@
 //      plus its SHUT_DOWN/GROUND_IDLE cases (real lines 591-768, "PART 1")
 //      are DONE as of CCP-013 (see "CCP-013 ADDITION" above). The
 //      remaining three SpoolState cases - SPOOLING_UP/THROTTLE_UNLIMITED/
-//      SPOOLING_DOWN, real lines 769-884, "PART 2" - are a separate,
-//      deliberately deferred future ticket (CCP-014 or similar): they
-//      depend on real, not-yet-built current-limiting
-//      (get_current_limit_max_throttle) and filtered-throttle
-//      (get_throttle) infrastructure. output_to_pwm (AP_MotorsMulticopter.cpp
-//      line 457), output_to_motors, output_armed_stabilizing,
-//      thrust_compensation, and disable_yaw_torque also remain separate,
-//      deliberately deferred future phases, NOT started by this ticket -
-//      output_to_pwm specifically also needs real PWM output plumbing
-//      beyond just the now-ported SpoolState enum. Actuator slew-rate
-//      limiting itself is NOT part of that missing infrastructure, since
+//      SPOOLING_DOWN, real lines 769-884, "PART 2" - are DONE as of
+//      CCP-014 (see "CCP-014 ADDITION" - search this file), and
+//      output_to_pwm (AP_MotorsMulticopter.cpp line 457) is DONE as of
+//      CCP-015 (see "CCP-015 ADDITION" above). output_to_motors (the real
+//      per-motor dispatcher that calls output_to_pwm once per motor,
+//      needing motor_enabled_/rc_write-equivalent output plumbing this
+//      port has not built), output_armed_stabilizing (the real per-motor
+//      mixing algorithm, ~190 real lines - the single largest remaining
+//      function in this whole output-stage effort), thrust_compensation,
+//      and disable_yaw_torque all remain separate, deliberately deferred
+//      future phases, NOT started by this ticket - output_to_motors
+//      specifically also needs real PWM output plumbing beyond just the
+//      now-ported SpoolState enum and output_to_pwm itself. Actuator
+//      slew-rate limiting itself is NOT part of that missing infrastructure, since
 //      CCP-012 already ported it as the unconditional pure function it
 //      really is (see "CCP-012 ADDITION" above for why it needs no
 //      SpoolState awareness of its own). The full thrust-boost MECHANISM
@@ -3191,6 +3194,93 @@ public:
             break;
         }
         }
+    }
+
+    // CCP-015 ADDITION - upstream AP_MotorsMulticopter::output_to_pwm, real
+    // function body lines 457-472 (~16 lines), re-verified directly against
+    // the pinned worktree (matches the ticket's own transcription exactly):
+    //
+    //   int16_t AP_MotorsMulticopter::output_to_pwm(float actuator)
+    //   {
+    //       float pwm_output;
+    //       if (_spool_state == SpoolState::SHUT_DOWN) {
+    //           if (_disarm_disable_pwm && !armed()) {
+    //               pwm_output = 0;
+    //           } else {
+    //               pwm_output = get_pwm_output_min();
+    //           }
+    //       } else {
+    //           pwm_output = get_pwm_output_min() + (get_pwm_output_max() - get_pwm_output_min()) * actuator;
+    //       }
+    //       return pwm_output;
+    //   }
+    //
+    // TRUNCATION, NOT ROUNDING - the one real quirk here, independently
+    // re-verified against the source above and matching copter-rust's own
+    // COP-004 finding exactly ("output_to_pwm computes a float and returns
+    // it through an int16_t, so the result TRUNCATES rather than rounds...
+    // the sweep includes actuator values that land just under an integer
+    // pulse, which is the only place a rounding port would disagree").
+    // Real upstream's own return statement (`return pwm_output;`) is an
+    // IMPLICIT float-to-int16_t conversion - C++'s standard conversion
+    // semantics for that truncate toward zero, they do NOT round to
+    // nearest. This port makes the conversion explicit
+    // (`static_cast<std::int16_t>(pwm_output)`) but preserves the exact
+    // same truncating behavior - NO std::round()/std::lround() is used, as
+    // that would be a silent behavioral "improvement" that disagrees with
+    // real upstream on any fractional PWM value >= 0.5. See this file's own
+    // dedicated truncation-vs-rounding regression test in
+    // motors_matrix_test.cpp.
+    //
+    // PARAMETER SHAPE - explicit parameters throughout, per ADR-0012 (this
+    // port has no PWM-range-owning module yet): `pwm_output_min`/
+    // `pwm_output_max` are typed `std::int16_t`, matching real upstream's
+    // own `get_pwm_output_min()`/`get_pwm_output_max()` accessor return
+    // type EXACTLY (AP_MotorsMulticopter.h: `int16_t get_pwm_output_min()
+    // const { return _pwm_min; }`, likewise for max/_pwm_max, both
+    // re-verified directly) rather than widening them to float - the
+    // narrower int16_t choice documents that real upstream's own
+    // configured PWM range can never itself carry a fractional value.
+    // `armed`/`disarm_disable_pwm` reuse the IDENTICAL names/concepts as
+    // CCP-013's own `output_logic(bool armed, bool interlock, bool
+    // disarm_disable_pwm, ...)` signature above (re-checked directly) -
+    // deliberately not reinvented under different names for the same two
+    // real booleans. `spool_state` is this port's own real `SpoolState`
+    // enum (CCP-013), now real/complete state rather than a placeholder.
+    //
+    // STATIC METHOD - like set_actuator_with_slew/
+    // actuator_spin_up_to_ground_idle above (see that pair's own "STATIC
+    // METHODS" design-decision comment), this function reads no
+    // MotorsMatrix instance state - `spool_state` is taken as an explicit
+    // parameter rather than reading the instance's own spool_state_,
+    // matching the ticket's own explicit instruction that it be an
+    // explicit parameter - so it is `static` rather than an ordinary
+    // instance method, for the exact same reason.
+    //
+    // DEFERRED - NOT this ticket's scope (named explicitly, matching this
+    // file's own "DEFERRED FUTURE PHASES" precedent): output_to_motors
+    // (the real per-motor dispatcher that calls this function once per
+    // motor, needing motor_enabled_/rc_write-equivalent output plumbing
+    // this port has not built) and output_armed_stabilizing (the real
+    // per-motor mixing algorithm, ~190 real lines - the single largest
+    // remaining function in this whole output-stage effort) are both
+    // separate, deliberately deferred future phases - see updated
+    // "DEFERRED FUTURE PHASES" below.
+    [[nodiscard]] static std::int16_t output_to_pwm(float actuator, SpoolState spool_state, bool armed,
+                                                     bool disarm_disable_pwm, std::int16_t pwm_output_min,
+                                                     std::int16_t pwm_output_max) {
+        float pwm_output;
+        if (spool_state == SpoolState::ShutDown) {
+            if (disarm_disable_pwm && !armed) {
+                pwm_output = 0.0f;
+            } else {
+                pwm_output = static_cast<float>(pwm_output_min);
+            }
+        } else {
+            pwm_output = static_cast<float>(pwm_output_min) +
+                         static_cast<float>(pwm_output_max - pwm_output_min) * actuator;
+        }
+        return static_cast<std::int16_t>(pwm_output);
     }
 
     // Test-only mutators (CCP-013) for output_logic's own new state -
