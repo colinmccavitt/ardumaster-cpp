@@ -962,3 +962,8 @@ catch_discover_tests(util_test)
 add_executable(can_test can_test.cpp)
 target_link_libraries(can_test PRIVATE ap-hal Catch2::Catch2WithMain)
 catch_discover_tests(can_test)
+
+# CCP-036 slice 1: Mode::Number, ModeReason, Mode base, set_mode checks.
+add_executable(mode_test mode_test.cpp)
+target_link_libraries(mode_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(mode_test)
