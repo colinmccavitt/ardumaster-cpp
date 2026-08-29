@@ -29,13 +29,13 @@ inline constexpr QrtlPortItem kQrtlCompleteness[] = {
     {"_enter climb submode", PortStatus::kThisSlice, "mode_qrtl_enter.hpp"},
     {"_enter RTL close-in POSITION1", PortStatus::kThisSlice, "mode_qrtl_enter.hpp"},
     {"completeness catalog", PortStatus::kThisSlice, "this table"},
-    {"update delegate QStabilize", PortStatus::kRemaining, "mode_qrtl.cpp update()"},
+    {"update delegate QStabilize", PortStatus::kThisSlice, "mode_qrtl_update.hpp"},
     {"run tailsitter FW branch", PortStatus::kThisSlice, "mode_qrtl_run.hpp"},
     {"run climb tick", PortStatus::kThisSlice, "mode_qrtl_run.hpp"},
     {"run RTL vtol_position_controller", PortStatus::kThisSlice, "mode_qrtl_run.hpp"},
     {"run land handoff verify_vtol_land", PortStatus::kThisSlice, "mode_qrtl_land_handoff.hpp"},
-    {"update_target_altitude approach", PortStatus::kRemaining, "RTL+APPROACH profile"},
-    {"allows_throttle_nudging", PortStatus::kRemaining, "RTL + QPOS_APPROACH only"},
+    {"update_target_altitude approach", PortStatus::kThisSlice, "mode_qrtl_target_altitude.hpp"},
+    {"allows_throttle_nudging", PortStatus::kThisSlice, "mode_qrtl_target_altitude.hpp"},
     {"QuadPlane::mode_enter wiring", PortStatus::kOutOfScope, "ADR-0012 caller applies"},
 };
 
