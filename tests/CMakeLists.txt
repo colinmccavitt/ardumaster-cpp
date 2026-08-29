@@ -477,6 +477,14 @@ catch_discover_tests(pos_control_ne_update_test)
 add_executable(wp_and_spline_init_test wp_and_spline_init_test.cpp)
 target_link_libraries(wp_and_spline_init_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
 catch_discover_tests(wp_and_spline_init_test)
+# CCP-028 slice 2: set_wp_destination / update_wpnav
+add_executable(set_wp_destination_test set_wp_destination_test.cpp)
+target_link_libraries(set_wp_destination_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
+catch_discover_tests(set_wp_destination_test)
+
+add_executable(update_wpnav_test update_wpnav_test.cpp)
+target_link_libraries(update_wpnav_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
+catch_discover_tests(update_wpnav_test)
 
 
 add_executable(quadplane_setup_test quadplane_setup_test.cpp)
