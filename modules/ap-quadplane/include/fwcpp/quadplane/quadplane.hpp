@@ -23,12 +23,14 @@
 #include <fwcpp/quadplane/quadplane_control_auto.hpp>
 #include <fwcpp/quadplane/quadplane_stabilize.hpp>
 #include <fwcpp/quadplane/quadplane_xy_controller.hpp>
+#include <fwcpp/quadplane/quadplane_throttle.hpp>
 #include <fwcpp/quadplane/quadplane_takeoff_controller.hpp>
 #include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
 #include <fwcpp/quadplane/quadplane_vtol_subsystems.hpp>
 #include <fwcpp/quadplane/quadplane_subsystems.hpp>
 #include <fwcpp/quadplane/quadplane_update.hpp>
 #include <fwcpp/tiltrotor/tiltrotor_types.hpp>
+#include <fwcpp/quadplane_transition/transition_base.hpp>
 #include <fwcpp/quadplane_transition/transition_fsm.hpp>
 
 namespace fwcpp::quadplane {
@@ -548,6 +550,34 @@ public:
             in.angle_max_cd = static_cast<float>(lean_angle_max_cd_);
         }
         return fwcpp::quadplane::assign_tilt_to_fwd_thr(fwd_tilt_, in);
+    }
+
+    [[nodiscard]] float get_throttle_input(float throttle_control_in, bool reversed_throttle) const {
+        return fwcpp::quadplane::get_throttle_input(throttle_control_in, reversed_throttle);
+    }
+
+    MotorsOutputState& motors_output_state_mut() { return motors_output_state_; }
+
+    [[nodiscard]] ThrottleSuppressionTick update_throttle_suppression(ThrottleSuppressionInputs in) {
+        in.guided_wait_takeoff = guided_wait_takeoff_;
+        in.air_mode_active = air_mode_active();
+        in.available = available();
+        in.options = options_;
+        return fwcpp::quadplane::update_throttle_suppression(motors_output_state_.last_motors_active_ms, in);
+    }
+
+    [[nodiscard]] ThrottleHoverTick update_throttle_hover(ThrottleHoverInputs in) const {
+        in.available = available();
+        in.tailsitter_enabled = tailsitter().enabled();
+        in.last_pidz_active_ms = z_ctrl_.last_pidz_active_ms;
+        return fwcpp::quadplane::update_throttle_hover(in);
+    }
+
+    [[nodiscard]] ThrottleMixTick update_throttle_mix(ThrottleMixInputs in) const {
+        in.allow_update_throttle_mix = fwcpp::quadplane_transition::slt_allow_update_throttle_mix(
+            slt_transition_.state(), assisted_flight_);
+        in.air_mode_active = air_mode_active();
+        return fwcpp::quadplane::update_throttle_mix(in);
     }
 
     [[nodiscard]] HoldHoverTick hold_hover(float target_climb_rate_cms, DesiredYawRateInputs yaw) const {
