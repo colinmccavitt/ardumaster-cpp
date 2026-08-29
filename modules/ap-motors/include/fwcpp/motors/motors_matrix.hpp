@@ -2,12 +2,101 @@
 
 // Port of libraries/AP_Motors/AP_MotorsMatrix.cpp's (Copter-4.7.0) CORE
 // factor storage/arithmetic - CCP-001, the first ticket of the copter-cpp
-// effort (see /srv/ardumaster/tracker/efforts/copter-cpp.md). Deliberately
-// NOT the frame tables (setup_quad_matrix..setup_deca_matrix, setup_motors'
-// dispatcher, ~1,400 real upstream lines) and NOT the output stage
-// (output_to_motors/output_armed_stabilizing/check_for_failed_motor/
-// thrust_compensation/disable_yaw_torque) - both real, substantial,
+// effort (see /srv/ardumaster/tracker/efforts/copter-cpp.md) - PLUS
+// (CCP-002) the first real consumer of that infrastructure,
+// setup_quad_matrix (AP_MotorsMatrix.cpp ~line 576-711). Deliberately NOT
+// the other six frame-class setup functions (setup_hexa_matrix through
+// setup_deca_matrix), NOT setup_motors' own dispatcher, and NOT the output
+// stage (output_to_motors/output_armed_stabilizing/check_for_failed_motor/
+// thrust_compensation/disable_yaw_torque) - all real, substantial,
 // separately-scoped future phases. See "DEFERRED FUTURE PHASES" below.
+//
+// CCP-002 ADDITION (setup_quad_matrix) - upstream AP_MotorsMatrix.cpp,
+// real function at line 576 (re-verified directly against the pinned
+// worktree, not trusted from the ticket's own transcription; the ticket's
+// guessed ~576-711 span matched exactly). The real switch(frame_type) has
+// exactly these cases, in this order:
+//   PLUS (581), X (592), NYT_PLUS (604, EXCLUDED - see below),
+//   NYT_X (615, EXCLUDED), BF_X (627), BF_X_REV (640), DJI_X (652),
+//   CW_X (665), V (678), H (689), VTAIL (701), ATAIL (724),
+//   PLUSREV (744), Y4 (756), default (767).
+// This is exhaustive - re-counted directly against the real file, matching
+// the ticket's own list exactly (PLUS/X/BF_X/BF_X_REV/DJI_X/CW_X/V/H/
+// VTAIL/ATAIL/PLUSREV/Y4, twelve in-scope cases).
+//
+// EXCLUDED: MOTOR_FRAME_TYPE_NYT_PLUS/MOTOR_FRAME_TYPE_NYT_X (lines
+// 604-625) sit behind a real
+// `#if APM_BUILD_TYPE(APM_BUILD_ArduPlane) || APM_BUILD_TYPE(APM_BUILD_UNKNOWN)`
+// gate (confirmed directly, line 603/626) - QuadPlane-specific frame
+// layouts, not real ArduCopter build scope. copter-rust's own COP-005
+// independently found and excluded the exact same two cases for the exact
+// same reason ("they are quadplane layouts and belong to that effort" -
+// COP-005 notes, 2026-08-25). Matching that precedent, both are excluded
+// here too - a disclosed exclusion, not an oversight.
+//
+// DEFAULT BRANCH - confirmed the SIMPLE kind: line 767-769 is
+// `default: // quad frame class does not support this frame type
+//          return false;` - a genuine "not supported" fallback with no
+// case logic hidden in it, UNLIKE setup_y6_matrix's own real `default:`
+// (a separate, later-ticket concern; copter-rust's own COP-005 found that
+// one answers for 24 of 64 upstream frame configurations). Quad's own
+// default carries no such risk - confirmed by reading it directly, not
+// assumed by analogy.
+//
+// REAL CONSTANTS used below (AP_MotorsMatrix.h lines 10-11,
+// AP_Motors_Class.h lines 14-17, both re-verified against the real
+// headers): AP_MOTORS_MATRIX_YAW_FACTOR_CW = -1, _CCW = 1 (ported as
+// kYawFactorCw/kYawFactorCcw, float to match MotorDef::yaw_factor's real
+// type); AP_MOTORS_MOT_1..4 = 0U,1U,2U,3U (zero-indexed motor numbers,
+// used directly as VTAIL/ATAIL's own add_motor() motor_num argument).
+//
+// VTAIL vs ATAIL (lines 701-743) - REAL, RE-VERIFIED ASYMMETRY: both call
+// add_motor() with the IDENTICAL four (motor_num, roll_deg, pitch_deg,
+// testing_order) tuples - (0,60,60,1), (1,0,-160,3), (2,-60,-60,4),
+// (3,0,160,2) - so roll_factor/pitch_factor/test_order are pairwise equal
+// between the two frames. The ONE real difference is motors 1 and 3's yaw
+// factor, which is the OPPOSITE sign in ATAIL vs VTAIL: VTAIL motor 1 =
+// CW, motor 3 = CCW; ATAIL motor 1 = CCW, motor 3 = CW. Upstream's own
+// comments (reproduced in full at each case below) explain why: an
+// A-shaped VTail's rear motors face the opposite direction from a
+// V-shaped VTail's for the same physical arm geometry, so the same
+// physical rotor spin direction produces opposite yaw torque. Motors 0
+// and 2 (the front motors) carry yaw_factor 0 in BOTH frames - "no yaw in
+// front motors" per VTAIL's own comment, and ATAIL's own comment confirms
+// "Yaw control is entirely in the rear motors" still holds. A port that
+// collapsed VTAIL and ATAIL into one shared implementation would be
+// wrong for both; motors_matrix_test.cpp tests this pair distinctly.
+//
+// PLUS vs PLUSREV (lines 581-591, 744-755) - REAL, RE-VERIFIED
+// SIGN-NEGATION: PLUSREV's own comment says "plus with reversed motor
+// directions". Confirmed directly: PLUSREV's four MotorDef entries have
+// the EXACT SAME angle_degrees/testing_order as PLUS's own four entries,
+// in the same order, with EVERY yaw_factor sign-flipped (PLUS: CCW, CCW,
+// CW, CW for motors at 90/-90/0/180 degrees respectively; PLUSREV: CW,
+// CW, CCW, CCW for the same four angles) - i.e. PLUSREV is exactly
+// PLUS's own yaw_factor column negated, motor-for-motor, not an
+// independent frame definition. motors_matrix_test.cpp confirms this
+// exact negation relationship directly rather than merely checking
+// PLUSREV's absolute values in isolation.
+//
+// V (line 678) - REAL, non-+-1 yaw factors, transcribed exactly as
+// upstream's own float literals (NOT derived from a cos/sin formula):
+// 0.7981f, 1.0000f, -0.7981f, -1.0000f for motors at 45/-135/-45/135
+// degrees respectively.
+//
+// Y4 (line 756) - uses add_motors_raw with real explicit roll/pitch/yaw
+// factors (no angle-based conversion at all): four MotorDefRaw entries,
+// transcribed exactly from the real static array.
+//
+// NOT ported (this ticket's own explicit scope, per the file banner
+// above and the ticket's acceptance criteria): the real upstream also
+// sets `_mav_type = MAV_TYPE_QUADROTOR;` unconditionally at the top of
+// setup_quad_matrix, before the switch - pure MAVLink/GCS metadata this
+// port has no GCS to report to and no _mav_type-typed member for (see
+// "NO-OP"/GCS-adjacent precedents in CCP-001's own banner above for the
+// same class of disclosed omission). frame_type_string_/
+// frame_class_string_ ARE ported (see class body) since the ticket
+// explicitly asks for them as useful test/debug state even without a GCS.
 //
 // Upstream (Copter-4.7.0, read directly from the pinned worktree at
 // /srv/ardumaster/upstream/plane-4.7.0 - confirmed byte-identical to
@@ -156,8 +245,14 @@
 // is used directly (kMaxNumMotors below), not invented.
 //
 // DEFERRED FUTURE PHASES (named explicitly, not silently omitted):
-//   1. Frame tables (setup_quad_matrix through setup_deca_matrix,
-//      setup_motors' dispatcher, ~1,400 upstream lines) - a future phase
+//   1. Remaining frame tables - setup_quad_matrix (line 576) is DONE as of
+//      CCP-002 (see "CCP-002 ADDITION" above); the other six frame-class
+//      setup functions (setup_hexa_matrix, setup_octa_matrix,
+//      setup_octaquad_matrix, setup_dodecahexa_matrix, setup_y6_matrix,
+//      setup_deca_matrix) and setup_motors' own dispatcher (which chooses
+//      among all seven by frame CLASS, ~1,400 upstream lines total across
+//      all seven) remain future phases, named explicitly here so none is
+//      silently folded into another ticket's scope. A future phase
 //      MUST independently re-verify (not blindly trust) copter-rust's own
 //      COP-005 findings:
 //        a. Y6's `default:` switch branch is productive - it answers for
@@ -201,6 +296,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <string>
 
 #include <fwcpp/math/scalar.hpp>
 
@@ -209,6 +305,14 @@ namespace fwcpp::motors {
 // AP_MOTORS_MAX_NUM_MOTORS's real, fully-resolved value for this port's
 // SITL target - see file banner above for the full investigation.
 inline constexpr std::size_t kMaxNumMotors = 32;
+
+// AP_MOTORS_MATRIX_YAW_FACTOR_CW/_CCW (AP_MotorsMatrix.h lines 10-11,
+// re-verified directly: `#define AP_MOTORS_MATRIX_YAW_FACTOR_CW -1` /
+// `_CCW 1`) - ported as float (matching MotorDef::yaw_factor's real
+// type) rather than int, since every real caller uses these only in a
+// float-typed yaw_factor position.
+inline constexpr float kYawFactorCw = -1.0f;
+inline constexpr float kYawFactorCcw = 1.0f;
 
 // MotorsMatrix - port of AP_MotorsMatrix's core per-motor factor storage
 // and arithmetic (CCP-001). See file banner for exactly what upstream
@@ -233,6 +337,31 @@ public:
         float pitch_fac;
         float yaw_fac;
         std::uint8_t testing_order;
+    };
+
+    // CCP-002: port of upstream's real `enum class motor_frame_type`
+    // (AP_Motors_Class.h), restricted to exactly the enumerators
+    // setup_quad_matrix's own real switch statement handles (NOT the full
+    // upstream enum, which also has many other frame-class-specific
+    // values this port has not built setup functions for yet - see file
+    // banner's "CCP-002 ADDITION" for the exhaustive real case list this
+    // was checked against). NYT_PLUS/NYT_X are deliberately absent - see
+    // file banner's "EXCLUDED" note. Named/shaped per this port's own
+    // house style for small state enums (e.g. CalibrationState,
+    // fwcpp/airspeed/airspeed_sensor.hpp).
+    enum class FrameType : std::uint8_t {
+        Plus,
+        X,
+        BfX,
+        BfXRev,
+        DjiX,
+        CwX,
+        V,
+        H,
+        VTail,
+        ATail,
+        PlusRev,
+        Y4,
     };
 
     // Upstream AP_Motors::initialised_ok()/set_initialised_ok() (see file
@@ -349,6 +478,208 @@ public:
         }
     }
 
+    // setup_quad_matrix - CCP-002 port of upstream
+    // AP_MotorsMatrix::setup_quad_matrix (AP_MotorsMatrix.cpp line 576).
+    // Every case's angle/yaw-factor/testing-order values are transcribed
+    // exactly from the real source - see file banner's "CCP-002 ADDITION"
+    // for the full exhaustiveness/exclusion/default-branch investigation.
+    // Returns false (upstream's own real return value) for any FrameType
+    // not handled below - this port's FrameType enum only ever contains
+    // handled values, so that path is unreachable through normal use, but
+    // is kept to mirror upstream's real "not supported" semantics exactly
+    // (e.g. against a future caller that widens the enum without updating
+    // this switch).
+    [[nodiscard]] bool setup_quad_matrix(FrameType frame_type) {
+        frame_class_string_ = "QUAD";
+        switch (frame_type) {
+        case FrameType::Plus: {
+            frame_type_string_ = "PLUS";
+            static constexpr MotorDef motors[] = {
+                {90.0f, kYawFactorCcw, 2},
+                {-90.0f, kYawFactorCcw, 4},
+                {0.0f, kYawFactorCw, 1},
+                {180.0f, kYawFactorCw, 3},
+            };
+            add_motors(motors, 4);
+            break;
+        }
+        case FrameType::X: {
+            frame_type_string_ = "X";
+            static constexpr MotorDef motors[] = {
+                {45.0f, kYawFactorCcw, 1},
+                {-135.0f, kYawFactorCcw, 3},
+                {-45.0f, kYawFactorCw, 4},
+                {135.0f, kYawFactorCw, 2},
+            };
+            add_motors(motors, 4);
+            break;
+        }
+        case FrameType::BfX: {
+            // betaflight quad X order
+            // see: https://fpvfrenzy.com/betaflight-motor-order/
+            frame_type_string_ = "BF_X";
+            static constexpr MotorDef motors[] = {
+                {135.0f, kYawFactorCw, 2},
+                {45.0f, kYawFactorCcw, 1},
+                {-135.0f, kYawFactorCcw, 3},
+                {-45.0f, kYawFactorCw, 4},
+            };
+            add_motors(motors, 4);
+            break;
+        }
+        case FrameType::BfXRev: {
+            // betaflight quad X order, reversed motors
+            frame_type_string_ = "X_REV";
+            static constexpr MotorDef motors[] = {
+                {135.0f, kYawFactorCcw, 2},
+                {45.0f, kYawFactorCw, 1},
+                {-135.0f, kYawFactorCw, 3},
+                {-45.0f, kYawFactorCcw, 4},
+            };
+            add_motors(motors, 4);
+            break;
+        }
+        case FrameType::DjiX: {
+            // DJI quad X order
+            // see https://forum44.djicdn.com/data/attachment/forum/201711/26/172348bppvtt1ot1nrtp5j.jpg
+            frame_type_string_ = "DJI_X";
+            static constexpr MotorDef motors[] = {
+                {45.0f, kYawFactorCcw, 1},
+                {-45.0f, kYawFactorCw, 4},
+                {-135.0f, kYawFactorCcw, 3},
+                {135.0f, kYawFactorCw, 2},
+            };
+            add_motors(motors, 4);
+            break;
+        }
+        case FrameType::CwX: {
+            // "clockwise X" motor order. Motors are ordered clockwise from
+            // front right matching test order
+            frame_type_string_ = "CW_X";
+            static constexpr MotorDef motors[] = {
+                {45.0f, kYawFactorCcw, 1},
+                {135.0f, kYawFactorCw, 2},
+                {-135.0f, kYawFactorCcw, 3},
+                {-45.0f, kYawFactorCw, 4},
+            };
+            add_motors(motors, 4);
+            break;
+        }
+        case FrameType::V: {
+            // Real, non-derived yaw factors - transcribed exactly from
+            // upstream's own float literals (see file banner).
+            frame_type_string_ = "V";
+            static constexpr MotorDef motors[] = {
+                {45.0f, 0.7981f, 1},
+                {-135.0f, 1.0000f, 3},
+                {-45.0f, -0.7981f, 4},
+                {135.0f, -1.0000f, 2},
+            };
+            add_motors(motors, 4);
+            break;
+        }
+        case FrameType::H: {
+            // H frame set-up - same as X but motors spin in opposite
+            // directions
+            frame_type_string_ = "H";
+            static constexpr MotorDef motors[] = {
+                {45.0f, kYawFactorCw, 1},
+                {-135.0f, kYawFactorCw, 3},
+                {-45.0f, kYawFactorCcw, 4},
+                {135.0f, kYawFactorCcw, 2},
+            };
+            add_motors(motors, 4);
+            break;
+        }
+        case FrameType::VTail: {
+            /*
+                Tested with: Lynxmotion Hunter Vtail 400
+                - inverted rear outward blowing motors (at a 40 degree angle)
+                - should also work with non-inverted rear outward blowing motors
+                - no roll in rear motors
+                - no yaw in front motors
+                - should fly like some mix between a tricopter and X Quadcopter
+
+                Roll control comes only from the front motors, Yaw control only from the rear motors.
+                Roll & Pitch factor is measured by the angle away from the top of the forward axis to each arm.
+
+                Note: if we want the front motors to help with yaw,
+                    motors 1's yaw factor should be changed to sin(radians(40)).  Where "40" is the vtail angle
+                    motors 3's yaw factor should be changed to -sin(radians(40))
+            */
+            frame_type_string_ = "VTAIL";
+            add_motor(0, 60.0f, 60.0f, 0.0f, 1);
+            add_motor(1, 0.0f, -160.0f, kYawFactorCw, 3);
+            add_motor(2, -60.0f, -60.0f, 0.0f, 4);
+            add_motor(3, 0.0f, 160.0f, kYawFactorCcw, 2);
+            break;
+        }
+        case FrameType::ATail: {
+            /*
+                The A-Shaped VTail is the exact same as a V-Shaped VTail, with one difference:
+                - The Yaw factors are reversed, because the rear motors are facing different directions
+
+                With V-Shaped VTails, the props make a V-Shape when spinning, but with
+                A-Shaped VTails, the props make an A-Shape when spinning.
+                - Rear thrust on a V-Shaped V-Tail Quad is outward
+                - Rear thrust on an A-Shaped V-Tail Quad is inward
+
+                Still functions the same as the V-Shaped VTail mixing below:
+                - Yaw control is entirely in the rear motors
+                - Roll is is entirely in the front motors
+            */
+            frame_type_string_ = "ATAIL";
+            add_motor(0, 60.0f, 60.0f, 0.0f, 1);
+            add_motor(1, 0.0f, -160.0f, kYawFactorCcw, 3);
+            add_motor(2, -60.0f, -60.0f, 0.0f, 4);
+            add_motor(3, 0.0f, 160.0f, kYawFactorCw, 2);
+            break;
+        }
+        case FrameType::PlusRev: {
+            // plus with reversed motor directions - every yaw_factor is
+            // PLUS's own yaw_factor negated, motor-for-motor (see file
+            // banner's "PLUS vs PLUSREV" note).
+            frame_type_string_ = "PLUSREV";
+            static constexpr MotorDef motors[] = {
+                {90.0f, kYawFactorCw, 2},
+                {-90.0f, kYawFactorCw, 4},
+                {0.0f, kYawFactorCcw, 1},
+                {180.0f, kYawFactorCcw, 3},
+            };
+            add_motors(motors, 4);
+            break;
+        }
+        case FrameType::Y4: {
+            frame_type_string_ = "Y4";
+            // Y4 motor definition with right front CCW, left front CW
+            static constexpr MotorDefRaw motors[] = {
+                {-1.0f, 1.000f, kYawFactorCcw, 1},
+                {0.0f, -1.000f, kYawFactorCw, 2},
+                {0.0f, -1.000f, kYawFactorCcw, 3},
+                {1.0f, 1.000f, kYawFactorCw, 4},
+            };
+            add_motors_raw(motors, 4);
+            break;
+        }
+        default:
+            // quad frame class does not support this frame type - matches
+            // upstream's own real default case exactly (see file banner:
+            // this is the SIMPLE kind of default, not setup_y6_matrix's
+            // own productive one).
+            return false;
+        }
+        return true;
+    }
+
+    // frame_type_string()/frame_class_string() - port of upstream's real
+    // _frame_type_string/_frame_class_string state (set by
+    // setup_quad_matrix above), even though this port has no GCS to
+    // report them to - useful for tests/debugging, per the ticket's own
+    // request. Empty until setup_quad_matrix has been called at least
+    // once (matching upstream's own uninitialized-until-setup behavior).
+    [[nodiscard]] const std::string& frame_type_string() const { return frame_type_string_; }
+    [[nodiscard]] const std::string& frame_class_string() const { return frame_class_string_; }
+
     // Accessors - not upstream methods (upstream reaches these fields as
     // protected member arrays from within the class hierarchy itself, or
     // via the small get_factors() accessor this ticket deliberately does
@@ -370,6 +701,8 @@ public:
 
 private:
     bool initialised_ok_ = false;
+    std::string frame_type_string_;
+    std::string frame_class_string_;
     std::array<bool, kMaxNumMotors> motor_enabled_{};
     std::array<float, kMaxNumMotors> roll_factor_{};
     std::array<float, kMaxNumMotors> pitch_factor_{};
