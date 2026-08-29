@@ -875,6 +875,138 @@
 // MAVLink/GCS metadata, out of scope for the same reason as the other
 // seven _mav_type writes.
 //
+// CCP-011 ADDITION (check_for_failed_motor) - upstream
+// AP_MotorsMatrix::check_for_failed_motor, real function body lines
+// 414-461 (re-verified directly against the pinned worktree; the
+// ticket's own guessed span, 414-457, undershot the real end by 4 lines
+// - the real closing brace is at line 461, not 457). The real contract
+// comment immediately above (lines 406-413) documents this is intended
+// to run immediately after output_armed_stabilizing (not yet built in
+// this port - see updated "DEFERRED FUTURE PHASES" below), with
+// throttle_thrust_best_plus_adj = throttle_thrust_best_rpy + thr_adj.
+//
+// THE REAL SIX-STEP STRUCTURE, TRANSCRIBED EXACTLY (re-verified line by
+// line against the real source, not trusted from the ticket's own
+// summary):
+//   1. alpha = dt_s / (dt_s + 0.5f) - a real, non-standard low-pass
+//      filter alpha formula specific to THIS function, deliberately NOT
+//      substituted with this port's own generic
+//      math::calc_lowpass_alpha_dt helper (used elsewhere in this port,
+//      e.g. fwcpp::filter::LowPassFilter) even though the two serve a
+//      similar purpose.
+//   2. For every enabled motor, in a first standalone loop: a plain
+//      exponential filter update, thrust_rpyt_out_filt_[i] += alpha *
+//      (thrust_rpyt_out_[i] - thrust_rpyt_out_filt_[i]).
+//   3. A SECOND, separate loop over enabled motors computes rpyt_high
+//      (the max filtered value seen so far), rpyt_sum (running total),
+//      and number_motors (count). While a NEW rpyt_high is recorded,
+//      motor_lost_index_ is updated to the CURRENT motor's index, but
+//      ONLY if !thrust_boost_ - re-verified this exact gating condition
+//      directly, matching upstream's own comment ("hold motor lost
+//      index constant while thrust boost is active").
+//   4. thrust_balance = (rpyt_sum > 0.1f) ? (rpyt_high * number_motors /
+//      rpyt_sum) : 1.0f - re-verified the exact 0.1f threshold and the
+//      1.0f fallback.
+//   5. Real hysteresis, confirmed to be TWO SEPARATE SEQUENTIAL `if`
+//      statements, NOT an if/else (re-verified directly - transcribed
+//      faithfully rather than "cleaned up"): is_corotating =
+//      (active_frame_type_ == FrameType::XCor || active_frame_type_ ==
+//      FrameType::CwXCor) (reusing CCP-005's own enumerators verbatim).
+//      First `if`: if (number_motors >= 6 && thrust_balance >= 1.5f &&
+//      thrust_balanced_ && !is_corotating) thrust_balanced_ = false.
+//      Second, independent `if`: if (thrust_balance <= 1.25f &&
+//      !thrust_balanced_) thrust_balanced_ = true.
+//   6. Final: if ((throttle_thrust_max * thr_lin_.get_compensation_gain(
+//      air_density_ratio) > throttle_thrust_best_plus_adj) && (rpyt_high
+//      < 0.9f) && thrust_balanced_) thrust_boost_ = false - re-verified
+//      this exact three-way AND and the 0.9f threshold, and that this is
+//      the ONLY place in the real function thrust_boost is ever
+//      assigned - NEVER set true here (see motors_matrix_test.cpp's own
+//      dedicated "never re-arms" test).
+//
+// A REAL, CONFIRMED UPSTREAM BUG - FIXED, NOT REPRODUCED, PER THIS
+// PROJECT'S OWN "port fixes bugs, not upstream, register every
+// divergence" POLICY: real upstream's own `_motor_lost_index`
+// (AP_MotorsMatrix.h line 150) has NO in-class default member
+// initializer, and AP_MotorsMatrix's own constructor (AP_MotorsMatrix.h
+// lines 17-24, re-verified directly) only delegates to
+// AP_MotorsMulticopter(speed_hz) - it never assigns `_motor_lost_index`
+// either. Real upstream therefore reads this uint8_t as
+// indeterminate/uninitialized memory until check_for_failed_motor itself
+// first writes it - a real, latent bug (an uninitialized-read), not an
+// intentional design choice. This port's own motor_lost_index_ is
+// instead given a real, DEFINED initial value of 0 (see the private
+// member declaration below) - confirmed harmless for this ticket's own
+// scope, since every real use of _motor_lost_index elsewhere in upstream
+// (AP_MotorsMatrix::get_lost_motor(), read by a higher-level thrust-boost
+// consumer this port has not built) is itself gated behind thrust_boost
+// being true first, and thrust_boost_ starts false (AP_Motors_Class.cpp
+// lines 54-55, re-verified directly) - so a defined-but-arbitrary initial
+// motor_lost_index_ value of 0 can never be observed as a "real"
+// lost-motor index before check_for_failed_motor itself has run at least
+// once and set thrust_boost_ true via some future caller. Disclosed here
+// and in the commit message, per policy - NOT a silent fix.
+//
+// active_frame_type_ TRACKING - DESIGN DECISION: real upstream's
+// _active_frame_type is written by AP_MotorsMatrix::init() (line 27) and
+// AP_MotorsMatrix::set_frame_class_and_type() (line 137) - re-verified
+// directly that the ALREADY-PORTED setup_motors (CCP-009, real function
+// lines 1290-1349) does NOT itself write _active_frame_type anywhere;
+// only those two other, still-unported functions do. Modifying the
+// already-verified, faithfully-transcribed setup_motors to ALSO record
+// active_frame_type_ would therefore not match what real upstream's own
+// setup_motors does. This ticket instead adds a standalone
+// set_active_frame_type() setter (see public accessors below) - tests
+// call it directly, matching upstream's own real init()/
+// set_frame_class_and_type() as the true (still-unported) setters of
+// this state. active_frame_type_ itself is given a defined default of
+// FrameType::Plus (upstream's own _active_frame_type field has no
+// in-class initializer either - a second, lower-stakes instance of the
+// same indeterminate-member pattern as _motor_lost_index above, though
+// not one the ticket specifically asked to fix; giving it a real default
+// here just continues this class's own established convention of never
+// leaving a member indeterminate, matching every other field in this
+// class).
+//
+// thr_lin_ MEMBER - this port's own MotorsMatrix had no
+// ThrustLinearization (CCP-010) dependency before this ticket; real
+// upstream's own AP_MotorsMulticopter (the base class) owns `thr_lin`,
+// and AP_MotorsMatrix inherits access to it. This port has no such base
+// class yet, so a ThrustLinearization instance is added directly as a
+// MotorsMatrix member instead (thr_lin_ below) - the smallest change
+// that lets this ticket's own get_compensation_gain() call be real
+// rather than stubbed. ThrustLinearization's own deleted copy
+// constructor/assignment (see thrust_linearization.hpp) makes
+// MotorsMatrix itself non-copyable as a result - confirmed harmless: no
+// existing test or caller copies a MotorsMatrix instance.
+//
+// PARAMETER SHAPE - check_for_failed_motor(throttle_thrust_best_plus_adj,
+// throttle_thrust_max, dt_s, air_density_ratio): dt_s and
+// air_density_ratio are explicit parameters per this ticket's own
+// instruction and CCP-010's own established explicit-parameter
+// convention (no AHRS/dt-source singleton - ADR-0012). throttle_thrust_max
+// is ALSO taken as an explicit parameter, beyond what the ticket's own
+// suggested signature named: real upstream's step 6 reads
+// `_throttle_thrust_max`, a real AP_MotorsMulticopter-level member this
+// port has not built yet (part of the deferred output-stage
+// infrastructure - see updated "DEFERRED FUTURE PHASES" below) -
+// surfacing it as an explicit caller-supplied parameter here, rather
+// than inventing a placeholder member or hardcoding a value, matches
+// this file's own established pattern (see ThrustLinearization's own
+// explicit-parameter treatment of AP::battery()/AP::ahrs() state it does
+// not own either).
+//
+// TEST-ONLY GAP, DISCLOSED: output_armed_stabilizing (not yet built -
+// see updated "DEFERRED FUTURE PHASES" below) is upstream's real, sole
+// writer of thrust_rpyt_out_ before check_for_failed_motor's own real
+// call-order contract expects it to run. Since this port has no
+// output_armed_stabilizing yet, a bounds-checked set_thrust_rpyt_out()
+// setter is added purely so tests can populate thrust_rpyt_out_ directly
+// - a real, temporary gap a LATER ticket (the one that actually builds
+// output_armed_stabilizing) closes by computing and writing these values
+// for real before calling this function, exactly matching upstream's own
+// call-order contract.
+//
 // DEFERRED FUTURE PHASES (named explicitly, not silently omitted):
 //   1. Remaining frame tables - setup_quad_matrix (line 576) is DONE as of
 //      CCP-002, setup_hexa_matrix (line 775) is DONE as of CCP-003,
@@ -899,14 +1031,20 @@
 //      findings - the X8 co-rotating scaling and its real float-vs-double
 //      pitfall - were independently re-verified and resolved by CCP-005;
 //      also not deferred further.)
-//   2. Output stage (output_to_motors, output_armed_stabilizing,
-//      check_for_failed_motor, thrust_compensation, disable_yaw_torque) -
-//      a separate, deliberately deferred future phase, NOT started by
-//      this ticket. Needs real thrust-linearization/battery-compensation
-//      infrastructure this port has not built yet (the future C++
-//      analogue of copter-rust's already-done COP-006), plus real
-//      current-limiting. This is also where add_motor_num()'s real
-//      SRV_Channels registration belongs (see NO-OP above).
+//   2. Output stage - check_for_failed_motor is DONE as of CCP-011 (see
+//      "CCP-011 ADDITION" above). output_to_motors, output_armed_
+//      stabilizing, thrust_compensation, and disable_yaw_torque remain
+//      separate, deliberately deferred future phases, NOT started by
+//      this ticket. output_armed_stabilizing and output_to_motors in
+//      particular need substantial new AP_MotorsMulticopter-level
+//      infrastructure this port has not built yet: a SpoolState state
+//      machine, actuator slew-rate limiting, and PWM output plumbing.
+//      The full thrust-boost MECHANISM itself (whatever sets
+//      thrust_boost_ true, and whatever reacts to get_lost_motor()) is
+//      also deferred - this ticket only ported the thrust_boost_-
+//      reading/off-switching logic INSIDE check_for_failed_motor, not
+//      the rest of the mechanism. This is also where add_motor_num()'s
+//      real SRV_Channels registration belongs (see NO-OP above).
 //   3. set_throttle_factor/set_update_rate/set_frame_class_and_type/
 //      output_test_num/_output_test_seq/get_factors - small real
 //      accessors/setters not needed by this ticket's own core scope; add
@@ -930,6 +1068,7 @@
 #include <string>
 
 #include <fwcpp/math/scalar.hpp>
+#include <fwcpp/motors/thrust_linearization.hpp>
 
 namespace fwcpp::motors {
 
@@ -2247,6 +2386,103 @@ public:
     [[nodiscard]] const std::string& frame_type_string() const { return frame_type_string_; }
     [[nodiscard]] const std::string& frame_class_string() const { return frame_class_string_; }
 
+    // check_for_failed_motor - CCP-011 port of upstream
+    // AP_MotorsMatrix::check_for_failed_motor (real function lines
+    // 414-461). See file banner's "CCP-011 ADDITION" for the full
+    // six-step structure, the disclosed motor_lost_index_ bug-fix, the
+    // active_frame_type_/thr_lin_ design decisions, and the
+    // throttle_thrust_max parameter-shape rationale - all re-verified
+    // directly against the real source, not trusted from the ticket's
+    // own summary.
+    void check_for_failed_motor(float throttle_thrust_best_plus_adj, float throttle_thrust_max, float dt_s,
+                                 float air_density_ratio) {
+        // Step 1/2: record filtered and scaled thrust output for motor
+        // loss monitoring purposes - the real, non-standard alpha formula
+        // (NOT math::calc_lowpass_alpha_dt - see file banner).
+        const float alpha = dt_s / (dt_s + 0.5f);
+        for (std::size_t i = 0; i < kMaxNumMotors; ++i) {
+            if (motor_enabled_[i]) {
+                thrust_rpyt_out_filt_[i] += alpha * (thrust_rpyt_out_[i] - thrust_rpyt_out_filt_[i]);
+            }
+        }
+
+        // Step 3: second, separate pass - rpyt_high/rpyt_sum/number_motors,
+        // plus the thrust_boost_-gated motor_lost_index_ update.
+        float rpyt_high = 0.0f;
+        float rpyt_sum = 0.0f;
+        std::uint8_t number_motors = 0;
+        for (std::size_t i = 0; i < kMaxNumMotors; ++i) {
+            if (motor_enabled_[i]) {
+                number_motors += 1;
+                rpyt_sum += thrust_rpyt_out_filt_[i];
+                // record highest filtered thrust command
+                if (thrust_rpyt_out_filt_[i] > rpyt_high) {
+                    rpyt_high = thrust_rpyt_out_filt_[i];
+                    // hold motor lost index constant while thrust boost is active
+                    if (!thrust_boost_) {
+                        motor_lost_index_ = static_cast<std::uint8_t>(i);
+                    }
+                }
+            }
+        }
+
+        // Step 4.
+        float thrust_balance = 1.0f;
+        if (rpyt_sum > 0.1f) {
+            thrust_balance = rpyt_high * number_motors / rpyt_sum;
+        }
+
+        // Step 5: real hysteresis - TWO separate, sequential `if`
+        // statements, not an if/else (see file banner).
+        const bool is_corotating = active_frame_type_ == FrameType::XCor || active_frame_type_ == FrameType::CwXCor;
+        if (number_motors >= 6 && thrust_balance >= 1.5f && thrust_balanced_ && !is_corotating) {
+            thrust_balanced_ = false;
+        }
+        if (thrust_balance <= 1.25f && !thrust_balanced_) {
+            thrust_balanced_ = true;
+        }
+
+        // Step 6: the ONLY place thrust_boost_ is assigned in this
+        // function - never set true here.
+        if ((throttle_thrust_max * thr_lin_.get_compensation_gain(air_density_ratio) > throttle_thrust_best_plus_adj) &&
+            (rpyt_high < 0.9f) && thrust_balanced_) {
+            thrust_boost_ = false;
+        }
+    }
+
+    // Test-only mutators (CCP-011) - see file banner's "TEST-ONLY GAP,
+    // DISCLOSED" and "active_frame_type_ TRACKING" sections: this port
+    // has no output_armed_stabilizing yet to populate thrust_rpyt_out_
+    // for real, and no init()/set_frame_class_and_type() yet to record
+    // active_frame_type_ for real, so both are directly settable here.
+    void set_thrust_rpyt_out(std::uint8_t i, float value) {
+        if (i < kMaxNumMotors) {
+            thrust_rpyt_out_[i] = value;
+        }
+    }
+    void set_active_frame_type(FrameType frame_type) { active_frame_type_ = frame_type; }
+    void set_thrust_boost(bool value) { thrust_boost_ = value; }
+    void set_thrust_balanced(bool value) { thrust_balanced_ = value; }
+
+    // Read accessors for check_for_failed_motor's own new state
+    // (CCP-011) - bounds-checked per this class's own established
+    // convention (see "Accessors" comment below).
+    [[nodiscard]] float thrust_rpyt_out(std::uint8_t i) const { return i < kMaxNumMotors ? thrust_rpyt_out_[i] : 0.0f; }
+    [[nodiscard]] float thrust_rpyt_out_filt(std::uint8_t i) const {
+        return i < kMaxNumMotors ? thrust_rpyt_out_filt_[i] : 0.0f;
+    }
+    [[nodiscard]] FrameType active_frame_type() const { return active_frame_type_; }
+    [[nodiscard]] bool thrust_boost() const { return thrust_boost_; }
+    [[nodiscard]] bool thrust_balanced() const { return thrust_balanced_; }
+    [[nodiscard]] std::uint8_t motor_lost_index() const { return motor_lost_index_; }
+    // Exposes the CCP-010 ThrustLinearization dependency directly (see
+    // file banner's "thr_lin_ MEMBER") - lets tests exercise a real,
+    // non-default get_compensation_gain() (e.g. via
+    // update_lift_max_from_batt_voltage) rather than only ever observing
+    // the default lift_max_ == 1.0 path.
+    [[nodiscard]] ThrustLinearization& thrust_linearization() { return thr_lin_; }
+    [[nodiscard]] const ThrustLinearization& thrust_linearization() const { return thr_lin_; }
+
     // Accessors - not upstream methods (upstream reaches these fields as
     // protected member arrays from within the class hierarchy itself, or
     // via the small get_factors() accessor this ticket deliberately does
@@ -2276,6 +2512,29 @@ private:
     std::array<float, kMaxNumMotors> yaw_factor_{};
     std::array<float, kMaxNumMotors> throttle_factor_{};
     std::array<std::uint8_t, kMaxNumMotors> test_order_{};
+
+    // CCP-011 additions - see file banner's "CCP-011 ADDITION" for the
+    // full rationale of each initial value below.
+    std::array<float, kMaxNumMotors> thrust_rpyt_out_{};
+    std::array<float, kMaxNumMotors> thrust_rpyt_out_filt_{};
+    bool thrust_boost_ = false;   // AP_Motors_Class.cpp line 54, re-verified directly.
+    bool thrust_balanced_ = true; // AP_Motors_Class.cpp line 55, re-verified directly.
+    // DISCLOSED BUG FIX (NOT reproduced from upstream) - real upstream's
+    // own _motor_lost_index has no in-class initializer and is never
+    // assigned in the constructor, so it reads as indeterminate memory
+    // until check_for_failed_motor's own first write. This port instead
+    // gives it a real, defined initial value of 0 - confirmed harmless,
+    // see file banner.
+    std::uint8_t motor_lost_index_ = 0;
+    // Real upstream's own _active_frame_type also has no in-class
+    // initializer; given a real default here too, per this class's own
+    // convention of never leaving a member indeterminate (see file
+    // banner).
+    FrameType active_frame_type_ = FrameType::Plus;
+    // CCP-010's ThrustLinearization, held directly since this port has no
+    // AP_MotorsMulticopter base class to inherit `thr_lin` from yet (see
+    // file banner's "thr_lin_ MEMBER").
+    ThrustLinearization thr_lin_;
 };
 
 } // namespace fwcpp::motors

@@ -2259,3 +2259,256 @@ TEST_CASE("setup_motors: re-configuring with a DIFFERENT frame class/type leaves
     REQUIRE(m.test_order(7) == 3);
 }
 
+// ---------------------------------------------------------------------
+// check_for_failed_motor (CCP-011) - port of upstream
+// AP_MotorsMatrix::check_for_failed_motor (real function lines 414-461).
+// See motors_matrix.hpp's own file banner ("CCP-011 ADDITION") for the
+// full six-step structure, the disclosed motor_lost_index_ bug-fix
+// (real upstream's own _motor_lost_index is indeterminate until first
+// write - this port gives it a defined 0 instead), and the
+// active_frame_type_/thr_lin_/throttle_thrust_max design decisions.
+//
+// Every test below builds its own enabled-motor set directly via
+// add_motor_raw (never via setup_motors/setup_*_matrix) so the motor
+// count and per-motor thrust are fully explicit and independent of any
+// particular frame table. Most tests pass a deliberately huge dt_s
+// (1.0e6f) so alpha = dt_s / (dt_s + 0.5f) is within ~5e-7 of 1.0 -
+// this snaps thrust_rpyt_out_filt_ to thrust_rpyt_out_ in a single call,
+// isolating the balance/lost-index/thrust-boost logic under test from
+// the filter's own convergence behavior (covered separately by the
+// first test below).
+// ---------------------------------------------------------------------
+
+TEST_CASE("check_for_failed_motor: thrust_boost_ defaults to false and thrust_balanced_ defaults to true, "
+          "matching upstream's real AP_Motors_Class.cpp constructor (lines 54-55)",
+          "[motors][check_for_failed_motor]") {
+    MotorsMatrix m;
+    REQUIRE_FALSE(m.thrust_boost());
+    REQUIRE(m.thrust_balanced());
+}
+
+TEST_CASE("check_for_failed_motor: motor_lost_index_ starts at a defined value (0), not indeterminate - "
+          "regression test for the disclosed upstream uninitialized-read bug fix (see file banner)",
+          "[motors][check_for_failed_motor][bugfix]") {
+    MotorsMatrix m;
+    // Fresh instance, before check_for_failed_motor has ever run and
+    // before thrust_boost_ has ever been set true. Real upstream's own
+    // _motor_lost_index (AP_MotorsMatrix.h line 150) has no in-class
+    // initializer and is never assigned in the constructor, so it would
+    // read as indeterminate memory here - this port's own
+    // motor_lost_index_ must instead read a real, defined 0.
+    REQUIRE(m.motor_lost_index() == 0);
+}
+
+TEST_CASE("check_for_failed_motor: alpha uses the real dt_s/(dt_s+0.5f) formula, not a generic lowpass "
+          "helper, and the filter converges toward a fixed thrust_rpyt_out over repeated calls",
+          "[motors][check_for_failed_motor]") {
+    MotorsMatrix m;
+    m.add_motor_raw(0, 0.0f, 0.0f, 0.0f, 1);
+    m.set_thrust_rpyt_out(0, 1.0f);
+
+    const float dt_s = 0.1f;
+    const float alpha = dt_s / (dt_s + 0.5f);
+    REQUIRE(alpha == Approx(1.0f / 6.0f).margin(1e-6f));
+
+    // filt_n = filt_{n-1} + alpha * (1.0 - filt_{n-1}), starting at 0 -
+    // computed independently here (not via a closed form) to mirror the
+    // real per-call update exactly.
+    float expected_filt = 0.0f;
+    for (int call = 0; call < 5; ++call) {
+        m.check_for_failed_motor(/*throttle_thrust_best_plus_adj=*/0.0f, /*throttle_thrust_max=*/0.0f, dt_s,
+                                  /*air_density_ratio=*/1.0f);
+        expected_filt += alpha * (1.0f - expected_filt);
+        REQUIRE(m.thrust_rpyt_out_filt(0) == Approx(expected_filt).margin(1e-6f));
+    }
+    // Monotonically approaching 1.0 from below over these five calls,
+    // never overshooting - real exponential-filter convergence behavior.
+    REQUIRE(m.thrust_rpyt_out_filt(0) < 1.0f);
+    REQUIRE(m.thrust_rpyt_out_filt(0) > 0.5f);
+}
+
+TEST_CASE("check_for_failed_motor: 6+ motor imbalance (ratio >= 1.5) trips thrust_balanced_ to false, "
+          "and a later balanced call (ratio <= 1.25) recovers it to true",
+          "[motors][check_for_failed_motor]") {
+    MotorsMatrix m;
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        m.add_motor_raw(static_cast<std::int8_t>(i), 0.0f, 0.0f, 0.0f, static_cast<std::uint8_t>(i + 1));
+    }
+    REQUIRE(m.thrust_balanced()); // real upstream default (AP_Motors_Class.cpp line 55)
+
+    // Motor 0 at 2.0, the other five at 1.0: rpyt_high=2.0, rpyt_sum=7.0,
+    // number_motors=6 -> thrust_balance = 2.0*6/7.0 ~= 1.714, well above
+    // the 1.5 trip threshold.
+    const float huge_dt_s = 1.0e6f;
+    m.set_thrust_rpyt_out(0, 2.0f);
+    for (std::uint8_t i = 1; i < 6; ++i) {
+        m.set_thrust_rpyt_out(i, 1.0f);
+    }
+    m.check_for_failed_motor(0.0f, 0.0f, huge_dt_s, 1.0f);
+    REQUIRE_FALSE(m.thrust_balanced());
+
+    // Recovery: all six motors now balanced at 1.0 -> thrust_balance ==
+    // 1.0, at/below the 1.25 recovery threshold.
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        m.set_thrust_rpyt_out(i, 1.0f);
+    }
+    m.check_for_failed_motor(0.0f, 0.0f, huge_dt_s, 1.0f);
+    REQUIRE(m.thrust_balanced());
+}
+
+TEST_CASE("check_for_failed_motor: a ratio strictly between 1.25 and 1.5 is a real dead zone - it "
+          "changes thrust_balanced_ in NEITHER direction",
+          "[motors][check_for_failed_motor]") {
+    MotorsMatrix m;
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        m.add_motor_raw(static_cast<std::int8_t>(i), 0.0f, 0.0f, 0.0f, static_cast<std::uint8_t>(i + 1));
+    }
+    const float huge_dt_s = 1.0e6f;
+
+    // Motor 0 at 1.45, the other five at 1.0: thrust_balance ==
+    // 6*1.45/(1.45+5.0) ~= 1.3488, strictly inside (1.25, 1.5).
+    auto set_dead_zone_thrusts = [&m]() {
+        m.set_thrust_rpyt_out(0, 1.45f);
+        for (std::uint8_t i = 1; i < 6; ++i) {
+            m.set_thrust_rpyt_out(i, 1.0f);
+        }
+    };
+
+    // Starting thrust_balanced_ == true (the default): the dead-zone
+    // ratio does not satisfy `thrust_balance >= 1.5f`, so it must stay
+    // true.
+    set_dead_zone_thrusts();
+    REQUIRE(m.thrust_balanced());
+    m.check_for_failed_motor(0.0f, 0.0f, huge_dt_s, 1.0f);
+    REQUIRE(m.thrust_balanced());
+
+    // Starting thrust_balanced_ == false: the same dead-zone ratio does
+    // not satisfy `thrust_balance <= 1.25f` either, so it must stay
+    // false.
+    m.set_thrust_balanced(false);
+    set_dead_zone_thrusts();
+    m.check_for_failed_motor(0.0f, 0.0f, huge_dt_s, 1.0f);
+    REQUIRE_FALSE(m.thrust_balanced());
+}
+
+TEST_CASE("check_for_failed_motor: co-rotating frame types (XCor/CwXCor) suppress the imbalance trip "
+          "that would otherwise fire for the exact same inputs",
+          "[motors][check_for_failed_motor]") {
+    const float huge_dt_s = 1.0e6f;
+
+    MotorsMatrix m_xcor;
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        m_xcor.add_motor_raw(static_cast<std::int8_t>(i), 0.0f, 0.0f, 0.0f, static_cast<std::uint8_t>(i + 1));
+    }
+    m_xcor.set_active_frame_type(MotorsMatrix::FrameType::XCor);
+    m_xcor.set_thrust_rpyt_out(0, 2.0f); // same imbalanced scenario as the
+    for (std::uint8_t i = 1; i < 6; ++i) { // >= 1.5 trip test above
+        m_xcor.set_thrust_rpyt_out(i, 1.0f);
+    }
+    m_xcor.check_for_failed_motor(0.0f, 0.0f, huge_dt_s, 1.0f);
+    REQUIRE(m_xcor.thrust_balanced()); // still true - is_corotating suppressed the trip
+
+    MotorsMatrix m_cwxcor;
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        m_cwxcor.add_motor_raw(static_cast<std::int8_t>(i), 0.0f, 0.0f, 0.0f, static_cast<std::uint8_t>(i + 1));
+    }
+    m_cwxcor.set_active_frame_type(MotorsMatrix::FrameType::CwXCor);
+    m_cwxcor.set_thrust_rpyt_out(0, 2.0f);
+    for (std::uint8_t i = 1; i < 6; ++i) {
+        m_cwxcor.set_thrust_rpyt_out(i, 1.0f);
+    }
+    m_cwxcor.check_for_failed_motor(0.0f, 0.0f, huge_dt_s, 1.0f);
+    REQUIRE(m_cwxcor.thrust_balanced());
+}
+
+TEST_CASE("check_for_failed_motor: fewer than 6 enabled motors never trips thrust_balanced_ to false, "
+          "regardless of ratio",
+          "[motors][check_for_failed_motor]") {
+    MotorsMatrix m;
+    for (std::uint8_t i = 0; i < 5; ++i) {
+        m.add_motor_raw(static_cast<std::int8_t>(i), 0.0f, 0.0f, 0.0f, static_cast<std::uint8_t>(i + 1));
+    }
+    // Motor 0 at 2.0, the other four at 1.0: rpyt_high=2.0, rpyt_sum=6.0,
+    // number_motors=5 -> thrust_balance = 2.0*5/6.0 ~= 1.667, itself well
+    // above the 1.5 threshold - but number_motors < 6 must suppress the
+    // trip regardless.
+    m.set_thrust_rpyt_out(0, 2.0f);
+    for (std::uint8_t i = 1; i < 5; ++i) {
+        m.set_thrust_rpyt_out(i, 1.0f);
+    }
+    m.check_for_failed_motor(0.0f, 0.0f, 1.0e6f, 1.0f);
+    REQUIRE(m.thrust_balanced());
+}
+
+TEST_CASE("check_for_failed_motor: motor_lost_index_ tracks the highest-filtered motor across calls, "
+          "and is frozen while thrust_boost_ is true",
+          "[motors][check_for_failed_motor]") {
+    MotorsMatrix m;
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        m.add_motor_raw(static_cast<std::int8_t>(i), 0.0f, 0.0f, 0.0f, static_cast<std::uint8_t>(i + 1));
+    }
+    const float huge_dt_s = 1.0e6f;
+
+    // Motor 3 is highest.
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        m.set_thrust_rpyt_out(i, i == 3 ? 5.0f : 1.0f);
+    }
+    m.check_for_failed_motor(0.0f, 0.0f, huge_dt_s, 1.0f);
+    REQUIRE(m.motor_lost_index() == 3);
+
+    // Now motor 5 becomes highest - motor_lost_index_ must move to 5,
+    // since thrust_boost_ is still false.
+    REQUIRE_FALSE(m.thrust_boost());
+    m.set_thrust_rpyt_out(5, 9.0f);
+    m.check_for_failed_motor(0.0f, 0.0f, huge_dt_s, 1.0f);
+    REQUIRE(m.motor_lost_index() == 5);
+
+    // Freeze: enable thrust_boost_, then make motor 0 the new highest -
+    // motor_lost_index_ must NOT move off 5 ("hold motor lost index
+    // constant while thrust boost is active" - upstream's own comment).
+    m.set_thrust_boost(true);
+    m.set_thrust_rpyt_out(0, 20.0f);
+    m.check_for_failed_motor(0.0f, 0.0f, huge_dt_s, 1.0f);
+    REQUIRE(m.motor_lost_index() == 5);
+}
+
+TEST_CASE("check_for_failed_motor: sets thrust_boost_ false when throttle headroom is available, "
+          "rpyt_high is below 0.9, and thrust is balanced - and only ever sets it false, never true",
+          "[motors][check_for_failed_motor]") {
+    MotorsMatrix m;
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        m.add_motor_raw(static_cast<std::int8_t>(i), 0.0f, 0.0f, 0.0f, static_cast<std::uint8_t>(i + 1));
+        m.set_thrust_rpyt_out(i, 0.1f); // rpyt_high stays well below 0.9 after filtering
+    }
+    m.set_thrust_boost(true);
+    REQUIRE(m.thrust_balanced()); // default true, unaffected by this balanced input
+
+    // air_density_ratio=1.0f -> get_compensation_gain() == 1.0f here:
+    // lift_max_ defaults to 1.0 (1/lift_max_ == 1.0), and 1.0 is inside
+    // the (0.3, 1.5) density gate but constrain_value(1.0, 0.5, 1.25) ==
+    // 1.0 is itself a no-op multiplier - so the first condition reduces
+    // to throttle_thrust_max > throttle_thrust_best_plus_adj.
+    m.check_for_failed_motor(/*throttle_thrust_best_plus_adj=*/0.5f, /*throttle_thrust_max=*/1.0f, 1.0e6f,
+                              /*air_density_ratio=*/1.0f);
+    REQUIRE_FALSE(m.thrust_boost());
+
+    // Once false, feed the exact same inputs again (every condition this
+    // function checks is satisfied) - thrust_boost_ must stay false,
+    // since this function never assigns it true anywhere.
+    m.check_for_failed_motor(0.5f, 1.0f, 1.0e6f, 1.0f);
+    REQUIRE_FALSE(m.thrust_boost());
+
+    // Negative control: starting thrust_boost_ true again, but with the
+    // headroom condition FALSE (throttle_thrust_max below
+    // throttle_thrust_best_plus_adj) - thrust_boost_ must remain true,
+    // proving the three-way AND is not vacuously satisfied.
+    MotorsMatrix m2;
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        m2.add_motor_raw(static_cast<std::int8_t>(i), 0.0f, 0.0f, 0.0f, static_cast<std::uint8_t>(i + 1));
+        m2.set_thrust_rpyt_out(i, 0.1f);
+    }
+    m2.set_thrust_boost(true);
+    m2.check_for_failed_motor(/*throttle_thrust_best_plus_adj=*/0.9f, /*throttle_thrust_max=*/0.5f, 1.0e6f, 1.0f);
+    REQUIRE(m2.thrust_boost());
+}
+
