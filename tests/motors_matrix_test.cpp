@@ -671,3 +671,150 @@ TEST_CASE("setup_quad_matrix: an out-of-range frame type hits the real SIMPLE de
         REQUIRE_FALSE(m.motor_enabled(i));
     }
 }
+
+// =======================================================================
+// CCP-003: setup_hexa_matrix - every real in-scope frame type, checked
+// against hand-computed values from the real upstream angle/factor
+// inputs (AP_MotorsMatrix.cpp lines 775-851). Angle-based frames reuse
+// checkAngleFrame() above (same real add_motor formula); H uses raw
+// (roll_fac, pitch_fac) pairs, checked by direct value comparison the
+// same way setup_quad_matrix's own Y4 test above checks its raw factors.
+// All five of hexa's real frame types (PLUS/X/H/DJI_X/CW_X) reuse
+// FrameType enumerators setup_quad_matrix's own tests above already
+// exercise - see motors_matrix.hpp's file banner "CCP-003 ADDITION" for
+// the enum-sharing investigation this reflects.
+// =======================================================================
+
+TEST_CASE("setup_hexa_matrix: PLUS matches hand-computed angle/yaw/test_order", "[motors][setup_hexa_matrix][plus]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_hexa_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(m.frame_class_string() == "HEXA");
+    REQUIRE(m.frame_type_string() == "PLUS");
+    const AngleMotor expected[] = {
+        {0.0f, kYawFactorCw, 1},   {180.0f, kYawFactorCcw, 4}, {-120.0f, kYawFactorCw, 5},
+        {60.0f, kYawFactorCcw, 2}, {-60.0f, kYawFactorCcw, 6}, {120.0f, kYawFactorCw, 3},
+    };
+    checkAngleFrame(m, expected, 6);
+}
+
+TEST_CASE("setup_hexa_matrix: X matches hand-computed angle/yaw/test_order", "[motors][setup_hexa_matrix][x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_hexa_matrix(MotorsMatrix::FrameType::X));
+    REQUIRE(m.frame_type_string() == "X");
+    const AngleMotor expected[] = {
+        {90.0f, kYawFactorCw, 2},  {-90.0f, kYawFactorCcw, 5}, {-30.0f, kYawFactorCw, 6},
+        {150.0f, kYawFactorCcw, 3}, {30.0f, kYawFactorCcw, 1}, {-150.0f, kYawFactorCw, 4},
+    };
+    checkAngleFrame(m, expected, 6);
+}
+
+TEST_CASE("setup_hexa_matrix: H uses real explicit raw roll/pitch pairs, not angle degrees, and matches exactly",
+          "[motors][setup_hexa_matrix][h]") {
+    // Upstream's own comment: "H is same as X except middle motors are
+    // closer to center" - confirmed directly this is add_motors_raw with
+    // real (roll_fac, pitch_fac) pairs, unlike quad's own angle-based H.
+    MotorsMatrix m;
+    REQUIRE(m.setup_hexa_matrix(MotorsMatrix::FrameType::H));
+    REQUIRE(m.frame_type_string() == "H");
+
+    struct RawMotor {
+        float roll_fac;
+        float pitch_fac;
+        float yaw_fac;
+        std::uint8_t test_order;
+    };
+    const RawMotor expected[] = {
+        {-1.0f, 0.0f, kYawFactorCw, 2},  {1.0f, 0.0f, kYawFactorCcw, 5}, {1.0f, 1.0f, kYawFactorCw, 6},
+        {-1.0f, -1.0f, kYawFactorCcw, 3}, {-1.0f, 1.0f, kYawFactorCcw, 1}, {1.0f, -1.0f, kYawFactorCw, 4},
+    };
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        INFO("motor index " << static_cast<int>(i));
+        REQUIRE(m.motor_enabled(i));
+        REQUIRE(m.roll_factor(i) == Approx(expected[i].roll_fac));
+        REQUIRE(m.pitch_factor(i) == Approx(expected[i].pitch_fac));
+        REQUIRE(m.yaw_factor(i) == Approx(expected[i].yaw_fac));
+        REQUIRE(m.test_order(i) == expected[i].test_order);
+    }
+}
+
+TEST_CASE("setup_hexa_matrix: DJI_X matches hand-computed angle/yaw/test_order", "[motors][setup_hexa_matrix][dji_x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_hexa_matrix(MotorsMatrix::FrameType::DjiX));
+    REQUIRE(m.frame_type_string() == "DJI_X");
+    const AngleMotor expected[] = {
+        {30.0f, kYawFactorCcw, 1},  {-30.0f, kYawFactorCw, 6}, {-90.0f, kYawFactorCcw, 5},
+        {-150.0f, kYawFactorCw, 4}, {150.0f, kYawFactorCcw, 3}, {90.0f, kYawFactorCw, 2},
+    };
+    checkAngleFrame(m, expected, 6);
+}
+
+TEST_CASE("setup_hexa_matrix: CW_X matches hand-computed angle/yaw/test_order", "[motors][setup_hexa_matrix][cw_x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_hexa_matrix(MotorsMatrix::FrameType::CwX));
+    REQUIRE(m.frame_type_string() == "CW_X");
+    const AngleMotor expected[] = {
+        {30.0f, kYawFactorCcw, 1}, {90.0f, kYawFactorCw, 2},   {150.0f, kYawFactorCcw, 3},
+        {-150.0f, kYawFactorCw, 4}, {-90.0f, kYawFactorCcw, 5}, {-30.0f, kYawFactorCw, 6},
+    };
+    checkAngleFrame(m, expected, 6);
+}
+
+TEST_CASE("setup_hexa_matrix: returns true for every real in-scope frame type and sets frame_class_string to HEXA",
+          "[motors][setup_hexa_matrix]") {
+    const MotorsMatrix::FrameType all_types[] = {
+        MotorsMatrix::FrameType::Plus, MotorsMatrix::FrameType::X,    MotorsMatrix::FrameType::H,
+        MotorsMatrix::FrameType::DjiX, MotorsMatrix::FrameType::CwX,
+    };
+    for (const auto ft : all_types) {
+        MotorsMatrix m;
+        REQUIRE(m.setup_hexa_matrix(ft));
+        REQUIRE(m.frame_class_string() == "HEXA");
+        // Every real frame type populates all six motor slots 0-5 (hexa
+        // has six motors, unlike setup_quad_matrix's own four).
+        for (std::uint8_t i = 0; i < 6; ++i) {
+            REQUIRE(m.motor_enabled(i));
+        }
+    }
+}
+
+TEST_CASE("setup_hexa_matrix: an out-of-range frame type hits the real SIMPLE default branch and returns false",
+          "[motors][setup_hexa_matrix][default]") {
+    // Confirms the real upstream default case ("hexa frame class does not
+    // support this frame type; return false;") - the simple kind, same
+    // as setup_quad_matrix's own, not setup_y6_matrix's own productive
+    // default (a separate, later-ticket concern per COP-005).
+    MotorsMatrix m;
+    REQUIRE_FALSE(m.setup_hexa_matrix(static_cast<MotorsMatrix::FrameType>(255)));
+    for (std::uint8_t i = 0; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+    }
+}
+
+TEST_CASE("setup_hexa_matrix: PLUS reuses the SAME FrameType enumerator as setup_quad_matrix's own PLUS, "
+          "but yields hexa-specific values on a six-motor table",
+          "[motors][setup_hexa_matrix][setup_quad_matrix][plus]") {
+    // Direct evidence for the file banner's enum-sharing investigation:
+    // MotorsMatrix::FrameType::Plus is the literal same C++ enumerator
+    // passed to both functions (mirroring upstream's real single shared
+    // motor_frame_type enum), yet each function's own frame table
+    // produces its own real, different numeric results - dispatch is by
+    // which FUNCTION is called (i.e. which real motor_frame_class the
+    // caller selected), not by a hexa-specific enumerator value.
+    MotorsMatrix quad;
+    MotorsMatrix hexa;
+    REQUIRE(quad.setup_quad_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(hexa.setup_hexa_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(quad.frame_class_string() == "QUAD");
+    REQUIRE(hexa.frame_class_string() == "HEXA");
+    // Quad's PLUS motor 0 sits at 90 degrees (yaw CCW); hexa's PLUS
+    // motor 0 sits at 0 degrees (yaw CW) - genuinely different real
+    // tables behind the same enumerator.
+    REQUIRE(quad.roll_factor(0) != Approx(hexa.roll_factor(0)));
+    REQUIRE(quad.yaw_factor(0) == Approx(kYawFactorCcw));
+    REQUIRE(hexa.yaw_factor(0) == Approx(kYawFactorCw));
+    // Hexa populates two motor slots quad never touches.
+    REQUIRE_FALSE(quad.motor_enabled(4));
+    REQUIRE_FALSE(quad.motor_enabled(5));
+    REQUIRE(hexa.motor_enabled(4));
+    REQUIRE(hexa.motor_enabled(5));
+}
