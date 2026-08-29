@@ -494,6 +494,11 @@ add_executable(update_wpnav_test update_wpnav_test.cpp)
 target_link_libraries(update_wpnav_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
 catch_discover_tests(update_wpnav_test)
 
+# CCP-028 slice 3: advance_wp_target_along_track / update_track_with_speed_accel_limits
+add_executable(advance_wp_target_test advance_wp_target_test.cpp)
+target_link_libraries(advance_wp_target_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
+catch_discover_tests(advance_wp_target_test)
+
 
 add_executable(quadplane_setup_test quadplane_setup_test.cpp)
 target_link_libraries(quadplane_setup_test PRIVATE ap-quadplane Catch2::Catch2WithMain)

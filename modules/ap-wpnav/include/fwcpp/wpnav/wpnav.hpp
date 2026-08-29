@@ -23,11 +23,12 @@
 //   AC_WPNav_OA.{h,cpp} — obstacle avoidance variant, separate scope
 //   AC_Loiter → loiter.hpp ; AC_Circle → circle.hpp
 //
-// Parity tests still to port (Rust): advance_wp_target.rs, set_spline_*.rs,
-// wpnav_leftover.rs
+// Parity tests still to port (Rust): set_spline_*.rs, wpnav_leftover.rs
 //
 // ADR-0004: no AHRS / PosControl / HAL millis singletons — caller supplies
 // stopping point, attitude jerk inputs, now_ms, and pos estimate for queries.
+// ADR-0012: PosControl inputs for advance/update-track are explicit context
+// structs (AdvanceWpTargetContext), not hidden singleton state.
 
 #include <cmath>
 #include <cstdint>
@@ -36,6 +37,7 @@
 
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector2.hpp>
+#include <fwcpp/math/control.hpp>
 #include <fwcpp/math/vector3.hpp>
 
 namespace fwcpp::wpnav {
@@ -80,6 +82,40 @@ struct UpdateWpNavContext {
     std::uint32_t now_ms{0};
     float dt_s{0.01f};
     std::optional<float> terrain_d_m{};
+};
+
+
+struct UpdateTrackLimitsLeftover {
+    bool need_this_spline_speed_accel{false};
+    bool need_this_scurve_speed_max{false};
+    bool need_next_spline_speed_accel{false};
+    bool need_next_scurve_speed_max{false};
+};
+
+struct AdvanceWpTargetContext {
+    float dt_s{0.01f};
+    std::optional<float> terrain_d_m{};
+    float terrain_scaler{1.0f};
+    math::Vector3<float> pos_estimate_ned_m{};
+    math::Vector3<float> pos_offset_ned_m{};
+    math::Vector3<float> vel_desired_ned_ms{};
+    float vel_offset_d_ms{0.0f};
+    math::Vector3<float> pos_error_ned_m{};
+    math::Vector3<float> vel_estimate_ned_ms{};
+    float pos_p_kp{1.0f};
+    float shaping_jerk_ne_msss{5.0f};
+    bool path_finished{false};
+};
+
+struct AdvanceWpTargetLeftover {
+    bool ok{false};
+    bool need_set_pos_terrain_target{false};
+    bool need_scurve_advance{false};
+    bool need_spline_advance{false};
+    bool need_set_pos_vel_accel{false};
+    float raw_track_dt_scalar{1.0f};
+    float vel_dt_scalar{1.0f};
+    float dt_along_track_s{0.0f};
 };
 
 struct UpdateWpNavLeftover {
@@ -340,6 +376,98 @@ public:
     void set_speed_up_ms(float speed_up_ms) { pos_speed_accel_.speed_up_ms = speed_up_ms; }
 
     void set_speed_down_ms(float speed_down_ms) { pos_speed_accel_.speed_down_ms = speed_down_ms; }
+
+    void set_pause() { paused_ = true; }
+    void set_resume() { paused_ = false; }
+    void set_fast_waypoint(bool fast) { flags_.fast_waypoint = fast; }
+
+    [[nodiscard]] bool reached_wp_destination_ne(const math::Vector3<float>& pos_estimate_ned_m) const {
+        return get_wp_distance_to_destination_m(pos_estimate_ned_m) < wp_radius_m_;
+    }
+
+    [[nodiscard]] UpdateTrackLimitsLeftover update_track_with_speed_accel_limits() const {
+        return UpdateTrackLimitsLeftover{
+            .need_this_spline_speed_accel = this_leg_is_spline_,
+            .need_this_scurve_speed_max = !this_leg_is_spline_,
+            .need_next_spline_speed_accel = next_leg_is_spline_,
+            .need_next_scurve_speed_max = !next_leg_is_spline_,
+        };
+    }
+
+    [[nodiscard]] AdvanceWpTargetLeftover advance_wp_target_along_track(AdvanceWpTargetContext ctx) {
+        AdvanceWpTargetLeftover fail{};
+        fail.raw_track_dt_scalar = 1.0f;
+        fail.vel_dt_scalar = 1.0f;
+
+        if (is_terrain_alt_ && !ctx.terrain_d_m.has_value()) {
+            return fail;
+        }
+        const float terr_offset_d_m = is_terrain_alt_ ? *ctx.terrain_d_m : 0.0f;
+
+        const float offset_d_scalar = ctx.terrain_scaler;
+
+        math::Vector3<float> curr_pos_ned_m = ctx.pos_estimate_ned_m - ctx.pos_offset_ned_m;
+        curr_pos_ned_m.z -= terr_offset_d_m;
+
+        math::Vector3<float> curr_target_vel_ned_ms = ctx.vel_desired_ned_ms;
+        curr_target_vel_ned_ms.z -= ctx.vel_offset_d_ms;
+
+        float raw_track_dt_scalar = 1.0f;
+        if (math::is_positive(curr_target_vel_ned_ms.length_squared())) {
+            const math::Vector3<float> track_direction =
+                curr_target_vel_ned_ms / curr_target_vel_ned_ms.length();
+            const float track_error_ned_m = ctx.pos_error_ned_m.dot(track_direction);
+            const float track_velocity_ned_ms = ctx.vel_estimate_ned_ms.dot(track_direction);
+            raw_track_dt_scalar = math::constrain_value(
+                0.05f + (track_velocity_ned_ms - ctx.pos_p_kp * track_error_ned_m) /
+                            curr_target_vel_ned_ms.length(),
+                0.0f, 1.0f);
+        }
+
+        float vel_dt_scalar = 1.0f;
+        if (math::is_positive(wp_desired_speed_ne_ms_)) {
+            math::update_vel_accel(offset_vel_ms_, offset_accel_mss_, ctx.dt_s, 0.0f, 0.0f);
+            const float vel_input_ms =
+                !paused_ ? wp_desired_speed_ne_ms_ * offset_d_scalar : 0.0f;
+            const float accel_min = -wp_acceleration_mss();
+            const float accel_max = wp_acceleration_mss();
+            math::shape_vel_accel(vel_input_ms, 0.0f, offset_vel_ms_, offset_accel_mss_, accel_min,
+                                  accel_max, ctx.shaping_jerk_ne_msss, ctx.dt_s, true);
+            vel_dt_scalar = offset_vel_ms_ / wp_desired_speed_ne_ms_;
+        }
+
+        float track_dt_scalar_tc = 1.0f;
+        if (!math::is_zero(wp_jerk_msss_)) {
+            track_dt_scalar_tc = wp_acceleration_mss() / wp_jerk_msss_;
+        }
+        track_dt_scalar_ +=
+            (raw_track_dt_scalar - track_dt_scalar_) * (ctx.dt_s / track_dt_scalar_tc);
+
+        const float dt_along_track_s = track_dt_scalar_ * vel_dt_scalar * ctx.dt_s;
+
+        if (!flags_.reached_destination && ctx.path_finished) {
+            if (flags_.fast_waypoint) {
+                flags_.reached_destination = true;
+            } else {
+                const math::Vector3<float> dist_to_dest_m = curr_pos_ned_m - destination_ned_m_;
+                if (dist_to_dest_m.length_squared() <= wp_radius_m_ * wp_radius_m_) {
+                    flags_.reached_destination = true;
+                }
+            }
+        }
+
+        AdvanceWpTargetLeftover leftover{};
+        leftover.ok = true;
+        leftover.need_set_pos_terrain_target = true;
+        leftover.need_scurve_advance = !this_leg_is_spline_;
+        leftover.need_spline_advance = this_leg_is_spline_;
+        leftover.need_set_pos_vel_accel = true;
+        leftover.raw_track_dt_scalar = raw_track_dt_scalar;
+        leftover.vel_dt_scalar = vel_dt_scalar;
+        leftover.dt_along_track_s = dt_along_track_s;
+        return leftover;
+    }
+
 
     [[nodiscard]] bool is_active(std::uint32_t now_ms) const {
         return (now_ms - wp_last_update_ms_) < kWpnavActiveTimeoutMs;
