@@ -629,6 +629,15 @@ add_executable(circle_init_test circle_init_test.cpp)
 target_link_libraries(circle_init_test PRIVATE ap-wpnav ap-common Catch2::Catch2WithMain)
 catch_discover_tests(circle_init_test)
 
+# CCP-028 slice 6: set_spline_destination / set_wp_destination_next
+add_executable(set_spline_destination_test set_spline_destination_test.cpp)
+target_link_libraries(set_spline_destination_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
+catch_discover_tests(set_spline_destination_test)
+
+add_executable(set_wp_destination_next_test set_wp_destination_next_test.cpp)
+target_link_libraries(set_wp_destination_next_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
+catch_discover_tests(set_wp_destination_next_test)
+
 add_executable(transition_update_test transition_update_test.cpp)
 target_link_libraries(transition_update_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
 catch_discover_tests(transition_update_test)

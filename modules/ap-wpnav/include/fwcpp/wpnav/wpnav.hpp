@@ -9,12 +9,13 @@
 //   calc_scurve_jerk_and_snap (attitude limits as injected inputs)
 //   is_active, horizontal distance/bearing helpers (pos estimate injected)
 //   set_wp_destination_NED_m / set_wp_destination_NEU_cm
+//   set_spline_destination_NED_m / set_wp_destination_next_NED_m
 //   update_wpnav (speed-param watch + advance/NE-controller leftovers)
 //   set_speed_NE/up/down_ms
 //
 // LEFTOVER / DEFERRED (future CCP-028 slices — do not assume present):
 //   convert_parameters, var_info / AP_Param glue
-//   set_spline_destination_*, set_wp_destination_next_*, force_stop_at_next_wp
+//   force_stop_at_next_wp
 //   advance_wp_target_along_track, update_track_with_speed_accel_limits
 //   terrain get_terrain_* / rangefinder, Location wrappers
 //   get_vector_NED from Location, get_wp_stopping_point_* wrappers
@@ -23,7 +24,7 @@
 //   AC_WPNav_OA.{h,cpp} — obstacle avoidance variant, separate scope
 //   AC_Loiter → loiter.hpp ; AC_Circle → circle.hpp
 //
-// Parity tests still to port (Rust): set_spline_*.rs, wpnav_leftover.rs
+// Parity tests still to port (Rust): wpnav_leftover.rs (Location/terrain/force_stop)
 //
 // ADR-0004: no AHRS / PosControl / HAL millis singletons — caller supplies
 // stopping point, attitude jerk inputs, now_ms, and pos estimate for queries.
@@ -203,6 +204,23 @@ public:
     [[nodiscard]] float last_wp_speed_up_ms() const { return last_wp_speed_up_ms_; }
     [[nodiscard]] float last_wp_speed_down_ms() const { return last_wp_speed_down_ms_; }
 
+    [[nodiscard]] bool spline_this_leg_set() const { return spline_this_leg_set_; }
+    [[nodiscard]] math::Vector3<float> spline_origin_vel_ned_ms() const { return spline_origin_vel_ned_ms_; }
+    [[nodiscard]] math::Vector3<float> spline_destination_vel_ned_ms() const {
+        return spline_destination_vel_ned_ms_;
+    }
+    [[nodiscard]] bool spline_next_leg_set() const { return spline_next_leg_set_; }
+    [[nodiscard]] math::Vector3<float> spline_next_destination_ned_m() const {
+        return spline_next_destination_ned_m_;
+    }
+    [[nodiscard]] math::Vector3<float> spline_next_origin_vel_ned_ms() const {
+        return spline_next_origin_vel_ned_ms_;
+    }
+    [[nodiscard]] math::Vector3<float> spline_next_destination_vel_ned_ms() const {
+        return spline_next_destination_vel_ned_ms_;
+    }
+    [[nodiscard]] bool need_this_leg_dest_speed_max() const { return need_this_leg_dest_speed_max_; }
+
     void set_wp_radius_m(float radius_m) { wp_radius_m_ = radius_m; }
     void set_wp_speed_ms(float speed_ms) { wp_speed_ms_ = speed_ms; }
     void set_wp_speed_up_ms(float speed_up_ms) { wp_speed_up_ms_ = speed_up_ms; }
@@ -327,6 +345,101 @@ public:
 
         return true;
     }
+
+    [[nodiscard]] bool set_spline_destination_ned_m(const math::Vector3<float>& destination_ned_m,
+                                                      bool is_terrain_alt,
+                                                      const math::Vector3<float>& next_destination_ned_m,
+                                                      bool next_is_terrain_alt, bool next_is_spline,
+                                                      SetWpDestinationContext ctx) {
+        if (!is_active(ctx.now_ms) || !flags_.reached_destination) {
+            wp_and_spline_init_m(wp_desired_speed_ne_ms_, ctx.stopping_point_ned_m, ctx.now_ms, ctx.attitude);
+        }
+
+        math::Vector3<float> origin_vector_ned_m{};
+        if (is_terrain_alt == is_terrain_alt_) {
+            if (flags_.fast_waypoint) {
+                if (this_leg_is_spline_) {
+                    origin_vector_ned_m = spline_destination_vel_ned_ms_;
+                } else {
+                    origin_vector_ned_m = destination_ned_m_ - origin_ned_m_;
+                }
+            }
+            origin_ned_m_ = destination_ned_m_;
+        } else {
+            origin_ned_m_ = destination_ned_m_;
+            if (!ctx.terrain_d_m.has_value()) {
+                return false;
+            }
+            const float terrain_d_m = *ctx.terrain_d_m;
+            if (is_terrain_alt) {
+                origin_ned_m_.z -= terrain_d_m;
+                pos_terrain_d_m_ = terrain_d_m;
+            } else {
+                origin_ned_m_.z += terrain_d_m;
+                pos_terrain_d_m_ = 0.0f;
+            }
+        }
+
+        destination_ned_m_ = destination_ned_m;
+        is_terrain_alt_ = is_terrain_alt;
+
+        math::Vector3<float> destination_vector_ned_m{};
+        if (is_terrain_alt == next_is_terrain_alt) {
+            if (next_is_spline) {
+                destination_vector_ned_m = next_destination_ned_m - origin_ned_m_;
+            } else {
+                destination_vector_ned_m = next_destination_ned_m - destination_ned_m_;
+            }
+        }
+
+        flags_.fast_waypoint = !destination_vector_ned_m.is_zero();
+        next_destination_ned_m_ = next_destination_ned_m;
+        spline_origin_vel_ned_ms_ = origin_vector_ned_m;
+        spline_destination_vel_ned_ms_ = destination_vector_ned_m;
+        spline_this_leg_set_ = true;
+        scurve_this_leg_calculated_ = false;
+        last_arc_rad_ = 0.0f;
+        this_leg_is_spline_ = true;
+        next_leg_is_spline_ = false;
+        spline_next_leg_set_ = false;
+        spline_next_destination_ned_m_ = math::Vector3<float>{};
+        spline_next_origin_vel_ned_ms_ = math::Vector3<float>{};
+        spline_next_destination_vel_ned_ms_ = math::Vector3<float>{};
+        need_this_leg_dest_speed_max_ = false;
+        scurve_next_leg_calculated_ = false;
+        last_next_arc_rad_ = 0.0f;
+        need_this_leg_dest_speed_max_zero_ = false;
+        need_next_scurve_init_ = false;
+        flags_.reached_destination = false;
+
+        return true;
+    }
+
+    [[nodiscard]] bool set_wp_destination_next_ned_m(const math::Vector3<float>& destination_ned_m,
+                                                       bool is_terrain_alt, float arc_rad) {
+        if (is_terrain_alt != is_terrain_alt_) {
+            return true;
+        }
+
+        scurve_next_leg_calculated_ = true;
+        last_next_arc_rad_ = arc_rad;
+        if (this_leg_is_spline_) {
+            need_this_leg_dest_speed_max_ = true;
+        }
+        next_leg_is_spline_ = false;
+        spline_next_leg_set_ = false;
+        spline_next_destination_ned_m_ = math::Vector3<float>{};
+        spline_next_origin_vel_ned_ms_ = math::Vector3<float>{};
+        spline_next_destination_vel_ned_ms_ = math::Vector3<float>{};
+        need_this_leg_dest_speed_max_zero_ = false;
+        need_next_scurve_init_ = false;
+
+        flags_.fast_waypoint = true;
+        next_destination_ned_m_ = destination_ned_m;
+
+        return true;
+    }
+
 
     [[nodiscard]] UpdateWpNavLeftover update_wpnav(UpdateWpNavContext ctx) {
         UpdateWpNavLeftover leftover{};
@@ -565,3 +678,4 @@ private:
 };
 
 }  // namespace fwcpp::wpnav
+
