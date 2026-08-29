@@ -567,6 +567,15 @@ add_executable(vtol_assist_recovery_test vtol_assist_recovery_test.cpp)
 target_link_libraries(vtol_assist_recovery_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
 catch_discover_tests(vtol_assist_recovery_test)
 
+# VCP-002 slice 4: Q_ASSIST_OPTIONS recovery paths + in_*_assist GCS getter stubs.
+add_executable(vtol_assist_gcs_getters_test vtol_assist_gcs_getters_test.cpp)
+target_link_libraries(vtol_assist_gcs_getters_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
+catch_discover_tests(vtol_assist_gcs_getters_test)
+
+add_executable(vtol_assist_recovery_options_test vtol_assist_recovery_options_test.cpp)
+target_link_libraries(vtol_assist_recovery_options_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
+catch_discover_tests(vtol_assist_recovery_options_test)
+
 # VCP-003 slice 1: ap-quadplane-transition FSM scaffold.
 add_executable(transition_fsm_test transition_fsm_test.cpp)
 target_link_libraries(transition_fsm_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
