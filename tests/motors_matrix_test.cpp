@@ -2668,3 +2668,498 @@ TEST_CASE("actuator_spin_up_to_ground_idle: depends on the caller-supplied spin_
     REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(ratio, 0.15f) == Approx(0.09f));
     REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(ratio, 0.20f) == Approx(0.12f));
 }
+
+// ---------------------------------------------------------------------
+// output_logic (PART 1 ONLY, CCP-013) - upstream
+// AP_MotorsMulticopter::output_logic, real function body lines 591-768
+// of the real 591-884 span. See motors_matrix.hpp's own file banner
+// "CCP-013 ADDITION" for the full structure, the corrected spool_state_/
+// spool_desired_ investigation (suspected bug, found NOT to be one),
+// the six-member uninitialized-read bug that WAS confirmed and fixed,
+// and the real same-call spoolup_block read-after-write finding.
+//
+// Per COP-004's own step-by-step verification philosophy (reused here,
+// see that file's own tracker notes, 2026-08-25: "A state machine can
+// agree at the endpoints and disagree in the middle... only a per-step
+// comparison sees that."), these tests drive the machine through many
+// successive calls and assert INTERMEDIATE state at each step, not just
+// final outcomes.
+//
+// Signature reminder (see file banner for the full rationale): output_logic(
+//   armed, interlock, disarm_disable_pwm, safe_time, spool_up_time&,
+//   spool_down_time, spin_arm, idle_time_delay_s, spin_min, spoolup_block,
+//   dt_s, limits_all_engaged&, should_set_spoolup_block&)
+// ---------------------------------------------------------------------
+
+TEST_CASE("output_logic: disarming forces immediate SHUT_DOWN of both actual and desired state, from any "
+          "prior state, with no ramp - the switch then runs the just-forced SHUT_DOWN case in the SAME call",
+          "[motors][output_logic][safety]") {
+    MotorsMatrix m;
+    m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+    m.set_spool_desired(MotorsMatrix::DesiredSpoolState::ThrottleUnlimited);
+    m.set_spin_up_ratio(0.5f);
+
+    float spool_up_time = 0.5f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    m.output_logic(/*armed=*/false, /*interlock=*/true, /*disarm_disable_pwm=*/true, /*safe_time=*/1.0f, spool_up_time,
+                    /*spool_down_time=*/0.5f, /*spin_arm=*/0.1f, /*idle_time_delay_s=*/0.5f, /*spin_min=*/0.15f,
+                    /*spoolup_block=*/false, /*dt_s=*/0.02f, limits_all_engaged, should_set_spoolup_block);
+
+    REQUIRE(m.spool_desired() == MotorsMatrix::DesiredSpoolState::ShutDown);
+    REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::ShutDown);
+    // The safety rule forces spool_state_ to ShutDown BEFORE the outer switch runs, so this same call
+    // also executes the ShutDown case body, zeroing the ramps too - not merely flipping the enum.
+    REQUIRE(m.spin_up_ratio() == Approx(0.0f));
+    REQUIRE(m.disarm_safe_timer() == Approx(0.0f));
+    REQUIRE(limits_all_engaged);
+}
+
+TEST_CASE("output_logic: an open interlock (while armed) forces the identical immediate SHUT_DOWN as "
+          "disarming",
+          "[motors][output_logic][safety]") {
+    MotorsMatrix m;
+    m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+    m.set_spool_desired(MotorsMatrix::DesiredSpoolState::ThrottleUnlimited);
+
+    float spool_up_time = 0.5f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    // armed=true but interlock=false, disarm_disable_pwm=false -> the disarm-safe-timer preamble takes
+    // its OWN "armed" branch regardless (timer logic only cares about armed(), not interlock) and jumps
+    // straight to safe_time since disarm_disable_pwm is false.
+    m.output_logic(/*armed=*/true, /*interlock=*/false, /*disarm_disable_pwm=*/false, /*safe_time=*/1.0f, spool_up_time,
+                    0.5f, 0.1f, 0.5f, 0.15f, false, /*dt_s=*/0.02f, limits_all_engaged, should_set_spoolup_block);
+
+    REQUIRE(m.spool_desired() == MotorsMatrix::DesiredSpoolState::ShutDown);
+    REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::ShutDown);
+    REQUIRE(m.disarm_safe_timer() == Approx(1.0f));
+}
+
+TEST_CASE("output_logic: disarm-safe-timer accumulates by dt_s per call while armed with disarm_disable_pwm "
+          "set, genuinely OVERSHOOTS past safe_time on the step that crosses it (the pre-increment check "
+          "does not prevent overshoot), is clamped down to exactly safe_time on the NEXT call, and resets "
+          "to 0 immediately on disarm",
+          "[motors][output_logic][disarm_safe_timer]") {
+    MotorsMatrix m;
+    float spool_up_time = 0.5f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+
+    const float safe_time = 0.25f;
+    const float dt_s = 0.1f;
+    auto step = [&](bool armed) {
+        m.output_logic(armed, /*interlock=*/true, /*disarm_disable_pwm=*/true, safe_time, spool_up_time, 0.5f, 0.1f,
+                        0.5f, 0.15f, false, dt_s, limits_all_engaged, should_set_spoolup_block);
+    };
+
+    step(true);
+    REQUIRE(m.disarm_safe_timer() == Approx(0.1f));
+    step(true);
+    REQUIRE(m.disarm_safe_timer() == Approx(0.2f));
+    // Real overshoot: 0.2 < 0.25 going INTO this call, so the if-branch adds the full dt_s, landing at
+    // 0.3 - past safe_time. Upstream's own check is against the PRE-increment value, so it does not
+    // prevent a step from crossing the ceiling, only the FOLLOWING call's check catches it.
+    step(true);
+    REQUIRE(m.disarm_safe_timer() == Approx(0.3f));
+    // Now 0.3 is not < 0.25, so the else-branch fires and clamps DOWN to exactly safe_time.
+    step(true);
+    REQUIRE(m.disarm_safe_timer() == Approx(0.25f));
+    step(true);
+    REQUIRE(m.disarm_safe_timer() == Approx(0.25f));
+    // Disarming resets to 0 immediately, regardless of the accumulated value.
+    step(false);
+    REQUIRE(m.disarm_safe_timer() == Approx(0.0f));
+}
+
+TEST_CASE("output_logic: disarm_disable_pwm=false jumps the disarm-safe-timer straight to safe_time on the "
+          "very first armed call - the timer is not exercised at all when PWM is not disabled while "
+          "disarmed",
+          "[motors][output_logic][disarm_safe_timer]") {
+    MotorsMatrix m;
+    float spool_up_time = 0.5f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    m.output_logic(true, true, /*disarm_disable_pwm=*/false, /*safe_time=*/0.75f, spool_up_time, 0.5f, 0.1f, 0.5f,
+                    0.15f, false, /*dt_s=*/0.01f, limits_all_engaged, should_set_spoolup_block);
+    REQUIRE(m.disarm_safe_timer() == Approx(0.75f));
+}
+
+TEST_CASE("output_logic: spool_up_time below the real 0.05s minimum_spool_time floor is clamped UP in the "
+          "CALLER's own variable - a genuine write-back, not a local copy",
+          "[motors][output_logic][write_back]") {
+    MotorsMatrix m;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+
+    float spool_up_time_low = 0.01f; // below the 0.05f floor
+    m.output_logic(true, true, false, 0.1f, spool_up_time_low, 0.5f, 0.1f, 0.5f, 0.15f, false, 0.02f, limits_all_engaged,
+                    should_set_spoolup_block);
+    REQUIRE(spool_up_time_low == Approx(0.05f)); // the CALLER's own variable is mutated
+
+    // A value already above the floor is left untouched.
+    float spool_up_time_ok = 0.3f;
+    m.output_logic(true, true, false, 0.1f, spool_up_time_ok, 0.5f, 0.1f, 0.5f, 0.15f, false, 0.02f, limits_all_engaged,
+                    should_set_spoolup_block);
+    REQUIRE(spool_up_time_ok == Approx(0.3f));
+
+    // Exactly at the floor is also left untouched - the real condition is strictly `<`.
+    float spool_up_time_exact = 0.05f;
+    m.output_logic(true, true, false, 0.1f, spool_up_time_exact, 0.5f, 0.1f, 0.5f, 0.15f, false, 0.02f, limits_all_engaged,
+                    should_set_spoolup_block);
+    REQUIRE(spool_up_time_exact == Approx(0.05f));
+}
+
+TEST_CASE("output_logic: SHUT_DOWN transitions to GROUND_IDLE only once BOTH the desired state has changed "
+          "AND the disarm-safe-timer has elapsed - each condition tested independently",
+          "[motors][output_logic][shutdown][ground_idle]") {
+    // Case A: desired changed, but the safe-time delay has not elapsed yet - stays SHUT_DOWN.
+    {
+        MotorsMatrix m;
+        m.set_spool_desired(MotorsMatrix::DesiredSpoolState::ThrottleUnlimited);
+        float spool_up_time = 0.5f;
+        bool limits_all_engaged = false;
+        bool should_set_spoolup_block = false;
+        m.output_logic(true, true, true, /*safe_time=*/1.0f, spool_up_time, 0.5f, 0.1f, 0.5f, 0.15f, false,
+                        /*dt_s=*/0.1f, limits_all_engaged, should_set_spoolup_block);
+        REQUIRE(m.disarm_safe_timer() == Approx(0.1f));
+        REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::ShutDown);
+    }
+    // Case B: the safe-time delay has elapsed, but desired is still SHUT_DOWN - stays SHUT_DOWN.
+    {
+        MotorsMatrix m;
+        float spool_up_time = 0.5f;
+        bool limits_all_engaged = false;
+        bool should_set_spoolup_block = false;
+        // desired stays the default ShutDown. dt_s > safe_time so the timer overshoots straight past it
+        // on the very first call.
+        m.output_logic(true, true, true, /*safe_time=*/0.1f, spool_up_time, 0.5f, 0.1f, 0.5f, 0.15f, false,
+                        /*dt_s=*/0.2f, limits_all_engaged, should_set_spoolup_block);
+        REQUIRE(m.disarm_safe_timer() >= 0.1f);
+        REQUIRE(m.spool_desired() == MotorsMatrix::DesiredSpoolState::ShutDown);
+        REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::ShutDown);
+    }
+    // Case C: both conditions true - transitions to GROUND_IDLE.
+    {
+        MotorsMatrix m;
+        m.set_spool_desired(MotorsMatrix::DesiredSpoolState::ThrottleUnlimited);
+        float spool_up_time = 0.5f;
+        bool limits_all_engaged = false;
+        bool should_set_spoolup_block = false;
+        m.output_logic(true, true, true, /*safe_time=*/0.1f, spool_up_time, 0.5f, 0.1f, 0.5f, 0.15f, false,
+                        /*dt_s=*/0.2f, limits_all_engaged, should_set_spoolup_block);
+        REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::GroundIdle);
+    }
+}
+
+TEST_CASE("output_logic: SHUT_DOWN zeroes spin_up_ratio/throttle_thrust_max/idle_time and disables thrust "
+          "boost every call, and sets the limits_all_engaged output",
+          "[motors][output_logic][shutdown]") {
+    MotorsMatrix m;
+    m.set_spin_up_ratio(0.7f);
+    m.set_throttle_thrust_max(0.4f);
+    m.set_idle_time(0.2f);
+    m.set_thrust_boost(true);
+    m.set_thrust_boost_ratio(0.6f);
+
+    float spool_up_time = 0.5f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    m.output_logic(true, true, false, 1.0f, spool_up_time, 0.5f, 0.1f, 0.5f, 0.15f, false, 0.02f, limits_all_engaged,
+                    should_set_spoolup_block);
+
+    REQUIRE(m.spin_up_ratio() == Approx(0.0f));
+    REQUIRE(m.throttle_thrust_max() == Approx(0.0f));
+    REQUIRE(m.idle_time() == Approx(0.0f));
+    REQUIRE_FALSE(m.thrust_boost());
+    REQUIRE(m.thrust_boost_ratio() == Approx(0.0f));
+    REQUIRE(limits_all_engaged);
+    REQUIRE_FALSE(should_set_spoolup_block);
+}
+
+TEST_CASE("output_logic: GROUND_IDLE, desired SHUT_DOWN - down-ramps spin_up_ratio using spool_down_time "
+          "and transitions to SHUT_DOWN exactly once the ratio reaches (and clamps to) 0, stepped call by "
+          "call",
+          "[motors][output_logic][ground_idle][shutdown_desired]") {
+    MotorsMatrix m;
+    m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+    m.set_spool_desired(MotorsMatrix::DesiredSpoolState::ShutDown);
+    m.set_spin_up_ratio(0.5f);
+
+    // spin_arm/spin_min = 0.1/0.2 = 0.5 (only affects the idle-time bookkeeping here, not this branch's
+    // own ramp formula). spool_down_time (0.4) is above the 0.05 floor, so it is used directly (no
+    // fallback to spool_up_time). spool_step = dt_s / spool_down_time = 0.1 / 0.4 = 0.25 per call.
+    float spool_up_time = 1.0f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    auto step = [&] {
+        m.output_logic(true, true, false, 1.0f, spool_up_time, /*spool_down_time=*/0.4f, /*spin_arm=*/0.1f,
+                        /*idle_time_delay_s=*/1.0f, /*spin_min=*/0.2f, false, /*dt_s=*/0.1f, limits_all_engaged,
+                        should_set_spoolup_block);
+    };
+
+    step();
+    REQUIRE(m.spin_up_ratio() == Approx(0.25f));
+    REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::GroundIdle);
+    // The shared post-inner-switch reset still fires every call, regardless of inner path.
+    REQUIRE(m.throttle_thrust_max() == Approx(0.0f));
+
+    step();
+    REQUIRE(m.spin_up_ratio() == Approx(0.0f)); // clamped to exactly 0, not left slightly negative
+    REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::ShutDown);
+}
+
+TEST_CASE("output_logic: GROUND_IDLE, desired SHUT_DOWN - falls back to spool_up_time when spool_down_time "
+          "is at or below the 0.05s floor, the real symmetry fallback",
+          "[motors][output_logic][ground_idle][shutdown_desired]") {
+    MotorsMatrix m;
+    m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+    m.set_spool_desired(MotorsMatrix::DesiredSpoolState::ShutDown);
+    m.set_spin_up_ratio(0.5f);
+
+    // spool_down_time (0.02) is NOT above the 0.05 floor, so upstream falls back to spool_up_time (0.5).
+    // spool_step = dt_s / spool_up_time = 0.1 / 0.5 = 0.2.
+    float spool_up_time = 0.5f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    m.output_logic(true, true, false, 1.0f, spool_up_time, /*spool_down_time=*/0.02f, 0.1f, 1.0f, 0.2f, false, 0.1f,
+                    limits_all_engaged, should_set_spoolup_block);
+    REQUIRE(m.spin_up_ratio() == Approx(0.3f));
+}
+
+TEST_CASE("output_logic: GROUND_IDLE, desired THROTTLE_UNLIMITED - ramps spin_up_ratio up, HOLDS it at "
+          "spin_up_ground_idle_ratio with a genuine early BREAK while the idle-time delay is still "
+          "running (not merely a clamp), then completes spin-up and raises should_set_spoolup_block on "
+          "exactly the transition call - which itself does NOT advance to SPOOLING_UP in the SAME call "
+          "(the real same-call read-after-write), only on a LATER call once the caller reports the block "
+          "cleared",
+          "[motors][output_logic][ground_idle][throttle_unlimited_desired]") {
+    MotorsMatrix m;
+    m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+    m.set_spool_desired(MotorsMatrix::DesiredSpoolState::ThrottleUnlimited);
+    m.set_spin_up_ratio(0.0f);
+    m.set_idle_time(0.0f);
+
+    // spin_up_ground_idle_ratio = spin_arm/spin_min = 0.1/0.2 = 0.5. spool_up_time = 0.5, dt_s = 0.1 ->
+    // spool_step = 0.2 per call. idle_time_delay_s = 0.3.
+    float spool_up_time = 0.5f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    auto step = [&](bool spoolup_block) {
+        m.output_logic(true, true, false, 1.0f, spool_up_time, 0.5f, /*spin_arm=*/0.1f, /*idle_time_delay_s=*/0.3f,
+                        /*spin_min=*/0.2f, spoolup_block, /*dt_s=*/0.1f, limits_all_engaged, should_set_spoolup_block);
+    };
+
+    // Calls 1-3: idle_time's own pre-check uses spin_up_ratio_ as it was BEFORE this call's own
+    // increment, and only starts advancing once that pre-increment ratio reaches the 0.5 target - so
+    // idle_time stays 0 through these three calls even though spin_up_ratio_ itself reaches 0.5 on call 3
+    // (0.5 >= 0.5 is not evaluated until call 4's own pre-check).
+    step(false);
+    REQUIRE(m.spin_up_ratio() == Approx(0.2f));
+    REQUIRE(m.idle_time() == Approx(0.0f));
+    REQUIRE_FALSE(should_set_spoolup_block);
+
+    step(false);
+    REQUIRE(m.spin_up_ratio() == Approx(0.4f));
+    REQUIRE(m.idle_time() == Approx(0.0f));
+
+    step(false);
+    // Ramped to 0.6 then held/clamped to the 0.5 ground-idle ratio (idle_time still < delay).
+    REQUIRE(m.spin_up_ratio() == Approx(0.5f));
+    REQUIRE(m.idle_time() == Approx(0.0f));
+
+    // Call 4: pre-check now sees ratio 0.5 >= target 0.5 - idle_time starts advancing. Ramp still held at
+    // 0.5 since idle_time (0.1) is still below the 0.3 delay.
+    step(false);
+    REQUIRE(m.idle_time() == Approx(0.1f));
+    REQUIRE(m.spin_up_ratio() == Approx(0.5f));
+
+    step(false);
+    REQUIRE(m.idle_time() == Approx(0.2f));
+    REQUIRE(m.spin_up_ratio() == Approx(0.5f));
+
+    // Call 6: idle_time reaches exactly the 0.3 delay (capped, not left to overshoot: MIN(delay,
+    // idle_time+dt_s)). The idle-time gate (idle_time < idle_time_delay_s) now reads FALSE - re-verify
+    // this uses idle_time AFTER this call's own advance, so the delay clears on the SAME call it reaches
+    // it, not one call later - so the hold/break is skipped THIS call: spin_up_ratio_ is left at its
+    // ramped 0.7 rather than clamped back to 0.5. It is still below 1.0, though, so completion has NOT
+    // happened yet - the ramp needs to keep climbing over several more calls once released from the hold,
+    // exactly as it did while held (0.2 per call), before it ever reaches the completion branch.
+    step(/*spoolup_block=*/false);
+    REQUIRE(m.idle_time() == Approx(0.3f));
+    REQUIRE(m.spin_up_ratio() == Approx(0.7f));
+    REQUIRE_FALSE(m.spin_up_complete());
+    REQUIRE_FALSE(should_set_spoolup_block);
+
+    // Call 7: past the delay, ramping continues normally (idle_time already capped at 0.3).
+    step(/*spoolup_block=*/false);
+    REQUIRE(m.spin_up_ratio() == Approx(0.9f));
+    REQUIRE_FALSE(m.spin_up_complete());
+
+    // Call 8: ratio would ramp to 1.1 - not < 1.0, so it is clamped to exactly 1.0 and spin_up_complete_
+    // makes its ONE, real transition to true. should_set_spoolup_block fires exactly on THIS call - but
+    // the SPOOLING_UP transition does NOT fire in the same call (the real same-call read-after-write:
+    // spoolup_block_now mirrors the just-raised block, so `spin_up_complete_ && !spoolup_block_now` is
+    // false here even though the INPUT `spoolup_block` parameter itself is still false).
+    step(/*spoolup_block=*/false);
+    REQUIRE(m.spin_up_ratio() == Approx(1.0f));
+    REQUIRE(m.spin_up_complete());
+    REQUIRE(should_set_spoolup_block);
+    REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::GroundIdle); // NOT SpoolingUp yet
+
+    // Call 9: the caller now reports the block cleared (spoolup_block=false, reflecting the real vehicle
+    // having lowered it after seeing should_set_spoolup_block from call 8) - now the transition fires.
+    step(/*spoolup_block=*/false);
+    REQUIRE_FALSE(should_set_spoolup_block); // only ever raised on the ONE transition call
+    REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::SpoolingUp);
+}
+
+TEST_CASE("output_logic: GROUND_IDLE, desired THROTTLE_UNLIMITED - a still-raised spoolup_block input holds "
+          "the machine in GROUND_IDLE indefinitely even after spin-up completes",
+          "[motors][output_logic][ground_idle][throttle_unlimited_desired]") {
+    MotorsMatrix m;
+    m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+    m.set_spool_desired(MotorsMatrix::DesiredSpoolState::ThrottleUnlimited);
+    m.set_spin_up_ratio(1.0f);
+    m.set_idle_time(1.0f); // already past the delay
+    // set_spin_up_complete has no dedicated setter - reach it for real by taking one call to completion
+    // first (spin_up_ratio already at 1.0, so the ramp immediately clamps and completes).
+    float spool_up_time = 0.5f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    m.output_logic(true, true, false, 1.0f, spool_up_time, 0.5f, 0.1f, 0.3f, 0.2f, /*spoolup_block=*/true, 0.1f,
+                    limits_all_engaged, should_set_spoolup_block);
+    REQUIRE(m.spin_up_complete());
+    REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::GroundIdle);
+
+    // Several more calls with the block still raised - never advances.
+    for (int i = 0; i < 5; ++i) {
+        m.output_logic(true, true, false, 1.0f, spool_up_time, 0.5f, 0.1f, 0.3f, 0.2f, /*spoolup_block=*/true, 0.1f,
+                        limits_all_engaged, should_set_spoolup_block);
+        REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::GroundIdle);
+        REQUIRE_FALSE(should_set_spoolup_block); // only ever raised on the ONE transition call, long past now
+    }
+}
+
+TEST_CASE("output_logic: GROUND_IDLE, desired GROUND_IDLE - asymmetric slew toward spin_up_ground_idle_ratio, "
+          "up-limited by spool_up_step, stepped call by call until it settles exactly at the target",
+          "[motors][output_logic][ground_idle][ground_idle_desired]") {
+    MotorsMatrix m;
+    m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+    m.set_spool_desired(MotorsMatrix::DesiredSpoolState::GroundIdle);
+    m.set_spin_up_ratio(0.0f);
+
+    // target = spin_arm/spin_min = 0.45/0.5 = 0.9. spool_up_step = dt_s/spool_up_time = 0.1/0.5 = 0.2.
+    float spool_up_time = 0.5f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    auto step = [&] {
+        m.output_logic(true, true, false, 1.0f, spool_up_time, /*spool_down_time=*/0.3f, /*spin_arm=*/0.45f,
+                        /*idle_time_delay_s=*/1.0f, /*spin_min=*/0.5f, false, /*dt_s=*/0.1f, limits_all_engaged,
+                        should_set_spoolup_block);
+    };
+
+    step();
+    REQUIRE(m.spin_up_ratio() == Approx(0.2f)); // diff 0.9 clamped to the 0.2 up-step
+    step();
+    REQUIRE(m.spin_up_ratio() == Approx(0.4f)); // diff 0.7, still clamped
+    step();
+    REQUIRE(m.spin_up_ratio() == Approx(0.6f));
+    step();
+    REQUIRE(m.spin_up_ratio() == Approx(0.8f));
+    step();
+    // diff is now 0.1, LESS than the 0.2 up-step - no longer clamped, lands exactly on the target.
+    REQUIRE(m.spin_up_ratio() == Approx(0.9f));
+    step();
+    // Settled: diff 0 stays at the target.
+    REQUIRE(m.spin_up_ratio() == Approx(0.9f));
+}
+
+TEST_CASE("output_logic: GROUND_IDLE, desired GROUND_IDLE - the DOWN direction is independently bounded by "
+          "spool_down_step (from spool_down_time), not the up-step",
+          "[motors][output_logic][ground_idle][ground_idle_desired]") {
+    MotorsMatrix m;
+    m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+    m.set_spool_desired(MotorsMatrix::DesiredSpoolState::GroundIdle);
+    m.set_spin_up_ratio(0.9f);
+
+    // target = spin_arm/spin_min = 0.05/0.5 = 0.1. spool_down_step = dt_s/spool_down_time = 0.1/0.2 = 0.5
+    // (spool_up_step, from spool_up_time=1.0, would be 0.1 - deliberately very different from the down
+    // step, to prove the down direction uses its OWN bound, not the up one).
+    float spool_up_time = 1.0f;
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    auto step = [&] {
+        m.output_logic(true, true, false, 1.0f, spool_up_time, /*spool_down_time=*/0.2f, /*spin_arm=*/0.05f,
+                        /*idle_time_delay_s=*/1.0f, /*spin_min=*/0.5f, false, /*dt_s=*/0.1f, limits_all_engaged,
+                        should_set_spoolup_block);
+    };
+
+    step();
+    // diff = 0.1 - 0.9 = -0.8, clamped to -0.5 (the down-step) -> 0.9 - 0.5 = 0.4.
+    REQUIRE(m.spin_up_ratio() == Approx(0.4f));
+    step();
+    // diff = 0.1 - 0.4 = -0.3, within the -0.5 bound (not clamped) -> lands exactly on the target.
+    REQUIRE(m.spin_up_ratio() == Approx(0.1f));
+}
+
+TEST_CASE("output_logic: GROUND_IDLE's shared post-inner-switch reset (throttle_thrust_max_/thrust_boost_/"
+          "thrust_boost_ratio_) fires identically regardless of which of the three inner DesiredSpoolState "
+          "paths ran",
+          "[motors][output_logic][ground_idle]") {
+    using Desired = MotorsMatrix::DesiredSpoolState;
+    for (Desired desired : {Desired::ShutDown, Desired::ThrottleUnlimited, Desired::GroundIdle}) {
+        MotorsMatrix m;
+        m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+        m.set_spool_desired(desired);
+        m.set_spin_up_ratio(0.5f); // mid-ramp, so ShutDown's own case doesn't finish/transition this call
+        m.set_throttle_thrust_max(0.7f);
+        m.set_thrust_boost(true);
+        m.set_thrust_boost_ratio(0.6f);
+
+        float spool_up_time = 1.0f;
+        bool limits_all_engaged = false;
+        bool should_set_spoolup_block = false;
+        m.output_logic(true, true, false, 1.0f, spool_up_time, 0.5f, 0.1f, 1.0f, 0.2f, false, 0.05f, limits_all_engaged,
+                        should_set_spoolup_block);
+
+        REQUIRE(m.throttle_thrust_max() == Approx(0.0f));
+        REQUIRE_FALSE(m.thrust_boost());
+        REQUIRE(m.thrust_boost_ratio() == Approx(0.0f));
+        REQUIRE(limits_all_engaged);
+    }
+}
+
+TEST_CASE("output_logic: a fresh MotorsMatrix starts with real, DEFINED initial values for every new "
+          "CCP-013 member - spool_state_/spool_desired_ genuinely match real upstream's own AP_Motors "
+          "constructor default (SHUT_DOWN for both, NOT a bug fix - see file banner), and the six "
+          "members with a CONFIRMED upstream uninitialized-read bug (disarm_safe_timer_/spin_up_ratio_/"
+          "throttle_thrust_max_/idle_time_/spin_up_complete_/thrust_boost_ratio_) are fixed to defined "
+          "values here rather than left indeterminate",
+          "[motors][output_logic][regression]") {
+    MotorsMatrix m;
+    REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::ShutDown);
+    REQUIRE(m.spool_desired() == MotorsMatrix::DesiredSpoolState::ShutDown);
+    REQUIRE(m.disarm_safe_timer() == Approx(0.0f));
+    REQUIRE(m.spin_up_ratio() == Approx(0.0f));
+    REQUIRE(m.throttle_thrust_max() == Approx(0.0f));
+    REQUIRE(m.idle_time() == Approx(0.0f));
+    REQUIRE_FALSE(m.spin_up_complete());
+    REQUIRE(m.thrust_boost_ratio() == Approx(0.0f));
+}
+
+TEST_CASE("output_logic: the real SpoolState/DesiredSpoolState enumerator values match upstream's own "
+          "SCREAMING_CASE enum exactly (SHUT_DOWN=0, GROUND_IDLE=1, SPOOLING_UP=2, THROTTLE_UNLIMITED=3, "
+          "SPOOLING_DOWN=4; SHUT_DOWN=0, GROUND_IDLE=1, THROTTLE_UNLIMITED=2)",
+          "[motors][output_logic][enum]") {
+    using SS = MotorsMatrix::SpoolState;
+    using DS = MotorsMatrix::DesiredSpoolState;
+    REQUIRE(static_cast<std::uint8_t>(SS::ShutDown) == 0);
+    REQUIRE(static_cast<std::uint8_t>(SS::GroundIdle) == 1);
+    REQUIRE(static_cast<std::uint8_t>(SS::SpoolingUp) == 2);
+    REQUIRE(static_cast<std::uint8_t>(SS::ThrottleUnlimited) == 3);
+    REQUIRE(static_cast<std::uint8_t>(SS::SpoolingDown) == 4);
+    REQUIRE(static_cast<std::uint8_t>(DS::ShutDown) == 0);
+    REQUIRE(static_cast<std::uint8_t>(DS::GroundIdle) == 1);
+    REQUIRE(static_cast<std::uint8_t>(DS::ThrottleUnlimited) == 2);
+}

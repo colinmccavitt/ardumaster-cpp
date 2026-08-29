@@ -1135,6 +1135,129 @@
 // thrust_linearization.hpp's own "NO AP_Param" precedent, CCP-010) - the
 // real default value is only asserted directly in a test.
 //
+// CCP-013 ADDITION (output_logic, PART 1 ONLY) - upstream
+// AP_MotorsMulticopter::output_logic, real function body lines 591-884
+// (~294 lines), re-verified directly against the pinned worktree. This
+// ticket ports ONLY lines 591-768 (~60%): the safety preamble
+// (597-622), SpoolState::SHUT_DOWN (633-663), and SpoolState::GROUND_IDLE
+// (665-768, including its own nested switch on DesiredSpoolState). The
+// remaining three SpoolState cases (SPOOLING_UP/THROTTLE_UNLIMITED/
+// SPOOLING_DOWN, real lines 769-884) are explicitly OUT OF SCOPE - a
+// separate, deliberately deferred future ticket (CCP-014 or similar),
+// since they depend on real, not-yet-built current-limiting
+// (get_current_limit_max_throttle) and filtered-throttle (get_throttle)
+// infrastructure this ticket's own scope does not need. Fourth ticket of
+// the copter-cpp effort's AP_Motors OUTPUT-STAGE phase, after CCP-010
+// (ThrustLinearization), CCP-011 (check_for_failed_motor), and CCP-012
+// (set_actuator_with_slew / actuator_spin_up_to_ground_idle). This is,
+// by a wide margin, the most complex single function this whole effort
+// has ported so far - a genuine, safety-critical real-time state
+// machine with many external dependencies this port has never built
+// (vehicle-level armed()/get_interlock(), an attitude-controller `limit`
+// flags object, a pre-takeoff `spoolup_block` gate) - every one of them
+// is an explicit function parameter or explicit output below, per
+// ADR-0012, rather than any attempt to build the real vehicle-level
+// infrastructure behind them.
+//
+// REUSED, INDEPENDENTLY RE-VERIFIED INVESTIGATION FROM copter-rust'S
+// COP-004
+//
+// COP-004 (crates/ap-motors/src/spool.rs, plane-fw-rust) already ported
+// this exact 294-line function to Rust with an unusually thorough
+// verification methodology (8 scripted flights, 25,200 iterations at
+// 400 Hz, all bit-exact against upstream). Three findings reused here
+// after independently re-checking each against the real C++ source:
+//   1. Step-by-step, not endpoint, testing is essential for a state
+//      machine (COP-004's own words: "A state machine can agree at the
+//      endpoints and disagree in the middle... only a per-step
+//      comparison sees that.") - motors_matrix_test.cpp's own new tests
+//      below drive the machine through many successive calls and assert
+//      intermediate state at each step, not just final outcomes.
+//   2. The real spool_up_time write-back: real upstream's own safety
+//      preamble clamps a too-short _spool_up_time back into the AP_Float
+//      PARAMETER ITSELF (`_spool_up_time.set(...)`, real line 620), not
+//      a local copy - reproduced here by taking spool_up_time as `float&`
+//      and genuinely mutating it when the clamp fires, matching
+//      COP-004's own `&mut f32` choice on the Rust side.
+//   3. get_throttle()'s own filtered-vs-raw distinction is a Part 2
+//      concern (SPOOLING_UP/THROTTLE_UNLIMITED both call it, real lines
+//      791/831) - not called anywhere in this ticket's own Part 1 scope,
+//      noted here for context only.
+//
+// TWO SUSPECTED UPSTREAM BUGS - ONE CONFIRMED FALSE, ONE CONFIRMED TRUE
+// (see the private member declarations below for the full writeup of
+// each): this ticket's own text suspected `_spool_state`/`_spool_desired`
+// had the same uninitialized-until-first-write bug class as CCP-011's
+// own `_motor_lost_index` finding. Re-verified directly and found FALSE:
+// real `AP_Motors::AP_Motors(uint16_t)` (AP_Motors_Class.cpp lines
+// 31-38) explicitly initializes BOTH via its own member-initializer list
+// (`_spool_desired(DesiredSpoolState::SHUT_DOWN),
+// _spool_state(SpoolState::SHUT_DOWN)`), and AP_MotorsMulticopter's own
+// constructor delegates to that base constructor - so both are correctly
+// SHUT_DOWN from construction in real upstream, contrary to this
+// ticket's own suspicion. A DIFFERENT, genuinely confirmed instance of
+// the same bug class turned up instead while investigating: six OTHER
+// members (`_disarm_safe_timer`/`_spin_up_ratio`/`_throttle_thrust_max`/
+// `_idle_time`/`_spin_up_complete`, AP_MotorsMulticopter.h, plus
+// `_thrust_boost_ratio`, AP_Motors_Class.h) have NO in-class initializer
+// and are assigned by NEITHER constructor - confirmed low-severity for
+// the same reason CCP-011's own finding was (each is written before any
+// real read reaches it, in the realistic call order), but fixed and
+// disclosed the same way: all six get real, DEFINED initial values in
+// this port rather than being left indeterminate.
+//
+// OUTPUT SHAPE - real upstream's own `limit.set_all(true)` (a five-flag
+// `AP_Motors_limit` struct roll/pitch/yaw/throttle_lower/throttle_upper
+// this port has not built) becomes a single explicit `bool&
+// limits_all_engaged` output parameter instead - this ticket's own Part
+// 1 scope only ever calls `set_all(true)` (never per-axis, never
+// `false` - that only happens in the three out-of-scope states), so a
+// single bool captures every real behavior Part 1 exercises; a future
+// ticket porting the SPOOLING_UP/THROTTLE_UNLIMITED/SPOOLING_DOWN cases
+// (which call `set_all(false)`) is the natural place to decide whether
+// the full five-flag struct is worth building then. Real upstream's own
+// `set_spoolup_block(true)` (a stateful setter on a vehicle-level flag
+// this port does not own) becomes a `bool& should_set_spoolup_block`
+// output instead, raised to `true` only on the exact call where
+// `_spin_up_complete` first transitions to true - `get_spoolup_block()`
+// (the corresponding getter) becomes the plain `bool spoolup_block`
+// INPUT parameter.
+//
+// THE REAL SAME-CALL spoolup_block READ-AFTER-WRITE - a genuine, easy-to-
+// miss finding independently re-verified here (AP_Motors_Class.h lines
+// 127-128, re-verified directly: get_spoolup_block()/set_spoolup_block()
+// are a plain bool getter/setter pair with no other side effect): real
+// upstream calls `set_spoolup_block(true)` and then, a few lines below
+// IN THE SAME output_logic CALL, reads `get_spoolup_block()` to decide
+// the SPOOLING_UP transition - so that transition NEVER fires on the
+// very call that first raises the block, it always observes the
+// just-written `true`. A naive port that read the `spoolup_block`
+// PARAMETER (the value as it was going INTO this call) for that same
+// check would take the transition one call too early. This is exactly
+// the "transition taken one iteration early" failure mode COP-004's own
+// tracker notes warn a state machine can hide at the endpoints and only
+// show step-by-step - fixed here with a local `spoolup_block_now`
+// variable that mirrors the synchronous write, matching real upstream's
+// actual observed behavior exactly (see output_logic's own inline
+// comment at the point of use).
+//
+// PARAMETER/OUTPUT SHAPE, FULL SIGNATURE - flat explicit parameters
+// throughout (not a bundling struct like ThrustLinParams/BatteryVoltage,
+// CCP-010), matching check_for_failed_motor's/set_actuator_with_slew's
+// own precedent of flat parameter lists and this ticket's own text,
+// which itself enumerates the dependencies as a flat list: armed,
+// interlock, disarm_disable_pwm, safe_time, spool_up_time (float&,
+// genuinely mutated - see finding #2 above), spool_down_time, spin_arm,
+// idle_time_delay_s, spin_min, spoolup_block, PLUS dt_s (needed
+// throughout for every ramp/timer but not itself named in the ticket's
+// own dependency list), PLUS the two explicit bool& outputs
+// (limits_all_engaged, should_set_spoolup_block) appended at the end,
+// mirroring set_actuator_with_slew's own established "mutate an output
+// parameter by reference" convention rather than returning a small
+// struct. There is no single obviously-correct shape for an
+// eleven-input/two-output function - this is the chosen one, stated
+// explicitly per this ticket's own request.
+//
 // DEFERRED FUTURE PHASES (named explicitly, not silently omitted):
 //   1. Remaining frame tables - setup_quad_matrix (line 576) is DONE as of
 //      CCP-002, setup_hexa_matrix (line 775) is DONE as of CCP-003,
@@ -1160,29 +1283,34 @@
 //      pitfall - were independently re-verified and resolved by CCP-005;
 //      also not deferred further.)
 //   2. Output stage - check_for_failed_motor is DONE as of CCP-011 (see
-//      "CCP-011 ADDITION" above), and set_actuator_with_slew /
+//      "CCP-011 ADDITION" above), set_actuator_with_slew /
 //      actuator_spin_up_to_ground_idle are DONE as of CCP-012 (see
-//      "CCP-012 ADDITION" above). output_to_pwm (AP_MotorsMulticopter.cpp
-//      line 457) is explicitly NOT ported by CCP-012 - it has a real
-//      dependency on a not-yet-built SpoolState enum
-//      (`_spool_state == SpoolState::SHUT_DOWN`) - a separate, deliberately
-//      deferred future ticket. output_to_motors, output_armed_stabilizing,
+//      "CCP-012 ADDITION" above), and output_logic's own SpoolState enum
+//      plus its SHUT_DOWN/GROUND_IDLE cases (real lines 591-768, "PART 1")
+//      are DONE as of CCP-013 (see "CCP-013 ADDITION" above). The
+//      remaining three SpoolState cases - SPOOLING_UP/THROTTLE_UNLIMITED/
+//      SPOOLING_DOWN, real lines 769-884, "PART 2" - are a separate,
+//      deliberately deferred future ticket (CCP-014 or similar): they
+//      depend on real, not-yet-built current-limiting
+//      (get_current_limit_max_throttle) and filtered-throttle
+//      (get_throttle) infrastructure. output_to_pwm (AP_MotorsMulticopter.cpp
+//      line 457), output_to_motors, output_armed_stabilizing,
 //      thrust_compensation, and disable_yaw_torque also remain separate,
-//      deliberately deferred future phases, NOT started by this ticket.
-//      output_armed_stabilizing, output_to_motors, and output_to_pwm all
-//      need the same substantial new infrastructure this port has not
-//      built yet: a SpoolState enum/spool-state machine, and (for
-//      output_to_pwm specifically) PWM output plumbing - actuator
-//      slew-rate limiting itself is NO LONGER part of that missing
-//      infrastructure, since CCP-012 already ported it as the
-//      unconditional pure function it really is (see "CCP-012 ADDITION"
-//      above for why it needs no SpoolState awareness of its own). The
-//      full thrust-boost MECHANISM itself (whatever sets thrust_boost_
-//      true, and whatever reacts to get_lost_motor()) is also deferred -
-//      CCP-011 only ported the thrust_boost_-reading/off-switching logic
-//      INSIDE check_for_failed_motor, not the rest of the mechanism. This
-//      is also where add_motor_num()'s real SRV_Channels registration
-//      belongs (see NO-OP above).
+//      deliberately deferred future phases, NOT started by this ticket -
+//      output_to_pwm specifically also needs real PWM output plumbing
+//      beyond just the now-ported SpoolState enum. Actuator slew-rate
+//      limiting itself is NOT part of that missing infrastructure, since
+//      CCP-012 already ported it as the unconditional pure function it
+//      really is (see "CCP-012 ADDITION" above for why it needs no
+//      SpoolState awareness of its own). The full thrust-boost MECHANISM
+//      itself (whatever sets thrust_boost_ true from a real motor-failure
+//      trigger, and whatever reacts to get_lost_motor()) is also
+//      deferred - CCP-011 only ported the thrust_boost_-reading/
+//      off-switching logic INSIDE check_for_failed_motor, and CCP-013
+//      only ported output_logic's own thrust_boost_/thrust_boost_ratio_
+//      RESETS inside SHUT_DOWN/GROUND_IDLE, not the rest of the
+//      mechanism. This is also where add_motor_num()'s real SRV_Channels
+//      registration belongs (see NO-OP above).
 //   3. set_throttle_factor/set_update_rate/set_frame_class_and_type/
 //      output_test_num/_output_test_seq/get_factors - small real
 //      accessors/setters not needed by this ticket's own core scope; add
@@ -1200,6 +1328,7 @@
 // it for header-only INTERFACE modules with no literal that actually
 // needs it.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -1394,6 +1523,35 @@ public:
         Dodecahexa,
         Y6,
         Deca,
+    };
+
+    // CCP-013: port of upstream's real `enum class SpoolState : uint8_t`
+    // and `enum class DesiredSpoolState : uint8_t` (both declared on the
+    // real `AP_Motors` base class, AP_Motors_Class.h lines 184-190 and
+    // 171-175 respectively, re-verified directly against the pinned
+    // worktree). Enumerator names/values/declared order are exact:
+    // SpoolState::{ShutDown=0, GroundIdle=1, SpoolingUp=2,
+    // ThrottleUnlimited=3, SpoolingDown=4} (five values);
+    // DesiredSpoolState::{ShutDown=0, GroundIdle=1, ThrottleUnlimited=2}
+    // (three values - real upstream has no "spooling" DESIRED state,
+    // only the actual SpoolState has transitional values). Named in this
+    // port's own PascalCase house style for small state enums (see
+    // FrameType/FrameClass above and CalibrationState,
+    // fwcpp/airspeed/airspeed_sensor.hpp), not upstream's SCREAMING_CASE.
+    // See file banner's "CCP-013 ADDITION" for the full output_logic
+    // (Part 1) investigation.
+    enum class SpoolState : std::uint8_t {
+        ShutDown,
+        GroundIdle,
+        SpoolingUp,
+        ThrottleUnlimited,
+        SpoolingDown,
+    };
+
+    enum class DesiredSpoolState : std::uint8_t {
+        ShutDown,
+        GroundIdle,
+        ThrottleUnlimited,
     };
 
     // Upstream AP_Motors::initialised_ok()/set_initialised_ok() (see file
@@ -2670,6 +2828,261 @@ public:
         return math::constrain_value(spin_up_ratio, 0.0f, 1.0f) * spin_min;
     }
 
+    // output_logic (PART 1 ONLY) - CCP-013 port of upstream
+    // AP_MotorsMulticopter::output_logic, real function body lines
+    // 591-768 of the real 591-884 span (re-verified directly against the
+    // pinned worktree). Covers the safety preamble (597-622),
+    // SpoolState::SHUT_DOWN (633-663), and SpoolState::GROUND_IDLE
+    // (665-768, including its own nested switch on DesiredSpoolState).
+    // The remaining three SpoolState cases (SPOOLING_UP/
+    // THROTTLE_UNLIMITED/SPOOLING_DOWN, real lines 769-884) are
+    // explicitly OUT OF SCOPE - a separate, deliberately deferred future
+    // ticket (CCP-014 or similar), since they depend on real,
+    // not-yet-built current-limiting (get_current_limit_max_throttle)
+    // and filtered-throttle (get_throttle) infrastructure this ticket's
+    // own scope does not need. See file banner's "CCP-013 ADDITION" for
+    // the full structure, the corrected spool_state_/spool_desired_
+    // investigation (suspected uninitialized-read bug, found NOT to be
+    // one - see the private member declarations below), the SIX-member
+    // uninitialized-read bug that WAS confirmed and fixed instead, the
+    // real same-call spoolup_block read-after-write finding, and the
+    // parameter-shape rationale.
+    //
+    // Every real external dependency (armed/interlock/spoolup_block/
+    // limit flags/etc.) is an explicit parameter or explicit output, per
+    // ADR-0012 - NO singleton/global is read. `spool_up_time` is taken
+    // as `float&` and genuinely mutated when the floor clamp fires,
+    // matching upstream's own real `_spool_up_time.set(...)` write-back
+    // (COP-004's own finding #2, independently re-verified here - see
+    // file banner). `limits_all_engaged`/`should_set_spoolup_block` are
+    // explicit `bool&` outputs (this port has no `limit` flags struct
+    // and no vehicle-level spoolup-block gate to call a setter on - see
+    // file banner's "OUTPUT SHAPE" section): both are set to `false` at
+    // the top of every call and only ever raised to `true` within the
+    // branches that would have called `limit.set_all(true)` /
+    // `set_spoolup_block(true)` in real upstream.
+    void output_logic(bool armed, bool interlock, bool disarm_disable_pwm, float safe_time, float& spool_up_time,
+                       float spool_down_time, float spin_arm, float idle_time_delay_s, float spin_min, bool spoolup_block,
+                       float dt_s, bool& limits_all_engaged, bool& should_set_spoolup_block) {
+        limits_all_engaged = false;
+        should_set_spoolup_block = false;
+
+        // Real function-local constant (line ~594) - NOT a port-wide
+        // constant, re-verified directly it is declared inside this
+        // function in upstream, not at file/class scope.
+        constexpr float minimum_spool_time = 0.05f;
+
+        // 1. Disarm-PWM safety-window timer (real lines 597-611). Only
+        // advances while armed; resets to 0 the instant it is not, so a
+        // disarm always costs the full delay again rather than resuming
+        // a part-elapsed one.
+        if (armed) {
+            if (disarm_disable_pwm && disarm_safe_timer_ < safe_time) {
+                disarm_safe_timer_ += dt_s;
+            } else {
+                disarm_safe_timer_ = safe_time;
+            }
+        } else {
+            disarm_safe_timer_ = 0.0f;
+        }
+
+        // 2. Global safety rule (real lines 613-617) - unconditional,
+        // no ramp: forces BOTH the desired and actual spool state to
+        // ShutDown immediately whenever either safety condition is
+        // false.
+        if (!armed || !interlock) {
+            spool_desired_ = DesiredSpoolState::ShutDown;
+            spool_state_ = SpoolState::ShutDown;
+        }
+
+        // 3. Spool-up-time floor clamp (real lines 619-622) - REAL
+        // WRITE-BACK into the CALLER's own variable, matching upstream's
+        // `_spool_up_time.set(...)` (see file banner and COP-004's own
+        // finding #2).
+        if (spool_up_time < minimum_spool_time) {
+            spool_up_time = minimum_spool_time;
+        }
+
+        switch (spool_state_) {
+        case SpoolState::ShutDown: {
+            // "All limits engaged" output - real upstream
+            // `limit.set_all(true)`, see file banner's "OUTPUT SHAPE"
+            // simplification.
+            limits_all_engaged = true;
+
+            spin_up_ratio_ = 0.0f;
+            throttle_thrust_max_ = 0.0f;
+            idle_time_ = 0.0f;
+
+            thrust_boost_ = false;
+            thrust_boost_ratio_ = 0.0f;
+
+            // Leave SHUT_DOWN only once the safe-time window has
+            // elapsed AND a higher-energy state is requested - real,
+            // re-verified two-part condition (real lines 660-662).
+            if (spool_desired_ != DesiredSpoolState::ShutDown && disarm_safe_timer_ >= safe_time) {
+                spool_state_ = SpoolState::GroundIdle;
+            }
+            break;
+        }
+
+        case SpoolState::GroundIdle: {
+            limits_all_engaged = true;
+
+            // Normalised against spin_min: with no spin_min there is
+            // nothing to normalise against and the target is zero (real
+            // lines 675-678).
+            float spin_up_ground_idle_ratio = 0.0f;
+            if (math::is_positive(spin_min)) {
+                spin_up_ground_idle_ratio = spin_arm / spin_min;
+            }
+
+            // The idle-time delay measures time AT ground-idle spin, not
+            // time since the request (real lines 680-683).
+            if (spin_up_ratio_ >= spin_up_ground_idle_ratio) {
+                idle_time_ = std::min(idle_time_delay_s, idle_time_ + dt_s);
+            }
+
+            switch (spool_desired_) {
+            case DesiredSpoolState::ShutDown: {
+                // Down path - real, easy-to-miss symmetry fallback: use
+                // spool_down_time if actually configured above the
+                // floor, else fall back to spool_up_time (real line
+                // 690).
+                const float spool_time = spool_down_time > minimum_spool_time ? spool_down_time : spool_up_time;
+                const float spool_step = dt_s / spool_time;
+                spin_up_ratio_ -= spool_step;
+
+                if (spin_up_ratio_ <= 0.0f) {
+                    spin_up_ratio_ = 0.0f;
+                    spool_state_ = SpoolState::ShutDown;
+                }
+                break;
+            }
+            case DesiredSpoolState::ThrottleUnlimited: {
+                const float spool_step = dt_s / spool_up_time;
+                spin_up_ratio_ += spool_step;
+
+                // Real, easy-to-miss idle-time gating (real lines
+                // 726-729): a genuine EARLY BREAK, not merely a clamp -
+                // holds spin at ground-idle and skips everything below
+                // in this case for this call, while the delay is still
+                // running.
+                if (idle_time_ < idle_time_delay_s) {
+                    spin_up_ratio_ = std::min(spin_up_ratio_, spin_up_ground_idle_ratio);
+                    break;
+                }
+
+                // Real same-call read-after-write (re-verified directly
+                // against AP_Motors_Class.h lines 127-128: get_spoolup_
+                // block()/set_spoolup_block() are a plain bool getter/
+                // setter pair with no other side effect). Upstream calls
+                // `set_spoolup_block(true)` and then, a few lines below
+                // IN THE SAME CALL, reads `get_spoolup_block()` - so the
+                // transition below never fires on the very call that
+                // first raises the block, it always sees the just-
+                // written `true`. `spoolup_block_now` mirrors that
+                // synchronous read-after-write; the `spoolup_block`
+                // PARAMETER itself is an input and is never mutated -
+                // the caller learns of the real transition via
+                // `should_set_spoolup_block` and is expected to pass the
+                // (now-updated) block state back in on a LATER call.
+                bool spoolup_block_now = spoolup_block;
+                if (spin_up_ratio_ < 1.0f) {
+                    spin_up_complete_ = false;
+                } else {
+                    spin_up_ratio_ = 1.0f;
+                    if (!spin_up_complete_) {
+                        spin_up_complete_ = true;
+                        should_set_spoolup_block = true;
+                        spoolup_block_now = true;
+                    }
+                }
+                if (spin_up_complete_ && !spoolup_block_now) {
+                    spool_state_ = SpoolState::SpoolingUp;
+                }
+                break;
+            }
+            case DesiredSpoolState::GroundIdle: {
+                // Real asymmetric slew toward spin_up_ground_idle_ratio
+                // (real line 762) - structurally distinct from
+                // set_actuator_with_slew's own formula (CCP-012, see
+                // file banner): down bounded by spool_down_step, up by
+                // spool_up_step, in one combined constrain_value call.
+                const float spool_up_step = dt_s / spool_up_time;
+                const float spool_down_time_effective = spool_down_time > minimum_spool_time ? spool_down_time : spool_up_time;
+                const float spool_down_step = dt_s / spool_down_time_effective;
+
+                spin_up_ratio_ +=
+                    math::constrain_value(spin_up_ground_idle_ratio - spin_up_ratio_, -spool_down_step, spool_up_step);
+                break;
+            }
+            }
+
+            // Shared post-inner-switch reset (real lines 764-768) - runs
+            // for ALL THREE inner cases above, OUTSIDE the inner switch,
+            // NOT duplicated per-case (re-verified directly - see file
+            // banner).
+            throttle_thrust_max_ = 0.0f;
+            thrust_boost_ = false;
+            thrust_boost_ratio_ = 0.0f;
+            break;
+        }
+
+        default:
+            // SpoolState::SpoolingUp/ThrottleUnlimited/SpoolingDown -
+            // explicitly OUT OF SCOPE for this ticket (real lines
+            // 769-884) - see this method's own banner comment above. A
+            // machine that reaches SpoolingUp via the GroundIdle ->
+            // SpoolingUp transition above simply does not advance
+            // further until a future ticket implements these cases.
+            break;
+        }
+    }
+
+    // Test-only mutators (CCP-013) for output_logic's own new state -
+    // matching CCP-011's own precedent (set_thrust_rpyt_out/
+    // set_active_frame_type) of adding direct setters where no real
+    // upstream setter exists yet for this port to call. `set_spool_
+    // desired` is the RAW assignment upstream's own output_logic reads
+    // (`_spool_desired`) - it is deliberately NOT the real, safety-
+    // checked `AP_MotorsMulticopter::set_desired_spool_state` (a
+    // separate real function, lines 565-577, outside this ticket's own
+    // 591-768 scope) - tests that want the safety clamp exercise the
+    // safety rule inside output_logic itself instead (see this ticket's
+    // own dedicated tests). `set_spool_state` likewise lets tests seed
+    // an arbitrary starting SpoolState directly, since this port has no
+    // real init()/output_min()-equivalent constructor path yet.
+    // `set_spin_up_ratio`/`set_idle_time` let tests seed the two GROUND_
+    // IDLE ramps directly, so each of the three inner DesiredSpoolState
+    // paths (and the idle-time early-break specifically) can be tested
+    // from a precise, known starting point rather than compounding many
+    // setup calls' own rounding into every assertion. `set_throttle_
+    // thrust_max`/`set_thrust_boost_ratio` exist purely so the shared
+    // post-inner-switch reset (throttle_thrust_max_/thrust_boost_/
+    // thrust_boost_ratio_, all zeroed unconditionally regardless of
+    // which inner path ran) can be proven to actually FIRE, by seeding a
+    // nonzero value beforehand - both are otherwise always zero for any
+    // MotorsMatrix this ticket's own scope can reach, so no test that
+    // only read them could distinguish "the reset ran" from "it was
+    // already zero".
+    void set_spool_desired(DesiredSpoolState desired) { spool_desired_ = desired; }
+    void set_spool_state(SpoolState state) { spool_state_ = state; }
+    void set_spin_up_ratio(float value) { spin_up_ratio_ = value; }
+    void set_idle_time(float value) { idle_time_ = value; }
+    void set_throttle_thrust_max(float value) { throttle_thrust_max_ = value; }
+    void set_thrust_boost_ratio(float value) { thrust_boost_ratio_ = value; }
+
+    // Read accessors for output_logic's own new state (CCP-013).
+    [[nodiscard]] SpoolState spool_state() const { return spool_state_; }
+    [[nodiscard]] DesiredSpoolState spool_desired() const { return spool_desired_; }
+    [[nodiscard]] float disarm_safe_timer() const { return disarm_safe_timer_; }
+    [[nodiscard]] float spin_up_ratio() const { return spin_up_ratio_; }
+    [[nodiscard]] float throttle_thrust_max() const { return throttle_thrust_max_; }
+    [[nodiscard]] float idle_time() const { return idle_time_; }
+    [[nodiscard]] bool spin_up_complete() const { return spin_up_complete_; }
+    [[nodiscard]] float thrust_boost_ratio() const { return thrust_boost_ratio_; }
+
     // Accessors - not upstream methods (upstream reaches these fields as
     // protected member arrays from within the class hierarchy itself, or
     // via the small get_factors() accessor this ticket deliberately does
@@ -2722,6 +3135,67 @@ private:
     // AP_MotorsMulticopter base class to inherit `thr_lin` from yet (see
     // file banner's "thr_lin_ MEMBER").
     ThrustLinearization thr_lin_;
+
+    // CCP-013 additions - see file banner's "CCP-013 ADDITION" for the
+    // full rationale of each initial value below.
+    //
+    // INVESTIGATED, NOT A BUG (corrects this ticket's own suspicion):
+    // `_spool_state`/`_spool_desired` are declared on the real `AP_Motors`
+    // BASE class (AP_Motors_Class.h lines 336-337, no in-class
+    // initializer there), and this ticket's own text suspected the same
+    // indeterminate-until-first-write bug class as CCP-011's
+    // `_motor_lost_index`. Re-verified directly and found FALSE: real
+    // `AP_Motors::AP_Motors(uint16_t)` (AP_Motors_Class.cpp lines 31-38)
+    // explicitly initializes BOTH in its own member-initializer list -
+    // `_spool_desired(DesiredSpoolState::SHUT_DOWN),
+    // _spool_state(SpoolState::SHUT_DOWN)` - and
+    // `AP_MotorsMulticopter::AP_MotorsMulticopter` (AP_MotorsMulticopter.cpp
+    // lines 260-265) delegates to `AP_Motors(speed_hz)`, so that
+    // initializer list genuinely runs for every real AP_MotorsMulticopter
+    // instance. This port's own `spool_state_`/`spool_desired_` are given
+    // the SAME real default (SpoolState::ShutDown / DesiredSpoolState::
+    // ShutDown) below - a faithful port of upstream's actual behavior,
+    // NOT a disclosed bug fix (unlike the six members below).
+    SpoolState spool_state_ = SpoolState::ShutDown;
+    DesiredSpoolState spool_desired_ = DesiredSpoolState::ShutDown;
+    //
+    // DISCLOSED BUG FIX (NOT reproduced from upstream), SAME CLASS as
+    // CCP-011's own motor_lost_index_ finding - genuinely confirmed this
+    // time: `_disarm_safe_timer`/`_spin_up_ratio`/`_throttle_thrust_max`/
+    // `_idle_time`/`_spin_up_complete` (AP_MotorsMulticopter.h lines
+    // 210-217, re-verified directly) and `_thrust_boost_ratio`
+    // (AP_Motors_Class.h line 378) all have NO in-class default member
+    // initializer. None of them is AP_Param (setup_object_defaults does
+    // not touch them), and re-verified directly that NEITHER
+    // AP_MotorsMulticopter's own constructor (AP_MotorsMulticopter.cpp
+    // lines 260-265: only `_throttle_limit(1.0f)` in its own
+    // member-initializer list, nothing else) NOR AP_Motors's own
+    // constructor (AP_Motors_Class.cpp lines 31-53, re-verified in full:
+    // only `_thrust_boost = false; _thrust_balanced = true;` are assigned
+    // in the body - `_thrust_boost_ratio` itself is conspicuously absent)
+    // assigns any of these six - real upstream therefore reads all six as
+    // indeterminate memory until first written. Confirmed low-severity,
+    // same reasoning class as CCP-011's own finding: `disarm_safe_timer_`
+    // is unconditionally written by this method's own safety-preamble on
+    // every call before any read; `spin_up_ratio_`/`throttle_thrust_max_`/
+    // `idle_time_` are unconditionally zeroed by the SpoolState::ShutDown
+    // case, which real upstream's own real startup path (disarmed forces
+    // ShutDown) always reaches before anything reads them;
+    // `spin_up_complete_` is written `false` on every GroundIdle+
+    // ThrottleUnlimited-desired call where spin_up_ratio_ is still below
+    // 1.0 (the common case while ramping up from 0), long before the
+    // `else` branch would ever read it; `thrust_boost_ratio_` is
+    // unconditionally zeroed by both the ShutDown and GroundIdle cases'
+    // own shared resets. This port instead gives all six real, DEFINED
+    // initial values (0.0f/false) - NOT reproduced as indeterminate,
+    // matching CCP-011's own precedent and this class's own established
+    // convention of never leaving a member indeterminate.
+    float disarm_safe_timer_ = 0.0f;
+    float spin_up_ratio_ = 0.0f;
+    float throttle_thrust_max_ = 0.0f;
+    float idle_time_ = 0.0f;
+    bool spin_up_complete_ = false;
+    float thrust_boost_ratio_ = 0.0f;
 };
 
 } // namespace fwcpp::motors
