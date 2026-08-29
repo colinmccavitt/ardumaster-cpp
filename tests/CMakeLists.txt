@@ -745,3 +745,17 @@ catch_discover_tests(loiter_alt_qland_test)
 add_executable(q_loiter_completeness_test q_loiter_completeness_test.cpp)
 target_link_libraries(q_loiter_completeness_test PRIVATE ap-q-loiter Catch2::Catch2WithMain)
 catch_discover_tests(q_loiter_completeness_test)
+
+# VCP-007 slice 1: ap-tailsitter scaffold.
+
+add_executable(tailsitter_enable_test tailsitter_enable_test.cpp)
+target_link_libraries(tailsitter_enable_test PRIVATE ap-tailsitter Catch2::Catch2WithMain)
+catch_discover_tests(tailsitter_enable_test)
+
+add_executable(tailsitter_input_type_test tailsitter_input_type_test.cpp)
+target_link_libraries(tailsitter_input_type_test PRIVATE ap-tailsitter Catch2::Catch2WithMain)
+catch_discover_tests(tailsitter_input_type_test)
+
+add_executable(tailsitter_completeness_test tailsitter_completeness_test.cpp)
+target_link_libraries(tailsitter_completeness_test PRIVATE ap-tailsitter Catch2::Catch2WithMain)
+catch_discover_tests(tailsitter_completeness_test)
