@@ -707,6 +707,11 @@ add_executable(qrtl_geometry_test qrtl_geometry_test.cpp)
 target_link_libraries(qrtl_geometry_test PRIVATE ap-qrtl Catch2::Catch2WithMain)
 catch_discover_tests(qrtl_geometry_test)
 
+
+add_executable(mode_qrtl_run_test mode_qrtl_run_test.cpp)
+target_link_libraries(mode_qrtl_run_test PRIVATE ap-qrtl Catch2::Catch2WithMain)
+catch_discover_tests(mode_qrtl_run_test)
+
 add_executable(mode_qrtl_enter_test mode_qrtl_enter_test.cpp)
 target_link_libraries(mode_qrtl_enter_test PRIVATE ap-qrtl Catch2::Catch2WithMain)
 catch_discover_tests(mode_qrtl_enter_test)

@@ -10,10 +10,10 @@ using fwcpp::qrtl::this_slice_count;
 
 TEST_CASE("qrtl catalog", "[qrtl][catalog]") {
     REQUIRE(on_main_count() == 0);
-    REQUIRE(this_slice_count() == 10);
-    REQUIRE(remaining_count() == 7);
+    REQUIRE(this_slice_count() == 14);
+    REQUIRE(remaining_count() == 3);
     REQUIRE(qrtl_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + 1);
     REQUIRE(completeness_has("_enter climb submode", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("run climb tick", PortStatus::kRemaining));
+    REQUIRE(completeness_has("run climb tick", PortStatus::kThisSlice));
 }
