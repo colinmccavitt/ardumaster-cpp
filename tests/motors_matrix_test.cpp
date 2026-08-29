@@ -1372,3 +1372,265 @@ TEST_CASE("setup_octaquad_matrix: PLUS reuses the SAME FrameType enumerator as s
         REQUIRE(octaquad.motor_enabled(i));
     }
 }
+
+// =======================================================================
+// CCP-006: setup_y6_matrix - Y6B/Y6F checked by direct value comparison
+// (raw MotorDefRaw entries, same style as setup_quad_matrix's own Y4
+// test above), PLUS the real productive `default:` fallback this
+// ticket's whole scope is about. See motors_matrix.hpp's file banner
+// "CCP-006 ADDITION" for the full case-list/default-branch
+// investigation - this function is a genuine structural departure from
+// every setup_*_matrix tested above: its own default: case is a real,
+// working fallback table (not "unsupported, return false"), and the
+// function itself never returns false anywhere.
+// =======================================================================
+
+TEST_CASE("setup_y6_matrix: Y6B raw factors match exactly, no angle conversion involved",
+          "[motors][setup_y6_matrix][y6b]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_y6_matrix(MotorsMatrix::FrameType::Y6B));
+    REQUIRE(m.frame_class_string() == "Y6");
+    REQUIRE(m.frame_type_string() == "Y6B");
+
+    // "Y6 motor definition with all top motors spinning clockwise, all
+    // bottom motors counter clockwise" - upstream's own comment,
+    // transcribed exactly (AP_MotorsMatrix.cpp line 1195).
+    REQUIRE(m.roll_factor(0) == Approx(-1.0f));
+    REQUIRE(m.pitch_factor(0) == Approx(0.500f));
+    REQUIRE(m.yaw_factor(0) == Approx(kYawFactorCw));
+    REQUIRE(m.test_order(0) == 1);
+
+    REQUIRE(m.roll_factor(1) == Approx(-1.0f));
+    REQUIRE(m.pitch_factor(1) == Approx(0.500f));
+    REQUIRE(m.yaw_factor(1) == Approx(kYawFactorCcw));
+    REQUIRE(m.test_order(1) == 2);
+
+    REQUIRE(m.roll_factor(2) == Approx(0.0f));
+    REQUIRE(m.pitch_factor(2) == Approx(-1.000f));
+    REQUIRE(m.yaw_factor(2) == Approx(kYawFactorCw));
+    REQUIRE(m.test_order(2) == 3);
+
+    REQUIRE(m.roll_factor(3) == Approx(0.0f));
+    REQUIRE(m.pitch_factor(3) == Approx(-1.000f));
+    REQUIRE(m.yaw_factor(3) == Approx(kYawFactorCcw));
+    REQUIRE(m.test_order(3) == 4);
+
+    REQUIRE(m.roll_factor(4) == Approx(1.0f));
+    REQUIRE(m.pitch_factor(4) == Approx(0.500f));
+    REQUIRE(m.yaw_factor(4) == Approx(kYawFactorCw));
+    REQUIRE(m.test_order(4) == 5);
+
+    REQUIRE(m.roll_factor(5) == Approx(1.0f));
+    REQUIRE(m.pitch_factor(5) == Approx(0.500f));
+    REQUIRE(m.yaw_factor(5) == Approx(kYawFactorCcw));
+    REQUIRE(m.test_order(5) == 6);
+}
+
+TEST_CASE("setup_y6_matrix: Y6F raw factors match exactly, including the real non-ascending testing_order array "
+          "layout",
+          "[motors][setup_y6_matrix][y6f]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_y6_matrix(MotorsMatrix::FrameType::Y6F));
+    REQUIRE(m.frame_class_string() == "Y6");
+    REQUIRE(m.frame_type_string() == "Y6F");
+
+    // "Y6 motor layout for FireFlyY6" - upstream's own comment,
+    // transcribed exactly (AP_MotorsMatrix.cpp line 1207). Note the
+    // array's own testing_order sequence is (3,1,5,4,2,6), NOT ascending -
+    // add_motors_raw uses array INDEX as motor_num, not testing_order, so
+    // this is re-verified per-slot rather than assumed to be in order.
+    REQUIRE(m.roll_factor(0) == Approx(0.0f));
+    REQUIRE(m.pitch_factor(0) == Approx(-1.000f));
+    REQUIRE(m.yaw_factor(0) == Approx(kYawFactorCcw));
+    REQUIRE(m.test_order(0) == 3);
+
+    REQUIRE(m.roll_factor(1) == Approx(-1.0f));
+    REQUIRE(m.pitch_factor(1) == Approx(0.500f));
+    REQUIRE(m.yaw_factor(1) == Approx(kYawFactorCcw));
+    REQUIRE(m.test_order(1) == 1);
+
+    REQUIRE(m.roll_factor(2) == Approx(1.0f));
+    REQUIRE(m.pitch_factor(2) == Approx(0.500f));
+    REQUIRE(m.yaw_factor(2) == Approx(kYawFactorCcw));
+    REQUIRE(m.test_order(2) == 5);
+
+    REQUIRE(m.roll_factor(3) == Approx(0.0f));
+    REQUIRE(m.pitch_factor(3) == Approx(-1.000f));
+    REQUIRE(m.yaw_factor(3) == Approx(kYawFactorCw));
+    REQUIRE(m.test_order(3) == 4);
+
+    REQUIRE(m.roll_factor(4) == Approx(-1.0f));
+    REQUIRE(m.pitch_factor(4) == Approx(0.500f));
+    REQUIRE(m.yaw_factor(4) == Approx(kYawFactorCw));
+    REQUIRE(m.test_order(4) == 2);
+
+    REQUIRE(m.roll_factor(5) == Approx(1.0f));
+    REQUIRE(m.pitch_factor(5) == Approx(0.500f));
+    REQUIRE(m.yaw_factor(5) == Approx(kYawFactorCw));
+    REQUIRE(m.test_order(5) == 6);
+}
+
+namespace {
+// Shared expected values for the real productive `default:` fallback
+// table (AP_MotorsMatrix.cpp lines 1219-1236) - upstream's own case has
+// no comment on it, just the table. Factored out so every fallback test
+// below checks the identical expected values, rather than each spelling
+// out its own copy that could silently drift.
+void checkY6DefaultFallback(const MotorsMatrix& m) {
+    REQUIRE(m.roll_factor(0) == Approx(-1.0f));
+    REQUIRE(m.pitch_factor(0) == Approx(0.666f));
+    REQUIRE(m.yaw_factor(0) == Approx(kYawFactorCcw));
+    REQUIRE(m.test_order(0) == 2);
+
+    REQUIRE(m.roll_factor(1) == Approx(1.0f));
+    REQUIRE(m.pitch_factor(1) == Approx(0.666f));
+    REQUIRE(m.yaw_factor(1) == Approx(kYawFactorCw));
+    REQUIRE(m.test_order(1) == 5);
+
+    REQUIRE(m.roll_factor(2) == Approx(1.0f));
+    REQUIRE(m.pitch_factor(2) == Approx(0.666f));
+    REQUIRE(m.yaw_factor(2) == Approx(kYawFactorCcw));
+    REQUIRE(m.test_order(2) == 6);
+
+    REQUIRE(m.roll_factor(3) == Approx(0.0f));
+    REQUIRE(m.pitch_factor(3) == Approx(-1.333f));
+    REQUIRE(m.yaw_factor(3) == Approx(kYawFactorCw));
+    REQUIRE(m.test_order(3) == 4);
+
+    REQUIRE(m.roll_factor(4) == Approx(-1.0f));
+    REQUIRE(m.pitch_factor(4) == Approx(0.666f));
+    REQUIRE(m.yaw_factor(4) == Approx(kYawFactorCw));
+    REQUIRE(m.test_order(4) == 1);
+
+    REQUIRE(m.roll_factor(5) == Approx(0.0f));
+    REQUIRE(m.pitch_factor(5) == Approx(-1.333f));
+    REQUIRE(m.yaw_factor(5) == Approx(kYawFactorCcw));
+    REQUIRE(m.test_order(5) == 3);
+}
+} // namespace
+
+TEST_CASE("setup_y6_matrix: THE REAL PRODUCTIVE default - several different non-Y6B/Y6F FrameType inputs ALL "
+          "produce the exact same fallback table, not a rejection and not different tables per input",
+          "[motors][setup_y6_matrix][default][pitfall]") {
+    // THE SINGLE MOST IMPORTANT TEST THIS TICKET WRITES (per CCP-006's
+    // own explicit acceptance criteria and file banner). Real upstream's
+    // setup_y6_matrix has a switch naming only Y6B/Y6F explicitly; every
+    // OTHER real, valid motor_frame_type value silently falls through to
+    // the SAME productive default: fallback table - it does NOT reject
+    // or vary per input. copter-rust's own COP-005 investigation found
+    // this first (24 of 64 real upstream frame configurations come from
+    // this exact fallback). A careless port would either (a) return
+    // false for these inputs, or (b) build a different table depending
+    // on which input arrived - this test would fail under EITHER wrong
+    // behavior: it checks that Plus/X/V/H/I/XCor (six real, valid
+    // FrameType values this port's own enum already defines from earlier
+    // tickets, none of which is Y6B/Y6F) each return true, each report
+    // frame_type_string() == "default", and each produce IDENTICAL
+    // per-motor factors/testing_order to the shared expected values in
+    // checkY6DefaultFallback() above - not merely "some" fallback, but
+    // the SAME one every time.
+    const MotorsMatrix::FrameType non_y6_types[] = {
+        MotorsMatrix::FrameType::Plus, MotorsMatrix::FrameType::X,  MotorsMatrix::FrameType::V,
+        MotorsMatrix::FrameType::H,    MotorsMatrix::FrameType::I,  MotorsMatrix::FrameType::XCor,
+    };
+    for (const auto ft : non_y6_types) {
+        MotorsMatrix m;
+        // Not a rejection: setup_y6_matrix returns true for every one of
+        // these, exactly like it does for Y6B/Y6F.
+        REQUIRE(m.setup_y6_matrix(ft));
+        REQUIRE(m.frame_class_string() == "Y6");
+        REQUIRE(m.frame_type_string() == "default");
+        checkY6DefaultFallback(m);
+    }
+
+    // Cross-check: two DIFFERENT non-Y6B/Y6F inputs produce bit-for-bit
+    // identical per-motor state, not merely each independently matching
+    // the expected constants above - guards against a checkY6
+    // DefaultFallback() copy/paste bug hiding a real per-input
+    // difference.
+    MotorsMatrix from_plus;
+    MotorsMatrix from_h;
+    REQUIRE(from_plus.setup_y6_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(from_h.setup_y6_matrix(MotorsMatrix::FrameType::H));
+    for (std::uint8_t i = 0; i < 6; ++i) {
+        REQUIRE(from_plus.roll_factor(i) == Approx(from_h.roll_factor(i)));
+        REQUIRE(from_plus.pitch_factor(i) == Approx(from_h.pitch_factor(i)));
+        REQUIRE(from_plus.yaw_factor(i) == Approx(from_h.yaw_factor(i)));
+        REQUIRE(from_plus.test_order(i) == from_h.test_order(i));
+    }
+}
+
+TEST_CASE("setup_y6_matrix: the real productive default is also reached by a truly out-of-range FrameType, and "
+          "still returns true",
+          "[motors][setup_y6_matrix][default][pitfall]") {
+    // Same fallback, reached the same way setup_quad_matrix's/
+    // setup_hexa_matrix's/setup_octa_matrix's/setup_octaquad_matrix's own
+    // "out-of-range default" tests reach THEIR default - except here the
+    // default is productive, not a rejection: this must still return
+    // true and populate the exact same fallback table, not false.
+    MotorsMatrix m;
+    REQUIRE(m.setup_y6_matrix(static_cast<MotorsMatrix::FrameType>(255)));
+    REQUIRE(m.frame_type_string() == "default");
+    checkY6DefaultFallback(m);
+}
+
+TEST_CASE("setup_y6_matrix: never returns false, for every real FrameType this port's own enum currently defines "
+          "plus an out-of-range value",
+          "[motors][setup_y6_matrix][default][pitfall]") {
+    // Confirms the SECOND real, related consequence the file banner
+    // discloses: unlike every other setup_*_matrix above (each of which
+    // has exactly one real `return false;`, in its own default: case),
+    // setup_y6_matrix's own body has NO `return false;` anywhere -
+    // re-verified directly against the real source. This test exercises
+    // EVERY enumerator this port's own FrameType currently defines
+    // (Y6B/Y6F explicitly handled, everything else via the productive
+    // default), plus a genuinely out-of-range enum value constructed via
+    // an explicit cast (this port's own established idiom for
+    // constructing such a value safely, matching every other
+    // setup_*_matrix's own "out-of-range default" test above) - the
+    // approach taken per the ticket's own explicit instruction to use
+    // judgment between "cast an out-of-range value" and "exhaustively
+    // test every real enumerator", since C++'s enum class permits
+    // constructing an out-of-range value safely for scoped enums with a
+    // fixed underlying type (std::uint8_t here), this test does BOTH
+    // rather than only the weaker substitute.
+    const MotorsMatrix::FrameType all_types[] = {
+        MotorsMatrix::FrameType::Plus,    MotorsMatrix::FrameType::X,      MotorsMatrix::FrameType::BfX,
+        MotorsMatrix::FrameType::BfXRev,  MotorsMatrix::FrameType::DjiX,   MotorsMatrix::FrameType::CwX,
+        MotorsMatrix::FrameType::V,       MotorsMatrix::FrameType::H,      MotorsMatrix::FrameType::VTail,
+        MotorsMatrix::FrameType::ATail,   MotorsMatrix::FrameType::PlusRev, MotorsMatrix::FrameType::Y4,
+        MotorsMatrix::FrameType::I,       MotorsMatrix::FrameType::XCor,   MotorsMatrix::FrameType::CwXCor,
+        MotorsMatrix::FrameType::Y6B,     MotorsMatrix::FrameType::Y6F,
+    };
+    for (const auto ft : all_types) {
+        MotorsMatrix m;
+        REQUIRE(m.setup_y6_matrix(ft));
+    }
+    // The genuinely out-of-range value too - matching the out-of-range
+    // idiom every other setup_*_matrix's own default test above uses.
+    MotorsMatrix m_oor;
+    REQUIRE(m_oor.setup_y6_matrix(static_cast<MotorsMatrix::FrameType>(255)));
+}
+
+TEST_CASE("setup_y6_matrix: Y6B and Y6F reuse no FrameType enumerator from any earlier setup_*_matrix - both are "
+          "genuinely new",
+          "[motors][setup_y6_matrix][y6b][y6f]") {
+    // Y6B/Y6F are CCP-006's own two new enumerators (see file banner's
+    // "CCP-006 ADDITION" enum investigation) - unlike CCP-003's hexa
+    // (zero new enumerators) or CCP-004's octa/CCP-005's octaquad (one
+    // and two new enumerators respectively, each reused by a LATER
+    // setup_*_matrix), Y6B/Y6F are used ONLY by setup_y6_matrix: passing
+    // either one to an earlier setup_*_matrix hits that function's own
+    // SIMPLE "not supported, return false" default, not a real frame
+    // table - confirming they are genuinely new to the switch dispatch,
+    // not silently aliasing an existing case in another frame class.
+    MotorsMatrix quad;
+    MotorsMatrix hexa;
+    MotorsMatrix octa;
+    MotorsMatrix octaquad;
+    REQUIRE_FALSE(quad.setup_quad_matrix(MotorsMatrix::FrameType::Y6B));
+    REQUIRE_FALSE(hexa.setup_hexa_matrix(MotorsMatrix::FrameType::Y6B));
+    REQUIRE_FALSE(octa.setup_octa_matrix(MotorsMatrix::FrameType::Y6F));
+    REQUIRE_FALSE(octaquad.setup_octaquad_matrix(MotorsMatrix::FrameType::Y6F));
+}
+

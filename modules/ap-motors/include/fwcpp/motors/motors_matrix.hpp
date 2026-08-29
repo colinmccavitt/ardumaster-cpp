@@ -575,27 +575,117 @@
 // the switch) - pure MAVLink/GCS metadata, out of scope for the same
 // reason as the other three _mav_type writes.
 //
+// CCP-006 ADDITION (setup_y6_matrix) - upstream AP_MotorsMatrix.cpp, real
+// function at line 1191 (re-verified directly against the pinned
+// worktree; the ticket's own guessed ~1191-1241 span was close - the
+// real function body, INCLUDING its closing brace, runs 1191-1239, with
+// the real AP_MOTORS_FRAME_Y6_ENABLED #if/#endif bracketing it at
+// 1190/1240 - one line shorter at the end than the ticket's own guess,
+// re-counted directly, not assumed). The real switch(frame_type) has
+// exactly TWO explicit cases plus a real, PRODUCTIVE default - a
+// genuine, disclosed structural departure from every setup_*_matrix
+// this port has built so far (setup_quad_matrix/setup_hexa_matrix/
+// setup_octa_matrix/setup_octaquad_matrix, CCP-002 through CCP-005),
+// each of which has exactly one "not supported, return false" default.
+//
+// THE REAL PRODUCTIVE default: PITFALL, CONFIRMED DIRECTLY (this is
+// exactly the pitfall copter-rust's own COP-005 investigation found
+// first - see that ticket's 2026-08-25 note, finding #1 - and this
+// effort's own charter named explicitly; re-verified independently here
+// against the real source, not trusted from that note): setup_y6_matrix's
+// own switch names only MOTOR_FRAME_TYPE_Y6B (line 1195) and
+// MOTOR_FRAME_TYPE_Y6F (line 1207) as explicit cases. Its own default:
+// (line 1219-1236) is NOT "unsupported, return false" - it is a real,
+// working six-motor MotorDefRaw table, transcribed exactly below, that
+// upstream reaches for EVERY OTHER motor_frame_type value: every other
+// named enumerator this port's own Plus/X/BfX/BfXRev/DjiX/CwX/V/H/VTail/
+// ATail/PlusRev/Y4/I/XCor/CwXCor already model (none of which Y6 itself
+// declares a case for), plus the ~5-7 other real upstream enumerators
+// this port has not yet added (e.g. MOTOR_FRAME_TYPE_DECA,
+// MOTOR_FRAME_TYPE_Y6B/_Y6F's own siblings like PLUS/X on frame classes
+// this ticket does not touch), plus any truly out-of-range value. A
+// switch-by-switch transcription that only handled Y6B/Y6F explicitly
+// and made every other value `return false` would be WRONG - it would
+// silently break every real Y6-frame-class vehicle not specifically
+// configured as Y6B/Y6F, which real upstream never does. See
+// motors_matrix_test.cpp's own dedicated fallback tests below, the
+// single most important tests this ticket writes.
+//
+// THE SECOND, RELATED REAL CONSEQUENCE, CONFIRMED DIRECTLY: unlike
+// setup_quad_matrix/setup_hexa_matrix/setup_octa_matrix/
+// setup_octaquad_matrix (each of which has exactly one `return false;`,
+// in its own default: case), setup_y6_matrix's own body has NO
+// `return false;` ANYWHERE - re-read line-by-line to confirm this. Every
+// path (Y6B, Y6F, and the productive default) falls through to the SAME
+// unconditional `return true;` at line 1238. Ported below exactly: the
+// switch has no `default: return false;` arm at all, and the function's
+// own final statement is an unconditional `return true;` - a genuine,
+// disclosed departure from every prior setup_*_matrix this port has
+// built, not an oversight.
+//
+// Y6's own two explicit frame types plus its productive default,
+// transcribed exactly from the real source (Y6 = six motors; all three
+// cases are add_motors_raw() calls over a static MotorDefRaw table, no
+// angle-based MotorDef anywhere in this function):
+//   Y6B (1195-1206) - upstream's own comment: "Y6 motor definition with
+//     all top motors spinning clockwise, all bottom motors counter
+//     clockwise": (roll_fac,pitch_fac,yaw,order)
+//     (-1.0,0.500,CW,1) (-1.0,0.500,CCW,2) (0.0,-1.000,CW,3)
+//     (0.0,-1.000,CCW,4) (1.0,0.500,CW,5) (1.0,0.500,CCW,6).
+//   Y6F (1207-1218) - upstream's own comment: "Y6 motor layout for
+//     FireFlyY6": (0.0,-1.000,CCW,3) (-1.0,0.500,CCW,1) (1.0,0.500,CCW,5)
+//     (0.0,-1.000,CW,4) (-1.0,0.500,CW,2) (1.0,0.500,CW,6). Note the
+//     array's own testing_order is NOT in ascending order (3,1,5,4,2,6) -
+//     transcribed exactly in that real array order, since add_motors_raw
+//     uses array INDEX as motor_num, not testing_order.
+//   default (1219-1236) - THE REAL PRODUCTIVE FALLBACK, upstream's own
+//     case has no comment on it, just the table:
+//     (-1.0,0.666,CCW,2) (1.0,0.666,CW,5) (1.0,0.666,CCW,6)
+//     (0.0,-1.333,CW,4) (-1.0,0.666,CW,1) (0.0,-1.333,CCW,3).
+//
+// FrameType-ENUM INVESTIGATION (this ticket's own explicit question,
+// answered by re-reading the CURRENT enum below directly before writing
+// anything, and independently against the real header
+// AP_Motors_Class.h lines 86-87): MOTOR_FRAME_TYPE_Y6B = 10 and
+// MOTOR_FRAME_TYPE_Y6F = 11 are BOTH genuinely new - neither appears in
+// any switch this port has ported so far (CCP-002 through CCP-005).
+// Named `Y6B`/`Y6F` below (appended after the existing `CwXCor`),
+// matching this enum's own established convention for names that are
+// already a single capitalized-letter-run in upstream (e.g. `Y4` kept
+// verbatim, `V`/`H`/`I` kept verbatim) - Y6B/Y6F have no internal
+// underscore word-boundary to collapse (unlike `CW_X` -> `CwX`), so they
+// are ported character-for-character as `Y6B`/`Y6F`.
+//
+// NOT ported (same disclosed omission class as every other
+// setup_*_matrix's own _mav_type write above): the real upstream also
+// sets `_mav_type = MAV_TYPE_HEXAROTOR;` unconditionally at the top of
+// setup_y6_matrix (line 1193, before the switch) - pure MAVLink/GCS
+// metadata, out of scope for the same reason as the other four
+// _mav_type writes.
+//
 // DEFERRED FUTURE PHASES (named explicitly, not silently omitted):
 //   1. Remaining frame tables - setup_quad_matrix (line 576) is DONE as of
 //      CCP-002, setup_hexa_matrix (line 775) is DONE as of CCP-003,
-//      setup_octa_matrix (line 854) is DONE as of CCP-004, and
-//      setup_octaquad_matrix (line 973) is DONE as of CCP-005 (see
+//      setup_octa_matrix (line 854) is DONE as of CCP-004,
+//      setup_octaquad_matrix (line 973) is DONE as of CCP-005, and
+//      setup_y6_matrix (line 1191) is DONE as of CCP-006 (see
 //      "CCP-002 ADDITION"/"CCP-003 ADDITION"/"CCP-004 ADDITION"/
-//      "CCP-005 ADDITION" above); the REMAINING THREE frame-class setup
-//      functions - setup_dodecahexa_matrix, setup_y6_matrix,
-//      setup_deca_matrix - and setup_motors' own dispatcher (which
+//      "CCP-005 ADDITION"/"CCP-006 ADDITION" above); the REMAINING TWO
+//      frame-class setup functions - setup_dodecahexa_matrix (already
+//      ported's neighbor at upstream line ~1150, confirmed simple
+//      "return false" default per CCP-005's own file-banner note above)
+//      and setup_deca_matrix - and setup_motors' own dispatcher (which
 //      chooses among all seven by frame CLASS - motor_frame_class, see
-//      CCP-003's own enum-sharing investigation above - remaining
-//      upstream lines across those three plus the dispatcher) remain
-//      future phases, named explicitly here so none is silently folded
-//      into another ticket's scope. A future phase MUST independently
-//      re-verify (not blindly trust) copter-rust's own COP-005 finding
-//      that Y6's `default:` switch branch is productive - it answers for
-//      24 of the real 64 upstream frame configurations. A naive
-//      switch-by-switch transcription silently drops all 24. (COP-005's
-//      other two findings - the X8 co-rotating scaling and its real
-//      float-vs-double pitfall - are now independently re-verified and
-//      resolved by THIS ticket, CCP-005, above; not deferred further.)
+//      CCP-003's own enum-sharing investigation above) remain future
+//      phases, named explicitly here so none is silently folded into
+//      another ticket's scope. copter-rust's own COP-005 finding that
+//      Y6's `default:` switch branch is productive - answering for 24 of
+//      the real 64 upstream frame configurations - is now independently
+//      re-verified and resolved by THIS ticket, CCP-006, above; not
+//      deferred further. (COP-005's other two findings - the X8
+//      co-rotating scaling and its real float-vs-double pitfall - were
+//      independently re-verified and resolved by CCP-005; also not
+//      deferred further.)
 //   2. Output stage (output_to_motors, output_armed_stabilizing,
 //      check_for_failed_motor, thrust_compensation, disable_yaw_torque) -
 //      needs real thrust-linearization/battery-compensation infrastructure
@@ -724,6 +814,13 @@ public:
     // follow this enum's own established abbreviation convention exactly
     // (each upstream underscore-word boundary becomes a capitalized run
     // with no separator, e.g. `CwX` for CW_X) applied to X_COR/CW_X_COR.
+    // CCP-006 added EXACTLY TWO new enumerators, `Y6B`/`Y6F` (appended
+    // below after `CwXCor`) - MOTOR_FRAME_TYPE_Y6B/_Y6F
+    // (AP_Motors_Class.h lines 86-87), both genuinely new to every
+    // switch this port has ported so far - see file banner's
+    // "CCP-006 ADDITION" for the full investigation, including the real
+    // PRODUCTIVE `default:` fallback setup_y6_matrix(FrameType) below
+    // reaches for every FrameType value OTHER than these two.
     enum class FrameType : std::uint8_t {
         Plus,
         X,
@@ -740,6 +837,8 @@ public:
         I,
         XCor,
         CwXCor,
+        Y6B,
+        Y6F,
     };
 
     // Upstream AP_Motors::initialised_ok()/set_initialised_ok() (see file
@@ -1488,6 +1587,92 @@ public:
             // setup_y6_matrix's own productive one).
             return false;
         }
+        return true;
+    }
+
+    // setup_y6_matrix - CCP-006 port of upstream
+    // AP_MotorsMatrix::setup_y6_matrix (AP_MotorsMatrix.cpp line 1191).
+    // Every case's raw factor/testing-order values are transcribed
+    // exactly from the real source - see file banner's "CCP-006 ADDITION"
+    // for the full case-list/default-branch investigation. Takes the
+    // SAME FrameType parameter type as every setup_*_matrix above;
+    // introduces exactly two new enumerators, Y6B/Y6F (see file banner).
+    //
+    // REAL, DELIBERATE DEPARTURE FROM EVERY OTHER setup_*_matrix ABOVE:
+    // this function's own real default: case is NOT "unsupported, return
+    // false" - it is a real, WORKING six-motor MotorDefRaw table that
+    // upstream reaches for every FrameType value that is neither Y6B nor
+    // Y6F (this port's own Plus/X/BfX/BfXRev/DjiX/CwX/V/H/VTail/ATail/
+    // PlusRev/Y4/I/XCor/CwXCor all included), matching upstream's own
+    // real "silently still build a working Y6 configuration" semantics
+    // exactly, NOT a rejection. Confirmed directly: this function's own
+    // body contains no `return false;` anywhere; every path - Y6B, Y6F,
+    // and the productive default alike - falls through to the SAME
+    // unconditional `return true;` below. See
+    // motors_matrix_test.cpp's own dedicated fallback tests, this
+    // ticket's single most important tests, which confirm several
+    // different non-Y6B/Y6F FrameType inputs all produce the exact same
+    // fallback table rather than being rejected or producing different
+    // tables per input.
+    [[nodiscard]] bool setup_y6_matrix(FrameType frame_type) {
+        frame_class_string_ = "Y6";
+        switch (frame_type) {
+        case FrameType::Y6B: {
+            // Y6 motor definition with all top motors spinning clockwise,
+            // all bottom motors counter clockwise.
+            frame_type_string_ = "Y6B";
+            static constexpr MotorDefRaw motors[] = {
+                {-1.0f, 0.500f, kYawFactorCw, 1},
+                {-1.0f, 0.500f, kYawFactorCcw, 2},
+                {0.0f, -1.000f, kYawFactorCw, 3},
+                {0.0f, -1.000f, kYawFactorCcw, 4},
+                {1.0f, 0.500f, kYawFactorCw, 5},
+                {1.0f, 0.500f, kYawFactorCcw, 6},
+            };
+            add_motors_raw(motors, 6);
+            break;
+        }
+        case FrameType::Y6F: {
+            // Y6 motor layout for FireFlyY6.
+            frame_type_string_ = "Y6F";
+            static constexpr MotorDefRaw motors[] = {
+                {0.0f, -1.000f, kYawFactorCcw, 3},
+                {-1.0f, 0.500f, kYawFactorCcw, 1},
+                {1.0f, 0.500f, kYawFactorCcw, 5},
+                {0.0f, -1.000f, kYawFactorCw, 4},
+                {-1.0f, 0.500f, kYawFactorCw, 2},
+                {1.0f, 0.500f, kYawFactorCw, 6},
+            };
+            add_motors_raw(motors, 6);
+            break;
+        }
+        default: {
+            // THE REAL PRODUCTIVE DEFAULT (see file banner's
+            // "CCP-006 ADDITION") - upstream's own real fallback table,
+            // reached by every FrameType value that is NOT Y6B/Y6F. This
+            // is NOT a rejection: it is a real, working six-motor
+            // configuration, ported byte-for-byte from upstream's own
+            // default: case body, which upstream itself gives no
+            // explanatory comment beyond the table.
+            frame_type_string_ = "default";
+            static constexpr MotorDefRaw motors[] = {
+                {-1.0f, 0.666f, kYawFactorCcw, 2},
+                {1.0f, 0.666f, kYawFactorCw, 5},
+                {1.0f, 0.666f, kYawFactorCcw, 6},
+                {0.0f, -1.333f, kYawFactorCw, 4},
+                {-1.0f, 0.666f, kYawFactorCw, 1},
+                {0.0f, -1.333f, kYawFactorCcw, 3},
+            };
+            add_motors_raw(motors, 6);
+            break;
+        }
+        }
+        // Real, deliberate departure from every other setup_*_matrix
+        // above (see file banner): upstream's own setup_y6_matrix NEVER
+        // returns false - re-verified directly, there is no
+        // `return false;` anywhere in its body. The default: case above
+        // IS a working configuration, not a rejection, so this
+        // unconditional `true` is correct, not an oversight.
         return true;
     }
 
