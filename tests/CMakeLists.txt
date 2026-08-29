@@ -592,6 +592,10 @@ add_executable(quadplane_throttle_test quadplane_throttle_test.cpp)
 target_link_libraries(quadplane_throttle_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_throttle_test)
 
+add_executable(quadplane_guided_test quadplane_guided_test.cpp)
+target_link_libraries(quadplane_guided_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_guided_test)
+
 add_executable(quadplane_motors_output_test quadplane_motors_output_test.cpp)
 target_link_libraries(quadplane_motors_output_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_motors_output_test)

@@ -24,6 +24,7 @@
 #include <fwcpp/quadplane/quadplane_stabilize.hpp>
 #include <fwcpp/quadplane/quadplane_xy_controller.hpp>
 #include <fwcpp/quadplane/quadplane_throttle.hpp>
+#include <fwcpp/quadplane/quadplane_guided.hpp>
 #include <fwcpp/quadplane/quadplane_takeoff_controller.hpp>
 #include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
 #include <fwcpp/quadplane/quadplane_vtol_subsystems.hpp>
@@ -169,6 +170,7 @@ public:
     PosControlState& poscontrol_mut() { return poscontrol_; }
 
     void set_guided_wait_takeoff(bool v) { guided_wait_takeoff_ = v; }
+    [[nodiscard]] bool guided_wait_takeoff() const { return guided_wait_takeoff_; }
     [[nodiscard]] bool guided_wait_takeoff_on_mode_enter() const {
         return guided_wait_takeoff_on_mode_enter_;
     }
@@ -578,6 +580,52 @@ public:
             slt_transition_.state(), assisted_flight_);
         in.air_mode_active = air_mode_active();
         return fwcpp::quadplane::update_throttle_mix(in);
+    }
+
+    [[nodiscard]] GuidedStartTick guided_start(GuidedStartInputs in) {
+        in.target.correction_north_m = poscontrol_.correction_north_m;
+        in.target.correction_east_m = poscontrol_.correction_east_m;
+        in.target.pos_state = poscontrol_.state;
+        in.target.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.target.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        in.target.pilot_accel_z_mss = pilot_accel_z_mss_;
+        in.approach.options = options_;
+        in.approach.approach_distance_m = approach_distance_m_;
+        guided_takeoff_ = false;
+        auto tick = fwcpp::quadplane::guided_start(poscontrol_, poscontrol_land_, in);
+        last_transition_prep_ = tick.approach.transition_prep;
+        last_set_state_sink_ = tick.approach.set_state_sink;
+        return tick;
+    }
+
+    [[nodiscard]] GuidedUpdateTick guided_update(GuidedUpdateInputs in) {
+        in.guided_takeoff = guided_takeoff_;
+        auto tick = fwcpp::quadplane::guided_update(poscontrol_, poscontrol_land_, last_set_state_sink_, in);
+        if (tick.clear_throttle_wait) {
+            throttle_wait_ = false;
+        }
+        guided_takeoff_ = tick.guided_takeoff;
+        return tick;
+    }
+
+    [[nodiscard]] UserTakeoffTick do_user_takeoff(float takeoff_altitude, UserTakeoffInputs in) {
+        in.options = options_;
+        in.start.target.correction_north_m = poscontrol_.correction_north_m;
+        in.start.target.correction_east_m = poscontrol_.correction_east_m;
+        in.start.target.pos_state = poscontrol_.state;
+        in.start.target.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.start.target.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        in.start.target.pilot_accel_z_mss = pilot_accel_z_mss_;
+        in.start.approach.options = options_;
+        in.start.approach.approach_distance_m = approach_distance_m_;
+        auto tick = fwcpp::quadplane::do_user_takeoff(poscontrol_, poscontrol_land_, takeoff_altitude, in);
+        if (tick.ok) {
+            guided_takeoff_ = true;
+            guided_wait_takeoff_ = false;
+            last_transition_prep_ = tick.start.approach.transition_prep;
+            last_set_state_sink_ = tick.start.approach.set_state_sink;
+        }
+        return tick;
     }
 
     [[nodiscard]] HoldHoverTick hold_hover(float target_climb_rate_cms, DesiredYawRateInputs yaw) const {
