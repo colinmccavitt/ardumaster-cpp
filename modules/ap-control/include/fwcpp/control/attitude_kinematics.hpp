@@ -2638,4 +2638,145 @@ inline void input_thrust_vector_heading(
     }
 }
 
+// ---------------------------------------------------------------------
+// CCP-034 ADDENDUM: input_quaternion (real lines 344-386),
+// input_angle_step_bf_roll_pitch_yaw_rad (real lines 788-806),
+// input_rate_step_bf_roll_pitch_yaw_rads (real lines 811-826).
+//
+// LOAD-BEARING vs the Euler / thrust-vector input_* family:
+//   - input_quaternion takes a NON-CONST Quaternion& for the caller's
+//     desired attitude. After shaping (or the unshaped snap), that
+//     argument is advanced by from_axis_angle(ang_vel_target * dt)
+//     composed on the RIGHT, then normalize(). `ang_vel_target` here is
+//     the LIMITED body-frame input rates rotated into the desired-quat
+//     frame (`attitude_desired_quat * ang_vel_body_rads`), NOT
+//     state.ang_vel_target_rads. Shaped and unshaped therefore advance
+//     the caller's quat identically.
+//   - ang_vel_body_rads is by-value, matching upstream's
+//     `Vector3f ang_vel_body_rads` parameter. ang_vel_limit mutates
+//     that local copy; the caller's Vector3 is not an out-parameter.
+//     The last Vector3f& is run_quat's `_ang_vel_body_rads` output
+//     (same family slot as every other input_* that calls run_quat).
+//   - Shaped: error_quat = target.inverse() * desired; to_axis_angle;
+//     command_model(wrap_PI(error.{x,y,z}), 0, ..., input_tc for
+//     roll/pitch, rate_y_tc for yaw). Does NOT snap attitude_target
+//     to desired. Unshaped: attitude_target = desired;
+//     ang_vel_target_rads = the rotated vector. Does NOT zero accel ff.
+//   - Both branches then to_euler, body_to_euler_derivative, mutate
+//     the caller's quat, run_quat.
+//   - input_angle_step_bf: no update_attitude_target, no shaping.
+//     from_axis_angle(step); target = target * update; normalize;
+//     to_euler; ZERO euler_rate / ang_vel / ang_accel ff; run_quat.
+//   - input_rate_step_bf: copies injected AHRS into attitude_target;
+//     to_euler; ZERO the three ff targets; ang_vel_body_rads = the
+//     three step rates. Does NOT call run_quat (and therefore takes
+//     no gyro/gains/run_quat outs).
+// ---------------------------------------------------------------------
+
+// input_quaternion - upstream AC_AttitudeControl::input_quaternion
+// (real lines 344-386). The desired quaternion is incrementally
+// advanced each timestep using the limited angular-velocity input.
+inline void input_quaternion(
+    math::Quaternion& attitude_desired_quat, math::Vector3f ang_vel_body_rads, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_cmd_rads) {
+    update_attitude_target(state.attitude_target, state.ang_vel_target_rads, dt);
+
+    ang_vel_limit(ang_vel_body_rads, math::radians(gains.ang_vel_roll_max_degs),
+                  math::radians(gains.ang_vel_pitch_max_degs), math::radians(gains.ang_vel_yaw_max_degs));
+
+    // Rotate the limited body-frame input into the desired-quat frame
+    // used for quaternion integration (real line 353).
+    const math::Vector3f ang_vel_target = attitude_desired_quat * ang_vel_body_rads;
+
+    if (gains.rate_bf_ff_enabled) {
+        const math::Quaternion attitude_error_quat = state.attitude_target.inverse() * attitude_desired_quat;
+        math::Vector3f attitude_error_angle;
+        attitude_error_quat.to_axis_angle(attitude_error_angle);
+
+        attitude_command_model(math::wrap_PI(attitude_error_angle.x), 0.0f, state.ang_vel_target_rads.x,
+                                state.ang_accel_target_rads.x, math::radians(gains.ang_vel_roll_max_degs),
+                                gains.accel_roll_max_radss, gains.input_tc, dt);
+        attitude_command_model(math::wrap_PI(attitude_error_angle.y), 0.0f, state.ang_vel_target_rads.y,
+                                state.ang_accel_target_rads.y, math::radians(gains.ang_vel_pitch_max_degs),
+                                gains.accel_pitch_max_radss, gains.input_tc, dt);
+        attitude_command_model(math::wrap_PI(attitude_error_angle.z), 0.0f, state.ang_vel_target_rads.z,
+                                state.ang_accel_target_rads.z, math::radians(gains.ang_vel_yaw_max_degs),
+                                gains.accel_yaw_max_radss, gains.rate_y_tc, dt);
+    } else {
+        state.attitude_target = attitude_desired_quat;
+        state.ang_vel_target_rads = ang_vel_target;
+    }
+
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+
+    (void)body_to_euler_derivative(state.attitude_target, state.ang_vel_target_rads, state.euler_rate_target_rads);
+
+    // Advance the caller's desired quat using the rotated limited input
+    // (real lines 379-382). Happens AFTER to_euler / body_to_euler_
+    // derivative so the snap above sees the pre-advance desired.
+    math::Quaternion attitude_desired_update;
+    attitude_desired_update.from_axis_angle(ang_vel_target * dt);
+    attitude_desired_quat = attitude_desired_quat * attitude_desired_update;
+    attitude_desired_quat.normalize();
+
+    attitude_controller_run_quat(state.attitude_target, attitude_body, state.ang_vel_target_rads, gyro_body_rads,
+                                  gains.rate_yaw_kp, gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                  gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                  gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+                                  gains.ang_vel_roll_max_degs, gains.ang_vel_pitch_max_degs,
+                                  gains.ang_vel_yaw_max_degs, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                  feedforward_scalar, attitude_ang_error, ang_vel_body_cmd_rads);
+}
+
+// input_angle_step_bf_roll_pitch_yaw_rad - upstream
+// AC_AttitudeControl::input_angle_step_bf_roll_pitch_yaw_rad (real
+// lines 788-806). Instantaneous body-frame attitude offset; no rate
+// or acceleration shaping.
+inline void input_angle_step_bf_roll_pitch_yaw_rad(
+    float roll_angle_step_bf_rad, float pitch_angle_step_bf_rad, float yaw_angle_step_bf_rad,
+    AttitudeTargetState& state, const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    math::Quaternion attitude_target_update;
+    attitude_target_update.from_axis_angle(
+        math::Vector3f{roll_angle_step_bf_rad, pitch_angle_step_bf_rad, yaw_angle_step_bf_rad});
+    state.attitude_target = state.attitude_target * attitude_target_update;
+    state.attitude_target.normalize();
+
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+
+    state.euler_rate_target_rads.zero();
+    state.ang_vel_target_rads.zero();
+    state.ang_accel_target_rads.zero();
+
+    attitude_controller_run_quat(state.attitude_target, attitude_body, state.ang_vel_target_rads, gyro_body_rads,
+                                  gains.rate_yaw_kp, gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                  gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                  gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+                                  gains.ang_vel_roll_max_degs, gains.ang_vel_pitch_max_degs,
+                                  gains.ang_vel_yaw_max_degs, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                  feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+}
+
+// input_rate_step_bf_roll_pitch_yaw_rads - upstream
+// AC_AttitudeControl::input_rate_step_bf_roll_pitch_yaw_rads (real
+// lines 811-826). Injects a body-frame rate step for this update.
+// Copies AHRS into the target and writes the step rates straight to
+// the rate-controller input. Does NOT call run_quat.
+inline void input_rate_step_bf_roll_pitch_yaw_rads(float roll_rate_step_bf_rads, float pitch_rate_step_bf_rads,
+                                                    float yaw_rate_step_bf_rads, AttitudeTargetState& state,
+                                                    const math::Quaternion& attitude_body,
+                                                    math::Vector3f& ang_vel_body_rads) {
+    state.attitude_target = attitude_body;
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+
+    state.ang_vel_target_rads.zero();
+    state.ang_accel_target_rads.zero();
+    state.euler_rate_target_rads.zero();
+
+    ang_vel_body_rads = math::Vector3f{roll_rate_step_bf_rads, pitch_rate_step_bf_rads, yaw_rate_step_bf_rads};
+}
+
 } // namespace fwcpp::control
