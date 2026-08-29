@@ -1,8 +1,8 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 8 lands
-// update_land_and_crash_detectors as a leftover tick. remaining_count() > 0
+// (Copter.cpp / Copter.h / system.cpp). Slice 9 lands
+// update_rangefinder_terrain_offset as a leftover tick. remaining_count() > 0
 // is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
@@ -51,9 +51,10 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
      "update_flight_mode.hpp; surface-tracking + landed-gain + EKF method + run"},
     {"Copter::update_home_from_EKF", PortStatus::kOnMain,
      "update_home_from_ekf.hpp; inflight copy_alt_from; SmartRTL leftover"},
-    {"Copter::update_land_and_crash_detectors", PortStatus::kThisSlice,
+    {"Copter::update_land_and_crash_detectors", PortStatus::kOnMain,
      "dispatcher + disarmed/landed; crash_check/AND-gate remaining"},
-    {"Copter::update_rangefinder_terrain_offset", PortStatus::kRemaining, "FAST_TASK body"},
+    {"Copter::update_rangefinder_terrain_offset", PortStatus::kThisSlice,
+     "update_rangefinder_terrain_offset.hpp; down/up LPF; circle leftover"},
     {"Copter::update_batt_compass", PortStatus::kRemaining, "10 Hz leftover"},
     {"Copter::update_altitude", PortStatus::kRemaining, "10 Hz leftover"},
     {"Copter::run_nav_updates", PortStatus::kRemaining, "50 Hz leftover"},

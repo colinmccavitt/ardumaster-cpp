@@ -24,6 +24,7 @@ using fwcpp::copter::SpoolState;
 using fwcpp::copter::UpdateFlightModeInputs;
 using fwcpp::copter::UpdateHomeFromEkfInputs;
 using fwcpp::copter::UpdateLandAndCrashDetectorsInputs;
+using fwcpp::copter::UpdateRangefinderTerrainOffsetInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -54,6 +55,7 @@ using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
 using fwcpp::copter::update_home_from_ekf;
 using fwcpp::copter::update_land_and_crash_detectors;
+using fwcpp::copter::update_rangefinder_terrain_offset;
 
 namespace {
 
@@ -69,10 +71,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 8", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 23);
+TEST_CASE("catalog remaining_count stays open after slice 9", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 22);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 12);
+    REQUIRE(on_main_count() == 13);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -87,9 +89,9 @@ TEST_CASE("catalog remaining_count stays open after slice 8", "[copter][leftover
     REQUIRE(completeness_has("Copter::check_ekf_reset", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_flight_mode", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_home_from_EKF", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::update_land_and_crash_detectors", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_land_and_crash_detectors", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_rangefinder_terrain_offset", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::update_rangefinder_terrain_offset", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -773,4 +775,93 @@ TEST_CASE("update_land_and_crash_detectors accel_ef z has gravity added",
     REQUIRE(fx.accel_ef_mss.y == 2.0f);
     REQUIRE(fx.accel_ef_mss.z == 0.0f);
     REQUIRE(fx.filter_apply);
+}
+
+TEST_CASE("update_rangefinder_terrain_offset down LPF mutates terrain_u_m",
+          "[copter][update_rangefinder_terrain_offset]") {
+    // alpha = 0.1 / max(0.2, 0.1) = 0.5
+    // down target = 10 - 2 = 8; new = 4 + (8 - 4) * 0.5 = 6
+    UpdateRangefinderTerrainOffsetInputs in{};
+    in.g_dt = 0.1f;
+    in.surftrak_tc = 0.2f;
+    in.rangefinder_state.ref_pos_u_m = 10.0f;
+    in.rangefinder_state.alt_glitch_protected_m = 2.0f;
+    in.rangefinder_state.terrain_u_m = 4.0f;
+    in.rangefinder_state.alt_healthy = false;
+    in.rangefinder_state.data_stale = false;
+
+    const auto fx = update_rangefinder_terrain_offset(in);
+    REQUIRE(in.rangefinder_state.terrain_u_m == 6.0f);
+    REQUIRE_FALSE(fx.wp_nav_set_rangefinder_terrain);
+    REQUIRE_FALSE(fx.circle_nav_set_rangefinder_terrain);
+
+    const auto* row = find_scheduler_task("update_rangefinder_terrain_offset");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kFast);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("update_rangefinder_terrain_offset up LPF uses plus glitch",
+          "[copter][update_rangefinder_terrain_offset]") {
+    // alpha = 0.1 / max(0.2, 0.1) = 0.5
+    // up target = 10 + 2 = 12; new = 4 + (12 - 4) * 0.5 = 8
+    UpdateRangefinderTerrainOffsetInputs in{};
+    in.g_dt = 0.1f;
+    in.surftrak_tc = 0.2f;
+    in.rangefinder_up_state.ref_pos_u_m = 10.0f;
+    in.rangefinder_up_state.alt_glitch_protected_m = 2.0f;
+    in.rangefinder_up_state.terrain_u_m = 4.0f;
+
+    (void)update_rangefinder_terrain_offset(in);
+    REQUIRE(in.rangefinder_up_state.terrain_u_m == 8.0f);
+}
+
+TEST_CASE("update_rangefinder_terrain_offset unhealthy and not stale skips wp_nav",
+          "[copter][update_rangefinder_terrain_offset]") {
+    UpdateRangefinderTerrainOffsetInputs in{};
+    in.g_dt = 0.1f;
+    in.surftrak_tc = 0.2f;
+    in.rangefinder_state.ref_pos_u_m = 10.0f;
+    in.rangefinder_state.alt_glitch_protected_m = 2.0f;
+    in.rangefinder_state.terrain_u_m = 4.0f;
+    in.rangefinder_state.enabled = true;
+    in.rangefinder_state.alt_healthy = false;
+    in.rangefinder_state.data_stale = false;
+
+    const auto fx = update_rangefinder_terrain_offset(in);
+    REQUIRE(in.rangefinder_state.terrain_u_m == 6.0f);
+    REQUIRE_FALSE(fx.wp_nav_set_rangefinder_terrain);
+    REQUIRE_FALSE(fx.circle_nav_set_rangefinder_terrain);
+}
+
+TEST_CASE("update_rangefinder_terrain_offset healthy or stale calls wp_nav",
+          "[copter][update_rangefinder_terrain_offset]") {
+    UpdateRangefinderTerrainOffsetInputs in{};
+    in.g_dt = 0.1f;
+    in.surftrak_tc = 0.2f;
+    in.rangefinder_state.ref_pos_u_m = 10.0f;
+    in.rangefinder_state.alt_glitch_protected_m = 2.0f;
+    in.rangefinder_state.terrain_u_m = 4.0f;
+    in.rangefinder_state.enabled = true;
+    in.rangefinder_state.alt_healthy = true;
+    in.rangefinder_state.data_stale = false;
+
+    const auto healthy = update_rangefinder_terrain_offset(in);
+    REQUIRE(healthy.wp_nav_set_rangefinder_terrain);
+    REQUIRE(healthy.wp_nav_enabled);
+    REQUIRE(healthy.wp_nav_alt_healthy);
+    REQUIRE(healthy.wp_nav_terrain_u_m == 6.0f);
+    REQUIRE(in.rangefinder_state.terrain_u_m == 6.0f);
+    REQUIRE_FALSE(healthy.circle_nav_set_rangefinder_terrain);
+
+    in.rangefinder_state.terrain_u_m = 4.0f;
+    in.rangefinder_state.enabled = false;
+    in.rangefinder_state.alt_healthy = false;
+    in.rangefinder_state.data_stale = true;
+    const auto stale = update_rangefinder_terrain_offset(in);
+    REQUIRE(stale.wp_nav_set_rangefinder_terrain);
+    REQUIRE_FALSE(stale.wp_nav_enabled);
+    REQUIRE_FALSE(stale.wp_nav_alt_healthy);
+    REQUIRE(stale.wp_nav_terrain_u_m == 6.0f);
+    REQUIRE_FALSE(stale.circle_nav_set_rangefinder_terrain);
 }
