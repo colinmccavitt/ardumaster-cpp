@@ -5,9 +5,11 @@
 // effort (see /srv/ardumaster/tracker/efforts/copter-cpp.md) - PLUS
 // (CCP-002) the first real consumer of that infrastructure,
 // setup_quad_matrix (AP_MotorsMatrix.cpp ~line 576-711) - PLUS (CCP-003)
-// the second, setup_hexa_matrix (AP_MotorsMatrix.cpp line 775-851).
-// Deliberately NOT the other five frame-class setup functions
-// (setup_octa_matrix through setup_deca_matrix), NOT setup_motors' own
+// the second, setup_hexa_matrix (AP_MotorsMatrix.cpp line 775-851) - PLUS
+// (CCP-004) the third, setup_octa_matrix (AP_MotorsMatrix.cpp line
+// 854-970). Deliberately NOT the remaining four frame-class setup
+// functions (setup_octaquad_matrix, setup_dodecahexa_matrix,
+// setup_y6_matrix, setup_deca_matrix), NOT setup_motors' own
 // dispatcher, and NOT the output stage (output_to_motors/
 // output_armed_stabilizing/check_for_failed_motor/thrust_compensation/
 // disable_yaw_torque) - all real, substantial, separately-scoped future
@@ -176,6 +178,93 @@
 // frame_class_string_ ARE ported (see class body) since the ticket
 // explicitly asks for them as useful test/debug state even without a GCS.
 //
+// CCP-004 ADDITION (setup_octa_matrix) - upstream AP_MotorsMatrix.cpp,
+// real function at line 854 (re-verified directly against the pinned
+// worktree; the ticket's own guessed ~854-972 span was close - the real
+// function, including its closing brace, runs 854-970, with the real
+// AP_MOTORS_FRAME_OCTA_ENABLED #if/#endif bracketing it at 853/971).
+// The real switch(frame_type) has exactly these cases, in this order:
+// PLUS (859), X (875), V (890), H (905), I (920), DJI_X (935),
+// CW_X (950), default (965). Seven in-scope cases - exhaustive,
+// re-counted directly against the real file; no gated #if blocks appear
+// anywhere inside the function body (confirmed by reading it
+// line-by-line, same check CCP-003's own hexa banner section performed).
+//
+// DEFAULT BRANCH - confirmed the SIMPLE kind: line 965-966 is
+// `default: // octa frame class does not support this frame type
+//          return false;` - matching setup_quad_matrix's/setup_hexa_
+// matrix's own simple defaults exactly, NOT setup_y6_matrix's own real
+// productive fallback (still a separate, later-ticket concern per
+// COP-005 - see "DEFERRED FUTURE PHASES" below).
+//
+// FrameType-ENUM INVESTIGATION (this ticket's own explicit question,
+// answered by re-reading the CURRENT enum below directly before writing
+// anything, not by trusting the ticket's own guess): of octa's seven
+// real frame types, SIX (PLUS, X, V, H, DJI_X, CW_X) were CONFIRMED
+// ALREADY PRESENT in this port's own FrameType enum, left over from
+// CCP-002's quad work (the existing Plus, X, V, H, DjiX, CwX
+// enumerators) - re-checked one by one against the enum's real
+// declaration, not assumed from the ticket text. Exactly ONE,
+// MOTOR_FRAME_TYPE_I (AP_Motors_Class.h line 91, re-verified directly:
+// "MOTOR_FRAME_TYPE_I = 15, // (sideways H) octo only"), is genuinely
+// new and is the only enumerator this ticket adds - as `I`, appended
+// after the existing `Y4` to preserve the enum's own incremental-growth
+// order rather than reordering any existing enumerator. This confirms
+// the ticket's own guess exactly (unlike CCP-003's own hexa
+// investigation, which found the ticket's guess of "five new
+// enumerators" wrong - zero were actually needed there); here the
+// ticket's guess of "one new enumerator" checked out, but was still
+// independently re-verified against the real enum and the real switch
+// cases rather than accepted on trust.
+//
+// Octa's own seven frame types, transcribed exactly from the real
+// source (octa = eight motors; PLUS/X/DJI_X/CW_X are plain add_motors()
+// calls over angle-based MotorDef tables; V/H/I are add_motors_raw()
+// calls over explicit-factor MotorDefRaw tables - unlike quad/hexa,
+// EVERY octa case uses one of these two forms, no direct add_motor()
+// calls like quad's own VTAIL/ATAIL):
+//   PLUS (859-871): angle/yaw/order octuple (0,CW,1) (180,CW,5)
+//     (45,CCW,2) (135,CCW,4) (-45,CCW,8) (-135,CCW,6) (-90,CW,7)
+//     (90,CW,3).
+//   X (875-886): (22.5,CW,1) (-157.5,CW,5) (67.5,CCW,2) (157.5,CCW,4)
+//     (-22.5,CCW,8) (-112.5,CCW,6) (-67.5,CW,7) (112.5,CW,3).
+//   V (890-901) - REAL, RE-VERIFIED non-round explicit raw
+//     (roll_fac, pitch_fac) pairs, NOT derived from any angle formula -
+//     transcribed exactly, matching the ticket's own explicit warning
+//     (roll_fac, pitch_fac, yaw, testing_order):
+//     (0.83,0.34,CW,7) (-0.67,-0.32,CW,3) (0.67,-0.32,CCW,6)
+//     (-0.50,-1.00,CCW,4) (1.00,1.00,CCW,8) (-0.83,0.34,CCW,2)
+//     (-1.00,1.00,CW,1) (0.50,-1.00,CW,5).
+//   H (905-916) - REAL, RE-VERIFIED raw (roll_fac, pitch_fac) pairs; six
+//     of the eight entries use plain +-1.0f pitch factors, but the TWO
+//     at testing_order 2 and 6 use +-0.333f pitch instead - transcribed
+//     exactly, NOT a typo and NOT rounded to +-1.0f or +-0.33f, matching
+//     the ticket's own explicit warning:
+//     (-1.0,1.0,CW,1) (1.0,-1.0,CW,5) (-1.0,0.333,CCW,2)
+//     (-1.0,-1.0,CCW,4) (1.0,1.0,CCW,8) (1.0,-0.333,CCW,6)
+//     (1.0,0.333,CW,7) (-1.0,-0.333,CW,3).
+//   I (920-931) - the genuinely new frame type (see enum investigation
+//     above); upstream's own comment on its enumerator calls it
+//     "(sideways H) octo only". REAL raw (roll_fac, pitch_fac) pairs,
+//     same +-1.0f/+-0.333f value vocabulary as H's own but arranged
+//     differently - here ROLL carries the four 0.333f-magnitude values,
+//     not pitch:
+//     (0.333,-1.0,CW,5) (-0.333,1.0,CW,1) (1.0,-1.0,CCW,6)
+//     (0.333,1.0,CCW,8) (-0.333,-1.0,CCW,4) (-1.0,1.0,CCW,2)
+//     (-1.0,-1.0,CW,3) (1.0,1.0,CW,7).
+//   DJI_X (935-946): (22.5,CCW,1) (-22.5,CW,8) (-67.5,CCW,7)
+//     (-112.5,CW,6) (-157.5,CCW,5) (157.5,CW,4) (112.5,CCW,3)
+//     (67.5,CW,2).
+//   CW_X (950-961): (22.5,CCW,1) (67.5,CW,2) (112.5,CCW,3) (157.5,CW,4)
+//     (-157.5,CCW,5) (-112.5,CW,6) (-67.5,CCW,7) (-22.5,CW,8).
+//
+// NOT ported (same disclosed omission class as setup_quad_matrix's/
+// setup_hexa_matrix's own _mav_type writes above): the real upstream
+// also sets `_mav_type = MAV_TYPE_OCTOROTOR;` unconditionally at the
+// top of setup_octa_matrix (line 857, before the switch) - pure
+// MAVLink/GCS metadata, out of scope for the same reason as the other
+// two _mav_type writes.
+//
 // Upstream (Copter-4.7.0, read directly from the pinned worktree at
 // /srv/ardumaster/upstream/plane-4.7.0 - confirmed byte-identical to
 // Copter-4.7.0 for this file by the copter-cpp effort charter, since both
@@ -186,12 +275,15 @@
 //     normalise_rpy_factors (line 1353) - every line number re-verified
 //     directly against the real file, not copied from the ticket.
 //   - AP_MotorsMatrix.h: MotorDef (line 82), MotorDefRaw (line 96).
-//   - AP_MotorsMatrix.cpp: setup_hexa_matrix (line 775, CCP-003).
+//   - AP_MotorsMatrix.cpp: setup_hexa_matrix (line 775, CCP-003),
+//     setup_octa_matrix (line 854, CCP-004).
 //   - AP_Motors_Class.h: initialised_ok()/set_initialised_ok() (lines
 //     113-114), add_motor_num() declaration (line 310),
 //     motor_frame_class enum (lines 54-72, CCP-003), motor_frame_type
 //     enum (lines 78-99, CCP-003) - see "CCP-003 ADDITION" above for the
-//     full enum-sharing investigation these two line ranges settled.
+//     full enum-sharing investigation these two line ranges settled -
+//     MOTOR_FRAME_TYPE_I specifically at line 91 (CCP-004, see
+//     "CCP-004 ADDITION" above).
 //   - AP_Motors_Class.cpp: add_motor_num()'s real body (line 214).
 //   - AP_MotorsMulticopter.h: motor_enabled[AP_MOTORS_MAX_NUM_MOTORS]
 //     (line 207) - the real array this ticket's functions operate on
@@ -328,17 +420,18 @@
 //
 // DEFERRED FUTURE PHASES (named explicitly, not silently omitted):
 //   1. Remaining frame tables - setup_quad_matrix (line 576) is DONE as of
-//      CCP-002 and setup_hexa_matrix (line 775) is DONE as of CCP-003 (see
-//      "CCP-002 ADDITION"/"CCP-003 ADDITION" above); the other five
-//      frame-class setup functions (setup_octa_matrix,
+//      CCP-002, setup_hexa_matrix (line 775) is DONE as of CCP-003, and
+//      setup_octa_matrix (line 854) is DONE as of CCP-004 (see
+//      "CCP-002 ADDITION"/"CCP-003 ADDITION"/"CCP-004 ADDITION" above);
+//      the REMAINING FOUR frame-class setup functions -
 //      setup_octaquad_matrix, setup_dodecahexa_matrix, setup_y6_matrix,
-//      setup_deca_matrix) and setup_motors' own dispatcher (which chooses
-//      among all seven by frame CLASS - motor_frame_class, see CCP-003's
-//      own enum-sharing investigation above - ~1,400 upstream lines total
-//      across all seven) remain future phases, named explicitly here so
-//      none is silently folded into another ticket's scope. A future
-//      phase MUST independently re-verify (not blindly trust) copter-rust's
-//      own COP-005 findings:
+//      setup_deca_matrix - and setup_motors' own dispatcher (which
+//      chooses among all seven by frame CLASS - motor_frame_class, see
+//      CCP-003's own enum-sharing investigation above - remaining
+//      upstream lines across those four plus the dispatcher) remain
+//      future phases, named explicitly here so none is silently folded
+//      into another ticket's scope. A future phase MUST independently
+//      re-verify (not blindly trust) copter-rust's own COP-005 findings:
 //        a. Y6's `default:` switch branch is productive - it answers for
 //           24 of the real 64 upstream frame configurations. A naive
 //           switch-by-switch transcription silently drops all 24.
@@ -423,29 +516,37 @@ public:
         std::uint8_t testing_order;
     };
 
-    // CCP-002/CCP-003: port of upstream's real `enum motor_frame_type`
-    // (AP_Motors_Class.h lines 78-99) - a SINGLE enum genuinely shared
-    // across every real setup_*_matrix function (setup_quad_matrix,
-    // setup_hexa_matrix, ...); which function runs is chosen separately
-    // by the real `motor_frame_class` enum (lines 54-72), not by this
-    // one - see file banner's "CCP-003 ADDITION" for the full
-    // enum-sharing investigation. This port's own FrameType therefore
-    // grows incrementally as each frame-class ticket lands and is
-    // reused verbatim by every setup_*_matrix method below, exactly
-    // mirroring that real design - it does NOT get a second, function-
-    // specific enum. Currently restricted to exactly the enumerators
-    // setup_quad_matrix's and setup_hexa_matrix's own real switch
-    // statements handle between them (NOT the full upstream enum, which
-    // also has other frame-class-specific values no setup function has
-    // been ported for yet - see file banner's "CCP-002 ADDITION"/
-    // "CCP-003 ADDITION" for the exhaustive real case lists this was
-    // checked against). NYT_PLUS/NYT_X are deliberately absent - see
-    // file banner's "EXCLUDED" note. CCP-003 added ZERO new enumerators:
-    // all five of setup_hexa_matrix's real frame types (PLUS/X/H/DJI_X/
-    // CW_X) were already present from CCP-002's setup_quad_matrix work,
-    // and setup_hexa_matrix(FrameType) below reuses them directly.
-    // Named/shaped per this port's own house style for small state enums
-    // (e.g. CalibrationState, fwcpp/airspeed/airspeed_sensor.hpp).
+    // CCP-002/CCP-003/CCP-004: port of upstream's real
+    // `enum motor_frame_type` (AP_Motors_Class.h lines 78-99) - a SINGLE
+    // enum genuinely shared across every real setup_*_matrix function
+    // (setup_quad_matrix, setup_hexa_matrix, setup_octa_matrix, ...);
+    // which function runs is chosen separately by the real
+    // `motor_frame_class` enum (lines 54-72), not by this one - see file
+    // banner's "CCP-003 ADDITION" for the full enum-sharing
+    // investigation. This port's own FrameType therefore grows
+    // incrementally as each frame-class ticket lands and is reused
+    // verbatim by every setup_*_matrix method below, exactly mirroring
+    // that real design - it does NOT get a second, function-specific
+    // enum. Currently restricted to exactly the enumerators
+    // setup_quad_matrix's, setup_hexa_matrix's, and setup_octa_matrix's
+    // own real switch statements handle among them (NOT the full
+    // upstream enum, which also has other frame-class-specific values no
+    // setup function has been ported for yet - see file banner's
+    // "CCP-002 ADDITION"/"CCP-003 ADDITION"/"CCP-004 ADDITION" for the
+    // exhaustive real case lists this was checked against). NYT_PLUS/
+    // NYT_X are deliberately absent - see file banner's "EXCLUDED" note.
+    // CCP-003 added ZERO new enumerators: all five of setup_hexa_matrix's
+    // real frame types (PLUS/X/H/DJI_X/CW_X) were already present from
+    // CCP-002's setup_quad_matrix work, and setup_hexa_matrix(FrameType)
+    // below reuses them directly. CCP-004 added EXACTLY ONE new
+    // enumerator, `I` (appended below after `Y4`) - the only one of
+    // setup_octa_matrix's seven real frame types not already present;
+    // the other six (PLUS/X/V/H/DJI_X/CW_X) were re-confirmed already
+    // present from CCP-002's work and are reused verbatim by
+    // setup_octa_matrix(FrameType) below - see file banner's
+    // "CCP-004 ADDITION" for the full investigation. Named/shaped per
+    // this port's own house style for small state enums (e.g.
+    // CalibrationState, fwcpp/airspeed/airspeed_sensor.hpp).
     enum class FrameType : std::uint8_t {
         Plus,
         X,
@@ -459,6 +560,7 @@ public:
         ATail,
         PlusRev,
         Y4,
+        I,
     };
 
     // Upstream AP_Motors::initialised_ok()/set_initialised_ok() (see file
@@ -860,12 +962,158 @@ public:
         return true;
     }
 
+    // setup_octa_matrix - CCP-004 port of upstream
+    // AP_MotorsMatrix::setup_octa_matrix (AP_MotorsMatrix.cpp line 854).
+    // Every case's angle/factor/testing-order values are transcribed
+    // exactly from the real source - see file banner's "CCP-004 ADDITION"
+    // for the full case-list/default-branch/enum-investigation. Takes the
+    // SAME FrameType parameter type as setup_quad_matrix/setup_hexa_matrix
+    // above; reuses Plus/X/V/H/DjiX/CwX verbatim (all six already existed
+    // from CCP-002) and introduces exactly one new enumerator, `I` (see
+    // file banner). Returns false (upstream's own real return value) for
+    // any FrameType not handled below, matching setup_quad_matrix's/
+    // setup_hexa_matrix's own real "not supported" semantics exactly.
+    [[nodiscard]] bool setup_octa_matrix(FrameType frame_type) {
+        frame_class_string_ = "OCTA";
+        switch (frame_type) {
+        case FrameType::Plus: {
+            frame_type_string_ = "PLUS";
+            static constexpr MotorDef motors[] = {
+                {0.0f, kYawFactorCw, 1},
+                {180.0f, kYawFactorCw, 5},
+                {45.0f, kYawFactorCcw, 2},
+                {135.0f, kYawFactorCcw, 4},
+                {-45.0f, kYawFactorCcw, 8},
+                {-135.0f, kYawFactorCcw, 6},
+                {-90.0f, kYawFactorCw, 7},
+                {90.0f, kYawFactorCw, 3},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        case FrameType::X: {
+            frame_type_string_ = "X";
+            static constexpr MotorDef motors[] = {
+                {22.5f, kYawFactorCw, 1},
+                {-157.5f, kYawFactorCw, 5},
+                {67.5f, kYawFactorCcw, 2},
+                {157.5f, kYawFactorCcw, 4},
+                {-22.5f, kYawFactorCcw, 8},
+                {-112.5f, kYawFactorCcw, 6},
+                {-67.5f, kYawFactorCw, 7},
+                {112.5f, kYawFactorCw, 3},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        case FrameType::V: {
+            // Real, non-round explicit raw (roll_fac, pitch_fac) pairs -
+            // NOT derived from any angle formula, transcribed exactly as
+            // upstream's own float literals (see file banner's
+            // "CCP-004 ADDITION").
+            frame_type_string_ = "V";
+            static constexpr MotorDefRaw motors[] = {
+                {0.83f, 0.34f, kYawFactorCw, 7},
+                {-0.67f, -0.32f, kYawFactorCw, 3},
+                {0.67f, -0.32f, kYawFactorCcw, 6},
+                {-0.50f, -1.00f, kYawFactorCcw, 4},
+                {1.00f, 1.00f, kYawFactorCcw, 8},
+                {-0.83f, 0.34f, kYawFactorCcw, 2},
+                {-1.00f, 1.00f, kYawFactorCw, 1},
+                {0.50f, -1.00f, kYawFactorCw, 5},
+            };
+            add_motors_raw(motors, 8);
+            break;
+        }
+        case FrameType::H: {
+            // Real explicit raw (roll_fac, pitch_fac) pairs - six of the
+            // eight entries use plain +-1.0f pitch, but the two at
+            // testing_order 2 and 6 use +-0.333f pitch instead,
+            // transcribed exactly (NOT a typo, NOT rounded - see file
+            // banner's "CCP-004 ADDITION").
+            frame_type_string_ = "H";
+            static constexpr MotorDefRaw motors[] = {
+                {-1.0f, 1.0f, kYawFactorCw, 1},
+                {1.0f, -1.0f, kYawFactorCw, 5},
+                {-1.0f, 0.333f, kYawFactorCcw, 2},
+                {-1.0f, -1.0f, kYawFactorCcw, 4},
+                {1.0f, 1.0f, kYawFactorCcw, 8},
+                {1.0f, -0.333f, kYawFactorCcw, 6},
+                {1.0f, 0.333f, kYawFactorCw, 7},
+                {-1.0f, -0.333f, kYawFactorCw, 3},
+            };
+            add_motors_raw(motors, 8);
+            break;
+        }
+        case FrameType::I: {
+            // (sideways H) octo only - upstream's own enumerator comment,
+            // re-verified directly (AP_Motors_Class.h line 91). The
+            // genuinely new frame type this ticket adds to FrameType -
+            // see file banner's "CCP-004 ADDITION". Same +-1.0f/+-0.333f
+            // value vocabulary as H's own above, but arranged
+            // differently: here roll carries the four 0.333f-magnitude
+            // values, not pitch.
+            frame_type_string_ = "I";
+            static constexpr MotorDefRaw motors[] = {
+                {0.333f, -1.0f, kYawFactorCw, 5},
+                {-0.333f, 1.0f, kYawFactorCw, 1},
+                {1.0f, -1.0f, kYawFactorCcw, 6},
+                {0.333f, 1.0f, kYawFactorCcw, 8},
+                {-0.333f, -1.0f, kYawFactorCcw, 4},
+                {-1.0f, 1.0f, kYawFactorCcw, 2},
+                {-1.0f, -1.0f, kYawFactorCw, 3},
+                {1.0f, 1.0f, kYawFactorCw, 7},
+            };
+            add_motors_raw(motors, 8);
+            break;
+        }
+        case FrameType::DjiX: {
+            frame_type_string_ = "DJI_X";
+            static constexpr MotorDef motors[] = {
+                {22.5f, kYawFactorCcw, 1},
+                {-22.5f, kYawFactorCw, 8},
+                {-67.5f, kYawFactorCcw, 7},
+                {-112.5f, kYawFactorCw, 6},
+                {-157.5f, kYawFactorCcw, 5},
+                {157.5f, kYawFactorCw, 4},
+                {112.5f, kYawFactorCcw, 3},
+                {67.5f, kYawFactorCw, 2},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        case FrameType::CwX: {
+            frame_type_string_ = "CW_X";
+            static constexpr MotorDef motors[] = {
+                {22.5f, kYawFactorCcw, 1},
+                {67.5f, kYawFactorCw, 2},
+                {112.5f, kYawFactorCcw, 3},
+                {157.5f, kYawFactorCw, 4},
+                {-157.5f, kYawFactorCcw, 5},
+                {-112.5f, kYawFactorCw, 6},
+                {-67.5f, kYawFactorCcw, 7},
+                {-22.5f, kYawFactorCw, 8},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        default:
+            // octa frame class does not support this frame type - matches
+            // upstream's own real default case exactly (see file banner:
+            // this is the SIMPLE kind of default, not setup_y6_matrix's
+            // own productive one).
+            return false;
+        }
+        return true;
+    }
+
     // frame_type_string()/frame_class_string() - port of upstream's real
     // _frame_type_string/_frame_class_string state (set by
-    // setup_quad_matrix/setup_hexa_matrix above), even though this port
-    // has no GCS to report them to - useful for tests/debugging, per the
-    // ticket's own request. Empty until one of those has been called at
-    // least once (matching upstream's own uninitialized-until-setup
+    // setup_quad_matrix/setup_hexa_matrix/setup_octa_matrix above), even
+    // though this port has no GCS to report them to - useful for
+    // tests/debugging, per the ticket's own request. Empty until one of
+    // those has been called at least once (matching upstream's own
+    // uninitialized-until-setup
     // behavior).
     [[nodiscard]] const std::string& frame_type_string() const { return frame_type_string_; }
     [[nodiscard]] const std::string& frame_class_string() const { return frame_class_string_; }

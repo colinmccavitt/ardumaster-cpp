@@ -818,3 +818,223 @@ TEST_CASE("setup_hexa_matrix: PLUS reuses the SAME FrameType enumerator as setup
     REQUIRE(hexa.motor_enabled(4));
     REQUIRE(hexa.motor_enabled(5));
 }
+
+// =======================================================================
+// CCP-004: setup_octa_matrix - every real in-scope frame type, checked
+// against hand-computed values from the real upstream angle/factor
+// inputs (AP_MotorsMatrix.cpp lines 854-970). Angle-based frames reuse
+// checkAngleFrame() above; V/H/I use real explicit raw (roll_fac,
+// pitch_fac) pairs, checked via checkRawFrame() below. V's own non-round
+// factors and H's/I's own +-0.333f entries are exactly the values this
+// ticket's own acceptance criteria calls out as needing exact
+// transcription, not rounding - checkRawFrame() uses plain Approx() with
+// no .margin() override (matching setup_quad_matrix's own Y4 test and
+// setup_hexa_matrix's own H test above), so Catch2's default ~0.1%
+// relative epsilon is tight enough to fail on a rounded/approximated
+// value like 0.33 in place of the real 0.333. Six of the seven real
+// frame types (PLUS/X/V/H/DJI_X/CW_X) reuse FrameType enumerators
+// setup_quad_matrix's own tests above already exercise; `I` is the one
+// genuinely new enumerator this ticket adds - see motors_matrix.hpp's
+// file banner "CCP-004 ADDITION" for the enum investigation this
+// reflects.
+// =======================================================================
+
+namespace {
+
+// One raw-factor motor definition, in the SAME array order
+// setup_octa_matrix's own static MotorDefRaw tables use for V/H/I.
+struct RawMotorDef {
+    float roll_fac;
+    float pitch_fac;
+    float yaw_fac;
+    std::uint8_t test_order;
+};
+
+// Hand-checks a raw-factor frame's motors against exact expected values,
+// independently of motors_matrix.hpp's own implementation - see the
+// section comment above for why no .margin() override is used here.
+void checkRawFrame(const MotorsMatrix& m, const RawMotorDef* motors, std::uint8_t n) {
+    for (std::uint8_t i = 0; i < n; ++i) {
+        INFO("motor index " << static_cast<int>(i));
+        REQUIRE(m.motor_enabled(i));
+        REQUIRE(m.roll_factor(i) == Approx(motors[i].roll_fac));
+        REQUIRE(m.pitch_factor(i) == Approx(motors[i].pitch_fac));
+        REQUIRE(m.yaw_factor(i) == Approx(motors[i].yaw_fac));
+        REQUIRE(m.test_order(i) == motors[i].test_order);
+    }
+}
+
+} // namespace
+
+TEST_CASE("setup_octa_matrix: PLUS matches hand-computed angle/yaw/test_order", "[motors][setup_octa_matrix][plus]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octa_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(m.frame_class_string() == "OCTA");
+    REQUIRE(m.frame_type_string() == "PLUS");
+    const AngleMotor expected[] = {
+        {0.0f, kYawFactorCw, 1},    {180.0f, kYawFactorCw, 5},   {45.0f, kYawFactorCcw, 2},
+        {135.0f, kYawFactorCcw, 4}, {-45.0f, kYawFactorCcw, 8},  {-135.0f, kYawFactorCcw, 6},
+        {-90.0f, kYawFactorCw, 7},  {90.0f, kYawFactorCw, 3},
+    };
+    checkAngleFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octa_matrix: X matches hand-computed angle/yaw/test_order", "[motors][setup_octa_matrix][x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octa_matrix(MotorsMatrix::FrameType::X));
+    REQUIRE(m.frame_type_string() == "X");
+    const AngleMotor expected[] = {
+        {22.5f, kYawFactorCw, 1},    {-157.5f, kYawFactorCw, 5},  {67.5f, kYawFactorCcw, 2},
+        {157.5f, kYawFactorCcw, 4},  {-22.5f, kYawFactorCcw, 8},  {-112.5f, kYawFactorCcw, 6},
+        {-67.5f, kYawFactorCw, 7},   {112.5f, kYawFactorCw, 3},
+    };
+    checkAngleFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octa_matrix: V uses the real non-round explicit raw factors exactly, not angle-derived",
+          "[motors][setup_octa_matrix][v]") {
+    // Ticket's own explicit warning: 0.83f/0.34f/-0.67f/-0.32f/etc are
+    // real, non-round upstream literals, not derived from any simple
+    // angle formula - a rounded or approximated value here would be a
+    // silent bug checkRawFrame's tight tolerance is built to catch.
+    MotorsMatrix m;
+    REQUIRE(m.setup_octa_matrix(MotorsMatrix::FrameType::V));
+    REQUIRE(m.frame_type_string() == "V");
+    const RawMotorDef expected[] = {
+        {0.83f, 0.34f, kYawFactorCw, 7},   {-0.67f, -0.32f, kYawFactorCw, 3},
+        {0.67f, -0.32f, kYawFactorCcw, 6}, {-0.50f, -1.00f, kYawFactorCcw, 4},
+        {1.00f, 1.00f, kYawFactorCcw, 8},  {-0.83f, 0.34f, kYawFactorCcw, 2},
+        {-1.00f, 1.00f, kYawFactorCw, 1},  {0.50f, -1.00f, kYawFactorCw, 5},
+    };
+    checkRawFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octa_matrix: H's own two 0.333f pitch entries are transcribed exactly, not rounded to "
+          "+-1.0f or +-0.33f",
+          "[motors][setup_octa_matrix][h]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octa_matrix(MotorsMatrix::FrameType::H));
+    REQUIRE(m.frame_type_string() == "H");
+    const RawMotorDef expected[] = {
+        {-1.0f, 1.0f, kYawFactorCw, 1},    {1.0f, -1.0f, kYawFactorCw, 5},
+        {-1.0f, 0.333f, kYawFactorCcw, 2}, {-1.0f, -1.0f, kYawFactorCcw, 4},
+        {1.0f, 1.0f, kYawFactorCcw, 8},    {1.0f, -0.333f, kYawFactorCcw, 6},
+        {1.0f, 0.333f, kYawFactorCw, 7},   {-1.0f, -0.333f, kYawFactorCw, 3},
+    };
+    checkRawFrame(m, expected, 8);
+    // Direct, explicit assertions on the two 0.333f-magnitude entries -
+    // the exact values the ticket's own acceptance criteria singles out
+    // (motor index 2 = testing_order 2, motor index 5 = testing_order 6).
+    REQUIRE(m.pitch_factor(2) == Approx(0.333f));
+    REQUIRE(m.pitch_factor(5) == Approx(-0.333f));
+}
+
+TEST_CASE("setup_octa_matrix: I is the genuinely new frame type - \"(sideways H) octo only\"",
+          "[motors][setup_octa_matrix][i]") {
+    // Upstream's own enumerator comment (AP_Motors_Class.h line 91,
+    // MOTOR_FRAME_TYPE_I = 15): "(sideways H) octo only" - the one
+    // enumerator this ticket adds to FrameType (see motors_matrix.hpp's
+    // file banner "CCP-004 ADDITION"). Same +-1.0f/+-0.333f value
+    // vocabulary as H's own above, but arranged differently - here roll
+    // carries the 0.333f-magnitude values, not pitch.
+    MotorsMatrix m;
+    REQUIRE(m.setup_octa_matrix(MotorsMatrix::FrameType::I));
+    REQUIRE(m.frame_class_string() == "OCTA");
+    REQUIRE(m.frame_type_string() == "I");
+    const RawMotorDef expected[] = {
+        {0.333f, -1.0f, kYawFactorCw, 5},    {-0.333f, 1.0f, kYawFactorCw, 1},
+        {1.0f, -1.0f, kYawFactorCcw, 6},     {0.333f, 1.0f, kYawFactorCcw, 8},
+        {-0.333f, -1.0f, kYawFactorCcw, 4},  {-1.0f, 1.0f, kYawFactorCcw, 2},
+        {-1.0f, -1.0f, kYawFactorCw, 3},     {1.0f, 1.0f, kYawFactorCw, 7},
+    };
+    checkRawFrame(m, expected, 8);
+    // Direct, explicit assertions on the 0.333f-magnitude roll entries.
+    REQUIRE(m.roll_factor(0) == Approx(0.333f));
+    REQUIRE(m.roll_factor(1) == Approx(-0.333f));
+}
+
+TEST_CASE("setup_octa_matrix: DJI_X matches hand-computed angle/yaw/test_order", "[motors][setup_octa_matrix][dji_x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octa_matrix(MotorsMatrix::FrameType::DjiX));
+    REQUIRE(m.frame_type_string() == "DJI_X");
+    const AngleMotor expected[] = {
+        {22.5f, kYawFactorCcw, 1},   {-22.5f, kYawFactorCw, 8},   {-67.5f, kYawFactorCcw, 7},
+        {-112.5f, kYawFactorCw, 6},  {-157.5f, kYawFactorCcw, 5}, {157.5f, kYawFactorCw, 4},
+        {112.5f, kYawFactorCcw, 3},  {67.5f, kYawFactorCw, 2},
+    };
+    checkAngleFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octa_matrix: CW_X matches hand-computed angle/yaw/test_order", "[motors][setup_octa_matrix][cw_x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octa_matrix(MotorsMatrix::FrameType::CwX));
+    REQUIRE(m.frame_type_string() == "CW_X");
+    const AngleMotor expected[] = {
+        {22.5f, kYawFactorCcw, 1},  {67.5f, kYawFactorCw, 2},    {112.5f, kYawFactorCcw, 3},
+        {157.5f, kYawFactorCw, 4},  {-157.5f, kYawFactorCcw, 5}, {-112.5f, kYawFactorCw, 6},
+        {-67.5f, kYawFactorCcw, 7}, {-22.5f, kYawFactorCw, 8},
+    };
+    checkAngleFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octa_matrix: returns true for every real in-scope frame type and sets frame_class_string to OCTA",
+          "[motors][setup_octa_matrix]") {
+    const MotorsMatrix::FrameType all_types[] = {
+        MotorsMatrix::FrameType::Plus, MotorsMatrix::FrameType::X,    MotorsMatrix::FrameType::V,
+        MotorsMatrix::FrameType::H,    MotorsMatrix::FrameType::I,    MotorsMatrix::FrameType::DjiX,
+        MotorsMatrix::FrameType::CwX,
+    };
+    for (const auto ft : all_types) {
+        MotorsMatrix m;
+        REQUIRE(m.setup_octa_matrix(ft));
+        REQUIRE(m.frame_class_string() == "OCTA");
+        // Every real frame type populates all eight motor slots 0-7
+        // (octa has eight motors, unlike setup_hexa_matrix's own six).
+        for (std::uint8_t i = 0; i < 8; ++i) {
+            REQUIRE(m.motor_enabled(i));
+        }
+    }
+}
+
+TEST_CASE("setup_octa_matrix: an out-of-range frame type hits the real SIMPLE default branch and returns false",
+          "[motors][setup_octa_matrix][default]") {
+    // Confirms the real upstream default case ("octa frame class does
+    // not support this frame type; return false;") - the simple kind,
+    // same as setup_quad_matrix's/setup_hexa_matrix's own, not
+    // setup_y6_matrix's own productive default (a separate, later-ticket
+    // concern per COP-005).
+    MotorsMatrix m;
+    REQUIRE_FALSE(m.setup_octa_matrix(static_cast<MotorsMatrix::FrameType>(255)));
+    for (std::uint8_t i = 0; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+    }
+}
+
+TEST_CASE("setup_octa_matrix: PLUS reuses the SAME FrameType enumerator as setup_quad_matrix's/setup_hexa_matrix's "
+          "own PLUS, but yields octa-specific values on an eight-motor table",
+          "[motors][setup_octa_matrix][setup_quad_matrix][plus]") {
+    // Direct evidence for the file banner's enum investigation:
+    // MotorsMatrix::FrameType::Plus is the literal same C++ enumerator
+    // passed to setup_quad_matrix and setup_octa_matrix (mirroring
+    // upstream's real single shared motor_frame_type enum), yet each
+    // function's own frame table produces its own real, different
+    // numeric results - dispatch is by which FUNCTION is called, not by
+    // an octa-specific enumerator value.
+    MotorsMatrix quad;
+    MotorsMatrix octa;
+    REQUIRE(quad.setup_quad_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(octa.setup_octa_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(quad.frame_class_string() == "QUAD");
+    REQUIRE(octa.frame_class_string() == "OCTA");
+    // Quad's PLUS motor 0 sits at 90 degrees (yaw CCW); octa's PLUS
+    // motor 0 sits at 0 degrees (yaw CW) - genuinely different real
+    // tables behind the same enumerator.
+    REQUIRE(quad.roll_factor(0) != Approx(octa.roll_factor(0)));
+    REQUIRE(quad.yaw_factor(0) == Approx(kYawFactorCcw));
+    REQUIRE(octa.yaw_factor(0) == Approx(kYawFactorCw));
+    // Octa populates four motor slots quad never touches.
+    for (std::uint8_t i = 4; i < 8; ++i) {
+        REQUIRE_FALSE(quad.motor_enabled(i));
+        REQUIRE(octa.motor_enabled(i));
+    }
+}
