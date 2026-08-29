@@ -19,6 +19,11 @@
 //   - euler_derivative_to_body  (real lines 1303-1316)
 //   - body_to_euler_derivative  (real lines 1323-1342)
 //
+// CCP-020 added a fifth function to this same file/module, once CCP-019
+// (below) unblocked it - see this file's own "CCP-020 ADDENDUM" comment
+// block further down for its full writeup:
+//   - thrust_vector_rotation_angles (real lines 1054-1103)
+//
 // These are the frame-conversion and limiting primitives every other
 // AC_AttitudeControl function is built on, with zero dependency on AC_PID/
 // AC_P (not yet ported into this port's own modules/) or on quaternion
@@ -178,14 +183,100 @@
 //                    body_limit.y / (sin_phi * cos_theta)),
 //                    body_limit.z / (cos_phi * cos_theta))
 //
-// DEFERRED, explicitly, NOT started here: everything else in
-// AC_AttitudeControl.cpp's own ~1550 lines (the attitude error
+// DEFERRED, explicitly, NOT started here (as of CCP-018): everything else
+// in AC_AttitudeControl.cpp's own ~1550 lines (the attitude error
 // decomposition, the command model, the rate target, entry points,
 // relax/reset paths, etc.), AC_AttitudeControl_Multi, AC_PosControl,
 // AC_WPNav, and the quaternion axis-angle math (from_axis_angle/
 // to_axis_angle/from_rotation_vector/rotate_fast) copter-rust's own
 // COP-007 needed for its next sub-ticket and which quaternion.hpp's own
-// file banner explicitly excludes from this port's current slice.
+// file banner explicitly excludes from this port's current slice. See
+// CCP-020's own addendum below for what came next.
+//
+// ---------------------------------------------------------------------
+// CCP-020 ADDENDUM: thrust_vector_rotation_angles, the quaternion error
+// decomposition (real lines 1054-1103, re-verified directly via `grep -n`
+// against the pinned upstream tree - matches this ticket's own claimed
+// range exactly).
+//
+// Both of this file's own dependencies now exist: CCP-018 built this
+// module, and CCP-019 extended quaternion.hpp with from_axis_angle/
+// to_axis_angle. This is the FIRST function in this module that needs
+// either.
+//
+// REUSED INVESTIGATION, same discipline as CCP-018's own addendum above:
+// copter-rust's own COP-007 ticket ported this exact function first
+// (ports/plane-fw-rust/crates/ap-control/src/attitude_error.rs, tests/
+// attitude_error.rs), with unusually rich investigation reused directly
+// below, independently re-verified against the real C++ source rather
+// than trusted on faith.
+//
+// WHY THE SPLIT EXISTS AT ALL (copter-rust's own words, reproduced
+// directly - understanding this is essential to porting the formula
+// correctly, not just transcribing it): "The split exists because the
+// two are not equally urgent. Thrust pointed the wrong way is a position
+// error in the making; heading pointed the wrong way means the aircraft
+// is going exactly where it should while facing elsewhere. So the
+// controller runs them on different gains and limits and can sacrifice
+// heading to keep thrust when it runs out of authority - which a single
+// combined error makes impossible to express, because there is nothing
+// to give up." And: "the yaw error comes out of a SECOND quaternion
+// rather than from an Euler decomposition of the first: after the thrust
+// correction, whatever rotation remains is about the body's own thrust
+// axis, so it is heading by construction rather than by approximation."
+//
+// attitude_target and attitude_body are passive rotations from
+// target/body frames to the NED frame (upstream's own real framing
+// comment, reproduced verbatim). Re-verified this port's own Quaternion
+// follows the identical convention before assuming operator ordering
+// transfers directly: operator*(Vector3) above is documented "Rotate a
+// vector by this quaternion", and CCP-018's own euler_derivative_to_body/
+// body_to_euler_derivative already rotate body-fixed quantities into the
+// inertial frame this same way - same passive-rotation convention real
+// upstream uses, confirmed directly rather than assumed.
+//
+// THE REAL MIXED-FRAME DOT PRODUCT (thrust_angle_rad) - re-verified this
+// is intentional, not a bug to "fix": thrust_vector_up is the BODY-frame
+// constant (0,0,-1); att_body_thrust_vec is already the INERTIAL-frame
+// view of that same vector (rotated there by attitude_body one line
+// above). The dot product mixes the two frames. This is exactly what
+// real upstream's own source does, transcribed as-is.
+//
+// THE REAL DEGENERATE-CASE FALLBACK, re-verified exactly: if the cross
+// product's own length is zero OR thrust_error_angle_rad is zero (a
+// real `||`, either alone triggers it), thrust_vec_cross resets to the
+// real thrust_vector_up CONSTANT ITSELF - not a zero vector, not left as
+// whatever the degenerate cross product computed. This is the aligned
+// case (parallel thrust vectors: both conditions trigger together,
+// error angle zero and cross length zero) and the antiparallel case
+// (opposed thrust vectors: cross length is zero but error angle is pi,
+// nonzero - proving the length-zero half of the `||` is independently
+// necessary, not redundant with the angle-zero half).
+//
+// THE REAL FRAME-TRANSFORM DIRECTION, re-verified exactly: thrust_vec_
+// cross was computed from two INERTIAL-frame vectors, but thrust_vector_
+// correction is defined relative to the BODY frame, so it is rotated by
+// the INVERSE of attitude_body (upstream's own comment: "First rotate it
+// by the inverse of attitude_body to express it back in the body
+// frame") - not a forward rotation by attitude_body itself.
+//
+// THE REAL SECOND-QUATERNION COMPOSITION for heading, re-verified this
+// exact three-way operand order: heading_vec_correction_quat =
+// thrust_vector_correction.inverse() * attitude_body.inverse() *
+// attitude_target - BOTH thrust_vector_correction and attitude_body are
+// inverted, attitude_target is not. Only its z axis-angle component is
+// taken (upstream's own comment: "x and y should be zero here" - a real,
+// testable invariant, pinned directly by this module's own test file
+// rather than trusted from the comment alone).
+//
+// DEFERRED, explicitly, as a separate future ticket: thrust_heading_
+// rotation_angles (real lines 1033-1050), the wrapper that adds
+// yaw-error limiting on top of this function. It needs real rate-PID
+// gain accessors (get_rate_yaw_pid().kP(), _p_angle_yaw.kP()) and an
+// inv_sqrt_controller helper, neither of which exists anywhere in this
+// port yet - matching copter-rust's own COP-007 identical, still-open
+// deferral of the same function for the same reason.
+// ---------------------------------------------------------------------
 
 #include <algorithm>
 #include <cmath>
@@ -330,6 +421,93 @@ inline void ang_vel_limit(math::Vector3f& euler_rad, float ang_vel_roll_max_rads
         std::min(body_limit.y / cos_phi, body_limit.z / sin_phi),
         std::min(std::min(body_limit.x / sin_theta, body_limit.y / (sin_phi * cos_theta)), body_limit.z / (cos_phi * cos_theta)),
     };
+}
+
+// thrust_vector_rotation_angles - upstream AC_AttitudeControl::
+// thrust_vector_rotation_angles (real lines 1054-1103). CCP-020 - see
+// this file's own banner addendum above for the full design writeup
+// (the thrust/heading urgency split, the second-quaternion heading
+// decomposition, the mixed-frame dot product, and the degenerate-case
+// fallback - all re-verified directly against the real upstream source,
+// not trusted from any summary). Ported as a free function for the same
+// reason as this module's other three: upstream's own method is `const`
+// but its body touches no instance state either - just its own
+// parameters.
+//
+// Out-parameters mirror real upstream's own signature shape exactly
+// (matching this module's established bool+out-param/void+out-param
+// precedent of following upstream's own parameter shape directly rather
+// than switching representations) - upstream returns void here (this
+// function always succeeds, unlike body_to_euler_derivative above), so
+// this does too.
+inline void thrust_vector_rotation_angles(const math::Quaternion& attitude_target, const math::Quaternion& attitude_body,
+                                           math::Quaternion& thrust_vector_correction, math::Vector3f& attitude_error_rad,
+                                           float& thrust_angle_rad, float& thrust_error_angle_rad) {
+    // The direction of thrust is [0,0,-1] in any body-fixed frame
+    // (upstream's own comment) - NED "up" is negative Z.
+    const math::Vector3f thrust_vector_up{0.0f, 0.0f, -1.0f};
+
+    // Rotating [0,0,-1] by each quaternion expresses (gets a view of)
+    // that frame's own thrust vector in the inertial frame.
+    const math::Vector3f att_target_thrust_vec = attitude_target * thrust_vector_up;
+    const math::Vector3f att_body_thrust_vec = attitude_body * thrust_vector_up;
+
+    // The current lean angle, for callers that limit against it - NOT
+    // the error (see this file's own banner addendum). A real,
+    // intentional mixed-frame dot product: thrust_vector_up is the
+    // BODY-frame constant, att_body_thrust_vec is already in the
+    // INERTIAL frame.
+    thrust_angle_rad = std::acos(math::constrain_value(thrust_vector_up * att_body_thrust_vec, -1.0f, 1.0f));
+
+    // The cross product of the current and target thrust vectors gives
+    // the axis to rotate about; the dot product gives how far.
+    math::Vector3f thrust_vec_cross = att_body_thrust_vec % att_target_thrust_vec;
+    thrust_error_angle_rad = std::acos(math::constrain_value(att_body_thrust_vec * att_target_thrust_vec, -1.0f, 1.0f));
+
+    // Degenerate when the two thrust vectors are parallel or
+    // antiparallel: the cross product has no direction to offer.
+    // Upstream substitutes the thrust axis ITSELF here (not a zero
+    // vector) - see this file's own banner addendum for why the `||` is
+    // not redundant (the antiparallel case trips the length check with
+    // a nonzero angle).
+    const float thrust_vector_length = thrust_vec_cross.length();
+    if (math::is_zero(thrust_vector_length) || math::is_zero(thrust_error_angle_rad)) {
+        thrust_vec_cross = thrust_vector_up;
+    } else {
+        thrust_vec_cross /= thrust_vector_length;
+    }
+
+    // thrust_vector_correction is defined relative to the body frame,
+    // but thrust_vec_cross was computed in the inertial frame (both its
+    // inputs were). Rotate it back by the INVERSE of attitude_body first
+    // (upstream's own comment: "First rotate it by the inverse of
+    // attitude_body to express it back in the body frame") - not a
+    // forward rotation.
+    thrust_vec_cross = attitude_body.inverse() * thrust_vec_cross;
+    thrust_vector_correction.from_axis_angle(thrust_vec_cross, thrust_error_angle_rad);
+
+    // The roll/pitch error comes straight from the thrust correction. z
+    // is deliberately NOT set here - it comes from the second
+    // quaternion below.
+    math::Vector3f rotation_rad;
+    thrust_vector_correction.to_axis_angle(rotation_rad);
+    attitude_error_rad.x = rotation_rad.x;
+    attitude_error_rad.y = rotation_rad.y;
+
+    // Whatever rotation remains after the thrust correction is a
+    // rotation about the body's own thrust axis by construction -
+    // heading, not an Euler approximation of it. Re-verify this exact
+    // three-way composition and operand order: BOTH thrust_vector_
+    // correction and attitude_body are inverted, attitude_target is
+    // not.
+    const math::Quaternion heading_vec_correction_quat =
+        thrust_vector_correction.inverse() * attitude_body.inverse() * attitude_target;
+
+    // x and y should be zero here (upstream's own comment - a real,
+    // testable invariant; see this module's own test file for the
+    // dedicated assertion, not just a trusted comment).
+    heading_vec_correction_quat.to_axis_angle(rotation_rad);
+    attitude_error_rad.z = rotation_rad.z;
 }
 
 } // namespace fwcpp::control

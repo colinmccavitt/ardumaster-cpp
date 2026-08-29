@@ -11,6 +11,39 @@
 // (ports/plane-fw-rust/crates/ap-control/tests/attitude_kinematics.rs) -
 // its real measured values/tolerances are reused directly here rather
 // than re-derived, per this ticket's own explicit instruction.
+//
+// CCP-020 added the thrust_vector_rotation_angles tests below (real
+// lines 1054-1103) - see attitude_kinematics.hpp's own "CCP-020
+// ADDENDUM" comment block for the full design writeup: the thrust/
+// heading urgency split, the second-quaternion heading decomposition,
+// and the degenerate-case fallback.
+//
+// TEST-CONSTRUCTION PITFALL, deliberately avoided here (copter-rust's
+// own COP-007 team fell into this and corrected it - reused directly):
+// "pure heading" is NOT the same Euler roll/pitch with a different Euler
+// yaw. Those angles are applied relative to the yawed frame, so on a
+// leaning aircraft changing Euler yaw moves the thrust vector too - it
+// is not heading-only. Every "pure heading" case below is instead built
+// as `body * Quaternion::from_axis_angle((0,0,-1), delta)`: a LOCAL
+// rotation about the body's own thrust axis (the constant (0,0,-1),
+// which is the thrust direction in any body-fixed frame per this file's
+// own banner), composed on the right of `body` - heading by
+// construction, not by Euler approximation.
+//
+// Every case below is deliberately neither level nor north-facing
+// (nonzero roll/pitch AND nonzero yaw somewhere in the pair), per
+// copter-rust's own test philosophy: the leak these tests look for
+// (thrust error leaking into yaw, or heading leaking into roll/pitch) is
+// invisible at trivial/symmetric attitudes.
+//
+// The general-case and pure-lean expected thrust_angle_rad/thrust_error_
+// angle_rad/attitude_error_rad values below were independently
+// recomputed from the real upstream formulas in a from-scratch Python
+// reimplementation (float32 arithmetic, matching this port's own
+// operator*(Vector3)/from_euler/from_axis_angle/to_axis_angle formulas
+// line-for-line but as an independent re-derivation, not copy-pasted
+// from this header or run through it) - not merely re-running this
+// port's own C++ output back at itself.
 
 #include <cmath>
 #include <cstdint>
@@ -271,4 +304,285 @@ TEST_CASE("body_to_euler_limit: the 0.1 trig floor caps inflation near a singula
 
     // x is always passed straight through, in every case.
     REQUIRE(out.x == Approx(body.x).margin(1e-6));
+}
+
+// =======================================================================
+// thrust_vector_rotation_angles (CCP-020) - the quaternion error
+// decomposition. See this file's own header comment and attitude_
+// kinematics.hpp's own "CCP-020 ADDENDUM" for the full design writeup.
+// =======================================================================
+
+namespace {
+
+// The heading_vec_correction_quat.to_axis_angle()'s x and y should be
+// zero (upstream's own comment) - re-derived directly here as an actual
+// assertion helper, not just trusted, for every test case below that
+// checks it.
+void require_heading_xy_is_zero(const Quaternion& thrust_vector_correction, const Quaternion& attitude_body,
+                                 const Quaternion& attitude_target, float tol) {
+    const Quaternion heading_vec_correction_quat = thrust_vector_correction.inverse() * attitude_body.inverse() * attitude_target;
+    Vector3f rotation_rad{};
+    heading_vec_correction_quat.to_axis_angle(rotation_rad);
+    REQUIRE(std::fabs(rotation_rad.x) < tol);
+    REQUIRE(std::fabs(rotation_rad.y) < tol);
+}
+
+} // namespace
+
+// -----------------------------------------------------------------------
+// Matching attitudes: no error of any kind, but the lean angle (thrust_
+// angle_rad) still reports the body's own lean rather than reading zero
+// just because the error is zero - a leaning-but-matched attitude proves
+// the two are not conflated.
+// -----------------------------------------------------------------------
+
+TEST_CASE("thrust_vector_rotation_angles: matching attitudes give no error, even while leaning",
+          "[control][attitude_kinematics][thrust_vector_rotation_angles]") {
+    const Quaternion att = attitude(0.3f, -0.2f, 1.1f);
+
+    Quaternion correction;
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_vector_rotation_angles(att, att, correction, error, thrust_angle, thrust_error_angle);
+
+    REQUIRE(error.x == Approx(0.0f).margin(1e-5));
+    REQUIRE(error.y == Approx(0.0f).margin(1e-5));
+    REQUIRE(error.z == Approx(0.0f).margin(1e-5));
+    REQUIRE(thrust_error_angle == Approx(0.0f).margin(1e-5));
+    // Still reports the real lean, matching att's own 0.3/-0.2 rad tilt -
+    // not the (zero) error.
+    REQUIRE(thrust_angle == Approx(0.358873f).margin(1e-3));
+}
+
+// -----------------------------------------------------------------------
+// (1) A pure lean (thrust-direction) error with zero heading difference
+// produces zero attitude_error_rad.z.
+//
+// Built with matching Euler pitch AND matching Euler yaw, only roll
+// differs - and the shared yaw (0.9 rad) and shared pitch (0.4 rad) are
+// both nonzero, so this is neither level nor north-facing. Expected
+// values independently recomputed - see this file's own header comment.
+// -----------------------------------------------------------------------
+
+TEST_CASE("thrust_vector_rotation_angles: a pure lean error stays out of yaw",
+          "[control][attitude_kinematics][thrust_vector_rotation_angles]") {
+    const Quaternion body = attitude(0.1f, 0.4f, 0.9f);
+    const Quaternion target = attitude(0.35f, 0.4f, 0.9f);
+
+    Quaternion correction;
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_vector_rotation_angles(target, body, correction, error, thrust_angle, thrust_error_angle);
+
+    REQUIRE(thrust_angle == Approx(0.411656f).margin(1e-3));
+    REQUIRE(thrust_error_angle == Approx(0.25f).margin(1e-3));
+    // The roll delta carries the whole correction...
+    REQUIRE(error.x == Approx(0.25f).margin(1e-3));
+    // ...and yaw is untouched.
+    REQUIRE(error.y == Approx(0.0f).margin(1e-4));
+    REQUIRE(error.z == Approx(0.0f).margin(1e-4));
+
+    require_heading_xy_is_zero(correction, body, target, 1e-4f);
+}
+
+// -----------------------------------------------------------------------
+// (2) A pure heading error, constructed the CORRECT way (a rotation
+// about the CURRENT attitude's own thrust axis via CCP-019's from_axis_
+// angle, composed on the right of body - not an independent Euler-yaw
+// delta), produces zero attitude_error_rad.x/.y.
+//
+// body is deliberately leaning (roll=0.3, pitch=-0.25) AND yawed
+// (0.6 rad) - not level, not north-facing. See this file's own header
+// comment for why the naive "same roll/pitch, different Euler yaw"
+// construction would have been wrong here.
+// -----------------------------------------------------------------------
+
+TEST_CASE("thrust_vector_rotation_angles: a pure heading error (rotation about the body's own thrust axis) stays out of "
+          "roll/pitch",
+          "[control][attitude_kinematics][thrust_vector_rotation_angles]") {
+    const Quaternion body = attitude(0.3f, -0.25f, 0.6f);
+    const float heading_change = 0.4f;
+
+    // The thrust axis is (0,0,-1) in ANY body-fixed frame (this file's
+    // own banner) - so a local rotation about that axis, composed on
+    // the right of body, is a rotation about body's OWN current thrust
+    // axis, not an independent Euler-yaw delta applied in the yawed
+    // frame. This is the corrected construction from copter-rust's own
+    // documented test-construction pitfall (see this file's own header
+    // comment) - built correctly from the start here.
+    Quaternion heading_delta;
+    heading_delta.from_axis_angle(Vector3f{0.0f, 0.0f, -1.0f}, heading_change);
+    const Quaternion target = body * heading_delta;
+
+    Quaternion correction;
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_vector_rotation_angles(target, body, correction, error, thrust_angle, thrust_error_angle);
+
+    // The thrust vectors already agree (a pure heading change does not
+    // move the thrust axis) - so this also exercises the degenerate
+    // zero-error-angle fallback from a genuinely non-trivial attitude,
+    // rather than only from the trivial matching-attitudes case above.
+    REQUIRE(thrust_error_angle == Approx(0.0f).margin(1e-4));
+    REQUIRE(error.x == Approx(0.0f).margin(1e-4));
+    REQUIRE(error.y == Approx(0.0f).margin(1e-4));
+    REQUIRE(std::fabs(error.z) == Approx(heading_change).margin(1e-3));
+}
+
+// -----------------------------------------------------------------------
+// (3) The degenerate fallback, exercised explicitly and split into its
+// two independently-triggering halves of the real `||` condition (see
+// attitude_kinematics.hpp's own banner addendum):
+//   - aligned thrust vectors: thrust_error_angle_rad is zero (and the
+//     cross product is also zero - both halves true together).
+//   - antiparallel thrust vectors: the cross product's length is zero
+//     but thrust_error_angle_rad is pi, NOT zero - proving the length
+//     check is independently necessary, not redundant with the angle
+//     check.
+// In both, thrust_vec_cross resets to the real thrust_vector_up CONSTANT
+// itself, not a zero vector - visible here via thrust_vector_correction
+// coming out finite and well-defined rather than NaN.
+// -----------------------------------------------------------------------
+
+TEST_CASE("thrust_vector_rotation_angles: degenerate fallback, aligned thrust vectors (zero error angle)",
+          "[control][attitude_kinematics][thrust_vector_rotation_angles][degenerate]") {
+    const Quaternion body = attitude(0.3f, -0.2f, 1.1f);
+
+    Quaternion correction;
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_vector_rotation_angles(body, body, correction, error, thrust_angle, thrust_error_angle);
+
+    REQUIRE(thrust_error_angle == Approx(0.0f).margin(1e-6));
+    REQUIRE(error.x == Approx(0.0f).margin(1e-6));
+    REQUIRE(error.y == Approx(0.0f).margin(1e-6));
+    REQUIRE(error.z == Approx(0.0f).margin(1e-6));
+    // The fallback quaternion is the identity, not NaN.
+    REQUIRE(std::isfinite(correction.q1));
+    REQUIRE(correction.q1 == Approx(1.0f).margin(1e-6));
+}
+
+TEST_CASE("thrust_vector_rotation_angles: degenerate fallback, antiparallel thrust vectors (zero cross length, "
+          "nonzero angle)",
+          "[control][attitude_kinematics][thrust_vector_rotation_angles][degenerate]") {
+    const Quaternion level = attitude(0.0f, 0.0f, 0.0f);
+    const Quaternion inverted = attitude(static_cast<float>(M_PI), 0.0f, 0.0f);
+
+    Quaternion correction;
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_vector_rotation_angles(inverted, level, correction, error, thrust_angle, thrust_error_angle);
+
+    REQUIRE(thrust_angle == Approx(0.0f).margin(1e-5));
+    REQUIRE(thrust_error_angle == Approx(static_cast<float>(M_PI)).margin(1e-3));
+    // Finite, not NaN - the fallback substituted thrust_vector_up
+    // rather than dividing a zero-length cross product by itself.
+    REQUIRE(std::isfinite(error.x));
+    REQUIRE(std::isfinite(error.y));
+    REQUIRE(std::isfinite(error.z));
+    REQUIRE(std::isfinite(correction.q1));
+    REQUIRE(correction.is_unit_length());
+}
+
+// -----------------------------------------------------------------------
+// (4) A general, non-trivial (neither level nor north-facing) case, with
+// thrust_angle_rad/thrust_error_angle_rad/attitude_error_rad
+// independently recomputed - see this file's own header comment.
+// -----------------------------------------------------------------------
+
+TEST_CASE("thrust_vector_rotation_angles: a general non-trivial case matches an independently computed reference",
+          "[control][attitude_kinematics][thrust_vector_rotation_angles]") {
+    const Quaternion body = attitude(0.2f, -0.3f, 0.7f);
+    const Quaternion target = attitude(-0.15f, 0.25f, 1.3f);
+
+    Quaternion correction;
+    Vector3f error{};
+    float thrust_angle = 0.0f;
+    float thrust_error_angle = 0.0f;
+    thrust_vector_rotation_angles(target, body, correction, error, thrust_angle, thrust_error_angle);
+
+    REQUIRE(thrust_angle == Approx(0.358873f).margin(1e-3));
+    REQUIRE(thrust_error_angle == Approx(0.624906f).margin(1e-3));
+    REQUIRE(error.x == Approx(-0.460579f).margin(1e-3));
+    REQUIRE(error.y == Approx(0.422345f).margin(1e-3));
+    REQUIRE(error.z == Approx(0.616828f).margin(1e-3));
+
+    // (5) The heading_vec_correction_quat's own x/y-should-be-zero
+    // invariant, confirmed as an actual assertion for this same
+    // non-trivial case.
+    require_heading_xy_is_zero(correction, body, target, 1e-4f);
+}
+
+// -----------------------------------------------------------------------
+// (5) The heading_vec_correction_quat's own "x and y should be zero
+// here" invariant (upstream's own comment), confirmed as an actual
+// assertion across several of the cases above rather than trusted on
+// faith - reusing the helper defined at the top of this section.
+// -----------------------------------------------------------------------
+
+TEST_CASE("thrust_vector_rotation_angles: heading_vec_correction_quat's x/y really are zero, across several attitudes",
+          "[control][attitude_kinematics][thrust_vector_rotation_angles]") {
+    struct Case {
+        Quaternion body;
+        Quaternion target;
+    };
+    const Case cases[] = {
+        {attitude(0.0f, 0.0f, 0.0f), attitude(0.2f, -0.3f, 0.7f)},
+        {attitude(0.1f, 0.4f, 0.9f), attitude(0.35f, 0.4f, 0.9f)},
+        {attitude(-0.5f, 0.6f, -1.2f), attitude(0.4f, -0.4f, 0.2f)},
+    };
+
+    for (const auto& c : cases) {
+        Quaternion correction;
+        Vector3f error{};
+        float thrust_angle = 0.0f;
+        float thrust_error_angle = 0.0f;
+        thrust_vector_rotation_angles(c.target, c.body, correction, error, thrust_angle, thrust_error_angle);
+        require_heading_xy_is_zero(correction, c.body, c.target, 1e-3f);
+    }
+}
+
+// -----------------------------------------------------------------------
+// Composition property: applying the two corrections in order (thrust,
+// then heading) takes body all the way to target - the strongest check
+// available without a full controller fixture, and independent of any
+// hardcoded reference numbers.
+// -----------------------------------------------------------------------
+
+TEST_CASE("thrust_vector_rotation_angles: the two corrections compose back to the target",
+          "[control][attitude_kinematics][thrust_vector_rotation_angles]") {
+    struct Case {
+        Quaternion body;
+        Quaternion target;
+    };
+    const Case cases[] = {
+        {attitude(0.0f, 0.0f, 0.0f), attitude(0.2f, -0.3f, 0.7f)},
+        {attitude(0.35f, -0.2f, 0.4f), attitude(-0.1f, 0.5f, 1.9f)},
+        {attitude(-0.5f, 0.6f, -1.2f), attitude(0.4f, -0.4f, 0.2f)},
+    };
+
+    for (const auto& c : cases) {
+        Quaternion correction;
+        Vector3f error{};
+        float thrust_angle = 0.0f;
+        float thrust_error_angle = 0.0f;
+        thrust_vector_rotation_angles(c.target, c.body, correction, error, thrust_angle, thrust_error_angle);
+
+        const Quaternion heading = correction.inverse() * c.body.inverse() * c.target;
+        const Quaternion rebuilt = c.body * correction * heading;
+
+        float rr = 0.0f, rp = 0.0f, ry = 0.0f;
+        rebuilt.to_euler(rr, rp, ry);
+        float tr = 0.0f, tp = 0.0f, ty = 0.0f;
+        c.target.to_euler(tr, tp, ty);
+
+        REQUIRE(rr == Approx(tr).margin(1e-3));
+        REQUIRE(rp == Approx(tp).margin(1e-3));
+        REQUIRE(ry == Approx(ty).margin(1e-3));
+    }
 }
