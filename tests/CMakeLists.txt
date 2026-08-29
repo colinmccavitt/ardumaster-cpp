@@ -982,3 +982,8 @@ catch_discover_tests(wspi_test)
 add_executable(pilot_input_test pilot_input_test.cpp)
 target_link_libraries(pilot_input_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(pilot_input_test)
+
+# CPP-089 slice 1: BoardKind + compile-only Watchdog stub.
+add_executable(hw_backend_test hw_backend_test.cpp)
+target_link_libraries(hw_backend_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(hw_backend_test)
