@@ -957,3 +957,8 @@ catch_discover_tests(spi_device_test)
 add_executable(util_test util_test.cpp)
 target_link_libraries(util_test PRIVATE ap-hal Catch2::Catch2WithMain)
 catch_discover_tests(util_test)
+
+# CPP-088 slice 4: in-memory CANIface send/receive.
+add_executable(can_test can_test.cpp)
+target_link_libraries(can_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(can_test)

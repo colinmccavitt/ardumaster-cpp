@@ -1,7 +1,7 @@
 #pragma once
 
-// CPP-088 completeness: slice 3 (SITL Util). I2C/SPI Device register
-// access is on main. remaining: WSPI, CAN. remaining_count() == 2.
+// CPP-088 completeness: slice 4 (in-memory CANIface). Util is on main.
+// remaining: WSPI only. remaining_count() == 1.
 
 #include <cstddef>
 #include <cstdint>
@@ -35,10 +35,11 @@ inline constexpr HalPortItem kHalCompleteness[] = {
      "AP_HAL::SPIDevice in-memory bank transfers (no Linux ioctl)"},
     {"Device register access", PortStatus::kOnMain,
      "AP_HAL::Device read_registers/write_register, set_speed, periodic token"},
-    {"Util", PortStatus::kThisSlice,
+    {"Util", PortStatus::kOnMain,
      "AP_HAL::Util SITL-subset: soft_armed, safety_switch, system_id, persistent_data"},
+    {"CAN", PortStatus::kThisSlice,
+     "AP_HAL::CANIface in-memory send/receive (no SocketCAN)"},
     {"WSPI", PortStatus::kRemaining, "AP_HAL::WSPIDevice wrap/quad SPI"},
-    {"CAN", PortStatus::kRemaining, "AP_HAL::CANIface send/receive, bitrate, filter"},
 };
 
 [[nodiscard]] inline constexpr std::size_t hal_completeness_size() {

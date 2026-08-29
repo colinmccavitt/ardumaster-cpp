@@ -1,4 +1,4 @@
-// CPP-088 slice 3: leftover catalog for remaining AP_HAL SITL surfaces.
+// CPP-088 slice 4: leftover catalog for remaining AP_HAL SITL surfaces.
 
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/hal/leftover.hpp>
@@ -12,10 +12,10 @@ using fwcpp::hal::remaining_count;
 using fwcpp::hal::this_slice_count;
 
 TEST_CASE("hal leftover catalog lists this slice vs remaining", "[hal][leftover][catalog]") {
-    REQUIRE(on_main_count() == 7);
+    REQUIRE(on_main_count() == 8);
     REQUIRE(this_slice_count() == 1);
     REQUIRE(remaining_count() > 0);
-    REQUIRE(remaining_count() == 2);
+    REQUIRE(remaining_count() == 1);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(hal_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -26,7 +26,7 @@ TEST_CASE("hal leftover catalog lists this slice vs remaining", "[hal][leftover]
     REQUIRE(completeness_has("I2CDevice", PortStatus::kOnMain));
     REQUIRE(completeness_has("SPIDevice", PortStatus::kOnMain));
     REQUIRE(completeness_has("Device register access", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Util", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Util", PortStatus::kOnMain));
+    REQUIRE(completeness_has("CAN", PortStatus::kThisSlice));
     REQUIRE(completeness_has("WSPI", PortStatus::kRemaining));
-    REQUIRE(completeness_has("CAN", PortStatus::kRemaining));
 }
