@@ -26,7 +26,7 @@ inline constexpr QuadPlanePortItem kQuadPlaneCompleteness[] = {
     {"get_singleton", PortStatus::kRemaining, "ADR-0012 no singleton"},
     {"AP_Param var_info", PortStatus::kRemaining, "parameter tree"},
     {"setup channels ahrs_view", PortStatus::kThisSlice, "setup_channels.hpp ADR-0012"},
-    {"wp_nav loiter_nav", PortStatus::kRemaining, "navigator objects in setup"},
+    {"wp_nav loiter_nav", PortStatus::kThisSlice, "setup_navigators.hpp ADR-0012"},
     {"mode_enter poscontrol FSM", PortStatus::kRemaining, "QPOS transitions"},
     {"update transition FSM", PortStatus::kRemaining, "main loop"},
     {"tailsitter tiltrotor", PortStatus::kRemaining, "subsystems"},

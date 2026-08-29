@@ -10,6 +10,7 @@
 #include <fwcpp/quadplane/quadplane_options.hpp>
 #include <fwcpp/quadplane/quadplane_poscontrol_stub.hpp>
 #include <fwcpp/quadplane/quadplane_setup_channels.hpp>
+#include <fwcpp/quadplane/quadplane_setup_navigators.hpp>
 
 namespace fwcpp::quadplane {
 
@@ -18,6 +19,7 @@ struct QuadPlaneSetupInputs {
     std::uint32_t available_memory_bytes{kSetupMinMemoryBytes};
     AhrsViewCreateInputs ahrs_view{};
     SetupChannelsSink channels_sink{};
+    WpNavSetupInputs wp_nav{};
 };
 
 class QuadPlane {
@@ -67,6 +69,11 @@ public:
     [[nodiscard]] const AhrsViewSetup& ahrs_view() const { return ahrs_view_; }
     [[nodiscard]] bool ahrs_view_inited() const { return ahrs_view_inited_; }
 
+    [[nodiscard]] bool wp_nav_inited() const { return wp_nav_inited_; }
+    [[nodiscard]] bool loiter_nav_inited() const { return loiter_nav_inited_; }
+    [[nodiscard]] const fwcpp::wpnav::WpNav& wp_nav() const { return wp_nav_; }
+    [[nodiscard]] const LoiterNavStub& loiter_nav() const { return loiter_nav_; }
+
     bool setup(const QuadPlaneSetupInputs& inputs = {}) {
         if (initialised_) return true;
         if (inputs.soft_armed) return false;
@@ -88,6 +95,21 @@ public:
         motors_inited_ = true;
         attitude_control_inited_ = true;
         pos_control_inited_ = true;
+
+        const NavigatorDeps nav_deps{
+            .ahrs_view_created = ahrs_view_.created,
+            .attitude_control_inited = attitude_control_inited_,
+            .pos_control_inited = pos_control_inited_,
+        };
+        const auto nav = wire_setup_navigators(nav_deps, inputs.wp_nav);
+        if (!nav.ok) {
+            return false;
+        }
+        wp_nav_ = nav.wp_nav;
+        loiter_nav_ = nav.loiter_nav;
+        wp_nav_inited_ = nav.wp_and_spline_inited;
+        loiter_nav_inited_ = nav.loiter_nav.created;
+
         weathervane_inited_ = true;
         initialised_ = true;
         return true;
@@ -147,6 +169,10 @@ private:
     bool attitude_control_inited_{false};
     bool pos_control_inited_{false};
     bool weathervane_inited_{false};
+    bool wp_nav_inited_{false};
+    bool loiter_nav_inited_{false};
+    fwcpp::wpnav::WpNav wp_nav_{};
+    LoiterNavStub loiter_nav_{};
     bool assisted_flight_{false};
     MotorsOutputState motors_output_state_{};
     std::int32_t lean_angle_max_cd_{0};
