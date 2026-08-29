@@ -1367,3 +1367,378 @@ TEST_CASE("update_ang_vel_target_from_att_error: the two new roll/pitch clamp co
     REQUIRE(kAccelRpControllerMinRadss == fwcpp::math::radians(40.0f));
     REQUIRE(kAccelRpControllerMaxRadss == fwcpp::math::radians(720.0f));
 }
+
+// ---------------------------------------------------------------------
+// CCP-025: update_attitude_target (real lines 979-986) and
+// attitude_controller_run_quat (real lines 989-1027) - the real control
+// loop itself. See attitude_kinematics.hpp's own "CCP-025 ADDENDUM"
+// comment block for the full design writeup: the real three-way
+// thrust-error branch, the single most important yaw-not-double-scaled
+// asymmetry, and the architectural decision to expose every real
+// persistent piece of state this function touches as an explicit
+// output parameter.
+//
+// Shared fixture gains below are deliberately unremarkable (matching
+// copter-rust's own COP-007 test fixture values, reused directly where
+// convenient) - the tests exist to pin the real control-flow structure
+// (composition order, branch thresholds, the yaw asymmetry), not to
+// re-litigate CCP-018/023/024's own already-tested formulas.
+// ---------------------------------------------------------------------
+
+namespace {
+
+struct ControllerGains {
+    float rate_yaw_kp = 2.0f;
+    float angle_yaw_kp = 1.0f;
+    float angle_kp_roll = 6.0f;
+    float angle_kp_pitch = 6.0f;
+    float angle_kp_yaw = 4.0f;
+    Vector3f angle_p_scale{1.0f, 1.0f, 1.0f};
+    float accel_roll_max_radss = fwcpp::math::radians(400.0f);
+    float accel_pitch_max_radss = fwcpp::math::radians(400.0f);
+    float accel_yaw_max_radss = fwcpp::math::radians(200.0f);
+    bool use_sqrt_controller = false;
+    float ang_vel_roll_max_degs = 220.0f;
+    float ang_vel_pitch_max_degs = 220.0f;
+    float ang_vel_yaw_max_degs = 200.0f;
+};
+
+// Reconstructs the pre-branch quantities (steps 1-6 of
+// attitude_controller_run_quat) independently, using this module's own
+// already-verified CCP-023/024/018 building blocks directly, so tests
+// below can hand-apply the real (or a deliberately wrong) branch
+// formula on top without re-deriving thrust_heading_rotation_angles or
+// update_ang_vel_target_from_att_error's own arithmetic.
+struct PreBranchState {
+    Quaternion target; // possibly mutated by thrust_heading_rotation_angles
+    float thrust_angle_rad = 0.0f;
+    float thrust_error_angle_rad = 0.0f;
+    Vector3f base_ang_vel_body_rads; // after steps 2+3, before the branch
+    Vector3f feedforward;            // ang_vel_body_feedforward, step 5
+};
+
+PreBranchState compute_pre_branch_state(Quaternion target, const Quaternion& body,
+                                         const Vector3f& ang_vel_target_rads, const ControllerGains& g, float dt) {
+    PreBranchState s;
+    Vector3f attitude_error{};
+    thrust_heading_rotation_angles(target, body, attitude_error, s.thrust_angle_rad, s.thrust_error_angle_rad,
+                                    g.rate_yaw_kp, g.angle_yaw_kp, g.accel_yaw_max_radss);
+    s.target = target;
+
+    s.base_ang_vel_body_rads = update_ang_vel_target_from_att_error(
+        attitude_error, g.angle_kp_roll, g.angle_kp_pitch, g.angle_kp_yaw, g.angle_p_scale, g.accel_roll_max_radss,
+        g.accel_pitch_max_radss, g.accel_yaw_max_radss, g.use_sqrt_controller, dt);
+    ang_vel_limit(s.base_ang_vel_body_rads, fwcpp::math::radians(g.ang_vel_roll_max_degs),
+                  fwcpp::math::radians(g.ang_vel_pitch_max_degs), fwcpp::math::radians(g.ang_vel_yaw_max_degs));
+
+    const Quaternion rotation_target_to_body = body.inverse() * s.target;
+    s.feedforward = rotation_target_to_body * ang_vel_target_rads;
+    return s;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------
+// update_attitude_target
+// ---------------------------------------------------------------------
+
+TEST_CASE("update_attitude_target advances the target by the commanded rate", "[control][attitude_kinematics][update_attitude_target]") {
+    Quaternion target = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f rate{0.0f, 0.0f, 1.0f}; // 1 rad/s of yaw
+    const float dt = 0.1f;
+
+    update_attitude_target(target, rate, dt);
+
+    float roll = 0.0f, pitch = 0.0f, yaw = 0.0f;
+    target.to_euler(roll, pitch, yaw);
+    REQUIRE(yaw == Approx(0.1f).margin(1e-4f));
+    REQUIRE(roll == Approx(0.0f).margin(1e-4f));
+    REQUIRE(pitch == Approx(0.0f).margin(1e-4f));
+}
+
+// THE SINGLE MOST IMPORTANT TEST FOR update_attitude_target - see this
+// file's own header comment and attitude_kinematics.hpp's own "CCP-025
+// ADDENDUM" banner for why explicit normalize() matters: composing a
+// small rotation onto a quaternion every iteration accumulates drift,
+// and at 400 Hz it is measurable within seconds. 4000 iterations,
+// matching copter-rust's own COP-007 test exactly.
+TEST_CASE("update_attitude_target: the quaternion stays normalised over thousands of iterations",
+          "[control][attitude_kinematics][update_attitude_target]") {
+    Quaternion q = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f rate{0.3f, -0.2f, 0.5f};
+    const float dt = 0.0025f; // 400 Hz
+
+    for (int i = 0; i < 4000; ++i) {
+        update_attitude_target(q, rate, dt);
+    }
+
+    REQUIRE(q.length() == Approx(1.0f).margin(1e-4f));
+    REQUIRE(q.is_unit_length());
+}
+
+// ---------------------------------------------------------------------
+// attitude_controller_run_quat: the real three-way branch
+// ---------------------------------------------------------------------
+
+// (1) Under 30 degrees of thrust error: full feedforward on all three
+// axes, feedforward_scalar stays at its initial 1.0f (unused, per the
+// real "else" branch), and the result is exactly base + feedforward on
+// every axis - a plain whole-vector add, not a per-axis scaled one.
+TEST_CASE("attitude_controller_run_quat: under 30 degrees of thrust error, full feedforward on all three axes",
+          "[control][attitude_kinematics][attitude_controller_run_quat]") {
+    const ControllerGains g;
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Quaternion original_target = attitude(0.15f, 0.0f, 0.0f); // ~8.6 degrees of lean, well under 30
+    const Vector3f ang_vel_target_rads{0.0f, 0.0f, 1.0f};
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    const float dt = 0.0025f;
+
+    const PreBranchState ref = compute_pre_branch_state(original_target, body, ang_vel_target_rads, g, dt);
+    REQUIRE(ref.thrust_error_angle_rad < kAttitudeThrustErrorAngleRad); // sanity: genuinely under 30 degrees
+
+    Quaternion target = original_target;
+    float thrust_angle = 0.0f, thrust_error_angle = 0.0f, feedforward_scalar = 0.0f;
+    Quaternion attitude_ang_error;
+    Vector3f ang_vel_body_rads;
+    attitude_controller_run_quat(target, body, ang_vel_target_rads, gyro, g.rate_yaw_kp, g.angle_yaw_kp,
+                                  g.angle_kp_roll, g.angle_kp_pitch, g.angle_kp_yaw, g.angle_p_scale,
+                                  g.accel_roll_max_radss, g.accel_pitch_max_radss, g.accel_yaw_max_radss,
+                                  g.use_sqrt_controller, g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs,
+                                  g.ang_vel_yaw_max_degs, dt, thrust_angle, thrust_error_angle, feedforward_scalar,
+                                  attitude_ang_error, ang_vel_body_rads);
+
+    REQUIRE(feedforward_scalar == 1.0f);
+    REQUIRE(ang_vel_body_rads.x == Approx(ref.base_ang_vel_body_rads.x + ref.feedforward.x).margin(1e-6f));
+    REQUIRE(ang_vel_body_rads.y == Approx(ref.base_ang_vel_body_rads.y + ref.feedforward.y).margin(1e-6f));
+    REQUIRE(ang_vel_body_rads.z == Approx(ref.base_ang_vel_body_rads.z + ref.feedforward.z).margin(1e-6f));
+
+    // Sanity: the feedforward genuinely contributes something
+    // non-negligible on at least one axis, proving this isn't a
+    // vacuously-true near-zero comparison.
+    REQUIRE(ref.feedforward.length() > 1e-3f);
+}
+
+// (2) Over 60 degrees: yaw is a direct, EXACT (bit-for-bit) overwrite
+// with gyro.z, and roll/pitch receive LITERALLY ZERO feedforward - not
+// merely heavily reduced - meaning they are bit-for-bit identical to
+// whatever update_ang_vel_target_from_att_error + ang_vel_limit alone
+// already produced.
+TEST_CASE("attitude_controller_run_quat: over 60 degrees, yaw is overwritten by the gyro and roll/pitch get "
+          "literally zero feedforward",
+          "[control][attitude_kinematics][attitude_controller_run_quat]") {
+    const ControllerGains g;
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    // 80 degrees of lean plus a heading component, matching copter-
+    // rust's own equivalent case shape.
+    const Quaternion original_target = attitude(fwcpp::math::radians(80.0f), 0.0f, 1.0f);
+    const Vector3f ang_vel_target_rads{0.0f, 0.0f, 1.0f};
+    const float measured_yaw_rate = 0.42f;
+    const Vector3f gyro{0.0f, 0.0f, measured_yaw_rate};
+    const float dt = 0.0025f;
+
+    const PreBranchState ref = compute_pre_branch_state(original_target, body, ang_vel_target_rads, g, dt);
+    REQUIRE(ref.thrust_error_angle_rad > 2.0f * kAttitudeThrustErrorAngleRad); // sanity: genuinely over 60 degrees
+
+    Quaternion target = original_target;
+    float thrust_angle = 0.0f, thrust_error_angle = 0.0f, feedforward_scalar = 0.0f;
+    Quaternion attitude_ang_error;
+    Vector3f ang_vel_body_rads;
+    attitude_controller_run_quat(target, body, ang_vel_target_rads, gyro, g.rate_yaw_kp, g.angle_yaw_kp,
+                                  g.angle_kp_roll, g.angle_kp_pitch, g.angle_kp_yaw, g.angle_p_scale,
+                                  g.accel_roll_max_radss, g.accel_pitch_max_radss, g.accel_yaw_max_radss,
+                                  g.use_sqrt_controller, g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs,
+                                  g.ang_vel_yaw_max_degs, dt, thrust_angle, thrust_error_angle, feedforward_scalar,
+                                  attitude_ang_error, ang_vel_body_rads);
+
+    // Yaw: exact overwrite, bit-for-bit.
+    REQUIRE(ang_vel_body_rads.z == measured_yaw_rate);
+
+    // Roll/pitch: bit-for-bit identical to the pre-branch base value -
+    // proving zero feedforward was added, not merely a small amount.
+    REQUIRE(ang_vel_body_rads.x == ref.base_ang_vel_body_rads.x);
+    REQUIRE(ang_vel_body_rads.y == ref.base_ang_vel_body_rads.y);
+
+    // Sanity: the feedforward that was withheld from roll/pitch really
+    // was non-negligible, so "zero feedforward" is a meaningful claim
+    // here rather than there being nothing to withhold in the first
+    // place.
+    REQUIRE(std::fabs(ref.feedforward.x) + std::fabs(ref.feedforward.y) > 1e-3f);
+}
+
+// (3) The fade-scalar formula, sampled at several points across the
+// 30-60 degree band rather than just the midpoint - a scalar that
+// happened to be right at 45 degrees could still be wrong elsewhere in
+// the band. Each sample is checked against the exact real formula, and
+// the sequence is confirmed monotonically decreasing.
+TEST_CASE("attitude_controller_run_quat: the fade scalar matches the real linear formula across the whole 30-60 "
+          "degree band",
+          "[control][attitude_kinematics][attitude_controller_run_quat]") {
+    const ControllerGains g;
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f ang_vel_target_rads{0.0f, 0.0f, 0.0f};
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    const float dt = 0.0025f;
+
+    float previous_scalar = 1.1f; // above any real feedforward_scalar, so the first comparison always passes
+    for (float degrees : {31.0f, 35.0f, 40.0f, 45.0f, 50.0f, 55.0f, 59.0f}) {
+        Quaternion target = attitude(fwcpp::math::radians(degrees), 0.0f, 0.0f);
+
+        float thrust_angle = 0.0f, thrust_error_angle = 0.0f, feedforward_scalar = 0.0f;
+        Quaternion attitude_ang_error;
+        Vector3f ang_vel_body_rads;
+        attitude_controller_run_quat(target, body, ang_vel_target_rads, gyro, g.rate_yaw_kp, g.angle_yaw_kp,
+                                      g.angle_kp_roll, g.angle_kp_pitch, g.angle_kp_yaw, g.angle_p_scale,
+                                      g.accel_roll_max_radss, g.accel_pitch_max_radss, g.accel_yaw_max_radss,
+                                      g.use_sqrt_controller, g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs,
+                                      g.ang_vel_yaw_max_degs, dt, thrust_angle, thrust_error_angle,
+                                      feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+
+        REQUIRE(thrust_error_angle > kAttitudeThrustErrorAngleRad); // sanity: genuinely inside the fade band
+        REQUIRE(thrust_error_angle < 2.0f * kAttitudeThrustErrorAngleRad);
+
+        const float expected_scalar =
+            1.0f - (thrust_error_angle - kAttitudeThrustErrorAngleRad) / kAttitudeThrustErrorAngleRad;
+        REQUIRE(feedforward_scalar == Approx(expected_scalar).margin(1e-5f));
+
+        REQUIRE(feedforward_scalar < previous_scalar);
+        previous_scalar = feedforward_scalar;
+    }
+
+    // Should not have reached zero before the far (60-degree) threshold.
+    REQUIRE(previous_scalar > 0.0f);
+}
+
+// (4) THE CRITICAL YAW-NOT-DOUBLE-SCALED TEST - see this file's own
+// header comment and attitude_kinematics.hpp's own "CCP-025 ADDENDUM"
+// banner for the full writeup of this asymmetry. Constructs a fade-band
+// case, computes the real (correct) yaw result via the actual function
+// under test, then independently reconstructs BOTH the correct formula
+// and the naive "scale yaw at the point of addition too" formula from
+// the same underlying pre-branch quantities, and confirms: the real
+// implementation matches the correct formula, and differs from the
+// naive one by a large, non-negligible margin (not merely a rounding-
+// sized discrepancy).
+TEST_CASE("attitude_controller_run_quat: the yaw feedforward is not double-scaled in the fade band",
+          "[control][attitude_kinematics][attitude_controller_run_quat][yaw_asymmetry]") {
+    const ControllerGains g;
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    // A pure 45-degree lean: dead center of the 30-60 degree band, so
+    // feedforward_scalar should land at exactly 0.5.
+    const Quaternion original_target = attitude(fwcpp::math::radians(45.0f), 0.0f, 0.0f);
+    // A deliberately large target yaw rate so the frame-rotation
+    // coupling produces a large, unmistakable ang_vel_body_feedforward.z
+    // component even though the target itself has no heading error.
+    const Vector3f ang_vel_target_rads{0.0f, 0.0f, 1.0f};
+    const float measured_yaw_rate = 0.05f;
+    const Vector3f gyro{0.0f, 0.0f, measured_yaw_rate};
+    const float dt = 0.0025f;
+
+    const PreBranchState ref = compute_pre_branch_state(original_target, body, ang_vel_target_rads, g, dt);
+    REQUIRE(ref.thrust_error_angle_rad > kAttitudeThrustErrorAngleRad); // sanity: genuinely in the fade band
+    REQUIRE(ref.thrust_error_angle_rad < 2.0f * kAttitudeThrustErrorAngleRad);
+    // Sanity: the feedforward.z the branch will operate on is genuinely
+    // large, not a near-zero value that would make any formula
+    // difference invisible.
+    REQUIRE(std::fabs(ref.feedforward.z) > 0.3f);
+
+    const float expected_scalar =
+        1.0f - (ref.thrust_error_angle_rad - kAttitudeThrustErrorAngleRad) / kAttitudeThrustErrorAngleRad;
+    REQUIRE(expected_scalar == Approx(0.5f).margin(0.05f)); // dead center of the band
+
+    // The REAL (correct) formula: unscaled add, then blend the
+    // already-summed value.
+    const float correct_z_sum = ref.base_ang_vel_body_rads.z + ref.feedforward.z;
+    const float correct_z = gyro.z * (1.0f - expected_scalar) + correct_z_sum * expected_scalar;
+
+    // The NAIVE (incorrect) formula: scale the feedforward at the point
+    // of addition too, "for symmetry" with roll/pitch, then blend -
+    // this is what a port that "cleaned up" the yaw branch to look
+    // parallel to roll/pitch would produce.
+    const float naive_z_sum = ref.base_ang_vel_body_rads.z + ref.feedforward.z * expected_scalar;
+    const float naive_z = gyro.z * (1.0f - expected_scalar) + naive_z_sum * expected_scalar;
+
+    // The two formulas must genuinely differ for this test to prove
+    // anything - a large, non-negligible margin, not a rounding-sized
+    // discrepancy.
+    REQUIRE(std::fabs(correct_z - naive_z) > 0.05f);
+
+    Quaternion target = original_target;
+    float thrust_angle = 0.0f, thrust_error_angle = 0.0f, feedforward_scalar = 0.0f;
+    Quaternion attitude_ang_error;
+    Vector3f ang_vel_body_rads;
+    attitude_controller_run_quat(target, body, ang_vel_target_rads, gyro, g.rate_yaw_kp, g.angle_yaw_kp,
+                                  g.angle_kp_roll, g.angle_kp_pitch, g.angle_kp_yaw, g.angle_p_scale,
+                                  g.accel_roll_max_radss, g.accel_pitch_max_radss, g.accel_yaw_max_radss,
+                                  g.use_sqrt_controller, g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs,
+                                  g.ang_vel_yaw_max_degs, dt, thrust_angle, thrust_error_angle, feedforward_scalar,
+                                  attitude_ang_error, ang_vel_body_rads);
+
+    // The actual implementation matches the correct (asymmetric)
+    // formula...
+    REQUIRE(ang_vel_body_rads.z == Approx(correct_z).margin(1e-5f));
+    // ...and genuinely differs from the naive (double-scaled) one, by
+    // the same large margin established above - proving this is the
+    // real, structurally different two-step yaw treatment, not the
+    // "obvious" symmetric one.
+    REQUIRE(ang_vel_body_rads.z != Approx(naive_z).margin(1e-5f));
+    REQUIRE(std::fabs(ang_vel_body_rads.z - naive_z) > 0.05f);
+}
+
+// (5) attitude_ang_error is recomputed after step 1's potential
+// mutation of attitude_target, using the real body.inverse() *
+// attitude_target composition - confirmed directly against an
+// independently-built reference using the (possibly mutated) target
+// this same call actually produced.
+TEST_CASE("attitude_controller_run_quat: attitude_ang_error uses the post-mutation attitude_target",
+          "[control][attitude_kinematics][attitude_controller_run_quat]") {
+    const ControllerGains g;
+    const Quaternion body = attitude(0.3f, -0.25f, 0.6f);
+    // A large heading delta, chosen (matching the established
+    // thrust_heading_rotation_angles test convention above) so the
+    // yaw-clamp guard genuinely fires and attitude_target is genuinely
+    // reassigned.
+    Quaternion heading_delta;
+    heading_delta.from_axis_angle(Vector3f{0.0f, 0.0f, -1.0f}, 1.2f); // well beyond kYawMaxErrorAngleRad (45 deg) on its own, guaranteeing the clamp fires
+    const Quaternion original_target = body * heading_delta;
+    const Vector3f ang_vel_target_rads{0.1f, -0.1f, 0.2f};
+    const Vector3f gyro{0.01f, 0.02f, 0.03f};
+    const float dt = 0.0025f;
+
+    Quaternion target = original_target;
+    float thrust_angle = 0.0f, thrust_error_angle = 0.0f, feedforward_scalar = 0.0f;
+    Quaternion attitude_ang_error;
+    Vector3f ang_vel_body_rads;
+    attitude_controller_run_quat(target, body, ang_vel_target_rads, gyro, g.rate_yaw_kp, g.angle_yaw_kp,
+                                  g.angle_kp_roll, g.angle_kp_pitch, g.angle_kp_yaw, g.angle_p_scale,
+                                  g.accel_roll_max_radss, g.accel_pitch_max_radss, g.accel_yaw_max_radss,
+                                  g.use_sqrt_controller, g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs,
+                                  g.ang_vel_yaw_max_degs, dt, thrust_angle, thrust_error_angle, feedforward_scalar,
+                                  attitude_ang_error, ang_vel_body_rads);
+
+    // Sanity: the mutation genuinely happened.
+    REQUIRE(target.q1 != original_target.q1);
+
+    const Quaternion expected = body.inverse() * target;
+    REQUIRE(attitude_ang_error.q1 == Approx(expected.q1).margin(1e-6f));
+    REQUIRE(attitude_ang_error.q2 == Approx(expected.q2).margin(1e-6f));
+    REQUIRE(attitude_ang_error.q3 == Approx(expected.q3).margin(1e-6f));
+    REQUIRE(attitude_ang_error.q4 == Approx(expected.q4).margin(1e-6f));
+
+    // And it is NOT the same as body.inverse() * original_target (the
+    // pre-mutation value) - proving this really did recompute using the
+    // post-mutation target, not reuse a stale rotation_target_to_body.
+    const Quaternion stale = body.inverse() * original_target;
+    const bool differs_from_stale = std::fabs(attitude_ang_error.q1 - stale.q1) > 1e-4f ||
+                                     std::fabs(attitude_ang_error.q2 - stale.q2) > 1e-4f ||
+                                     std::fabs(attitude_ang_error.q3 - stale.q3) > 1e-4f ||
+                                     std::fabs(attitude_ang_error.q4 - stale.q4) > 1e-4f;
+    REQUIRE(differs_from_stale);
+}
+
+// (6) kAttitudeThrustErrorAngleRad is exactly radians()'s own output -
+// matching CCP-022/023/024's own established ULP-precision test
+// discipline.
+TEST_CASE("attitude_controller_run_quat: kAttitudeThrustErrorAngleRad is exactly radians(30.0f)",
+          "[control][attitude_kinematics][attitude_controller_run_quat]") {
+    REQUIRE(kAttitudeThrustErrorAngleRad == fwcpp::math::radians(30.0f));
+}

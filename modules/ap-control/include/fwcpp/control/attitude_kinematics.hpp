@@ -622,6 +622,204 @@
 // this ticket's own two functions.
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// CCP-025 ADDENDUM: update_attitude_target (real lines 979-986) and
+// attitude_controller_run_quat (real lines 989-1027), re-verified
+// directly via `grep -n` against the pinned upstream tree - matches
+// this ticket's own claimed ranges exactly (`grep -n
+// 'update_attitude_target\|attitude_controller_run_quat'` puts the two
+// definitions at real lines 979 and 989). This is the real control
+// LOOP itself - Phase 8 of the copter-cpp effort's AC_AttitudeControl
+// work, tying together almost everything the phase has built so far
+// (CCP-018's ang_vel_limit, CCP-019's from_axis_angle, CCP-023's
+// thrust_heading_rotation_angles, CCP-024's
+// update_ang_vel_target_from_att_error).
+//
+// AC_ATTITUDE_THRUST_ERROR_ANGLE_RAD - re-confirmed directly this round
+// at AC_AttitudeControl.h real line 29: `radians(30.0f)`. Named below
+// kAttitudeThrustErrorAngleRad, matching CCP-022/023/024's own
+// established `inline const float` (NOT `inline constexpr`, since
+// math::radians() is not constexpr-callable) computation discipline.
+//
+// REUSED INVESTIGATION: copter-rust's own COP-007 ticket already ported
+// this exact function pair, under the real, actual merged names
+// `update_attitude_target` and `attitude_controller_run` (NOT
+// `attitude_controller_run_quat` - the Rust port renamed it, since
+// "_quat" only disambiguated it from sibling `_run_*` entry points that
+// port never built either), in
+// ports/plane-fw-rust/crates/ap-control/src/attitude_error.rs (its own
+// merged mainline copy - NOT the stale
+// ports/plane-fw-rust/crates/ap-control/src/attitude_controller.rs file
+// of the same crate, which only re-exports/consumes these functions,
+// and NOT the /srv/ardumaster/worktrees/cop-023-params worktree, which
+// turned out to be an unrelated, already-merged COP-023 branch, not
+// this function pair's own home). Read in full before writing anything
+// here; every finding below independently re-verified against the real
+// C++ source rather than trusted on faith.
+//
+// THE REAL THREE-WAY BRANCH IS "SACRIFICE HEADING TO KEEP THRUST" MADE
+// CONCRETE, copter-rust's own words reused directly: "A multirotor
+// yaws by unbalancing rotor drag, which costs thrust margin - exactly
+// what an aircraft with a large thrust error has none of. Fighting for
+// heading there trades the thing that keeps it flying for the thing
+// that decides which way it faces." Concretely, re-verified directly
+// against real lines 1000-1023:
+//   - Under 30 degrees of thrust_error_angle_rad: full feedforward on
+//     all three axes.
+//   - Between 30 and 60: roll/pitch feedforward fades out linearly:
+//     `feedforward_scalar = 1 - (thrust_error_angle_rad -
+//     AC_ATTITUDE_THRUST_ERROR_ANGLE_RAD) / AC_ATTITUDE_THRUST_ERROR_
+//     ANGLE_RAD` (1.0 at the low/30-degree end, 0.0 at the high/60-
+//     degree end - re-verified directly). The yaw COMMAND ITSELF is
+//     then blended toward the measured gyro rate.
+//   - Over 60: yaw is replaced by the gyro outright; roll/pitch are not
+//     touched at all.
+//
+// THE SINGLE MOST IMPORTANT, EASIEST-TO-GET-WRONG FINDING IN THIS
+// TICKET - reused directly from copter-rust's own exact words: "in the
+// middle band the yaw feedforward is added in FULL and then the whole
+// yaw command is blended toward the gyro. It is NOT scaled by the
+// feedforward scalar the way roll and pitch are, so applying the
+// scalar to it as well - the obvious reading - would scale it twice."
+// Re-verified directly against real lines 1017-1021: roll/pitch get
+// `ang_vel_body_rads.{x,y} += ang_vel_body_feedforward.{x,y} *
+// feedforward_scalar` (ONE scaled add each), while yaw gets, in this
+// exact real order:
+//   1. `ang_vel_body_rads.z += ang_vel_body_feedforward.z;`   (UNSCALED)
+//   2. `ang_vel_body_rads.z = gyro.z * (1.0f - feedforward_scalar) +
+//       ang_vel_body_rads.z * feedforward_scalar;`  (blend the
+//       ALREADY-summed value)
+// - a structurally different two-step process for yaw, not a parallel
+// three-line pattern across all three axes. This module's own test
+// file includes a dedicated test constructing a case where the real
+// (correct) result and the naive "scale yaw at the point of addition
+// too" result are computed side by side from the same underlying
+// quantities and differ by a large, non-negligible margin (see "the
+// yaw feedforward is not double-scaled" test below) - not merely
+// eyeballed against the formula in isolation.
+//
+// A REAL, DISCLOSED EXTENSION BEYOND THE THREE PERSISTENT-STATE
+// VARIABLES THIS TICKET NAMED EXPLICITLY: re-reading the real function
+// body directly (lines 992-994) shows `_thrust_angle_rad` and
+// `_thrust_error_angle_rad` are ALSO real persistent AC_AttitudeControl
+// member state written every call (via the very same
+// thrust_heading_rotation_angles call that populates the local
+// `attitude_error` in upstream's own body) - not merely transient
+// locals. Per the same ADR-0012 explicit-parameter discipline this
+// ticket's own architectural note calls for, this port exposes THOSE
+// two as explicit `float&` output parameters as well
+// (`thrust_angle_rad`, `thrust_error_angle_rad`), on top of the three
+// the ticket named directly (`feedforward_scalar`, `attitude_ang_error`,
+// `ang_vel_body_rads`) - five real output parameters in total, matching
+// upstream's own complete real persistent-state footprint for this
+// function exactly. `attitude_error` itself, by contrast, is confirmed
+// directly (real line 992) to be a plain LOCAL `Vector3f` in upstream's
+// own body, never assigned to a member - this port matches that
+// exactly too, keeping it a local inside attitude_controller_run_quat
+// below rather than a sixth output parameter that upstream itself does
+// not persist.
+//
+// THE ARCHITECTURAL DECISION, stated here and in this ticket's own
+// commit message: no new stateful class is introduced. Every piece of
+// real persistent AC_AttitudeControl state this function pair touches
+// (`_feedforward_scalar`, `_attitude_ang_error`, `_thrust_angle_rad`,
+// `_thrust_error_angle_rad`, `_ang_vel_body_rads`) is threaded through
+// as an explicit reference output parameter, matching this whole
+// module's own established free-function-with-explicit-state
+// convention (CCP-011's check_for_failed_motor, CCP-013's output_logic,
+// CCP-023's own mutating `attitude_target&` immediately above).
+//
+// REAL AHRS DEPENDENCIES, explicit parameters per ADR-0012 (real
+// upstream: `_ahrs.get_quat_body_to_ned(attitude_body)` and
+// `get_latest_gyro()`): `attitude_body` reuses the exact `const
+// Quaternion&` shape CCP-020's own thrust_vector_rotation_angles
+// already established above; `gyro_body_rads` is a new explicit `const
+// Vector3f&` parameter standing in for the real gyro reading, matching
+// this file's own established const-reference convention for
+// input-only Vector3f quantities (attitude_error_rot_vec_rad,
+// angle_p_scale, etc.).
+//
+// update_attitude_target's REAL COMPOSITION ORDER AND NORMALIZE, each
+// re-verified directly against real lines 981-984:
+//   1. `attitude_target_update.from_axis_angle(_ang_vel_target_rads *
+//      _dt_s)` - the multiplication happens BEFORE the call, as one
+//      real Vector3f, using the CCP-019 self-normalizing single-
+//      Vector3-argument overload (a zero-length product resets to the
+//      identity rotation, not a divide-by-zero).
+//   2. `_attitude_target *= attitude_target_update` - the delta is
+//      composed on the RIGHT of the existing target (this port's own
+//      `operator*=` is `*this = *this * v`, matching this exactly).
+//   3. `_attitude_target.normalize()` - re-verified this call is
+//      unconditional, every single call, not merely occasional cleanup.
+//      Real reason, reused directly from copter-rust's own words: "at
+//      400 Hz the accumulated error from repeatedly composing a small
+//      rotation is measurable within seconds." This module's own test
+//      file includes a real, multi-iteration (4000, matching copter-
+//      rust's own test exactly) test proving the quaternion's own
+//      unit-length norm survives that many repeated compositions, which
+//      would NOT hold without this explicit normalize() call - see "the
+//      quaternion stays normalised over thousands of iterations" test
+//      below.
+//
+// attitude_controller_run_quat's REAL STEP ORDER, each re-verified
+// directly against real lines 989-1027:
+//   1. Calls this file's own already-merged thrust_heading_rotation_
+//      angles (CCP-023) with `attitude_target`/`attitude_body`,
+//      producing `attitude_error`/`thrust_angle_rad`/`thrust_error_
+//      angle_rad` - `attitude_target` may itself be mutated by this
+//      call (CCP-023's own established semantics, reused directly:
+//      this port's own signature keeps `attitude_target` a non-const
+//      `Quaternion&` for exactly this reason).
+//   2. Calls this file's own already-merged update_ang_vel_target_
+//      from_att_error (CCP-024) with `attitude_error`, producing the
+//      pre-limit `ang_vel_body_rads`.
+//   3. Calls this file's own already-merged ang_vel_limit (CCP-018) on
+//      `ang_vel_body_rads`, with the real roll/pitch/yaw max-rate
+//      parameters each converted via math::radians() - matching this
+//      whole file's own established ULP-precision discipline of never
+//      hand-converting a degrees-to-radians literal.
+//   4. `rotation_target_to_body = attitude_body.inverse() *
+//      attitude_target` - re-verified this exact composition order
+//      (body inverse LEFT, target RIGHT).
+//   5. `ang_vel_body_feedforward = rotation_target_to_body *
+//      ang_vel_target_rads`, using this port's own Quaternion::
+//      operator*(Vector3) - rotating the TARGET's own angular velocity
+//      (expressed in the target frame) into the body frame via the
+//      just-computed relative rotation.
+//   6. `gyro = gyro_body_rads` (this function's own explicit parameter).
+//   7. The real three-way branch above, `feedforward_scalar = 1.0f` set
+//      UNCONDITIONALLY before the branch runs (re-verified directly:
+//      every real code path, including the under-30-degree `else`
+//      branch where it is never subsequently read, still passes through
+//      this initial assignment first).
+//   8. `attitude_ang_error = attitude_body.inverse() * attitude_target`
+//      - real upstream's own comment, reproduced verbatim: recorded "to
+//      handle EKF resets". Re-verified this composition is IDENTICAL in
+//      form to step 4's `rotation_target_to_body` (both are `attitude_
+//      body.inverse() * attitude_target`), but evaluated a SECOND time
+//      after `attitude_target` may have been mutated by step 1 above -
+//      re-verified upstream really does recompute rather than reuse the
+//      step-4 value, so this port's own body does too, not merely
+//      aliasing `attitude_ang_error` to `rotation_target_to_body`.
+//   9. The final `ang_vel_body_rads` (as computed by whichever branch
+//      ran) is the function's own real primary output.
+//
+// DEFERRED, explicitly, still NOT started here, matching copter-rust's
+// own COP-007 identically-still-open deferral of the same functions for
+// the same reasons: command_model_rate_predictor (real lines 1134-1152
+// - still needs real per-axis STATE this port has nowhere to source
+// from yet, per this file's own CCP-022/023 addenda above), the
+// input_* entry points (input_euler_angle_or_mag_rate, input_euler_rate_
+// roll_pitch_yaw, input_rate_bf_roll_pitch_yaw, input_thrust_vector_
+// rate_heading, input_thrust_vector_heading, input_quaternion, etc.),
+// and the relax/reset paths (relax, reset_target_and_rate, reset_yaw_
+// target_and_rate, inertial_frame_reset) - all separate, deliberately
+// deferred future phases, none retroactively unblocked by this ticket's
+// own two functions. This is a genuinely shared, still-open frontier
+// for both ports, confirmed directly by copter-rust's own COP-007 notes
+// naming the identical set as its own next steps.
+// ---------------------------------------------------------------------
+
 #include <algorithm>
 #include <cmath>
 
@@ -1100,6 +1298,146 @@ inline const float kAccelRpControllerMaxRadss = math::radians(720.0f);
     }
 
     return rate_target_ang_vel;
+}
+
+// kAttitudeThrustErrorAngleRad - AC_ATTITUDE_THRUST_ERROR_ANGLE_RAD
+// (AC_AttitudeControl.h real line 29) - see this file's own "CCP-025
+// ADDENDUM" banner above for why this is a real, runtime-initialized
+// `inline const float` (not `inline constexpr`): math::radians() is not
+// constexpr-callable.
+inline const float kAttitudeThrustErrorAngleRad = math::radians(30.0f);
+
+// update_attitude_target - upstream AC_AttitudeControl::
+// update_attitude_target (real lines 979-986). CCP-025 - see this
+// file's own "CCP-025 ADDENDUM" banner above for the full design
+// writeup (the real composition order and the disclosed reason
+// normalize() is unconditional, not optional cleanup).
+//
+// Advances attitude_target by one step of ang_vel_target_rads: builds a
+// delta quaternion via the CCP-019 self-normalizing single-Vector3
+// from_axis_angle overload, composes it on the RIGHT of the existing
+// target, and normalizes the result - re-verify this last step is not
+// dropped; this module's own test file pins the real reason (repeated
+// composition drifts off the unit sphere within seconds at 400 Hz) with
+// a dedicated multi-iteration test.
+inline void update_attitude_target(math::Quaternion& attitude_target, const math::Vector3f& ang_vel_target_rads,
+                                    float dt) {
+    math::Quaternion attitude_target_update;
+    attitude_target_update.from_axis_angle(ang_vel_target_rads * dt);
+    attitude_target *= attitude_target_update;
+    attitude_target.normalize();
+}
+
+// attitude_controller_run_quat - upstream AC_AttitudeControl::
+// attitude_controller_run_quat (real lines 989-1027). CCP-025 - see
+// this file's own "CCP-025 ADDENDUM" banner above for the full design
+// writeup: the real three-way thrust-error branch, the single most
+// important yaw-not-double-scaled asymmetry in this whole ticket, the
+// architectural decision to expose every real persistent piece of state
+// this function touches as an explicit output parameter rather than
+// introduce a stateful class, and the explicit AHRS-dependency
+// parameters (attitude_body, gyro_body_rads) standing in for real
+// upstream's own _ahrs.get_quat_body_to_ned()/get_latest_gyro() calls.
+//
+// attitude_target is read AND, conditionally, mutated in place (via the
+// thrust_heading_rotation_angles call below - CCP-023's own established
+// semantics, propagated here exactly). thrust_angle_rad, thrust_error_
+// angle_rad, feedforward_scalar, attitude_ang_error, and ang_vel_body_
+// rads are this function's five real output parameters, matching real
+// upstream's own complete _thrust_angle_rad/_thrust_error_angle_rad/
+// _feedforward_scalar/_attitude_ang_error/_ang_vel_body_rads member
+// footprint exactly - see this file's own banner addendum for why this
+// is two more than the ticket's own three named examples.
+inline void attitude_controller_run_quat(
+    math::Quaternion& attitude_target, const math::Quaternion& attitude_body,
+    const math::Vector3f& ang_vel_target_rads, const math::Vector3f& gyro_body_rads, float rate_yaw_kp,
+    float angle_yaw_kp, float angle_kp_roll, float angle_kp_pitch, float angle_kp_yaw,
+    const math::Vector3f& angle_p_scale, float accel_roll_max_radss, float accel_pitch_max_radss,
+    float accel_yaw_max_radss, bool use_sqrt_controller, float ang_vel_roll_max_degs, float ang_vel_pitch_max_degs,
+    float ang_vel_yaw_max_degs, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    // Step 1: the thrust/heading error decomposition (CCP-023), which
+    // may itself mutate attitude_target - propagated via the same
+    // non-const Quaternion& this function itself takes attitude_target
+    // by. attitude_error is a plain LOCAL here, matching real upstream's
+    // own real line 992 exactly (never assigned to a member there
+    // either).
+    math::Vector3f attitude_error;
+    thrust_heading_rotation_angles(attitude_target, attitude_body, attitude_error, thrust_angle_rad,
+                                    thrust_error_angle_rad, rate_yaw_kp, angle_yaw_kp, accel_yaw_max_radss);
+
+    // Step 2: the angle-error-to-rate-target conversion (CCP-024).
+    ang_vel_body_rads = update_ang_vel_target_from_att_error(attitude_error, angle_kp_roll, angle_kp_pitch,
+                                                              angle_kp_yaw, angle_p_scale, accel_roll_max_radss,
+                                                              accel_pitch_max_radss, accel_yaw_max_radss,
+                                                              use_sqrt_controller, dt);
+
+    // Step 3: the configured rate limits (CCP-018), each bound converted
+    // via math::radians() - never a hand-typed radian literal.
+    ang_vel_limit(ang_vel_body_rads, math::radians(ang_vel_roll_max_degs), math::radians(ang_vel_pitch_max_degs),
+                  math::radians(ang_vel_yaw_max_degs));
+
+    // Steps 4-6: the target's own angular velocity, rotated from the
+    // target frame into the body frame via the relative rotation
+    // between the two attitudes, plus the real gyro reading.
+    const math::Quaternion rotation_target_to_body = attitude_body.inverse() * attitude_target;
+    const math::Vector3f ang_vel_body_feedforward = rotation_target_to_body * ang_vel_target_rads;
+    const math::Vector3f gyro = gyro_body_rads;
+
+    // Step 7: the real three-way branch - see this file's own "CCP-025
+    // ADDENDUM" banner above for the full writeup of why it exists and
+    // the yaw asymmetry within it. feedforward_scalar is set here
+    // UNCONDITIONALLY before the branch, re-verified directly against
+    // real upstream: every path passes through this assignment first,
+    // even the under-30-degree branch below where it is never
+    // subsequently read.
+    feedforward_scalar = 1.0f;
+    if (thrust_error_angle_rad > 2.0f * kAttitudeThrustErrorAngleRad) {
+        // Over 60 degrees: yaw is replaced by the gyro OUTRIGHT (a
+        // plain overwrite, not a blend). Roll/pitch are NOT touched at
+        // all in this branch - they keep exactly whatever steps 2+3
+        // already produced, with ZERO feedforward added. See this
+        // module's own dedicated test below proving this literally, not
+        // just "heavily reduced".
+        ang_vel_body_rads.z = gyro.z;
+    } else if (thrust_error_angle_rad > kAttitudeThrustErrorAngleRad) {
+        // 30-60 degrees, the real fade band. feedforward_scalar
+        // evaluates to 1.0 at the low (30-degree) end and 0.0 at the
+        // high (60-degree) end - re-verified directly.
+        feedforward_scalar =
+            1.0f - (thrust_error_angle_rad - kAttitudeThrustErrorAngleRad) / kAttitudeThrustErrorAngleRad;
+
+        // Roll/pitch: ONE scaled add each.
+        ang_vel_body_rads.x += ang_vel_body_feedforward.x * feedforward_scalar;
+        ang_vel_body_rads.y += ang_vel_body_feedforward.y * feedforward_scalar;
+
+        // Yaw: THE SINGLE MOST IMPORTANT ASYMMETRY IN THIS TICKET - see
+        // this file's own banner addendum above. The feedforward is
+        // added in FULL and UNSCALED first (NOT `* feedforward_scalar`,
+        // which would be the "obvious," symmetric-looking, and WRONG
+        // reading - that would scale the yaw feedforward twice, once
+        // here and again in the blend immediately below). Only AFTER
+        // this unscaled add does the entire, already-summed yaw command
+        // get blended toward the gyro as one already-composed value.
+        ang_vel_body_rads.z += ang_vel_body_feedforward.z;
+        ang_vel_body_rads.z = gyro.z * (1.0f - feedforward_scalar) + ang_vel_body_rads.z * feedforward_scalar;
+    } else {
+        // Under 30 degrees: full feedforward, all three axes, one plain
+        // whole-vector add. feedforward_scalar stays at its initial
+        // 1.0f, unused in this branch.
+        ang_vel_body_rads += ang_vel_body_feedforward;
+    }
+
+    // Step 8: recorded "to handle EKF resets" (real upstream's own
+    // comment, reproduced verbatim). Re-verified this is genuinely
+    // recomputed here, a second time, using whatever attitude_target
+    // step 1 may have left it as - not merely an alias of the step-4
+    // rotation_target_to_body value computed before that mutation could
+    // have happened to matter.
+    attitude_ang_error = attitude_body.inverse() * attitude_target;
+
+    // Step 9: ang_vel_body_rads, as left by whichever branch ran above,
+    // is this function's own real primary output.
 }
 
 } // namespace fwcpp::control
