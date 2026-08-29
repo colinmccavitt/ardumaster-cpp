@@ -20,8 +20,10 @@ using fwcpp::copter::PortStatus;
 using fwcpp::copter::RateControllerMainInputs;
 using fwcpp::copter::ReadInertiaInputs;
 using fwcpp::copter::TaskKind;
+using fwcpp::copter::SpoolState;
 using fwcpp::copter::UpdateFlightModeInputs;
 using fwcpp::copter::UpdateHomeFromEkfInputs;
+using fwcpp::copter::UpdateLandAndCrashDetectorsInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -48,8 +50,10 @@ using fwcpp::copter::run_rate_controller_main;
 using fwcpp::copter::scheduler_task_count;
 using fwcpp::copter::this_slice_count;
 using fwcpp::copter::throttle_loop;
+using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
 using fwcpp::copter::update_home_from_ekf;
+using fwcpp::copter::update_land_and_crash_detectors;
 
 namespace {
 
@@ -65,10 +69,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 7", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 24);
+TEST_CASE("catalog remaining_count stays open after slice 8", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 23);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 11);
+    REQUIRE(on_main_count() == 12);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -82,8 +86,10 @@ TEST_CASE("catalog remaining_count stays open after slice 7", "[copter][leftover
     REQUIRE(completeness_has("Copter::read_inertia", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::check_ekf_reset", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_flight_mode", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::update_home_from_EKF", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_home_from_EKF", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::update_land_and_crash_detectors", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::update_rangefinder_terrain_offset", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -687,4 +693,84 @@ TEST_CASE("update_home_from_ekf armed inflight copies origin alt; missing origin
     REQUIRE_FALSE(miss.set_home_ok);
     REQUIRE_FALSE(miss.home_is_set);
     REQUIRE(skipped.alt == 42);
+}
+
+TEST_CASE("update_land_and_crash_detectors disarmed sets land_complete",
+          "[copter][update_land_and_crash_detectors]") {
+    UpdateLandAndCrashDetectorsInputs in{};
+    in.land.armed = false;
+    in.land.land_complete = false;
+    in.land.land_detector_count = 7;
+
+    const auto fx = update_land_and_crash_detectors(in);
+    REQUIRE(fx.update_land_detector);
+    REQUIRE(fx.filter_apply);
+    REQUIRE_FALSE(fx.parachute_check);
+    REQUIRE_FALSE(fx.crash_check);
+    REQUIRE_FALSE(fx.thrust_loss_check);
+    REQUIRE_FALSE(fx.yaw_imbalance_check);
+    REQUIRE(fx.land.land_complete);
+    REQUIRE(fx.land.land_complete_maybe);
+    REQUIRE_FALSE(fx.land.internal_error_flow_of_control);
+    REQUIRE(fx.land.land_detector_count == 0);
+
+    const auto* row = find_scheduler_task("update_land_and_crash_detectors");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kFast);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("update_land_and_crash_detectors already landed + high throttle clears land",
+          "[copter][update_land_and_crash_detectors]") {
+    UpdateLandAndCrashDetectorsInputs in{};
+    in.land.armed = true;
+    in.land.land_complete = true;
+    in.land.is_taking_off = false;
+    in.land.throttle_out = 0.5f;
+    in.land.non_takeoff_throttle = 0.1f;
+    in.land.spool = SpoolState::THROTTLE_UNLIMITED;
+    in.land.land_detector_count = 12;
+
+    const auto fx = update_land_and_crash_detectors(in);
+    REQUIRE_FALSE(fx.land.land_complete);
+    REQUIRE_FALSE(fx.land.land_complete_maybe);
+    REQUIRE(fx.land.internal_error_flow_of_control);
+    REQUIRE(fx.land.land_detector_count == 0);
+    REQUIRE(fx.update_land_detector);
+    REQUIRE_FALSE(fx.crash_check);
+
+    in.land.is_taking_off = true;
+    const auto taking_off = update_land_and_crash_detectors(in);
+    REQUIRE(taking_off.land.land_complete);
+    REQUIRE_FALSE(taking_off.land.internal_error_flow_of_control);
+    REQUIRE(taking_off.land.land_detector_count == 12);
+}
+
+TEST_CASE("update_land_and_crash_detectors standby_active zeros land_detector_count",
+          "[copter][update_land_and_crash_detectors]") {
+    UpdateLandAndCrashDetectorsInputs in{};
+    in.land.armed = true;
+    in.land.land_complete = false;
+    in.land.standby_active = true;
+    in.land.land_detector_count = 9;
+
+    const auto fx = update_land_and_crash_detectors(in);
+    REQUIRE(fx.land.land_detector_count == 0);
+    REQUIRE_FALSE(fx.land.land_complete);
+    REQUIRE_FALSE(fx.land.internal_error_flow_of_control);
+}
+
+TEST_CASE("update_land_and_crash_detectors accel_ef z has gravity added",
+          "[copter][update_land_and_crash_detectors]") {
+    REQUIRE(kGravityMss == 9.80665f);
+
+    UpdateLandAndCrashDetectorsInputs in{};
+    in.accel_ef_mss = fwcpp::math::Vector3f{1.0f, 2.0f, -kGravityMss};
+    in.land.armed = false;
+
+    const auto fx = update_land_and_crash_detectors(in);
+    REQUIRE(fx.accel_ef_mss.x == 1.0f);
+    REQUIRE(fx.accel_ef_mss.y == 2.0f);
+    REQUIRE(fx.accel_ef_mss.z == 0.0f);
+    REQUIRE(fx.filter_apply);
 }
