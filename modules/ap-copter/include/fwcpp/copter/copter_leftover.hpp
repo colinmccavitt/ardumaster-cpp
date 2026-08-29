@@ -1,9 +1,9 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 1 lands the scheduler
-// table as data plus the rc_loop leftover. remaining_count() > 0 is
-// expected after this slice.
+// (Copter.cpp / Copter.h / system.cpp). Slice 2 lands motors_output /
+// motors_output_main and read_AHRS. remaining_count() > 0 is expected
+// after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
 // Subsystem objects are injected as inputs on later leftover ticks.
@@ -35,8 +35,9 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
      "rc_loop.hpp; always read_radio then read_mode_switch"},
     {"RC_Channels::read_mode_switch", PortStatus::kThisSlice,
      "NoValidInput / NoChannel / Read; inject has_valid_input + channel"},
-    {"Copter::motors_output / motors_output_main", PortStatus::kRemaining, "FAST_TASK body"},
-    {"Copter::read_AHRS", PortStatus::kRemaining, "FAST_TASK skip_ins_update"},
+    {"Copter::motors_output / motors_output_main", PortStatus::kThisSlice,
+     "motors_output.hpp; AFS skip, arming delay, interlock, drive, push"},
+    {"Copter::read_AHRS", PortStatus::kThisSlice, "read_ahrs.hpp; skip_ins_update"},
     {"Copter::throttle_loop", PortStatus::kRemaining, "50 Hz leftover"},
     {"Copter::init_ardupilot", PortStatus::kRemaining, "system.cpp init"},
     {"Copter::run_rate_controller_main", PortStatus::kRemaining, "FAST_TASK body"},
