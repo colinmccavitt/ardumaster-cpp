@@ -23,6 +23,7 @@
 
 #include <cstdint>
 
+#include <fwcpp/copter/mode_stabilize.hpp>
 #include <fwcpp/math/vector3.hpp>
 
 namespace fwcpp::copter {
@@ -35,14 +36,8 @@ inline constexpr float kGravityMss = 9.80665f;
 // stationary AND-gate leftover increments land_detector_count.
 inline constexpr float kLandDetectorTriggerSec = 1.0f;
 
-// AP_Motors::SpoolState (AP_Motors_Class.h ~184-190).
-enum class SpoolState : std::uint8_t {
-    SHUT_DOWN = 0,
-    GROUND_IDLE = 1,
-    SPOOLING_UP = 2,
-    THROTTLE_UNLIMITED = 3,
-    SPOOLING_DOWN = 4,
-};
+// SpoolState is declared in mode_stabilize.hpp (AP_Motors_Class.h
+// ~184-190). Reused here so copter.hpp can include both headers.
 
 struct UpdateLandDetectorInputs {
     bool armed{false};
