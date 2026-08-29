@@ -423,3 +423,13 @@ catch_discover_tests(sitl_harness_test)
 add_executable(motors_matrix_test motors_matrix_test.cpp)
 target_link_libraries(motors_matrix_test PRIVATE ap-motors Catch2::Catch2WithMain)
 catch_discover_tests(motors_matrix_test)
+
+# CCP-010 (copter-cpp effort, AP_Motors output-stage phase):
+# fwcpp::motors::ThrustLinearization - thrust curve linearization plus
+# battery-voltage/air-density compensation
+# (AP_Motors_Thrust_Linearization.{h,cpp}) - see
+# modules/ap-motors/include/fwcpp/motors/thrust_linearization.hpp's own
+# file banner for full scope.
+add_executable(thrust_linearization_test thrust_linearization_test.cpp)
+target_link_libraries(thrust_linearization_test PRIVATE ap-motors Catch2::Catch2WithMain)
+catch_discover_tests(thrust_linearization_test)
