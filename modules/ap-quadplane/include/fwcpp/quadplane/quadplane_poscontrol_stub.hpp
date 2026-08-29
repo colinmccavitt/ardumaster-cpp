@@ -4,7 +4,6 @@
 
 namespace fwcpp::quadplane {
 
-/// Upstream QuadPlane::position_control_state / QPOS_*.
 enum class PositionControlState : std::uint8_t {
     kNone = 0,
     kApproach = 1,
@@ -17,7 +16,6 @@ enum class PositionControlState : std::uint8_t {
     kLandComplete = 8,
 };
 
-/// QuadPlane-side poscontrol fields cleared in mode_enter (not AC_PosControl).
 struct PosControlState {
     PositionControlState state{PositionControlState::kNone};
     float correction_north_m{0.f};
@@ -31,6 +29,18 @@ struct PosControlState {
     float target_vel_east_ms{0.f};
     float target_vel_down_ms{0.f};
     bool mode_enter_cleared{false};
+    std::uint32_t last_state_change_ms{0};
+    std::uint32_t last_run_ms{0};
+    std::uint32_t last_log_ms{0};
+    bool reached_wp_speed{false};
+    float pos1_speed_limit_ms{0.f};
+    bool done_accel_init{false};
+    std::uint32_t thrust_loss_start_ms{0};
+    bool slow_descent{false};
+    std::uint16_t ahrs_position_ne_reset_count{0};
+    bool overshoot{false};
+    float override_descent_rate_ms{0.f};
+    std::uint32_t last_override_descent_ms{0};
 
     void reset_on_mode_enter() {
         state = PositionControlState::kNone;
@@ -44,8 +54,20 @@ struct PosControlState {
         target_vel_north_ms = 0.f;
         target_vel_east_ms = 0.f;
         target_vel_down_ms = 0.f;
+        last_state_change_ms = 0;
+        last_run_ms = 0;
+        last_log_ms = 0;
+        reached_wp_speed = false;
+        pos1_speed_limit_ms = 0.f;
+        done_accel_init = false;
+        thrust_loss_start_ms = 0;
+        slow_descent = false;
+        ahrs_position_ne_reset_count = 0;
+        overshoot = false;
+        override_descent_rate_ms = 0.f;
+        last_override_descent_ms = 0;
         mode_enter_cleared = true;
     }
 };
 
-}  // namespace fwcpp::quadplane
+}

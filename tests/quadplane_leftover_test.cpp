@@ -8,6 +8,7 @@ TEST_CASE("catalog", "[quadplane][leftover]") {
     REQUIRE(completeness_has("setup / available / initialised", PortStatus::kThisSlice));
     REQUIRE(completeness_has("setup channels ahrs_view", PortStatus::kThisSlice));
     REQUIRE(completeness_has("wp_nav loiter_nav", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("mode_enter poscontrol FSM", PortStatus::kThisSlice));
     REQUIRE(completeness_has("motors_output motor_test", PortStatus::kThisSlice));
     REQUIRE(completeness_has("update transition FSM", PortStatus::kRemaining));
 }

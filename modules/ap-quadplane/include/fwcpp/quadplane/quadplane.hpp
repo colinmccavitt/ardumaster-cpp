@@ -8,6 +8,8 @@
 #include <fwcpp/quadplane/quadplane_motors_init.hpp>
 #include <fwcpp/quadplane/quadplane_motors_output.hpp>
 #include <fwcpp/quadplane/quadplane_options.hpp>
+#include <fwcpp/quadplane/quadplane_poscontrol_approach.hpp>
+#include <fwcpp/quadplane/quadplane_poscontrol_fsm.hpp>
 #include <fwcpp/quadplane/quadplane_poscontrol_stub.hpp>
 #include <fwcpp/quadplane/quadplane_setup_channels.hpp>
 #include <fwcpp/quadplane/quadplane_setup_navigators.hpp>
@@ -143,6 +145,28 @@ public:
         return run_motors_output(view, options_, assisted_flight_, motors_output_state_);
     }
 
+    void set_approach_distance_m(float v) { approach_distance_m_ = v; }
+    [[nodiscard]] float approach_distance_m() const { return approach_distance_m_; }
+    [[nodiscard]] const PosControlLandStub& poscontrol_land() const { return poscontrol_land_; }
+    [[nodiscard]] const PosControlTransitionPrep& last_transition_prep() const {
+        return last_transition_prep_;
+    }
+    PoscontrolApproachInitResult poscontrol_init_approach(const ApproachInitView& view,
+                                                          const PosControlSetStateInputs& set_state) {
+        PoscontrolApproachInitInputs in{
+            .options = options_,
+            .approach_distance_m = approach_distance_m_,
+            .view = view,
+            .set_state = set_state,
+        };
+        const auto result = poscontrol_init_approach_prep(poscontrol_, poscontrol_land_, in);
+        last_transition_prep_ = result.transition_prep;
+        last_set_state_sink_ = result.set_state_sink;
+        return result;
+    }
+    [[nodiscard]] const PosControlSetStateSink& last_set_state_sink() const {
+        return last_set_state_sink_;
+    }
     void mode_enter() {
         if (available()) {
             lean_angle_max_cd_ = 0;
@@ -150,6 +174,8 @@ public:
         poscontrol_.reset_on_mode_enter();
         guided_wait_takeoff_on_mode_enter_ = guided_wait_takeoff_;
         guided_wait_takeoff_ = false;
+        last_transition_prep_ = {};
+        last_set_state_sink_ = {};
     }
 
 private:
@@ -179,6 +205,10 @@ private:
     PosControlState poscontrol_{};
     bool guided_wait_takeoff_{false};
     bool guided_wait_takeoff_on_mode_enter_{false};
+    float approach_distance_m_{kApproachDistanceDefaultM};
+    PosControlLandStub poscontrol_land_{};
+    PosControlTransitionPrep last_transition_prep_{};
+    PosControlSetStateSink last_set_state_sink_{};
 };
 
 }  // namespace fwcpp::quadplane
