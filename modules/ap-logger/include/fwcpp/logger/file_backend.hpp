@@ -16,9 +16,18 @@
 // thread except Replay/UNKNOWN. CardInserted is true iff a FILE*/fd was
 // provided (no SD detect).
 //
+// EraseAll (slice 5): armed-gate + rewind/ftruncate of the open stream.
+// soft_armed is injected (no Util singleton). !_initialised is
+// logging_started() — this backend has no separate Init() flag.
+//
+// Divergence from File.cpp stop_logging(): upstream closes _write_fd.
+// We rewind+ftruncate the caller-owned FILE*/fd so WriteBlock still
+// has a handle ("erase then can log again" without reopen). No
+// directory walk, no erase.log_num / logNN.BIN rotation (remaining).
+//
 // Remaining vs File.cpp (later slices): _writebuf / io_timer chunked
-// write+fsync, EraseAll, find_last_log, get_log_data, MAVLink
-// LOG_REQUEST_* transfer, log rotation.
+// write+fsync, find_last_log, get_log_data, MAVLink LOG_REQUEST_*
+// transfer, max-files rotation.
 
 #include <cstddef>
 #include <cstdio>
@@ -98,6 +107,33 @@ public:
         }
     }
 
+    // AP_Logger_File::EraseAll (File.cpp ~401-415). Armed or
+    // !logging_started: no-op, file untouched. Else record
+    // was_logging and truncate the open stream to 0.
+    void EraseAll(bool soft_armed) {
+        if (soft_armed) {
+            return;
+        }
+        if (!logging_started()) {
+            return;
+        }
+        was_logging_ = true;
+        if (file_ != nullptr) {
+            std::fflush(file_);
+            const int raw = ::fileno(file_);
+            if (raw >= 0) {
+                ::ftruncate(raw, 0);
+            }
+            std::rewind(file_);
+            std::clearerr(file_);
+        } else if (fd_ >= 0) {
+            ::lseek(fd_, 0, SEEK_SET);
+            ::ftruncate(fd_, 0);
+        }
+    }
+
+    [[nodiscard]] bool was_logging() const { return was_logging_; }
+
     [[nodiscard]] std::uint32_t page_adr() const { return page_adr_; }
     [[nodiscard]] bool is_writing() const { return writing_; }
     [[nodiscard]] std::uint32_t ended_writes() const { return ended_; }
@@ -116,6 +152,7 @@ private:
     bool writing_{false};
     std::uint32_t ended_{0};
     std::uint32_t short_writes_{0};
+    bool was_logging_{false};
 };
 
 }  // namespace fwcpp::logger

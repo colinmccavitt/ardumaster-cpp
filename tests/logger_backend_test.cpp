@@ -300,3 +300,72 @@ TEST_CASE("FileBackend short write returns false and counts locally", "[logger][
     REQUIRE(log.logging_started());
     std::fclose(f);
 }
+
+TEST_CASE("FileBackend EraseAll armed is a no-op", "[logger][file][erase]") {
+    using fwcpp::logger::FileBackend;
+
+    std::FILE* f = std::tmpfile();
+    REQUIRE(f != nullptr);
+    FileBackend log(f);
+    const std::uint8_t block[] = {1, 2, 3, 4};
+    REQUIRE(log.WriteBlock(std::span<const std::uint8_t>(block, sizeof(block))));
+    REQUIRE(std::fflush(f) == 0);
+    REQUIRE(std::fseek(f, 0, SEEK_END) == 0);
+    REQUIRE(std::ftell(f) == 4);
+
+    log.EraseAll(true);
+    REQUIRE_FALSE(log.was_logging());
+    REQUIRE(log.logging_started());
+
+    REQUIRE(std::fseek(f, 0, SEEK_END) == 0);
+    REQUIRE(std::ftell(f) == 4);
+    std::rewind(f);
+    std::uint8_t got[4]{};
+    REQUIRE(std::fread(got, 1, sizeof(got), f) == sizeof(got));
+    REQUIRE(std::equal(got, got + sizeof(got), block));
+    std::fclose(f);
+}
+
+TEST_CASE("FileBackend EraseAll uninitialised is a no-op", "[logger][file][erase]") {
+    using fwcpp::logger::FileBackend;
+
+    FileBackend log;
+    REQUIRE_FALSE(log.logging_started());
+    REQUIRE_FALSE(log.was_logging());
+    log.EraseAll(false);
+    REQUIRE_FALSE(log.was_logging());
+    REQUIRE_FALSE(log.logging_started());
+}
+
+TEST_CASE("FileBackend EraseAll truncates and WriteBlock works after",
+          "[logger][file][erase]") {
+    using fwcpp::logger::FileBackend;
+
+    std::FILE* f = std::tmpfile();
+    REQUIRE(f != nullptr);
+    FileBackend log(f);
+    const std::uint8_t first[] = {0xAA, 0xBB, 0xCC};
+    REQUIRE(log.WriteBlock(std::span<const std::uint8_t>(first, sizeof(first))));
+    REQUIRE(std::fflush(f) == 0);
+    REQUIRE(std::fseek(f, 0, SEEK_END) == 0);
+    REQUIRE(std::ftell(f) == static_cast<long>(sizeof(first)));
+
+    log.EraseAll(false);
+    REQUIRE(log.was_logging());
+    REQUIRE(log.logging_started());
+    REQUIRE(std::fseek(f, 0, SEEK_END) == 0);
+    REQUIRE(std::ftell(f) == 0);
+
+    const std::uint8_t second[] = {0x11, 0x22};
+    REQUIRE(log.WriteBlock(std::span<const std::uint8_t>(second, sizeof(second))));
+    REQUIRE(log.num_short_writes() == 0);
+    REQUIRE(std::fflush(f) == 0);
+    REQUIRE(std::fseek(f, 0, SEEK_END) == 0);
+    REQUIRE(std::ftell(f) == static_cast<long>(sizeof(second)));
+    std::rewind(f);
+    std::uint8_t got[2]{};
+    REQUIRE(std::fread(got, 1, sizeof(got), f) == sizeof(got));
+    REQUIRE(got[0] == 0x11);
+    REQUIRE(got[1] == 0x22);
+    std::fclose(f);
+}
