@@ -10,6 +10,7 @@
 using fwcpp::tiltrotor::ContinuousTiltInputs;
 using fwcpp::tiltrotor::ContinuousTiltStrategy;
 using fwcpp::tiltrotor::SlewFlightFlags;
+using fwcpp::tiltrotor::TiltCompensateInputs;
 using fwcpp::tiltrotor::TiltControlState;
 using fwcpp::tiltrotor::TiltRateParams;
 using fwcpp::tiltrotor::TiltType;
@@ -40,6 +41,8 @@ using fwcpp::tiltrotor::resolve_continuous_strategy;
 using fwcpp::tiltrotor::resolve_setup;
 using fwcpp::tiltrotor::resolve_update_path;
 using fwcpp::tiltrotor::slew;
+using fwcpp::tiltrotor::tilt_compensate;
+using fwcpp::tiltrotor::tilt_compensate_angle;
 using fwcpp::tiltrotor::tilt_max_change;
 using fwcpp::tiltrotor::tilt_over_max_angle;
 using fwcpp::tiltrotor::update;
@@ -402,4 +405,114 @@ TEST_CASE("tiltrotor update runs vectoring into TiltUpdateResult", "[tiltrotor][
     const auto direct = vectoring(vin);
     REQUIRE_THAT(out.vectoring.tilt_left, Catch::Matchers::WithinAbs(direct.tilt_left, 1e-6f));
     REQUIRE_THAT(out.vectoring.tilt_right, Catch::Matchers::WithinAbs(direct.tilt_right, 1e-6f));
+}
+
+TEST_CASE("tiltrotor tilt_compensate_angle untilted vs tilted muls then mix", "[tiltrotor][compensate]") {
+    float thrust[4] = {0.2f, 0.8f, 1.0f, 1.0f};
+    const float roll_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    TiltCompensateInputs in{};
+    in.current_tilt = 0.5f;
+    in.tilt_mask = 0x3u;
+    in.roll_factor = roll_factor;
+
+    tilt_compensate_angle(thrust, 4, 0.25f, 1.0f, in);
+
+    REQUIRE_THAT(thrust[0], Catch::Matchers::WithinAbs(0.35f, 1e-6f));
+    REQUIRE_THAT(thrust[1], Catch::Matchers::WithinAbs(0.65f, 1e-6f));
+    REQUIRE_THAT(thrust[2], Catch::Matchers::WithinAbs(0.25f, 1e-6f));
+    REQUIRE_THAT(thrust[3], Catch::Matchers::WithinAbs(0.25f, 1e-6f));
+}
+
+TEST_CASE("tiltrotor tilt_compensate_angle yaw differential uses roll_factor", "[tiltrotor][compensate]") {
+    float thrust[2] = {0.5f, 0.5f};
+    const float roll_factor[2] = {1.0f, -1.0f};
+    TiltCompensateInputs in{};
+    in.current_tilt = 0.5f;
+    in.tilt_yaw_angle = 30.0f;
+    in.tilt_mask = 0x3u;
+    in.roll_factor = roll_factor;
+    in.motors_yaw = 0.4f;
+    in.motors_yaw_ff = 0.1f;
+
+    tilt_compensate_angle(thrust, 2, 1.0f, 1.0f, in);
+
+    const float sin_tilt = std::sin(fwcpp::math::radians(0.5f * 90.0f));
+    const float yaw_gain = std::sin(fwcpp::math::radians(30.0f));
+    const float diff = 0.5f * sin_tilt * yaw_gain;
+    REQUIRE_THAT(thrust[0], Catch::Matchers::WithinAbs(0.5f + diff, 1e-6f));
+    REQUIRE_THAT(thrust[1], Catch::Matchers::WithinAbs(0.5f - diff, 1e-6f));
+}
+
+TEST_CASE("tiltrotor tilt_compensate_angle saturation scales every motor", "[tiltrotor][compensate]") {
+    float thrust[3] = {1.0f, 1.0f, 1.0f};
+    const float roll_factor[3] = {0.0f, 0.0f, 0.0f};
+    TiltCompensateInputs in{};
+    in.current_tilt = 0.0f;
+    in.tilt_mask = 0x3u;
+    in.roll_factor = roll_factor;
+
+    tilt_compensate_angle(thrust, 3, 1.0f, 2.0f, in);
+
+    REQUIRE_THAT(thrust[0], Catch::Matchers::WithinAbs(1.0f, 1e-6f));
+    REQUIRE_THAT(thrust[1], Catch::Matchers::WithinAbs(1.0f, 1e-6f));
+    REQUIRE_THAT(thrust[2], Catch::Matchers::WithinAbs(0.5f, 1e-6f));
+}
+
+TEST_CASE("tiltrotor tilt_compensate is no-op when tilt is not positive", "[tiltrotor][compensate]") {
+    float thrust[2] = {0.7f, 0.8f};
+    const float roll_factor[2] = {1.0f, -1.0f};
+    TiltCompensateInputs in{};
+    in.current_tilt = 0.0f;
+    in.tilt_mask = 0x3u;
+    in.roll_factor = roll_factor;
+    in.motors_yaw = 1.0f;
+    in.in_vtol_mode = false;
+
+    tilt_compensate(thrust, 2, in);
+    REQUIRE_THAT(thrust[0], Catch::Matchers::WithinAbs(0.7f, 1e-6f));
+    REQUIRE_THAT(thrust[1], Catch::Matchers::WithinAbs(0.8f, 1e-6f));
+
+    in.current_tilt = -0.1f;
+    tilt_compensate(thrust, 2, in);
+    REQUIRE_THAT(thrust[0], Catch::Matchers::WithinAbs(0.7f, 1e-6f));
+    REQUIRE_THAT(thrust[1], Catch::Matchers::WithinAbs(0.8f, 1e-6f));
+}
+
+TEST_CASE("tiltrotor tilt_compensate VTOL uses cos as untilted mul", "[tiltrotor][compensate]") {
+    float thrust[2] = {0.4f, 0.8f};
+    const float roll_factor[2] = {0.0f, 0.0f};
+    TiltCompensateInputs in{};
+    in.current_tilt = 0.5f;
+    in.tilt_mask = 0x1u;
+    in.roll_factor = roll_factor;
+    in.in_vtol_mode = true;
+
+    tilt_compensate(thrust, 2, in);
+
+    const float tilt_factor = std::cos(fwcpp::math::radians(0.5f * 90.0f));
+    REQUIRE_THAT(thrust[0], Catch::Matchers::WithinAbs(0.4f, 1e-6f));
+    REQUIRE_THAT(thrust[1], Catch::Matchers::WithinAbs(0.8f * tilt_factor, 1e-6f));
+}
+
+TEST_CASE("tiltrotor tilt_compensate FW uses inv_cos with 0.98 clamp", "[tiltrotor][compensate]") {
+    const float roll_factor[2] = {0.0f, 0.0f};
+    TiltCompensateInputs in{};
+    in.tilt_mask = 0x1u;
+    in.roll_factor = roll_factor;
+    in.in_vtol_mode = false;
+
+    in.current_tilt = 0.5f;
+    float mid[2] = {0.4f, 0.8f};
+    tilt_compensate(mid, 2, in);
+    const float inv_mid = 1.0f / std::cos(fwcpp::math::radians(0.5f * 90.0f));
+    REQUIRE_THAT(mid[0], Catch::Matchers::WithinAbs(0.4f * inv_mid, 1e-6f));
+    REQUIRE_THAT(mid[1], Catch::Matchers::WithinAbs(0.8f, 1e-6f));
+
+    in.current_tilt = 1.0f;
+    float fwd[2] = {0.01f, 0.5f};
+    tilt_compensate(fwd, 2, in);
+    const float inv_clamp = 1.0f / std::cos(fwcpp::math::radians(0.98f * 90.0f));
+    REQUIRE_THAT(fwd[0], Catch::Matchers::WithinAbs(0.01f * inv_clamp, 1e-5f));
+    REQUIRE_THAT(fwd[1], Catch::Matchers::WithinAbs(0.5f, 1e-6f));
+    REQUIRE(std::isfinite(fwd[0]));
 }

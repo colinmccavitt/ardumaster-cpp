@@ -10,8 +10,8 @@ using fwcpp::tiltrotor::this_slice_count;
 
 TEST_CASE("tiltrotor catalog", "[tiltrotor][catalog]") {
     REQUIRE(on_main_count() == 0);
-    REQUIRE(this_slice_count() == 22);
-    REQUIRE(remaining_count() == 8);
+    REQUIRE(this_slice_count() == 24);
+    REQUIRE(remaining_count() == 6);
     REQUIRE(tiltrotor_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + 3);
     REQUIRE(completeness_has("tilt_max_change", PortStatus::kThisSlice));
@@ -19,4 +19,6 @@ TEST_CASE("tiltrotor catalog", "[tiltrotor][catalog]") {
     REQUIRE(completeness_has("Tiltrotor::continuous_update", PortStatus::kThisSlice));
     REQUIRE(completeness_has("tilt_over_max_angle", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Tiltrotor::vectoring", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("tilt_compensate_angle", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("tilt_compensate", PortStatus::kThisSlice));
 }

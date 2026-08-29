@@ -534,4 +534,71 @@ struct TiltUpdateResult {
     return out;
 }
 
+struct TiltCompensateInputs {
+    float current_tilt{0.0f};
+    float tilt_yaw_angle{kTiltYawAngleDefault};
+    std::uint16_t tilt_mask{0};
+    const float* roll_factor{nullptr};
+    float motors_yaw{0.0f};
+    float motors_yaw_ff{0.0f};
+    bool in_vtol_mode{true};
+};
+
+// Upstream Tiltrotor::tilt_compensate_angle: apply muls, equalise tilted
+// motors toward the average, add yaw differential, then scale if saturated.
+// No tilt_count==0 guard: upstream divides unconditionally.
+inline void tilt_compensate_angle(float* thrust, std::uint8_t num_motors, float non_tilted_mul,
+                                  float tilted_mul, const TiltCompensateInputs& in) {
+    float tilt_total = 0.0f;
+    std::uint8_t tilt_count = 0;
+
+    for (std::uint8_t i = 0; i < num_motors; ++i) {
+        if (!is_motor_tilting(in.tilt_mask, i)) {
+            thrust[i] *= non_tilted_mul;
+        } else {
+            thrust[i] *= tilted_mul;
+            tilt_total += thrust[i];
+            ++tilt_count;
+        }
+    }
+
+    float largest_tilted = 0.0f;
+    const float sin_tilt = std::sin(fwcpp::math::radians(in.current_tilt * 90.0f));
+    const float yaw_gain = std::sin(fwcpp::math::radians(in.tilt_yaw_angle));
+    const float avg_tilt_thrust = tilt_total / tilt_count;
+
+    for (std::uint8_t i = 0; i < num_motors; ++i) {
+        if (is_motor_tilting(in.tilt_mask, i)) {
+            thrust[i] = in.current_tilt * avg_tilt_thrust + thrust[i] * (1.0f - in.current_tilt);
+            const float diff_thrust =
+                in.roll_factor[i] * (in.motors_yaw + in.motors_yaw_ff) * sin_tilt * yaw_gain;
+            thrust[i] += diff_thrust;
+            largest_tilted = std::max(largest_tilted, thrust[i]);
+        }
+    }
+
+    if (largest_tilted > 1.0f) {
+        const float scale = 1.0f / largest_tilted;
+        for (std::uint8_t i = 0; i < num_motors; ++i) {
+            thrust[i] *= scale;
+        }
+    }
+}
+
+// Upstream Tiltrotor::tilt_compensate: VTOL uses cos as the untilted mul;
+// fixed-wing uses 1/cos with current_tilt clamped at 0.98.
+inline void tilt_compensate(float* thrust, std::uint8_t num_motors, const TiltCompensateInputs& in) {
+    if (in.current_tilt <= 0.0f) {
+        return;
+    }
+    if (in.in_vtol_mode) {
+        const float tilt_factor = std::cos(fwcpp::math::radians(in.current_tilt * 90.0f));
+        tilt_compensate_angle(thrust, num_motors, tilt_factor, 1.0f, in);
+    } else {
+        const float inv_tilt_factor =
+            1.0f / std::cos(fwcpp::math::radians(std::min(in.current_tilt, 0.98f) * 90.0f));
+        tilt_compensate_angle(thrust, num_motors, 1.0f, inv_tilt_factor, in);
+    }
+}
+
 }  // namespace fwcpp::tiltrotor
