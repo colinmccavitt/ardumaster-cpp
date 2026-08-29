@@ -41,6 +41,21 @@ inline constexpr QuadPlanePortItem kQuadPlaneCompleteness[] = {
     {"hover/pilot-input", PortStatus::kThisSlice, "quadplane_pilot_input.hpp hold_hover get_pilot_*"},
     {"land detector", PortStatus::kThisSlice, "quadplane_land_detector.hpp should_relax land_detector check_land_*"},
     {"takeoff_controller", PortStatus::kThisSlice, "quadplane_takeoff_controller.hpp setup_target_position takeoff waypoint"},
+    {"control_auto", PortStatus::kThisSlice, "quadplane_control_auto.hpp dispatcher; dead should_run_motors"},
+    {"hold_stabilize / run_z_controller / multicopter_attitude_rate_update", PortStatus::kRemaining,
+     "stabilize / z / attitude-rate bodies"},
+    {"run_xy_controller / set_climb_rate_ms / assign_tilt_to_fwd_thr", PortStatus::kRemaining,
+     "xy / climb / tilt-to-fwd helpers"},
+    {"update_throttle_hover / update_throttle_suppression / update_throttle_mix", PortStatus::kRemaining,
+     "throttle hover/suppression/mix"},
+    {"guided_start / guided_update / do_user_takeoff", PortStatus::kRemaining, "guided + user takeoff"},
+    {"landing_descent_rate_ms / abort_landing / update_land_positioning", PortStatus::kRemaining,
+     "landing close-out"},
+    {"assist_climb_rate_cms / weathervane yaw / is_flying_vtol", PortStatus::kRemaining,
+     "assist climb, weathervane, flying-vtol"},
+    {"vtol_position_controller body", PortStatus::kRemaining, "stub exists; full landing/RTL body remaining"},
+    {"verify_vtol_land body leftovers", PortStatus::kRemaining, "POSITION2/descend/abort/payload-place beyond land_detector"},
+    {"Log_Write_*", PortStatus::kOutOfScope, "no logger"},
 };
 
 [[nodiscard]] inline constexpr std::size_t quadplane_completeness_size() {

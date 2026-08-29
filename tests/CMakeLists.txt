@@ -576,6 +576,10 @@ add_executable(quadplane_takeoff_controller_test quadplane_takeoff_controller_te
 target_link_libraries(quadplane_takeoff_controller_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_takeoff_controller_test)
 
+add_executable(quadplane_control_auto_test quadplane_control_auto_test.cpp)
+target_link_libraries(quadplane_control_auto_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_control_auto_test)
+
 add_executable(quadplane_motors_output_test quadplane_motors_output_test.cpp)
 target_link_libraries(quadplane_motors_output_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_motors_output_test)

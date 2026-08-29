@@ -2,7 +2,7 @@
 
 // QuadPlane takeoff / waypoint controllers — Plane-4.7.0 ArduPlane/quadplane.cpp:
 // setup_target_position (3113-3135), takeoff_controller (3140-3259),
-// waypoint_controller (3264-3303). control_auto (3310+) is not this slice.
+// waypoint_controller (3264-3303). control_auto is quadplane_control_auto.hpp.
 //
 // ADR-0012: no pos_control / wp_nav / attitude_control objects. Motors
 // spool, origin, next_WP, corrections, tiltrotor fully_up, weathervane,

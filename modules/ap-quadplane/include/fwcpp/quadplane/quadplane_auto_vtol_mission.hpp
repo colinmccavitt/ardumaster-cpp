@@ -7,11 +7,16 @@
 
 namespace fwcpp::quadplane {
 
-inline constexpr std::uint16_t kMavCmdNavVtolTakeoff = 84;
+inline constexpr std::uint16_t kMavCmdNavWaypoint = 16;
+inline constexpr std::uint16_t kMavCmdNavLoiterUnlim = 17;
+inline constexpr std::uint16_t kMavCmdNavLoiterTurns = 18;
+inline constexpr std::uint16_t kMavCmdNavLoiterTime = 19;
+inline constexpr std::uint16_t kMavCmdNavLand = 21;
 inline constexpr std::uint16_t kMavCmdNavTakeoff = 22;
+inline constexpr std::uint16_t kMavCmdNavLoiterToAlt = 31;
+inline constexpr std::uint16_t kMavCmdNavVtolTakeoff = 84;
 inline constexpr std::uint16_t kMavCmdNavVtolLand = 85;
 inline constexpr std::uint16_t kMavCmdNavPayloadPlace = 94;
-inline constexpr std::uint16_t kMavCmdNavLand = 21;
 
 enum class MavVtolState : std::uint8_t { kMc = 3, kFw = 4 };
 

@@ -20,6 +20,7 @@
 #include <fwcpp/quadplane/quadplane_setup_navigators.hpp>
 #include <fwcpp/quadplane/quadplane_auto_vtol_mission.hpp>
 #include <fwcpp/quadplane/quadplane_land_detector.hpp>
+#include <fwcpp/quadplane/quadplane_control_auto.hpp>
 #include <fwcpp/quadplane/quadplane_takeoff_controller.hpp>
 #include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
 #include <fwcpp/quadplane/quadplane_vtol_subsystems.hpp>
@@ -437,6 +438,12 @@ public:
         in.target.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
         in.target.pilot_accel_z_mss = pilot_accel_z_mss_;
         return fwcpp::quadplane::waypoint_controller(takeoff_nav_, poscontrol_, in);
+    }
+
+    [[nodiscard]] ControlAutoTick control_auto(ControlAutoInputs in) {
+        in.available = available();
+        in.options = options_;
+        return fwcpp::quadplane::control_auto(poscontrol_, poscontrol_land_, last_set_state_sink_, in);
     }
 
     [[nodiscard]] HoldHoverTick hold_hover(float target_climb_rate_cms, DesiredYawRateInputs yaw) const {
