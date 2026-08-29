@@ -1,6 +1,11 @@
 #pragma once
 
 #include <fwcpp/q_loiter/loiter_alt_qland.hpp>
+#include <fwcpp/q_loiter/mode_qloiter_update.hpp>
+#include <fwcpp/q_loiter/mode_qloiter_systemid.hpp>
+#include <fwcpp/q_loiter/mode_qloiter_qland_options.hpp>
+#include <fwcpp/q_loiter/loiter_alt_qland_navigate.hpp>
+#include <fwcpp/q_loiter/loiter_alt_qland_handle_guided.hpp>
 #include <fwcpp/q_loiter/mode_loiter_alt_qland_meta.hpp>
 #include <fwcpp/q_loiter/mode_qland_enter.hpp>
 #include <fwcpp/q_loiter/mode_qland_meta.hpp>

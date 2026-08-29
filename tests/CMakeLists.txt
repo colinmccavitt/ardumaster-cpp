@@ -758,6 +758,10 @@ add_executable(q_loiter_completeness_test q_loiter_completeness_test.cpp)
 target_link_libraries(q_loiter_completeness_test PRIVATE ap-q-loiter Catch2::Catch2WithMain)
 catch_discover_tests(q_loiter_completeness_test)
 
+add_executable(mode_qloiter_slice3_test mode_qloiter_slice3_test.cpp)
+target_link_libraries(mode_qloiter_slice3_test PRIVATE ap-q-loiter Catch2::Catch2WithMain)
+catch_discover_tests(mode_qloiter_slice3_test)
+
 # VCP-007 slice 1: ap-tailsitter scaffold.
 
 add_executable(tailsitter_enable_test tailsitter_enable_test.cpp)

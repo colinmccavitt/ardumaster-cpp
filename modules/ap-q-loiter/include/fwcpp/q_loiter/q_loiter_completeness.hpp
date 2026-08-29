@@ -30,13 +30,14 @@ inline constexpr QLoiterPortItem kQLoiterCompleteness[] = {
     {"QLAND run delegates QLOITER", PortStatus::kThisSlice, "mode_qland_run.hpp"},
     {"QLOITER QLAND vertical branch", PortStatus::kThisSlice, "mode_qloiter_run.hpp"},
     {"completeness catalog", PortStatus::kThisSlice, "this table"},
-    {"QLOITER update delegate QStabilize", PortStatus::kRemaining, "mode_qloiter.cpp update"},
+    {"QLOITER update delegate QStabilize", PortStatus::kThisSlice, "mode_qloiter_update.hpp"},
+    {"QLAND update delegate QStabilize", PortStatus::kThisSlice, "mode_qloiter_update.hpp qland_update"},
     {"QLOITER run loiter_nav body", PortStatus::kThisSlice, "mode_qloiter_run.hpp"},
     {"QLOITER precland overrides", PortStatus::kThisSlice, "mode_qloiter_precland_run.hpp"},
-    {"QLOITER systemid att offset", PortStatus::kRemaining, "AP_PLANE_SYSTEMID_ENABLED"},
-    {"LoiterAltQLand navigate hook", PortStatus::kRemaining, "ModeLoiter navigate"},
-    {"LoiterAltQLand handle_guided WP", PortStatus::kRemaining, "set_guided_WP caller"},
-    {"QLAND landing gear IC engine cut", PortStatus::kRemaining, "optional compile flags"},
+    {"QLOITER systemid att offset", PortStatus::kThisSlice, "mode_qloiter_systemid.hpp"},
+    {"LoiterAltQLand navigate hook", PortStatus::kThisSlice, "loiter_alt_qland_navigate.hpp"},
+    {"LoiterAltQLand handle_guided WP", PortStatus::kThisSlice, "loiter_alt_qland_handle_guided.hpp"},
+    {"QLAND landing gear IC engine cut", PortStatus::kThisSlice, "mode_qland_enter.hpp + mode_qloiter_qland_options.hpp"},
     {"Plane / QuadPlane refs", PortStatus::kOutOfScope, "ADR-0012 caller applies"},
 };
 
@@ -72,11 +73,17 @@ inline constexpr QLoiterPortItem kQLoiterCompleteness[] = {
     return false;
 }
 
+[[nodiscard]] inline constexpr std::size_t on_main_count() {
+    return count_status(PortStatus::kOnMain);
+}
 [[nodiscard]] inline constexpr std::size_t this_slice_count() {
     return count_status(PortStatus::kThisSlice);
 }
 [[nodiscard]] inline constexpr std::size_t remaining_count() {
     return count_status(PortStatus::kRemaining);
+}
+[[nodiscard]] inline constexpr std::size_t out_of_scope_count() {
+    return count_status(PortStatus::kOutOfScope);
 }
 
 }  // namespace fwcpp::q_loiter

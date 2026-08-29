@@ -1,6 +1,7 @@
 #pragma once
 
 #include <fwcpp/q_loiter/mode_qloiter_precland_run.hpp>
+#include <fwcpp/q_loiter/mode_qloiter_qland_options.hpp>
 #include <fwcpp/q_loiter/q_loiter_defaults.hpp>
 #include <fwcpp/q_modes/q_run_common.hpp>
 #include <fwcpp/quadplane/quadplane_poscontrol_stub.hpp>
@@ -51,6 +52,8 @@ struct QLoiterRunInputs {
     float precland_velocity_match_n_ms{0.0F};
     float precland_velocity_match_e_ms{0.0F};
     std::uint32_t precland_last_velocity_match_ms{0};
+    bool icengine_enabled{false};
+    std::int8_t land_icengine_cut{0};
 };
 
 struct QLoiterRunActions {
@@ -82,6 +85,7 @@ struct QLoiterRunActions {
     bool pilot_yaw_rate_time_constant{false};
     bool attitude_euler_input{false};
     bool process_pilot_lean_angles{false};
+    bool cut_ic_engine{false};
 };
 
 struct QLoiterRunEffects {
@@ -172,6 +176,11 @@ namespace detail {
         case QLoiterVerticalBranch::kQlandDescent:
             if (in.poscontrol_before_land_final && in.check_land_final_true) {
                 out.qland_land_final_transition = true;
+                const QLoiterQlandOptionalInputs ice_in{.active_control_is_qland = in.active_control_is_qland,
+                                                        .land_final_transition = true,
+                                                        .icengine_enabled = in.icengine_enabled,
+                                                        .land_icengine_cut = in.land_icengine_cut};
+                out.cut_ic_engine = qloiter_qland_optional_effects(ice_in).cut_ic_engine;
             }
             out.qland_descent_rate = true;
             out.qland_check_complete = true;
