@@ -45,6 +45,26 @@
 // from this header or run through it) - not merely re-running this
 // port's own C++ output back at itself.
 
+// CCP-022 added the attitude_command_model tests below (real lines
+// 1108-1130) - see attitude_kinematics.hpp's own "CCP-022 ADDENDUM"
+// comment block for the full design writeup: the two fallback defaults
+// and why each exists, the jerk-limit direction, the exact argument
+// mapping into shape_angle_vel_accel, and the real separate final
+// integration step.
+//
+// Several of these tests use an EQUIVALENT-CALL comparison rather than
+// hand-deriving an expected numeric output: one call with a fallback
+// parameter (accel_max or input_tc) left invalid so the real internal
+// default kicks in, compared bit-for-bit against a second call with
+// that same parameter set EXPLICITLY to what the default is claimed to
+// be, everything else held identical. shape_angle_vel_accel (and
+// everything it calls) is a pure function of its arguments, so if the
+// two calls produce bit-identical output, the internal default must
+// have resolved to exactly the explicit value used in the second call -
+// this is what lets the input_tc test pin "exactly dt * 10.0" without
+// having to independently replicate the jerk-limiting arithmetic by
+// hand and risk a reordering-induced rounding mismatch of its own.
+
 #include <cmath>
 #include <cstdint>
 
@@ -52,6 +72,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/control/attitude_kinematics.hpp>
 #include <fwcpp/math/quaternion.hpp>
+#include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector3.hpp>
 
 using namespace fwcpp::control;
@@ -585,4 +606,186 @@ TEST_CASE("thrust_vector_rotation_angles: the two corrections compose back to th
         REQUIRE(rp == Approx(tp).margin(1e-3));
         REQUIRE(ry == Approx(ty).margin(1e-3));
     }
+}
+
+// -----------------------------------------------------------------------
+// attitude_command_model (CCP-022) - see attitude_kinematics.hpp's own
+// "CCP-022 ADDENDUM" banner for the full design writeup this section's
+// tests are built against.
+// -----------------------------------------------------------------------
+
+// (1) The accel_max fallback: radians(1800.0f), EXACTLY - not a
+// separately hand-typed approximation. Driven directly rather than via
+// the equivalent-call technique used below for input_tc: input_tc is
+// set absurdly small (1e-6f) so the jerk limit (accel_max / input_tc)
+// is astronomically large and cannot possibly bind on this first call
+// from rest, max_ang_vel is set huge so the velocity clamp inside
+// shape_pos_vel_accel cannot bind either, and error_angle (kept inside
+// (-pi, pi) so shape_angle_vel_accel's own wrap_PI is a no-op and does
+// not complicate the reasoning) is large enough that the sqrt-shaped
+// correction comfortably exceeds accel_max before its own clamp. The
+// ONLY thing left able to determine target_ang_accel is the real
+// accel_min/accel_max clamp inside shape_pos_vel_accel, using the exact
+// accel_max this function resolved the fallback to - so the output is
+// a direct, bit-exact readout of that resolved value.
+TEST_CASE("attitude_command_model: the accel_max fallback is exactly radians(1800.0f), read directly off a "
+          "saturated first step",
+          "[control][attitude_kinematics][attitude_command_model]") {
+    float target_ang_vel = 0.0f;
+    float target_ang_accel = 0.0f;
+    attitude_command_model(/*error_angle=*/2.5f, /*desired_ang_vel=*/0.0f, target_ang_vel, target_ang_accel,
+                            /*max_ang_vel=*/1.0e6f, /*accel_max=*/0.0f, /*input_tc=*/1.0e-6f, /*dt=*/0.0025f);
+
+    // Compared against radians()'s own real output, not a separately
+    // hand-typed literal - the precise test that would catch a
+    // ULP-level transcription error in the fallback constant.
+    REQUIRE(target_ang_accel == fwcpp::math::radians(1800.0f));
+}
+
+// (2) The input_tc fallback: exactly dt * 10.0 (upstream's own comment:
+// "achieve maximum acceleration in 10 clock cycles"). Uses the
+// equivalent-call technique described in this file's own header
+// comment above: one call with input_tc invalid (triggering the real
+// fallback), one call with input_tc explicitly set to dt * 10.0f,
+// everything else identical (including a valid, explicit accel_max, so
+// this test is not entangled with test (1) above). If the fallback
+// really resolves to dt * 10.0, the two calls are computing the exact
+// same jerk_max from the exact same accel_max, and thus a pure
+// downstream function of identical inputs - the two results must be
+// bit-identical.
+TEST_CASE("attitude_command_model: the input_tc fallback is exactly dt * 10.0", "[control][attitude_kinematics]["
+                                                                                  "attitude_command_model]") {
+    const float error_angle = 0.6f;
+    const float desired_ang_vel = 0.1f;
+    const float max_ang_vel = 5.0f;
+    const float accel_max = fwcpp::math::radians(400.0f);
+    const float dt = 0.0025f;
+
+    float fallback_vel = 0.0f;
+    float fallback_accel = 0.0f;
+    attitude_command_model(error_angle, desired_ang_vel, fallback_vel, fallback_accel, max_ang_vel, accel_max,
+                            /*input_tc=*/0.0f, dt);
+
+    float explicit_vel = 0.0f;
+    float explicit_accel = 0.0f;
+    attitude_command_model(error_angle, desired_ang_vel, explicit_vel, explicit_accel, max_ang_vel, accel_max,
+                            /*input_tc=*/dt * 10.0f, dt);
+
+    REQUIRE(fallback_accel == explicit_accel);
+    REQUIRE(fallback_vel == explicit_vel);
+
+    // Sanity check the equivalent-call technique is actually exercising
+    // something: a wildly different input_tc must NOT agree, or this
+    // test would pass no matter what the fallback resolved to.
+    float different_vel = 0.0f;
+    float different_accel = 0.0f;
+    attitude_command_model(error_angle, desired_ang_vel, different_vel, different_accel, max_ang_vel, accel_max,
+                            /*input_tc=*/dt * 100.0f, dt);
+    REQUIRE(different_accel != fallback_accel);
+}
+
+// (3) THE DIRECTION TEST copter-rust's own notes specifically call out:
+// a smaller input_tc must produce a SHARPER (larger-magnitude
+// target_ang_accel) response than a larger input_tc, all else held
+// identical. This is the one test that would fail if accel_max/
+// input_tc were accidentally swapped in the accel_max / input_tc jerk-
+// limit division - a swap would still compile, still run, and still
+// produce SOME finite, plausible jerk limit, just the wrong one.
+//
+// error_angle (kept inside (-pi, pi) so wrap_PI is a no-op) is large
+// enough that the pre-jerk-limit acceleration command saturates against
+// accel_max for BOTH input_tc choices (so the comparison below is
+// purely about which jerk limit binds, not about two different
+// unsaturated sqrt-controller outputs), and both input_tc choices are
+// comfortably larger than dt so that jerk_max * dt (the real per-step
+// accel change from rest) stays below accel_max for both - i.e. the
+// jerk limit, not the accel_max clamp, is what determines the outcome
+// of this first step.
+TEST_CASE("attitude_command_model: a smaller input_tc produces a sharper (larger-magnitude) response",
+          "[control][attitude_kinematics][attitude_command_model]") {
+    const float error_angle = 2.5f;
+    const float desired_ang_vel = 0.0f;
+    const float max_ang_vel = 1.0e6f;
+    const float accel_max = fwcpp::math::radians(400.0f);
+    const float dt = 0.0025f;
+
+    float sharp_vel = 0.0f;
+    float sharp_accel = 0.0f;
+    attitude_command_model(error_angle, desired_ang_vel, sharp_vel, sharp_accel, max_ang_vel, accel_max,
+                            /*input_tc=*/0.02f, dt);
+
+    float gentle_vel = 0.0f;
+    float gentle_accel = 0.0f;
+    attitude_command_model(error_angle, desired_ang_vel, gentle_vel, gentle_accel, max_ang_vel, accel_max,
+                            /*input_tc=*/0.08f, dt);
+
+    REQUIRE(sharp_accel > 0.0f);
+    REQUIRE(gentle_accel > 0.0f);
+    REQUIRE(sharp_accel > gentle_accel);
+    // Both stay strictly below the acceleration ceiling itself - proving
+    // this comparison is really about the jerk limit binding, not two
+    // calls that both simply saturated at accel_max.
+    REQUIRE(sharp_accel < accel_max);
+    REQUIRE(gentle_accel < accel_max);
+}
+
+// (4) The dt <= 0 early return: both output parameters left completely
+// untouched, not merely "close to" their input values.
+TEST_CASE("attitude_command_model: a non-positive dt leaves both outputs completely unchanged",
+          "[control][attitude_kinematics][attitude_command_model]") {
+    float target_ang_vel = 1.23f;
+    float target_ang_accel = 4.56f;
+    attitude_command_model(/*error_angle=*/0.5f, /*desired_ang_vel=*/0.2f, target_ang_vel, target_ang_accel,
+                            /*max_ang_vel=*/5.0f, /*accel_max=*/fwcpp::math::radians(400.0f), /*input_tc=*/0.05f,
+                            /*dt=*/0.0f);
+    REQUIRE(target_ang_vel == 1.23f);
+    REQUIRE(target_ang_accel == 4.56f);
+
+    // A negative dt takes the exact same early-return branch
+    // (is_positive gates it, not merely != 0).
+    target_ang_vel = 1.23f;
+    target_ang_accel = 4.56f;
+    attitude_command_model(0.5f, 0.2f, target_ang_vel, target_ang_accel, 5.0f, fwcpp::math::radians(400.0f), 0.05f,
+                            -0.0025f);
+    REQUIRE(target_ang_vel == 1.23f);
+    REQUIRE(target_ang_accel == 4.56f);
+}
+
+// (5) The real, separate final `target_ang_vel += target_ang_accel *
+// dt` integration step - genuinely additional to whatever
+// shape_angle_vel_accel itself does (that call's own angle_vel
+// parameter is by-value input only, so it cannot have written
+// target_ang_vel back). Constructed so skipping this step would
+// produce a measurably different (and wrong) target_ang_vel: starting
+// target_ang_vel is a nonzero, arbitrary value unrelated to the error,
+// so shape_angle_vel_accel's own internal treatment of it cannot
+// coincidentally reproduce this function's final output on its own.
+TEST_CASE("attitude_command_model: target_ang_vel gets a real, separate final += target_ang_accel * dt step",
+          "[control][attitude_kinematics][attitude_command_model]") {
+    const float starting_target_ang_vel = 3.0f;
+    const float dt = 0.0025f;
+
+    float target_ang_vel = starting_target_ang_vel;
+    float target_ang_accel = 0.0f;
+    attitude_command_model(/*error_angle=*/0.5f, /*desired_ang_vel=*/0.1f, target_ang_vel, target_ang_accel,
+                            /*max_ang_vel=*/5.0f, /*accel_max=*/fwcpp::math::radians(400.0f), /*input_tc=*/0.05f,
+                            dt);
+
+    // The step must have moved the needle by a measurable amount - not
+    // merely be "not exactly zero" due to float noise - or this test
+    // would not actually be distinguishing "the step ran" from "the
+    // step is missing".
+    REQUIRE(std::fabs(target_ang_accel * dt) > 1e-6f);
+
+    // shape_angle_vel_accel's own angle_vel parameter is by-value input
+    // only (see attitude_kinematics.hpp's own banner addendum), so
+    // target_ang_vel is provably UNCHANGED by that call itself; the
+    // final value must equal the starting value plus exactly this
+    // function's own separate integration step.
+    REQUIRE(target_ang_vel == Approx(starting_target_ang_vel + target_ang_accel * dt).margin(1e-6f));
+
+    // And that really is different from what a port that dropped the
+    // final step (leaving target_ang_vel at its pre-call value) would
+    // have produced.
+    REQUIRE(target_ang_vel != starting_target_ang_vel);
 }

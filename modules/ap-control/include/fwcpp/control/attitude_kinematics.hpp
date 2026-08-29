@@ -277,10 +277,124 @@
 // port yet - matching copter-rust's own COP-007 identical, still-open
 // deferral of the same function for the same reason.
 // ---------------------------------------------------------------------
+//
+// ---------------------------------------------------------------------
+// CCP-022 ADDENDUM: attitude_command_model, the jerk-limited angle-error
+// shaping (real lines 1108-1130, re-verified directly via `grep -n`
+// against the pinned upstream tree - matches this ticket's own claimed
+// range exactly). CCP-021 just unblocked this by adding
+// fwcpp::math::shape_angle_vel_accel (modules/ap-math/include/fwcpp/
+// math/control.hpp) - the one real dependency this function needed that
+// this port did not already have.
+//
+// REUSED INVESTIGATION: copter-rust's own COP-007 ticket already ported
+// this exact function (ports/plane-fw-rust/crates/ap-control/src/
+// attitude_error.rs - CommandModel, DEFAULT_ACCEL_MAX_DEGSS,
+// DEFAULT_INPUT_TC_CYCLES, attitude_command_model) - read in full before
+// writing anything here, two of its own findings reused directly below,
+// independently re-verified against the real C++ source rather than
+// trusted on faith.
+//
+// TWO REAL FALLBACK DEFAULTS, both exist "to keep the arithmetic finite
+// rather than to describe a vehicle" (copter-rust's own exact words,
+// reused verbatim) - re-verified directly against the real source:
+//   - if accel_max is not positive, it resets (LOCALLY - see below) to
+//     radians(1800.0f). Computed via this port's own real radians()
+//     function, NOT a hand-typed radian literal: the value feeds a
+//     division below, and a hand-converted constant would be one ULP
+//     off from radians()'s own output as often as not, propagating
+//     error rather than letting it stay put. Pinned by a dedicated test
+//     comparing against radians(1800.0f)'s own computed output, not a
+//     separately hand-typed approximation.
+//   - if input_tc is not positive, it resets (LOCALLY) to dt * 10.0f -
+//     upstream's own comment, reproduced verbatim: "no acceleration set
+//     so default to achieve maximum acceleration in 10 clock cycles".
+// BY VALUE, NOT BY REFERENCE - already confirmed directly by reading
+// AC_AttitudeControl.h line 432: accel_max and input_tc are plain float
+// parameters, not float&, so upstream's own reassignment of either
+// inside the function body is purely local to that call, invisible to
+// the caller - it only affects the shape_angle_vel_accel call below.
+// This port's own accel_max/input_tc parameters are likewise plain
+// float (by value), matching that exactly.
+//
+// THE JERK LIMIT, re-verified directly at the shape_angle_vel_accel call
+// site below: accel_max / input_tc - a SMALLER input_tc produces a
+// LARGER (sharper) jerk limit, i.e. a sharper response. Pinned by a
+// dedicated direction test (two otherwise-identical calls differing
+// only in input_tc, the smaller one producing the larger-magnitude
+// target_ang_accel) precisely because a port that accidentally swapped
+// accel_max/input_tc in this division would still compile, still run,
+// and still produce SOME finite, plausible-looking jerk limit - only a
+// test checking the actual DIRECTION of the relationship would catch
+// that swap.
+//
+// THE ARGUMENT MAPPING into shape_angle_vel_accel is NOT a 1:1
+// forwarding of this function's own parameters in argument order -
+// re-verified directly against both real signatures side by side:
+//   angle_desired        = error_angle
+//   angle_vel_desired    = desired_ang_vel
+//   angle_accel_desired  = 0.0f  (literal)
+//   angle                = 0.0f  (literal)
+//   angle_vel            = target_ang_vel  (BY VALUE into that
+//                          parameter - shape_angle_vel_accel's own
+//                          angle_vel is a plain float, not float&, so
+//                          this call does NOT write target_ang_vel
+//                          back through it; angle_accel below is the
+//                          only real reference output of the call)
+//   angle_accel (float&) = target_ang_accel  (the sole real output of
+//                          this call)
+//   angle_vel_min        = -max_ang_vel
+//   angle_vel_max        = max_ang_vel
+//   angle_accel_max      = accel_max
+//   angle_jerk_max       = accel_max / input_tc
+//   dt                   = dt
+//   limit_total          = true
+//
+// THE REAL, EASY-TO-MISS FINAL STEP, re-verified directly at real line
+// 1129: target_ang_vel += target_ang_accel * dt - an ADDITIONAL,
+// explicit Euler integration step AFTER the shape_angle_vel_accel call
+// returns, using the JUST-COMPUTED target_ang_accel and the ORIGINAL
+// dt. This is genuinely separate from anything shape_angle_vel_accel
+// itself does internally (its own angle_vel parameter is by-value
+// input only, as noted above - it never writes target_ang_vel), not a
+// redundant double-integration. copter-rust's own COP-007 notes exactly
+// why this matters: dropping it leaves the rate target one iteration
+// behind, which at 400 Hz is small and constant - exactly the kind of
+// error that reads as a slightly sluggish airframe rather than as a
+// bug. Pinned by a dedicated test constructing a case where skipping
+// this step would produce a measurably different target_ang_vel than
+// this function actually returns.
+//
+// DELIBERATELY EXCLUDED, named explicitly as a separate, deferred
+// future ticket: command_model_rate_predictor (real lines 1134-1152,
+// the function immediately after this one). It needs real AC_P-style
+// proportional-gain accessors (_p_angle_roll.kP()/_p_angle_pitch.kP()),
+// a real _rate_bf_ff_enabled flag, get_accel_roll_max_radss()/get_
+// accel_pitch_max_radss() accessors, and a real _angle_P_scale member -
+// none of which this port has wired into AC_AttitudeControl yet, the
+// same real, disclosed gap CCP-020 already found and deferred for
+// thrust_heading_rotation_angles above.
+//
+// A REAL, ALREADY-CONFIRMED LATENT HAZARD in that DEFERRED function,
+// noted here (without acting on it, since it is out of this ticket's
+// own scope) so it is not lost before that future ticket starts:
+// command_model_rate_predictor takes its own dt PARAMETER but its own
+// real body never reads it - all three internal calls it makes
+// (attitude_command_model x2, ang_vel_limit x1) pass the MEMBER _dt_s
+// instead, never the dt parameter. This is copter-rust's own documented
+// finding (its own D-025): "not an active defect... but a latent
+// hazard, since any future caller asking about a different interval
+// would be answered about the controller's own step [interval]."
+// Re-verified directly this ticket's OWN function has no such mismatch:
+// attitude_command_model's own dt parameter IS genuinely used, both in
+// the is_positive(dt) guard and passed straight through to
+// shape_angle_vel_accel below.
+// ---------------------------------------------------------------------
 
 #include <algorithm>
 #include <cmath>
 
+#include <fwcpp/math/control.hpp>
 #include <fwcpp/math/quaternion.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector2.hpp>
@@ -508,6 +622,61 @@ inline void thrust_vector_rotation_angles(const math::Quaternion& attitude_targe
     // dedicated assertion, not just a trusted comment).
     heading_vec_correction_quat.to_axis_angle(rotation_rad);
     attitude_error_rad.z = rotation_rad.z;
+}
+
+// attitude_command_model - upstream AC_AttitudeControl::
+// attitude_command_model (real lines 1108-1130). CCP-022 - see this
+// file's own "CCP-022 ADDENDUM" banner above for the full design
+// writeup (both fallback defaults and their rationale, the jerk-limit
+// direction test, the exact argument mapping into
+// shape_angle_vel_accel, and the real separate final integration step -
+// all re-verified directly against the real upstream source, not
+// trusted from any summary).
+//
+// Turns an angle error into a rate and acceleration target, applying
+// acceleration/deceleration limits and jerk limiting (via input_tc) on
+// top of CCP-021's shape_angle_vel_accel. Ported as a free function for
+// the same reason as this module's other functions: upstream's own
+// method is `const` but its body touches no instance state, and no
+// AC_AttitudeControl-equivalent class exists in this port for it to be
+// a method of regardless.
+//
+// accel_max and input_tc are plain float (BY VALUE, not float&),
+// matching upstream's own AC_AttitudeControl.h line 432 declaration
+// exactly - see this file's own banner addendum for why that matters
+// (their fallback reassignment below is purely local to this call).
+inline void attitude_command_model(float error_angle, float desired_ang_vel, float& target_ang_vel,
+                                    float& target_ang_accel, float max_ang_vel, float accel_max, float input_tc,
+                                    float dt) {
+    if (!math::is_positive(dt)) {
+        return;
+    }
+
+    // protect against divide by zero: no acceleration set, so default
+    // to 1800 degrees/s^2 - computed via radians(), not a hand-typed
+    // radian literal (see this file's own banner addendum's "TWO REAL
+    // FALLBACK DEFAULTS" section for why that distinction matters).
+    if (!math::is_positive(accel_max)) {
+        accel_max = math::radians(1800.0f);
+    }
+
+    // no time constant set, so default to achieve maximum acceleration
+    // in 10 clock cycles (upstream's own comment, reproduced verbatim).
+    if (!math::is_positive(input_tc)) {
+        input_tc = dt * 10.0f;
+    }
+
+    // See this file's own banner addendum's "THE ARGUMENT MAPPING"
+    // section - this is NOT a 1:1 forwarding of this function's own
+    // parameters in order.
+    math::shape_angle_vel_accel(error_angle, desired_ang_vel, 0.0f, 0.0f, target_ang_vel, target_ang_accel,
+                                 -max_ang_vel, max_ang_vel, accel_max, accel_max / input_tc, dt, true);
+
+    // The real, easy-to-miss final step - see this file's own banner
+    // addendum's "THE REAL, EASY-TO-MISS FINAL STEP" section. Genuinely
+    // separate from shape_angle_vel_accel's own internal behavior, not
+    // a redundant double-integration.
+    target_ang_vel += target_ang_accel * dt;
 }
 
 } // namespace fwcpp::control
