@@ -504,3 +504,21 @@ target_link_libraries(quadplane_leftover_test PRIVATE ap-quadplane Catch2::Catch
 catch_discover_tests(quadplane_options_test)
 catch_discover_tests(quadplane_poscontrol_test)
 catch_discover_tests(quadplane_leftover_test)
+
+
+# VCP-002 slice 1: ap-vtol-assist enable/check + hysteresis + should_assist stubs.
+add_executable(vtol_assist_enable_test vtol_assist_enable_test.cpp)
+target_link_libraries(vtol_assist_enable_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
+catch_discover_tests(vtol_assist_enable_test)
+
+add_executable(vtol_assist_hysteresis_test vtol_assist_hysteresis_test.cpp)
+target_link_libraries(vtol_assist_hysteresis_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
+catch_discover_tests(vtol_assist_hysteresis_test)
+
+add_executable(vtol_assist_should_assist_test vtol_assist_should_assist_test.cpp)
+target_link_libraries(vtol_assist_should_assist_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
+catch_discover_tests(vtol_assist_should_assist_test)
+
+add_executable(vtol_assist_completeness_test vtol_assist_completeness_test.cpp)
+target_link_libraries(vtol_assist_completeness_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
+catch_discover_tests(vtol_assist_completeness_test)
