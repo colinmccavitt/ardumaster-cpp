@@ -714,3 +714,29 @@ catch_discover_tests(mode_qrtl_enter_test)
 add_executable(qrtl_completeness_test qrtl_completeness_test.cpp)
 target_link_libraries(qrtl_completeness_test PRIVATE ap-qrtl Catch2::Catch2WithMain)
 catch_discover_tests(qrtl_completeness_test)
+
+# VCP-005 slice 1: ap-q-loiter QLOITER QLAND scaffold.
+
+add_executable(q_loiter_meta_test q_loiter_meta_test.cpp)
+target_link_libraries(q_loiter_meta_test PRIVATE ap-q-loiter Catch2::Catch2WithMain)
+catch_discover_tests(q_loiter_meta_test)
+
+add_executable(mode_qloiter_enter_test mode_qloiter_enter_test.cpp)
+target_link_libraries(mode_qloiter_enter_test PRIVATE ap-q-loiter Catch2::Catch2WithMain)
+catch_discover_tests(mode_qloiter_enter_test)
+
+add_executable(mode_qland_enter_test mode_qland_enter_test.cpp)
+target_link_libraries(mode_qland_enter_test PRIVATE ap-q-loiter Catch2::Catch2WithMain)
+catch_discover_tests(mode_qland_enter_test)
+
+add_executable(mode_qloiter_run_test mode_qloiter_run_test.cpp)
+target_link_libraries(mode_qloiter_run_test PRIVATE ap-q-loiter Catch2::Catch2WithMain)
+catch_discover_tests(mode_qloiter_run_test)
+
+add_executable(loiter_alt_qland_test loiter_alt_qland_test.cpp)
+target_link_libraries(loiter_alt_qland_test PRIVATE ap-q-loiter Catch2::Catch2WithMain)
+catch_discover_tests(loiter_alt_qland_test)
+
+add_executable(q_loiter_completeness_test q_loiter_completeness_test.cpp)
+target_link_libraries(q_loiter_completeness_test PRIVATE ap-q-loiter Catch2::Catch2WithMain)
+catch_discover_tests(q_loiter_completeness_test)
