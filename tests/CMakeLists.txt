@@ -572,6 +572,11 @@ add_executable(quadplane_setup_navigators_test quadplane_setup_navigators_test.c
 target_link_libraries(quadplane_setup_navigators_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_setup_navigators_test)
 
+add_executable(quadplane_update_test quadplane_update_test.cpp)
+target_link_libraries(quadplane_update_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_update_test)
+
+
 
 
 

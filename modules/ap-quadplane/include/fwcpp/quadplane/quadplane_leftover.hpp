@@ -28,7 +28,7 @@ inline constexpr QuadPlanePortItem kQuadPlaneCompleteness[] = {
     {"setup channels ahrs_view", PortStatus::kThisSlice, "setup_channels.hpp ADR-0012"},
     {"wp_nav loiter_nav", PortStatus::kThisSlice, "setup_navigators.hpp ADR-0012"},
     {"mode_enter poscontrol FSM", PortStatus::kThisSlice, "set_state + init_approach prep"},
-    {"update transition FSM", PortStatus::kRemaining, "main loop"},
+    {"update transition FSM", PortStatus::kThisSlice, "quadplane_update.hpp SLT wiring"},
     {"tailsitter tiltrotor", PortStatus::kRemaining, "subsystems"},
     {"vtol controllers landing", PortStatus::kRemaining, "position + landing"},
     {"AUTO VTOL mission", PortStatus::kRemaining, "do_vtol verify"},

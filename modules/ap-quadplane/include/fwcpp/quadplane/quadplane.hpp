@@ -13,6 +13,8 @@
 #include <fwcpp/quadplane/quadplane_poscontrol_stub.hpp>
 #include <fwcpp/quadplane/quadplane_setup_channels.hpp>
 #include <fwcpp/quadplane/quadplane_setup_navigators.hpp>
+#include <fwcpp/quadplane/quadplane_update.hpp>
+#include <fwcpp/quadplane_transition/transition_fsm.hpp>
 
 namespace fwcpp::quadplane {
 
@@ -167,6 +169,15 @@ public:
     [[nodiscard]] const PosControlSetStateSink& last_set_state_sink() const {
         return last_set_state_sink_;
     }
+    [[nodiscard]] const fwcpp::quadplane_transition::SltTransition& slt_transition() const {
+        return slt_transition_;
+    }
+    fwcpp::quadplane_transition::SltTransition& slt_transition_mut() { return slt_transition_; }
+
+    QuadPlaneUpdateTick update(const QuadPlaneUpdateView& view) {
+        return run_quadplane_update(slt_transition_, available(), assisted_flight_, options_, view);
+    }
+
     void mode_enter() {
         if (available()) {
             lean_angle_max_cd_ = 0;
@@ -209,6 +220,8 @@ private:
     PosControlLandStub poscontrol_land_{};
     PosControlTransitionPrep last_transition_prep_{};
     PosControlSetStateSink last_set_state_sink_{};
+    fwcpp::quadplane_transition::SltTransition slt_transition_{
+        fwcpp::quadplane_transition::SltTransition::with_defaults()};
 };
 
 }  // namespace fwcpp::quadplane
