@@ -25,3 +25,8 @@ add_subdirectory(ap-steer-control)
 add_subdirectory(ap-vehicle)
 add_subdirectory(ap-ekf)
 add_subdirectory(ap-hal-sitl)
+
+# copter-cpp effort (see /srv/ardumaster/tracker/efforts/copter-cpp.md):
+# ArduCopter-specific modules, reusing the shared modules above unchanged.
+# ap-motors (CCP-001): AP_MotorsMatrix core factor storage/arithmetic.
+add_subdirectory(ap-motors)

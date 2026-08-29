@@ -414,3 +414,12 @@ catch_discover_tests(ekf_backend_test)
 add_executable(sitl_harness_test sitl_harness_test.cpp)
 target_link_libraries(sitl_harness_test PRIVATE ap-hal-sitl ap-vehicle ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sitl_harness_test)
+
+# CCP-001 (copter-cpp effort): fwcpp::motors::MotorsMatrix - AP_MotorsMatrix
+# core factor storage/arithmetic (add_motor/add_motor_raw's angle-to-factor
+# conversion, remove_motor, normalise_rpy_factors). First test target for
+# the new ap-motors module - see modules/ap-motors/include/fwcpp/motors/
+# motors_matrix.hpp's own file banner for full scope.
+add_executable(motors_matrix_test motors_matrix_test.cpp)
+target_link_libraries(motors_matrix_test PRIVATE ap-motors Catch2::Catch2WithMain)
+catch_discover_tests(motors_matrix_test)
