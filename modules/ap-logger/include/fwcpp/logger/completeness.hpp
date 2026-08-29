@@ -1,9 +1,8 @@
 #pragma once
 
-// CPP-090 completeness: this slice (WriteStreaming rate-limit gate) vs
+// CPP-090 completeness: this slice (POSIX FileBackend WriteBlock) vs
 // remaining AP_Logger / DataFlash surfaces. remaining_count() > 0 until
-// later slices land the DataFlash page map, POSIX/SD, transfer, and
-// erase/rotate.
+// later slices land the DataFlash page map, transfer, and erase/rotate.
 
 #include <cstddef>
 #include <cstdint>
@@ -31,11 +30,11 @@ inline constexpr LoggerPortItem kLoggerCompleteness[] = {
     {"completeness catalog", PortStatus::kOnMain, "this table"},
     {"DataFlash page map", PortStatus::kRemaining,
      "page-based DataFlash layout; BufferToPage / PageToBuffer (NAND)"},
-    {"POSIX/SD file backend", PortStatus::kRemaining,
-     "AP_Logger_File on a real filesystem; no filesystem in this slice"},
+    {"POSIX/SD file backend", PortStatus::kThisSlice,
+     "FileBackend fwrite/write seam; caller-owned FILE*/fd; no ringbuffer/io_timer"},
     {"FMT registry", PortStatus::kOnMain,
      "LogStructure / log_Format, Fill_Format, Write_Format, lookup by name/type"},
-    {"streaming", PortStatus::kThisSlice,
+    {"streaming", PortStatus::kOnMain,
      "WriteStreaming rate-limit gate (should_log_streaming, 1000/rate_hz ms)"},
     {"transfer", PortStatus::kRemaining,
      "MAVLink LOG_REQUEST_LIST / LOG_ENTRY listing"},

@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <span>
 
@@ -234,4 +235,68 @@ TEST_CASE("WriteStreaming passing write lands in MemoryBackend", "[logger][strea
     const auto rec = log.recorded();
     REQUIRE(std::equal(rec.begin(), rec.end(), block));
     REQUIRE(log.rate_limiter().last_send_ms(4) == 1000);
+}
+
+TEST_CASE("FileBackend tmpfile WriteBlock round-trip", "[logger][file]") {
+    using fwcpp::logger::FileBackend;
+
+    std::FILE* f = std::tmpfile();
+    REQUIRE(f != nullptr);
+    FileBackend log(f);
+    REQUIRE(log.logging_started());
+    REQUIRE(log.WritesOK());
+    REQUIRE(log.CardInserted());
+    REQUIRE(log.StartNewLogOK());
+    REQUIRE(log.num_short_writes() == 0);
+
+    log.StartWrite(3);
+    REQUIRE(log.is_writing());
+    REQUIRE(log.page_adr() == 3);
+    const std::uint8_t head[] = {0xA3, 0x95};
+    const std::uint8_t payload[] = {0x01, 0x42, 0xFF};
+    REQUIRE(log.WriteBlock(std::span<const std::uint8_t>(head, sizeof(head))));
+    REQUIRE(log.WriteBlock(std::span<const std::uint8_t>(payload, sizeof(payload))));
+    log.EndWrite();
+    REQUIRE_FALSE(log.is_writing());
+    REQUIRE(log.ended_writes() == 1);
+    REQUIRE(log.num_short_writes() == 0);
+
+    REQUIRE(std::fflush(f) == 0);
+    std::rewind(f);
+    std::uint8_t got[5]{};
+    REQUIRE(std::fread(got, 1, sizeof(got), f) == sizeof(got));
+    REQUIRE(got[0] == 0xA3);
+    REQUIRE(got[1] == 0x95);
+    REQUIRE(got[2] == 0x01);
+    REQUIRE(got[3] == 0x42);
+    REQUIRE(got[4] == 0xFF);
+    std::fclose(f);
+}
+
+TEST_CASE("FileBackend closed FILE* WritesOK false", "[logger][file]") {
+    using fwcpp::logger::FileBackend;
+
+    FileBackend log(static_cast<std::FILE*>(nullptr));
+    REQUIRE_FALSE(log.logging_started());
+    REQUIRE_FALSE(log.WritesOK());
+    REQUIRE_FALSE(log.CardInserted());
+    REQUIRE_FALSE(log.StartNewLogOK());
+
+    const std::uint8_t block[] = {0x10, 0x20};
+    REQUIRE_FALSE(log.WriteBlock(std::span<const std::uint8_t>(block, sizeof(block))));
+    REQUIRE(log.num_short_writes() == 1);
+}
+
+TEST_CASE("FileBackend short write returns false and counts locally", "[logger][file]") {
+    using fwcpp::logger::FileBackend;
+
+    std::FILE* f = std::fopen("/dev/full", "w");
+    REQUIRE(f != nullptr);
+    FileBackend log(f);
+    REQUIRE(log.WritesOK());
+    const std::uint8_t block[] = {1, 2, 3, 4};
+    REQUIRE_FALSE(log.WriteBlock(std::span<const std::uint8_t>(block, sizeof(block))));
+    REQUIRE(log.num_short_writes() == 1);
+    REQUIRE(log.logging_started());
+    std::fclose(f);
 }
