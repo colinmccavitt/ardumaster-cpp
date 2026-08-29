@@ -3,7 +3,10 @@
 #include <cstdint>
 #include <optional>
 
+#include <fwcpp/quadplane/quadplane_air_mode.hpp>
 #include <fwcpp/quadplane/quadplane_defaults.hpp>
+#include <fwcpp/quadplane/quadplane_mode_predicates.hpp>
+#include <fwcpp/quadplane/quadplane_vtol_position_controller.hpp>
 #include <fwcpp/quadplane/quadplane_frame.hpp>
 #include <fwcpp/quadplane/quadplane_motors_init.hpp>
 #include <fwcpp/quadplane/quadplane_motors_output.hpp>
@@ -139,6 +142,38 @@ public:
     }
 
     void set_assisted_flight(bool v) { assisted_flight_ = v; }
+    void set_air_mode(AirMode v) { air_mode_ = v; }
+    [[nodiscard]] AirMode air_mode() const { return air_mode_; }
+    [[nodiscard]] bool air_mode_active() const {
+        return fwcpp::quadplane::air_mode_active(air_mode_, assisted_flight_);
+    }
+    void apply_air_mode_aux(AirModeAuxPos pos) {
+        fwcpp::quadplane::apply_air_mode_aux(pos, air_mode_, throttle_wait_);
+    }
+    void apply_armdisarm_airmode_latch(bool armed) {
+        fwcpp::quadplane::apply_armdisarm_airmode_latch(armed, air_mode_, throttle_wait_);
+    }
+    [[nodiscard]] bool throttle_wait() const { return throttle_wait_; }
+    void set_throttle_wait(bool v) { throttle_wait_ = v; }
+
+    [[nodiscard]] bool in_vtol_mode(const InVtolModeInputs& view) const {
+        InVtolModeInputs in = view;
+        in.available = available();
+        in.pos_state = poscontrol_.state;
+        return compute_in_vtol_mode(in);
+    }
+
+    VtolPositionControllerTick vtol_position_controller(const VtolPositionControllerInputs& in) {
+        InVtolModeInputs vtol_in = in.in_vtol;
+        vtol_in.available = available();
+        vtol_in.pos_state = poscontrol_.state;
+        VtolPositionControllerInputs wired = in;
+        wired.in_vtol = vtol_in;
+        return run_vtol_position_controller(poscontrol_, poscontrol_land_, vtol_pos_sink_, wired);
+    }
+    [[nodiscard]] const PosControlSetStateSink& vtol_pos_sink() const { return vtol_pos_sink_; }
+
+
     [[nodiscard]] bool assisted_flight() const { return assisted_flight_; }
 
     [[nodiscard]] const MotorsOutputState& motors_output_state() const { return motors_output_state_; }
@@ -211,6 +246,9 @@ private:
     fwcpp::wpnav::WpNav wp_nav_{};
     LoiterNavStub loiter_nav_{};
     bool assisted_flight_{false};
+    AirMode air_mode_{AirMode::kOff};
+    bool throttle_wait_{false};
+    PosControlSetStateSink vtol_pos_sink_{};
     MotorsOutputState motors_output_state_{};
     std::int32_t lean_angle_max_cd_{0};
     PosControlState poscontrol_{};

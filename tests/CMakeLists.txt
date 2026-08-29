@@ -585,6 +585,16 @@ catch_discover_tests(quadplane_setup_navigators_test)
 add_executable(quadplane_update_test quadplane_update_test.cpp)
 target_link_libraries(quadplane_update_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_update_test)
+add_executable(quadplane_air_mode_test quadplane_air_mode_test.cpp)
+add_executable(quadplane_mode_predicates_test quadplane_mode_predicates_test.cpp)
+add_executable(quadplane_vtol_position_controller_test quadplane_vtol_position_controller_test.cpp)
+target_link_libraries(quadplane_air_mode_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+target_link_libraries(quadplane_mode_predicates_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+target_link_libraries(quadplane_vtol_position_controller_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_air_mode_test)
+catch_discover_tests(quadplane_mode_predicates_test)
+catch_discover_tests(quadplane_vtol_position_controller_test)
+
 
 
 
