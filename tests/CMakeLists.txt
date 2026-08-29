@@ -433,3 +433,13 @@ catch_discover_tests(motors_matrix_test)
 add_executable(thrust_linearization_test thrust_linearization_test.cpp)
 target_link_libraries(thrust_linearization_test PRIVATE ap-motors Catch2::Catch2WithMain)
 catch_discover_tests(thrust_linearization_test)
+
+# CCP-018 (copter-cpp effort, AC_AttitudeControl phase): fwcpp::control's
+# attitude_kinematics.hpp - AC_AttitudeControl frame-conversion/limit
+# primitives (euler_derivative_to_body/body_to_euler_derivative/
+# ang_vel_limit/body_to_euler_limit). First test target for the new
+# ap-control module - see modules/ap-control/include/fwcpp/control/
+# attitude_kinematics.hpp's own file banner for full scope.
+add_executable(attitude_kinematics_test attitude_kinematics_test.cpp)
+target_link_libraries(attitude_kinematics_test PRIVATE ap-control Catch2::Catch2WithMain)
+catch_discover_tests(attitude_kinematics_test)

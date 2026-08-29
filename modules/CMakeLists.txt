@@ -30,3 +30,8 @@ add_subdirectory(ap-hal-sitl)
 # ArduCopter-specific modules, reusing the shared modules above unchanged.
 # ap-motors (CCP-001): AP_MotorsMatrix core factor storage/arithmetic.
 add_subdirectory(ap-motors)
+
+# ap-control (CCP-018): AC_AttitudeControl frame-conversion/limit
+# kinematics - the first ticket of this effort's own AC_AttitudeControl
+# phase, following AP_Motors's completion (CCP-001 through CCP-017).
+add_subdirectory(ap-control)
