@@ -56,7 +56,8 @@ inline constexpr QuadPlanePortItem kQuadPlaneCompleteness[] = {
     {"assist_climb_rate_cms / weathervane yaw / is_flying_vtol", PortStatus::kThisSlice,
      "quadplane_assist.hpp ticks; weathervane get_yaw_out injected"},
     {"vtol_position_controller body", PortStatus::kThisSlice, "landing/RTL FSM ticks; no pos_control/nav/GCS objects"},
-    {"verify_vtol_land body leftovers", PortStatus::kRemaining, "POSITION2/descend/abort/payload-place beyond land_detector"},
+    {"verify_vtol_land body leftovers", PortStatus::kThisSlice,
+     "quadplane_verify_vtol_land.hpp ticks; land_detector reused; no GCS/gear/ICE objects"},
     {"Log_Write_*", PortStatus::kOutOfScope, "no logger"},
 };
 

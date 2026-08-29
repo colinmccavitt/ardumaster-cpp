@@ -297,11 +297,9 @@ public:
         return verify_vtol_takeoff(wired);
     }
 
-    [[nodiscard]] bool verify_vtol_land_mission(const VerifyVtolLandInputs& in) const {
-        VerifyVtolLandInputs wired = in;
-        wired.available = available();
-        wired.pos_state = poscontrol_.state;
-        return verify_vtol_land(wired);
+    [[nodiscard]] VerifyVtolLandTick verify_vtol_land_mission(VerifyVtolLandInputs in) {
+        in.available = available();
+        return verify_vtol_land(poscontrol_, poscontrol_land_, in);
     }
 
     [[nodiscard]] HandleDoVtolTransitionResult handle_do_vtol_transition_mission(

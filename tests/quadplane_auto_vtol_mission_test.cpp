@@ -1,11 +1,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/quadplane/quadplane.hpp>
 #include <fwcpp/quadplane/quadplane_auto_vtol_mission.hpp>
+#include <fwcpp/quadplane/quadplane_poscontrol_fsm.hpp>
 
 using fwcpp::quadplane::DoVtolLandInputs;
 using fwcpp::quadplane::DoVtolTakeoffInputs;
 using fwcpp::quadplane::HandleDoVtolTransitionInputs;
 using fwcpp::quadplane::MavVtolState;
+using fwcpp::quadplane::PosControlLandStub;
+using fwcpp::quadplane::PosControlState;
 using fwcpp::quadplane::QuadPlane;
 using fwcpp::quadplane::VerifyVtolLandInputs;
 using fwcpp::quadplane::VerifyVtolTakeoffInputs;
@@ -49,8 +52,10 @@ TEST_CASE("handle_do_vtol_transition auto mc", "[quadplane][auto_vtol]") {
     REQUIRE(r.clear_fwd_throttle);
 }
 
-TEST_CASE("verify_vtol_land complete at land complete", "[quadplane][auto_vtol]") {
-    using fwcpp::quadplane::PositionControlState;
-    REQUIRE_FALSE(verify_vtol_land({.available = true, .pos_state = PositionControlState::kLandDescend}));
-    REQUIRE(verify_vtol_land({.available = true, .pos_state = PositionControlState::kLandComplete}));
+TEST_CASE("verify_vtol_land unavailable is complete", "[quadplane][auto_vtol]") {
+    PosControlState pc{};
+    pc.state = fwcpp::quadplane::PositionControlState::kLandDescend;
+    PosControlLandStub land{};
+    REQUIRE(verify_vtol_land(pc, land, {.available = false}).done);
+    REQUIRE_FALSE(verify_vtol_land(pc, land, {.available = true}).done);
 }

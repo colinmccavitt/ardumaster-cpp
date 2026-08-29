@@ -2,6 +2,7 @@
 
 #include <fwcpp/quadplane/quadplane_options.hpp>
 #include <fwcpp/quadplane/quadplane_poscontrol_stub.hpp>
+#include <fwcpp/quadplane/quadplane_verify_vtol_land.hpp>
 
 #include <cstdint>
 
@@ -156,18 +157,6 @@ struct VerifyVtolTakeoffResult {
     out.next_wp_no_crosstrack = true;
     out.complete = true;
     return out;
-}
-
-struct VerifyVtolLandInputs {
-    bool available{false};
-    PositionControlState pos_state{PositionControlState::kNone};
-};
-
-[[nodiscard]] inline bool verify_vtol_land(const VerifyVtolLandInputs& in) {
-    if (!in.available) {
-        return true;
-    }
-    return in.pos_state == PositionControlState::kLandComplete;
 }
 
 struct HandleDoVtolTransitionInputs {
