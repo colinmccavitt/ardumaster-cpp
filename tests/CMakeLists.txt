@@ -789,3 +789,21 @@ catch_discover_tests(tiltrotor_predicates_test)
 add_executable(tiltrotor_completeness_test tiltrotor_completeness_test.cpp)
 target_link_libraries(tiltrotor_completeness_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
 catch_discover_tests(tiltrotor_completeness_test)
+
+# VCP-009 slice 1: ap-qautotune scaffold.
+
+add_executable(qautotune_enable_test qautotune_enable_test.cpp)
+target_link_libraries(qautotune_enable_test PRIVATE ap-qautotune Catch2::Catch2WithMain)
+catch_discover_tests(qautotune_enable_test)
+
+add_executable(qautotune_init_test qautotune_init_test.cpp)
+target_link_libraries(qautotune_init_test PRIVATE ap-qautotune Catch2::Catch2WithMain)
+catch_discover_tests(qautotune_init_test)
+
+add_executable(mode_qautotune_run_test mode_qautotune_run_test.cpp)
+target_link_libraries(mode_qautotune_run_test PRIVATE ap-qautotune Catch2::Catch2WithMain)
+catch_discover_tests(mode_qautotune_run_test)
+
+add_executable(qautotune_completeness_test qautotune_completeness_test.cpp)
+target_link_libraries(qautotune_completeness_test PRIVATE ap-qautotune Catch2::Catch2WithMain)
+catch_discover_tests(qautotune_completeness_test)
