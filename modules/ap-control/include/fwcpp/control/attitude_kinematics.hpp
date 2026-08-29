@@ -2437,4 +2437,205 @@ inline void input_rate_bf_roll_pitch_yaw_no_shaping_cds(float roll_rate_bf_cds, 
                                                  ang_vel_body_rads);
 }
 
+// ---------------------------------------------------------------------
+// CCP-033 ADDENDUM: input_thrust_vector heading family
+// (input_thrust_vector_rate_heading_rads, input_thrust_vector_heading_rad,
+// input_thrust_vector_heading + HeadingCommand/HeadingMode). Upstream
+// AC_AttitudeControl.cpp real lines 832-944 and AC_AttitudeControl.h
+// ~284 (slew_yaw default true) and ~717-727 (HeadingMode/HeadingCommand
+// member order). ALTHOLD/LOITER thrust-vector entry.
+//
+// There is NO input_thrust_vector_xy in this tag. Do not invent it.
+//
+// LOAD-BEARING vs the Euler input_* family:
+//   - Tilt is a thrust VECTOR, not Euler roll/pitch. Desired attitude
+//     is attitude_from_thrust_vector (CCP-024). Rate-heading builds that
+//     with heading 0 (yaw is a separate rate); heading_rad bakes the
+//     heading angle into the desired quat.
+//   - Error vs the current target is thrust_vector_rotation_angles
+//     (CCP-020), not wrap_PI(euler_in - euler_target). Do not
+//     reimplement those helpers; watch the acos precision cliff already
+//     documented on CCP-030 / attitude_from_thrust_vector.
+//   - rate_heading slew_yaw: if true, yaw_rate_max = get_slew_yaw_max_rads;
+//     else radians(ang_vel_yaw_max_degs). heading_rad ALWAYS uses
+//     get_slew_yaw_max_rads for its yaw command_model limit (no slew flag).
+//   - Shaped rate_heading: command_model error.x/y with input_tc (rate
+//     command 0); yaw command_model(0, heading_rate, ..., yaw_rate_max,
+//     accel_yaw, rate_y_tc). Unshaped: constrain heading_rate if
+//     yaw_rate_max positive; yaw_quat from_axis_angle {0,0,heading_rate*dt};
+//     attitude_target = attitude_target * thrust_vec_correction * yaw_quat;
+//     normalize; zero ff.
+//   - Shaped heading_rad: rotation_angles vs current target; command_model
+//     error.x/y with input_tc; yaw command_model(error.z, heading_rate,
+//     ..., get_slew_yaw_max_rads(), accel_yaw, rate_y_tc). Unshaped:
+//     attitude_target = desired_attitude; zero ff.
+//   - Both always finish with body_to_euler_derivative + run_quat.
+//   - HeadingMode dispatch (Rate_Only uses the header default
+//     slew_yaw=true): Rate_Only -> rate_heading; Angle_Only ->
+//     heading_rad(..., 0.0); Angle_And_Rate -> heading_rad(..., yaw_rate).
+// ---------------------------------------------------------------------
+
+// HeadingMode / HeadingCommand - upstream AC_AttitudeControl.h ~717-727.
+// Member order matches upstream: Angle_Only, Angle_And_Rate, Rate_Only
+// on the enum; yaw_angle_rad, yaw_rate_rads, heading_mode on the struct.
+enum class HeadingMode {
+    Angle_Only,
+    Angle_And_Rate,
+    Rate_Only
+};
+
+struct HeadingCommand {
+    float yaw_angle_rad;
+    float yaw_rate_rads;
+    HeadingMode heading_mode;
+};
+
+inline void input_thrust_vector_rate_heading_rads(
+    const math::Vector3f& thrust_vector, float heading_rate_rads, bool slew_yaw, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    float yaw_rate_max_rads = math::radians(gains.ang_vel_yaw_max_degs);
+    if (slew_yaw) {
+        yaw_rate_max_rads = get_slew_yaw_max_rads(gains.ang_vel_yaw_max_degs, gains.rate_wp_yaw_max_degs);
+    }
+
+    update_attitude_target(state.attitude_target, state.ang_vel_target_rads, dt);
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+
+    // Zero heading: yaw is commanded as a rate, not baked into the quat.
+    const math::Quaternion thrust_vec_quat = attitude_from_thrust_vector(thrust_vector, 0.0f);
+
+    float thrust_vector_diff_angle = 0.0f;
+    math::Quaternion thrust_vec_correction_quat;
+    math::Vector3f attitude_error;
+    float returned_thrust_vector_angle = 0.0f;
+    thrust_vector_rotation_angles(thrust_vec_quat, state.attitude_target, thrust_vec_correction_quat, attitude_error,
+                                   returned_thrust_vector_angle, thrust_vector_diff_angle);
+
+    if (gains.rate_bf_ff_enabled) {
+        (void)thrust_vec_correction_quat;
+        (void)returned_thrust_vector_angle;
+        (void)thrust_vector_diff_angle;
+        attitude_command_model(attitude_error.x, 0.0f, state.ang_vel_target_rads.x, state.ang_accel_target_rads.x,
+                                math::radians(gains.ang_vel_roll_max_degs), gains.accel_roll_max_radss, gains.input_tc,
+                                dt);
+        attitude_command_model(attitude_error.y, 0.0f, state.ang_vel_target_rads.y, state.ang_accel_target_rads.y,
+                                math::radians(gains.ang_vel_pitch_max_degs), gains.accel_pitch_max_radss,
+                                gains.input_tc, dt);
+        attitude_command_model(0.0f, heading_rate_rads, state.ang_vel_target_rads.z, state.ang_accel_target_rads.z,
+                                yaw_rate_max_rads, gains.accel_yaw_max_radss, gains.rate_y_tc, dt);
+    } else {
+        if (math::is_positive(yaw_rate_max_rads)) {
+            heading_rate_rads = math::constrain_value(heading_rate_rads, -yaw_rate_max_rads, yaw_rate_max_rads);
+        }
+        math::Quaternion yaw_quat;
+        yaw_quat.from_axis_angle(math::Vector3f{0.0f, 0.0f, heading_rate_rads * dt});
+        state.attitude_target = state.attitude_target * thrust_vec_correction_quat * yaw_quat;
+        state.attitude_target.normalize();
+
+        state.euler_rate_target_rads.zero();
+        state.ang_vel_target_rads.zero();
+        state.ang_accel_target_rads.zero();
+    }
+
+    (void)body_to_euler_derivative(state.attitude_target, state.ang_vel_target_rads, state.euler_rate_target_rads);
+
+    attitude_controller_run_quat(state.attitude_target, attitude_body, state.ang_vel_target_rads, gyro_body_rads,
+                                  gains.rate_yaw_kp, gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                  gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                  gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+                                  gains.ang_vel_roll_max_degs, gains.ang_vel_pitch_max_degs,
+                                  gains.ang_vel_yaw_max_degs, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                  feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+}
+
+// Default slew_yaw=true (AC_AttitudeControl.h ~284). Rate_Only dispatch
+// uses this overload, matching the real two-argument call.
+inline void input_thrust_vector_rate_heading_rads(
+    const math::Vector3f& thrust_vector, float heading_rate_rads, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    input_thrust_vector_rate_heading_rads(thrust_vector, heading_rate_rads, true, state, attitude_body, gyro_body_rads,
+                                           gains, dt, thrust_angle_rad, thrust_error_angle_rad, feedforward_scalar,
+                                           attitude_ang_error, ang_vel_body_rads);
+}
+
+inline void input_thrust_vector_heading_rad(
+    const math::Vector3f& thrust_vector, float heading_angle_rad, float heading_rate_rads,
+    AttitudeTargetState& state, const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    update_attitude_target(state.attitude_target, state.ang_vel_target_rads, dt);
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+
+    const math::Quaternion desired_attitude_quat = attitude_from_thrust_vector(thrust_vector, heading_angle_rad);
+
+    if (gains.rate_bf_ff_enabled) {
+        math::Vector3f attitude_error;
+        float thrust_vector_diff_angle = 0.0f;
+        math::Quaternion thrust_vec_correction_quat;
+        float returned_thrust_vector_angle = 0.0f;
+        thrust_vector_rotation_angles(desired_attitude_quat, state.attitude_target, thrust_vec_correction_quat,
+                                       attitude_error, returned_thrust_vector_angle, thrust_vector_diff_angle);
+        (void)thrust_vec_correction_quat;
+        (void)returned_thrust_vector_angle;
+        (void)thrust_vector_diff_angle;
+
+        attitude_command_model(attitude_error.x, 0.0f, state.ang_vel_target_rads.x, state.ang_accel_target_rads.x,
+                                math::radians(gains.ang_vel_roll_max_degs), gains.accel_roll_max_radss, gains.input_tc,
+                                dt);
+        attitude_command_model(attitude_error.y, 0.0f, state.ang_vel_target_rads.y, state.ang_accel_target_rads.y,
+                                math::radians(gains.ang_vel_pitch_max_degs), gains.accel_pitch_max_radss,
+                                gains.input_tc, dt);
+        attitude_command_model(attitude_error.z, heading_rate_rads, state.ang_vel_target_rads.z,
+                                state.ang_accel_target_rads.z,
+                                get_slew_yaw_max_rads(gains.ang_vel_yaw_max_degs, gains.rate_wp_yaw_max_degs),
+                                gains.accel_yaw_max_radss, gains.rate_y_tc, dt);
+    } else {
+        state.attitude_target = desired_attitude_quat;
+
+        state.euler_rate_target_rads.zero();
+        state.ang_vel_target_rads.zero();
+        state.ang_accel_target_rads.zero();
+    }
+
+    (void)body_to_euler_derivative(state.attitude_target, state.ang_vel_target_rads, state.euler_rate_target_rads);
+
+    attitude_controller_run_quat(state.attitude_target, attitude_body, state.ang_vel_target_rads, gyro_body_rads,
+                                  gains.rate_yaw_kp, gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                  gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                  gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+                                  gains.ang_vel_roll_max_degs, gains.ang_vel_pitch_max_degs,
+                                  gains.ang_vel_yaw_max_degs, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                  feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+}
+
+inline void input_thrust_vector_heading(
+    const math::Vector3f& thrust_vector, const HeadingCommand& heading, AttitudeTargetState& state,
+    const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    switch (heading.heading_mode) {
+    case HeadingMode::Rate_Only:
+        // Omits slew_yaw: header default true.
+        input_thrust_vector_rate_heading_rads(thrust_vector, heading.yaw_rate_rads, state, attitude_body,
+                                               gyro_body_rads, gains, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                               feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+        break;
+    case HeadingMode::Angle_Only:
+        input_thrust_vector_heading_rad(thrust_vector, heading.yaw_angle_rad, 0.0f, state, attitude_body,
+                                         gyro_body_rads, gains, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                         feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+        break;
+    case HeadingMode::Angle_And_Rate:
+        input_thrust_vector_heading_rad(thrust_vector, heading.yaw_angle_rad, heading.yaw_rate_rads, state,
+                                         attitude_body, gyro_body_rads, gains, dt, thrust_angle_rad,
+                                         thrust_error_angle_rad, feedforward_scalar, attitude_ang_error,
+                                         ang_vel_body_rads);
+        break;
+    }
+}
+
 } // namespace fwcpp::control

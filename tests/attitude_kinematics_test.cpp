@@ -3458,3 +3458,401 @@ TEST_CASE("input_rate_bf _cds wrappers convert via cd_to_rad and call the rads e
     }
 }
 
+
+// =======================================================================
+// CCP-033: input_thrust_vector heading family
+// Pins: slew_yaw vs not; shaped vs unshaped; HeadingMode dispatch;
+// heading_rad Angle_Only uses 0 rate. Lean ~0.25 rad stays well above
+// the ~3.2e-4 acos cliff documented on CCP-030 / attitude_from_thrust_vector.
+// =======================================================================
+
+namespace {
+
+// ~0.25 rad lean about Y: from (0,0,-1) to (sin, 0, -cos).
+Vector3f lean_thrust(float lean_rad) {
+    return Vector3f{std::sin(lean_rad), 0.0f, -std::cos(lean_rad)};
+}
+
+void require_quat_eq(const Quaternion& a, const Quaternion& b, float margin = 1e-6f) {
+    REQUIRE(a.q1 == Approx(b.q1).margin(margin));
+    REQUIRE(a.q2 == Approx(b.q2).margin(margin));
+    REQUIRE(a.q3 == Approx(b.q3).margin(margin));
+    REQUIRE(a.q4 == Approx(b.q4).margin(margin));
+}
+
+void require_vec_eq(const Vector3f& a, const Vector3f& b, float margin = 1e-6f) {
+    REQUIRE(a.x == Approx(b.x).margin(margin));
+    REQUIRE(a.y == Approx(b.y).margin(margin));
+    REQUIRE(a.z == Approx(b.z).margin(margin));
+}
+
+void require_state_eq(const AttitudeTargetState& a, const AttitudeTargetState& b, float margin = 1e-6f) {
+    require_quat_eq(a.attitude_target, b.attitude_target, margin);
+    require_vec_eq(a.euler_angle_target_rad, b.euler_angle_target_rad, margin);
+    require_vec_eq(a.euler_rate_target_rads, b.euler_rate_target_rads, margin);
+    require_vec_eq(a.ang_vel_target_rads, b.ang_vel_target_rads, margin);
+    require_vec_eq(a.ang_accel_target_rads, b.ang_accel_target_rads, margin);
+}
+
+void step_rate_heading(const Vector3f& thrust, float heading_rate, bool slew_yaw, AttitudeTargetState& state,
+                       const EulerAngleRateShapingGains& gains, float dt) {
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    float t = 0.0f, te = 0.0f, ff = 0.0f;
+    Quaternion err;
+    Vector3f av;
+    input_thrust_vector_rate_heading_rads(thrust, heading_rate, slew_yaw, state, body, gyro, gains, dt, t, te, ff, err,
+                                           av);
+}
+
+void step_heading_rad(const Vector3f& thrust, float heading_angle, float heading_rate, AttitudeTargetState& state,
+                      const EulerAngleRateShapingGains& gains, float dt) {
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    float t = 0.0f, te = 0.0f, ff = 0.0f;
+    Quaternion err;
+    Vector3f av;
+    input_thrust_vector_heading_rad(thrust, heading_angle, heading_rate, state, body, gyro, gains, dt, t, te, ff, err,
+                                     av);
+}
+
+void step_heading_cmd(const Vector3f& thrust, const HeadingCommand& heading, AttitudeTargetState& state,
+                      const EulerAngleRateShapingGains& gains, float dt) {
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    float t = 0.0f, te = 0.0f, ff = 0.0f;
+    Quaternion err;
+    Vector3f av;
+    input_thrust_vector_heading(thrust, heading, state, body, gyro, gains, dt, t, te, ff, err, av);
+}
+
+} // namespace
+
+TEST_CASE("input_thrust_vector_rate_heading_rads: slew_yaw uses get_slew_yaw_max, not ang_vel_yaw_max",
+          "[control][attitude_kinematics][input_thrust_vector][CCP-033][slew_yaw]") {
+    EntryPointGains eg;
+    eg.ang_vel_yaw_max_degs = 360.0f;
+    eg.rate_wp_yaw_max_degs = 30.0f;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.0025f;
+    const float heading_rate = 2.0f;
+    const Vector3f thrust = lean_thrust(0.25f);
+
+    AttitudeTargetState fast = fresh_state();
+    AttitudeTargetState slow = fresh_state();
+    for (int i = 0; i < 80; ++i) {
+        step_rate_heading(thrust, heading_rate, false, fast, gains, dt);
+        step_rate_heading(thrust, heading_rate, true, slow, gains, dt);
+    }
+
+    REQUIRE(std::fabs(slow.ang_vel_target_rads.z) < std::fabs(fast.ang_vel_target_rads.z));
+    REQUIRE(std::fabs(slow.ang_vel_target_rads.z) <
+            get_slew_yaw_max_rads(gains.ang_vel_yaw_max_degs, gains.rate_wp_yaw_max_degs) + 1e-4f);
+}
+
+TEST_CASE("input_thrust_vector_rate_heading_rads: shaped command_model vs unshaped compose+zero-ff",
+          "[control][attitude_kinematics][input_thrust_vector][CCP-033][shaped-unshaped]") {
+    EntryPointGains eg;
+    EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.01f;
+    const float heading_rate = 1.2f;
+    const Vector3f thrust = lean_thrust(0.25f);
+    const Quaternion body = attitude(0.15f, -0.10f, 0.40f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+
+    // Unshaped: constrain heading_rate, compose target * correction * yaw_quat, zero ff.
+    {
+        gains.rate_bf_ff_enabled = false;
+        gains.ang_vel_yaw_max_degs = 100.0f;
+
+        AttitudeTargetState state = fresh_state();
+        state.attitude_target = attitude(0.20f, 0.10f, 0.30f);
+        state.euler_rate_target_rads = Vector3f{1.0f, -1.0f, 1.0f};
+        state.ang_vel_target_rads = Vector3f{0.0f, 0.0f, 0.0f};
+        state.ang_accel_target_rads = Vector3f{3.0f, -3.0f, 3.0f};
+
+        AttitudeTargetState expected = state;
+        update_attitude_target(expected.attitude_target, expected.ang_vel_target_rads, dt);
+        expected.attitude_target.to_euler(expected.euler_angle_target_rad);
+        const Quaternion thrust_vec_quat = attitude_from_thrust_vector(thrust, 0.0f);
+        Quaternion correction;
+        Vector3f att_err;
+        float ret_angle = 0.0f, diff_angle = 0.0f;
+        thrust_vector_rotation_angles(thrust_vec_quat, expected.attitude_target, correction, att_err, ret_angle,
+                                       diff_angle);
+        const float yaw_rate_max = fwcpp::math::radians(gains.ang_vel_yaw_max_degs);
+        float limited_rate = heading_rate;
+        if (fwcpp::math::is_positive(yaw_rate_max)) {
+            limited_rate = fwcpp::math::constrain_value(limited_rate, -yaw_rate_max, yaw_rate_max);
+        }
+        Quaternion yaw_quat;
+        yaw_quat.from_axis_angle(Vector3f{0.0f, 0.0f, limited_rate * dt});
+        expected.attitude_target = expected.attitude_target * correction * yaw_quat;
+        expected.attitude_target.normalize();
+        expected.euler_rate_target_rads.zero();
+        expected.ang_vel_target_rads.zero();
+        expected.ang_accel_target_rads.zero();
+        (void)body_to_euler_derivative(expected.attitude_target, expected.ang_vel_target_rads,
+                                        expected.euler_rate_target_rads);
+
+        float t = 0.0f, te = 0.0f, ff = 0.0f;
+        Quaternion err;
+        Vector3f av;
+        input_thrust_vector_rate_heading_rads(thrust, heading_rate, false, state, body, gyro, gains, dt, t, te, ff, err,
+                                               av);
+
+        float ref_t = 0.0f, ref_te = 0.0f, ref_ff = 0.0f;
+        Quaternion ref_err;
+        Vector3f ref_av;
+        attitude_controller_run_quat(expected.attitude_target, body, expected.ang_vel_target_rads, gyro,
+                                      gains.rate_yaw_kp, gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                      gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                      gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+                                      gains.ang_vel_roll_max_degs, gains.ang_vel_pitch_max_degs,
+                                      gains.ang_vel_yaw_max_degs, dt, ref_t, ref_te, ref_ff, ref_err, ref_av);
+
+        require_quat_eq(state.attitude_target, expected.attitude_target);
+        REQUIRE(state.euler_rate_target_rads.x == 0.0f);
+        REQUIRE(state.euler_rate_target_rads.y == 0.0f);
+        REQUIRE(state.euler_rate_target_rads.z == 0.0f);
+        REQUIRE(state.ang_vel_target_rads.x == 0.0f);
+        REQUIRE(state.ang_vel_target_rads.y == 0.0f);
+        REQUIRE(state.ang_vel_target_rads.z == 0.0f);
+        REQUIRE(state.ang_accel_target_rads.x == 0.0f);
+        REQUIRE(state.ang_accel_target_rads.y == 0.0f);
+        REQUIRE(state.ang_accel_target_rads.z == 0.0f);
+
+        // Unshaped constrain: huge rate is clipped to yaw_rate_max when positive.
+        AttitudeTargetState huge = fresh_state();
+        input_thrust_vector_rate_heading_rads(thrust, 10.0f, false, huge, body, gyro, gains, dt, t, te, ff, err, av);
+        AttitudeTargetState limited = fresh_state();
+        input_thrust_vector_rate_heading_rads(thrust, yaw_rate_max, false, limited, body, gyro, gains, dt, t, te, ff,
+                                               err, av);
+        require_quat_eq(huge.attitude_target, limited.attitude_target);
+
+        // Zero yaw_rate_max disables the constrain.
+        EulerAngleRateShapingGains unlimited = gains;
+        unlimited.ang_vel_yaw_max_degs = 0.0f;
+        AttitudeTargetState unlim = fresh_state();
+        input_thrust_vector_rate_heading_rads(thrust, 10.0f, false, unlim, body, gyro, unlimited, dt, t, te, ff, err,
+                                               av);
+        REQUIRE(std::fabs(unlim.attitude_target.q4 - limited.attitude_target.q4) > 1e-4f);
+    }
+
+    // Shaped: replay command_model on rotation-angle error.x/y (input_tc)
+    // and yaw as a rate command (rate_y_tc).
+    {
+        gains.rate_bf_ff_enabled = true;
+        const int kSteps = 40;
+        AttitudeTargetState state = fresh_state();
+        for (int i = 0; i < kSteps; ++i) {
+            step_rate_heading(thrust, heading_rate, false, state, gains, dt);
+        }
+
+        AttitudeTargetState replay = fresh_state();
+        for (int i = 0; i < kSteps; ++i) {
+            update_attitude_target(replay.attitude_target, replay.ang_vel_target_rads, dt);
+            replay.attitude_target.to_euler(replay.euler_angle_target_rad);
+            const Quaternion thrust_vec_quat = attitude_from_thrust_vector(thrust, 0.0f);
+            Quaternion correction;
+            Vector3f att_err;
+            float ret_angle = 0.0f, diff_angle = 0.0f;
+            thrust_vector_rotation_angles(thrust_vec_quat, replay.attitude_target, correction, att_err, ret_angle,
+                                           diff_angle);
+            attitude_command_model(att_err.x, 0.0f, replay.ang_vel_target_rads.x, replay.ang_accel_target_rads.x,
+                                    fwcpp::math::radians(gains.ang_vel_roll_max_degs), gains.accel_roll_max_radss,
+                                    gains.input_tc, dt);
+            attitude_command_model(att_err.y, 0.0f, replay.ang_vel_target_rads.y, replay.ang_accel_target_rads.y,
+                                    fwcpp::math::radians(gains.ang_vel_pitch_max_degs), gains.accel_pitch_max_radss,
+                                    gains.input_tc, dt);
+            attitude_command_model(0.0f, heading_rate, replay.ang_vel_target_rads.z, replay.ang_accel_target_rads.z,
+                                    fwcpp::math::radians(gains.ang_vel_yaw_max_degs), gains.accel_yaw_max_radss,
+                                    gains.rate_y_tc, dt);
+            (void)body_to_euler_derivative(replay.attitude_target, replay.ang_vel_target_rads,
+                                            replay.euler_rate_target_rads);
+            float rt = 0.0f, rte = 0.0f, rff = 0.0f;
+            Quaternion rerr;
+            Vector3f rav;
+            const Quaternion replay_body = attitude(0.0f, 0.0f, 0.0f);
+            const Vector3f replay_gyro{0.0f, 0.0f, 0.0f};
+            attitude_controller_run_quat(replay.attitude_target, replay_body, replay.ang_vel_target_rads, replay_gyro,
+                                          gains.rate_yaw_kp, gains.angle_yaw_kp, gains.angle_kp_roll,
+                                          gains.angle_kp_pitch, gains.angle_kp_yaw, gains.angle_p_scale,
+                                          gains.accel_roll_max_radss, gains.accel_pitch_max_radss,
+                                          gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+                                          gains.ang_vel_roll_max_degs, gains.ang_vel_pitch_max_degs,
+                                          gains.ang_vel_yaw_max_degs, dt, rt, rte, rff, rerr, rav);
+        }
+
+        require_vec_eq(state.ang_vel_target_rads, replay.ang_vel_target_rads, 1e-5f);
+        require_vec_eq(state.ang_accel_target_rads, replay.ang_accel_target_rads, 1e-5f);
+        REQUIRE(std::fabs(state.ang_vel_target_rads.z) > 0.2f);
+    }
+}
+
+TEST_CASE("input_thrust_vector_heading_rad: shaped uses error.z+rate; unshaped snaps to desired",
+          "[control][attitude_kinematics][input_thrust_vector][CCP-033][heading_rad]") {
+    EntryPointGains eg;
+    eg.ang_vel_yaw_max_degs = 360.0f;
+    eg.rate_wp_yaw_max_degs = 45.0f;
+    EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.01f;
+    const float heading_angle = 0.40f;
+    const float heading_rate = 0.50f;
+    const Vector3f thrust = lean_thrust(0.25f);
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+
+    // Unshaped: attitude_target = desired; zero ff. Then run_quat.
+    {
+        gains.rate_bf_ff_enabled = false;
+        AttitudeTargetState state = fresh_state();
+        state.euler_rate_target_rads = Vector3f{1.0f, -1.0f, 1.0f};
+        state.ang_accel_target_rads = Vector3f{3.0f, -3.0f, 3.0f};
+
+        Quaternion desired = attitude_from_thrust_vector(thrust, heading_angle);
+        float t = 0.0f, te = 0.0f, ff = 0.0f;
+        Quaternion err;
+        Vector3f av;
+        input_thrust_vector_heading_rad(thrust, heading_angle, heading_rate, state, body, gyro, gains, dt, t, te, ff,
+                                         err, av);
+
+        Quaternion expected = desired;
+        float ref_t = 0.0f, ref_te = 0.0f, ref_ff = 0.0f;
+        Quaternion ref_err;
+        Vector3f ref_av;
+        Vector3f zero_ff{0.0f, 0.0f, 0.0f};
+        attitude_controller_run_quat(expected, body, zero_ff, gyro, gains.rate_yaw_kp, gains.angle_yaw_kp,
+                                      gains.angle_kp_roll, gains.angle_kp_pitch, gains.angle_kp_yaw, gains.angle_p_scale,
+                                      gains.accel_roll_max_radss, gains.accel_pitch_max_radss,
+                                      gains.accel_yaw_max_radss, gains.use_sqrt_controller, gains.ang_vel_roll_max_degs,
+                                      gains.ang_vel_pitch_max_degs, gains.ang_vel_yaw_max_degs, dt, ref_t, ref_te,
+                                      ref_ff, ref_err, ref_av);
+        require_quat_eq(state.attitude_target, expected);
+        REQUIRE(state.ang_vel_target_rads.x == 0.0f);
+        REQUIRE(state.ang_vel_target_rads.y == 0.0f);
+        REQUIRE(state.ang_vel_target_rads.z == 0.0f);
+        REQUIRE(state.ang_accel_target_rads.x == 0.0f);
+        REQUIRE(state.ang_accel_target_rads.y == 0.0f);
+        REQUIRE(state.ang_accel_target_rads.z == 0.0f);
+        REQUIRE(state.euler_rate_target_rads.x == 0.0f);
+        REQUIRE(state.euler_rate_target_rads.y == 0.0f);
+        REQUIRE(state.euler_rate_target_rads.z == 0.0f);
+    }
+
+    // Shaped: yaw command_model uses error.z AND heading_rate, limited by
+    // get_slew_yaw_max_rads (not ang_vel_yaw_max). With heading_angle 0
+    // the only difference is the rate command — Angle_Only stays near 0.
+    {
+        gains.rate_bf_ff_enabled = true;
+        const int kSteps = 50;
+        const float rate_only_heading = 0.0f;
+        const float feedforward_rate = 0.80f;
+        AttitudeTargetState with_rate = fresh_state();
+        AttitudeTargetState angle_only = fresh_state();
+        for (int i = 0; i < kSteps; ++i) {
+            step_heading_rad(thrust, rate_only_heading, feedforward_rate, with_rate, gains, dt);
+            step_heading_rad(thrust, rate_only_heading, 0.0f, angle_only, gains, dt);
+        }
+        REQUIRE(std::fabs(with_rate.ang_vel_target_rads.z) > 0.3f);
+        REQUIRE(std::fabs(angle_only.ang_vel_target_rads.z) < 0.05f);
+        REQUIRE(std::fabs(with_rate.ang_vel_target_rads.z - angle_only.ang_vel_target_rads.z) > 0.25f);
+
+        // Replay one step of the Angle_Only (0 rate) path.
+        AttitudeTargetState replay = fresh_state();
+        update_attitude_target(replay.attitude_target, replay.ang_vel_target_rads, dt);
+        replay.attitude_target.to_euler(replay.euler_angle_target_rad);
+        const Quaternion desired = attitude_from_thrust_vector(thrust, heading_angle);
+        Quaternion correction;
+        Vector3f att_err;
+        float ret_angle = 0.0f, diff_angle = 0.0f;
+        thrust_vector_rotation_angles(desired, replay.attitude_target, correction, att_err, ret_angle, diff_angle);
+        attitude_command_model(att_err.x, 0.0f, replay.ang_vel_target_rads.x, replay.ang_accel_target_rads.x,
+                                fwcpp::math::radians(gains.ang_vel_roll_max_degs), gains.accel_roll_max_radss,
+                                gains.input_tc, dt);
+        attitude_command_model(att_err.y, 0.0f, replay.ang_vel_target_rads.y, replay.ang_accel_target_rads.y,
+                                fwcpp::math::radians(gains.ang_vel_pitch_max_degs), gains.accel_pitch_max_radss,
+                                gains.input_tc, dt);
+        attitude_command_model(att_err.z, 0.0f, replay.ang_vel_target_rads.z, replay.ang_accel_target_rads.z,
+                                get_slew_yaw_max_rads(gains.ang_vel_yaw_max_degs, gains.rate_wp_yaw_max_degs),
+                                gains.accel_yaw_max_radss, gains.rate_y_tc, dt);
+
+        AttitudeTargetState one = fresh_state();
+        step_heading_rad(thrust, heading_angle, 0.0f, one, gains, dt);
+        require_vec_eq(one.ang_vel_target_rads, replay.ang_vel_target_rads, 1e-5f);
+        REQUIRE(std::fabs(att_err.x) + std::fabs(att_err.y) > 0.15f);
+    }
+}
+
+TEST_CASE("input_thrust_vector_heading: HeadingMode dispatch; Angle_Only uses 0 rate; Rate_Only slews",
+          "[control][attitude_kinematics][input_thrust_vector][CCP-033][HeadingMode]") {
+    EntryPointGains eg;
+    eg.ang_vel_yaw_max_degs = 360.0f;
+    eg.rate_wp_yaw_max_degs = 30.0f;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.0025f;
+    const Vector3f thrust = lean_thrust(0.25f);
+    const float yaw_angle = 0.40f;
+    const float yaw_rate = 2.0f;
+    const int kSteps = 80;
+
+    HeadingCommand rate_only{yaw_angle, yaw_rate, HeadingMode::Rate_Only};
+    HeadingCommand angle_only{yaw_angle, yaw_rate, HeadingMode::Angle_Only};
+    HeadingCommand angle_and_rate{yaw_angle, yaw_rate, HeadingMode::Angle_And_Rate};
+
+    AttitudeTargetState via_cmd_rate = fresh_state();
+    AttitudeTargetState via_rate_default = fresh_state();
+    AttitudeTargetState via_rate_slew_true = fresh_state();
+    AttitudeTargetState via_rate_slew_false = fresh_state();
+    AttitudeTargetState via_cmd_angle = fresh_state();
+    AttitudeTargetState via_heading_zero = fresh_state();
+    AttitudeTargetState via_cmd_both = fresh_state();
+    AttitudeTargetState via_heading_both = fresh_state();
+
+    for (int i = 0; i < kSteps; ++i) {
+        step_heading_cmd(thrust, rate_only, via_cmd_rate, gains, dt);
+        step_rate_heading(thrust, yaw_rate, true, via_rate_slew_true, gains, dt);
+        step_rate_heading(thrust, yaw_rate, false, via_rate_slew_false, gains, dt);
+        {
+            const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+            const Vector3f gyro{0.0f, 0.0f, 0.0f};
+            float t = 0.0f, te = 0.0f, ff = 0.0f;
+            Quaternion err;
+            Vector3f av;
+            input_thrust_vector_rate_heading_rads(thrust, yaw_rate, via_rate_default, body, gyro, gains, dt, t, te, ff,
+                                                   err, av);
+        }
+        step_heading_cmd(thrust, angle_only, via_cmd_angle, gains, dt);
+        step_heading_rad(thrust, yaw_angle, 0.0f, via_heading_zero, gains, dt);
+        step_heading_cmd(thrust, angle_and_rate, via_cmd_both, gains, dt);
+        step_heading_rad(thrust, yaw_angle, yaw_rate, via_heading_both, gains, dt);
+    }
+
+    require_state_eq(via_cmd_rate, via_rate_default);
+    require_state_eq(via_cmd_rate, via_rate_slew_true);
+    REQUIRE(std::fabs(via_cmd_rate.ang_vel_target_rads.z) < std::fabs(via_rate_slew_false.ang_vel_target_rads.z));
+
+    require_state_eq(via_cmd_angle, via_heading_zero);
+    require_state_eq(via_cmd_both, via_heading_both);
+
+    // Angle_Only passes 0 rate even when HeadingCommand.yaw_rate_rads is
+    // nonzero. Isolate that from saturating angle-error by commanding
+    // heading_angle 0 (same pin as the heading_rad test above).
+    HeadingCommand angle_only_zero_heading{0.0f, yaw_rate, HeadingMode::Angle_Only};
+    HeadingCommand both_zero_heading{0.0f, yaw_rate, HeadingMode::Angle_And_Rate};
+    AttitudeTargetState cmd_angle_zero = fresh_state();
+    AttitudeTargetState rad_zero = fresh_state();
+    AttitudeTargetState cmd_both_zero = fresh_state();
+    AttitudeTargetState rad_both_zero = fresh_state();
+    for (int i = 0; i < kSteps; ++i) {
+        step_heading_cmd(thrust, angle_only_zero_heading, cmd_angle_zero, gains, dt);
+        step_heading_rad(thrust, 0.0f, 0.0f, rad_zero, gains, dt);
+        step_heading_cmd(thrust, both_zero_heading, cmd_both_zero, gains, dt);
+        step_heading_rad(thrust, 0.0f, yaw_rate, rad_both_zero, gains, dt);
+    }
+    require_state_eq(cmd_angle_zero, rad_zero);
+    require_state_eq(cmd_both_zero, rad_both_zero);
+    REQUIRE(std::fabs(cmd_angle_zero.ang_vel_target_rads.z) < 0.05f);
+    REQUIRE(std::fabs(cmd_both_zero.ang_vel_target_rads.z) > 0.25f);
+}
+
