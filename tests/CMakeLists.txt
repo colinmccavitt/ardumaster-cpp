@@ -967,3 +967,8 @@ catch_discover_tests(can_test)
 add_executable(mode_test mode_test.cpp)
 target_link_libraries(mode_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_test)
+
+# CPP-090 slice 6: max-files rotation + erase_next (in-memory slot table).
+add_executable(logger_rotation_test logger_rotation_test.cpp)
+target_link_libraries(logger_rotation_test PRIVATE ap-logger Catch2::Catch2WithMain)
+catch_discover_tests(logger_rotation_test)

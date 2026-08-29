@@ -22,12 +22,17 @@
 //
 // Divergence from File.cpp stop_logging(): upstream closes _write_fd.
 // We rewind+ftruncate the caller-owned FILE*/fd so WriteBlock still
-// has a handle ("erase then can log again" without reopen). No
-// directory walk, no erase.log_num / logNN.BIN rotation (remaining).
+// has a handle ("erase then can log again" without reopen).
+//
+// Slice 6: optional LogDirectory* — EraseAll that passes the armed /
+// uninitialised gates also sets directory erase_log_num=1. The
+// periodic io_timer unlink of logNN.BIN is LogDirectory::erase_next
+// (in-memory slot clear), not a POSIX directory walk.
 //
 // Remaining vs File.cpp (later slices): _writebuf / io_timer chunked
-// write+fsync, find_last_log, get_log_data, MAVLink LOG_REQUEST_*
-// transfer, max-files rotation.
+// write+fsync, get_log_data, MAVLink LOG_REQUEST_* transfer.
+
+#include <fwcpp/logger/log_directory.hpp>
 
 #include <cstddef>
 #include <cstdio>
@@ -55,6 +60,9 @@ public:
         fd_ = fd;
         file_ = nullptr;
     }
+
+    // Non-owning. EraseAll that proceeds pokes directory->EraseAll().
+    void attach_directory(LogDirectory* directory) { directory_ = directory; }
 
     [[nodiscard]] bool logging_started() const {
         return file_ != nullptr || fd_ >= 0;
@@ -130,6 +138,9 @@ public:
             ::lseek(fd_, 0, SEEK_SET);
             ::ftruncate(fd_, 0);
         }
+        if (directory_ != nullptr) {
+            directory_->EraseAll();
+        }
     }
 
     [[nodiscard]] bool was_logging() const { return was_logging_; }
@@ -148,6 +159,7 @@ private:
 
     std::FILE* file_{nullptr};
     int fd_{-1};
+    LogDirectory* directory_{nullptr};
     std::uint32_t page_adr_{0};
     bool writing_{false};
     std::uint32_t ended_{0};

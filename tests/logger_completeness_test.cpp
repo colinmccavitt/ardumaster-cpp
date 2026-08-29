@@ -10,10 +10,10 @@ using fwcpp::logger::remaining_count;
 using fwcpp::logger::this_slice_count;
 
 TEST_CASE("logger completeness table lists this slice vs remaining", "[logger][completeness]") {
-    REQUIRE(on_main_count() == 6);
+    REQUIRE(on_main_count() == 7);
     REQUIRE(this_slice_count() == 1);
     REQUIRE(remaining_count() > 0);
-    REQUIRE(remaining_count() == 3);
+    REQUIRE(remaining_count() == 2);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(logger_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -25,6 +25,6 @@ TEST_CASE("logger completeness table lists this slice vs remaining", "[logger][c
     REQUIRE(completeness_has("FMT registry", PortStatus::kOnMain));
     REQUIRE(completeness_has("streaming", PortStatus::kOnMain));
     REQUIRE(completeness_has("transfer", PortStatus::kRemaining));
-    REQUIRE(completeness_has("EraseAll", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("max-files rotation", PortStatus::kRemaining));
+    REQUIRE(completeness_has("EraseAll", PortStatus::kOnMain));
+    REQUIRE(completeness_has("max-files rotation", PortStatus::kThisSlice));
 }

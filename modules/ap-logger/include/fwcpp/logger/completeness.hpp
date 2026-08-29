@@ -1,9 +1,9 @@
 #pragma once
 
-// CPP-090 completeness: this slice (EraseAll armed-gate + truncate) vs
-// remaining AP_Logger / DataFlash surfaces. remaining_count() > 0 until
-// later slices land the DataFlash page map, transfer, and max-files
-// rotation. POSIX/SD FileBackend WriteBlock is on main.
+// CPP-090 completeness: this slice (max-files rotation + erase_next) vs
+// remaining AP_Logger / DataFlash surfaces. remaining_count()==2 until
+// later slices land the DataFlash page map and MAVLink transfer.
+// POSIX/SD FileBackend WriteBlock and EraseAll truncate stay on main.
 
 #include <cstddef>
 #include <cstdint>
@@ -39,10 +39,10 @@ inline constexpr LoggerPortItem kLoggerCompleteness[] = {
      "WriteStreaming rate-limit gate (should_log_streaming, 1000/rate_hz ms)"},
     {"transfer", PortStatus::kRemaining,
      "MAVLink LOG_REQUEST_LIST / LOG_ENTRY listing"},
-    {"EraseAll", PortStatus::kThisSlice,
+    {"EraseAll", PortStatus::kOnMain,
      "armed-gate + rewind/truncate of the open stream; no directory walk"},
-    {"max-files rotation", PortStatus::kRemaining,
-     "logNN.BIN / LASTLOG.TXT rotation and erase_next unlink walk"},
+    {"max-files rotation", PortStatus::kThisSlice,
+     "in-memory log slot table, LASTLOG, next_log_number wrap, erase_next"},
 };
 
 [[nodiscard]] inline constexpr std::size_t logger_completeness_size() {
