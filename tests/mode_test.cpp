@@ -197,9 +197,9 @@ TEST_CASE("rc_failsafe allows AltHold (default allows_entry true)", "[copter][mo
 }
 
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
-    REQUIRE(remaining_count() == 8);
+    REQUIRE(remaining_count() == 10);
     REQUIRE(remaining_count() > 0);
-    REQUIRE(mode_this_slice_count() == 6);
+    REQUIRE(mode_this_slice_count() == 7);
     REQUIRE(mode_on_main_count() == 0);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
@@ -209,7 +209,10 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("Mode base virtuals", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("mode_from_mode_num stabilize+althold", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("set_mode checks", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("stabilize_run", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("AUTO_RTL", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("acro_run", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("althold_run", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("remaining mode bodies", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kRemaining));

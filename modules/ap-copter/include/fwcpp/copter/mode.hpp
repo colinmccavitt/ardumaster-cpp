@@ -8,7 +8,9 @@
 // Mode is not a heap singleton. The caller owns FlightModeTable;
 // FlightModeContext holds a non-owning Mode* into that table.
 // ADR-0012: header-only, C++20, no exceptions, no AP::, no flight-path alloc.
-// ACRO/AUTO/RTL bodies stay CCP-039. update_flight_mode is CCP-035 leftover.
+// ModeStabilize::run body is stabilize_run in mode_stabilize.hpp (CCP-039
+// slice 1). ACRO/ALTHOLD run() and AUTO/RTL bodies stay later CCP-039
+// slices. update_flight_mode is CCP-035 leftover.
 
 #include <fwcpp/copter/mode_reason.hpp>
 
@@ -70,6 +72,7 @@ public:
 
     [[nodiscard]] Number mode_number() const override { return Number::STABILIZE; }
     [[nodiscard]] bool init(bool /*ignore_checks*/) override { return true; }
+    // Body is stabilize_run() in mode_stabilize.hpp (injected context).
     void run() override {}
     [[nodiscard]] bool requires_position() const override { return false; }
     [[nodiscard]] bool has_manual_throttle() const override { return true; }

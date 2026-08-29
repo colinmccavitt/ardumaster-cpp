@@ -4,6 +4,7 @@
 #include <fwcpp/copter/copter_leftover.hpp>
 #include <fwcpp/copter/mode.hpp>
 #include <fwcpp/copter/mode_reason.hpp>
+#include <fwcpp/copter/mode_stabilize.hpp>
 #include <fwcpp/copter/pilot_input.hpp>
 #include <fwcpp/copter/motors_output.hpp>
 #include <fwcpp/copter/rc_loop.hpp>

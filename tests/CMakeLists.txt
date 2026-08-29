@@ -987,3 +987,8 @@ catch_discover_tests(pilot_input_test)
 add_executable(hw_backend_test hw_backend_test.cpp)
 target_link_libraries(hw_backend_test PRIVATE ap-hal Catch2::Catch2WithMain)
 catch_discover_tests(hw_backend_test)
+
+# CCP-039 slice 1: ModeStabilize run via input_euler_angle.
+add_executable(mode_stabilize_test mode_stabilize_test.cpp)
+target_link_libraries(mode_stabilize_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(mode_stabilize_test)
