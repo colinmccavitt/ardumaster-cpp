@@ -97,9 +97,9 @@ TEST_CASE("can uninitialized send returns -1", "[hal][can][uninit]") {
     REQUIRE(can.receive(got, ts, flags) == 0);
 }
 
-TEST_CASE("leftover remaining_count is 1 after CAN slice", "[hal][can][leftover]") {
-    REQUIRE(remaining_count() == 1);
-    REQUIRE(completeness_has("CAN", PortStatus::kThisSlice));
+TEST_CASE("leftover remaining_count is 0 after WSPI slice", "[hal][can][leftover]") {
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(completeness_has("CAN", PortStatus::kOnMain));
     REQUIRE(completeness_has("Util", PortStatus::kOnMain));
-    REQUIRE(completeness_has("WSPI", PortStatus::kRemaining));
+    REQUIRE(completeness_has("WSPI", PortStatus::kThisSlice));
 }

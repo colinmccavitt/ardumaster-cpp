@@ -116,9 +116,9 @@ TEST_CASE("available_memory is SITL 512k", "[hal][util][memory]") {
     REQUIRE(util.available_memory() == kSitlAvailableMemoryBytes);
 }
 
-TEST_CASE("leftover remaining_count is 1 after CAN slice", "[hal][util][leftover]") {
-    REQUIRE(remaining_count() == 1);
+TEST_CASE("leftover remaining_count is 0 after WSPI slice", "[hal][util][leftover]") {
+    REQUIRE(remaining_count() == 0);
     REQUIRE(completeness_has("Util", PortStatus::kOnMain));
-    REQUIRE(completeness_has("CAN", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("WSPI", PortStatus::kRemaining));
+    REQUIRE(completeness_has("CAN", PortStatus::kOnMain));
+    REQUIRE(completeness_has("WSPI", PortStatus::kThisSlice));
 }

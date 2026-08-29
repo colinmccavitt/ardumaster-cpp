@@ -972,3 +972,8 @@ catch_discover_tests(mode_test)
 add_executable(logger_rotation_test logger_rotation_test.cpp)
 target_link_libraries(logger_rotation_test PRIVATE ap-logger Catch2::Catch2WithMain)
 catch_discover_tests(logger_rotation_test)
+
+# CPP-088 slice 5: in-memory WSPIDevice command header and transfer.
+add_executable(wspi_test wspi_test.cpp)
+target_link_libraries(wspi_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(wspi_test)
