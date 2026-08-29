@@ -17,10 +17,35 @@
 // Matrix3f and Matrix3d overloads, independent of T - matches upstream),
 // todouble/tofloat.
 //
-// Deliberately NOT in this slice: from_axis_angle (+_fast variants),
-// to_axis_angle, from_vector312/to_vector312, from_angular_velocity,
-// rotate_fast, angular_difference, roll_pitch_difference, earth_to_body,
-// operator/. Tracked in CPP-009's notes.
+// CCP-019 added from_axis_angle (both overloads: the self-normalizing
+// single-Vector3 "rotation vector" form, and the axis+theta form that does
+// NOT normalize its axis - upstream doesn't check, and normalizing here
+// would make this port disagree with it for any caller that passed
+// something else), to_axis_angle (wraps its angle via this file's own
+// wrap_PI - a rotation of 350 degrees comes back as -10, not +350, which
+// matters because every real use of this treats the result as an error to
+// drive to zero), and rotate(const Vector3&) (rotates THIS quaternion by a
+// delta rotation vector - a genuinely different operation from the
+// already-existing operator*(Vector3) above, which rotates an external
+// vector by this quaternion and leaves this quaternion untouched; see the
+// methods themselves for the full writeup). copter-rust's own COP-007
+// ticket ported this same function group; its Rust port named its
+// vector-rotation helper "rotate" (i.e. what this port calls
+// operator*(Vector3)) and did not separately port upstream's own
+// self-mutating rotate(Vector3) - this port follows the real upstream
+// semantics/name for rotate(Vector3) rather than the Rust port's reused
+// name, so the two ports' "rotate" are NOT the same operation; do not
+// assume parity between them by name alone.
+//
+// Deliberately NOT in this slice: from_vector312/to_vector312,
+// from_angular_velocity, from_axis_angle_fast/rotate_fast (the small-angle-
+// approximation family - only valid for rotation vectors under ~0.17
+// radians / 10 degrees, real lines 507+), angular_difference,
+// roll_pitch_difference, earth_to_body, operator/. Tracked in CPP-009's
+// notes. thrust_vector_rotation_angles/thrust_heading_rotation_angles (the
+// quaternion error-decomposition functions CCP-019's own work unblocks,
+// per copter-rust's own COP-007 sequencing) are a deliberately separate,
+// later ticket - not part of CCP-019's own scope either.
 //
 // from_rotation(Rotation)/rotate(Rotation) added by CPP-019 once the
 // Rotation enum existed. from_rotation is a precomputed constant table
@@ -38,13 +63,15 @@
 // LITERAL SAFETY: from_euler's `roll*0.5` etc use a bare 0.5 - exactly
 // representable in both float and double, so -fsingle-precision-constant's
 // float-vs-double parsing makes no difference here (same reasoning already
-// used for wrap_360's 360.0/36000.0 literals). is_unit_length's 1E-3
-// tolerance IS affected by the flag (0.001 is not exact in either format),
-// but the function's own doc comment already calls this "somewhat greater
-// than sqrt(FLT_EPSILON)" - a loose heuristic threshold, not a value with
-// D-003-style downstream consequences - so the ~1e-10 difference between
-// the float- and double-rounded constant is immaterial and this stays
-// header-only rather than getting the compiled-.cpp treatment.
+// used for wrap_360's 360.0/36000.0 literals). from_axis_angle's own
+// `theta * 0.5` and to_axis_angle's `2.0 * atan2(...)` are the same kind of
+// exactly-representable bare literal, for the same reason. is_unit_length's
+// 1E-3 tolerance IS affected by the flag (0.001 is not exact in either
+// format), but the function's own doc comment already calls this "somewhat
+// greater than sqrt(FLT_EPSILON)" - a loose heuristic threshold, not a
+// value with D-003-style downstream consequences - so the ~1e-10 difference
+// between the float- and double-rounded constant is immaterial and this
+// stays header-only rather than getting the compiled-.cpp treatment.
 //
 // normalize()'s zero-quaternion path reports through fwcpp::InternalError
 // (CPP-005), matching upstream's
@@ -183,6 +210,77 @@ struct QuaternionT {
         yaw = static_cast<double>(get_euler_yaw());
     }
     void to_euler(Vector3d& rpy) const { to_euler(rpy.x, rpy.y, rpy.z); }
+
+    // Build from an axis-angle "rotation vector": the vector's own direction
+    // is the rotation axis and its own length is the rotation angle in
+    // radians. This is the SELF-normalizing entry point - it normalizes `v`
+    // internally (dividing by its own length) before delegating to the
+    // axis+theta overload just below, which does NOT normalize. A zero-
+    // length `v` has no defined axis, so this resets to the identity
+    // rotation rather than dividing by zero.
+    void from_axis_angle(Vector3<T> v) {
+        const T theta = v.length();
+        if (math::is_zero(theta)) {
+            q1 = T(1);
+            q2 = q3 = q4 = T(0);
+            return;
+        }
+        v /= theta;
+        from_axis_angle(v, theta);
+    }
+
+    // Build from an axis and an angle (radians) kept separate. `axis` MUST
+    // already be a unit vector - matching real upstream, this does NOT
+    // check or normalize its length. Normalizing here would make this port
+    // disagree with real upstream for any caller that deliberately passed a
+    // non-unit axis (relying on the OTHER, self-normalizing overload above
+    // instead) - so a non-unit `axis` here produces the same literal,
+    // unnormalized-axis result real upstream would. A zero `theta` resets
+    // to the identity rotation, same as the overload above.
+    void from_axis_angle(const Vector3<T>& axis, T theta) {
+        if (math::is_zero(theta)) {
+            q1 = T(1);
+            q2 = q3 = q4 = T(0);
+            return;
+        }
+        const T st2 = std::sin(theta * T(0.5));
+        q1 = std::cos(theta * T(0.5));
+        q2 = axis.x * st2;
+        q3 = axis.y * st2;
+        q4 = axis.z * st2;
+    }
+
+    // Rotate THIS quaternion by the delta rotation vector `v` (axis
+    // direction, angle as length) - i.e. compose *this = *this * r, where r
+    // is the quaternion for `v` built via the self-normalizing from_
+    // axis_angle(Vector3) overload above. This is NOT the same operation as
+    // operator*(Vector3) above: that rotates an external VECTOR by this
+    // quaternion and leaves this quaternion unchanged; this rotates the
+    // QUATERNION ITSELF and leaves any external vector alone. Easy to
+    // conflate by name/shape alone - see the file banner's own note on this.
+    void rotate(const Vector3<T>& v) {
+        QuaternionT<T> r;
+        r.from_axis_angle(v);
+        (*this) *= r;
+    }
+
+    // Convert this quaternion to a rotation vector: its direction is the
+    // rotation axis, its length is the rotation angle in radians. The angle
+    // is wrapped via this file's own wrap_PI to (-pi, pi] - e.g. a rotation
+    // of 350 degrees comes back as -10 degrees, not +350 - because every
+    // real use of this treats the result as an error to be driven to zero,
+    // where the unwrapped form would command a nearly-full turn instead of
+    // a small correction. When the vector part's own magnitude `l` is zero
+    // (a near-identity quaternion), `v` is left as the raw, un-rescaled
+    // (q2,q3,q4) - a near-zero vector regardless, not an error path.
+    void to_axis_angle(Vector3<T>& v) const {
+        const T l = std::sqrt(q2 * q2 + q3 * q3 + q4 * q4);
+        v = Vector3<T>(q2, q3, q4);
+        if (!math::is_zero(l)) {
+            v /= l;
+            v *= wrap_PI(T(2) * std::atan2(l, q1));
+        }
+    }
 
     // Both overloads exist on every QuaternionT<T> regardless of T, exactly
     // as upstream declares them (output precision is a caller choice, not
