@@ -1634,3 +1634,195 @@ TEST_CASE("setup_y6_matrix: Y6B and Y6F reuse no FrameType enumerator from any e
     REQUIRE_FALSE(octaquad.setup_octaquad_matrix(MotorsMatrix::FrameType::Y6F));
 }
 
+// =======================================================================
+// CCP-007: setup_dodecahexa_matrix - every real in-scope frame type,
+// checked against hand-computed values from the real upstream angle/yaw
+// inputs (AP_MotorsMatrix.cpp lines 1140-1188). Angle-based frames reuse
+// checkAngleFrame() above (both PLUS and X are plain add_motors() calls
+// over a 12-entry MotorDef table - no add_motors_raw()/direct add_motor()
+// calls anywhere in this function). A RETURN to the SIMPLE default: shape
+// used by setup_quad_matrix/setup_hexa_matrix/setup_octa_matrix/
+// setup_octaquad_matrix above, NOT a continuation of setup_y6_matrix's
+// own productive-default departure - see motors_matrix.hpp's file banner
+// "CCP-007 ADDITION" for the full investigation, including the
+// correction of the ticket's own claim about which ticket first added
+// zero new FrameType enumerators (CCP-003, not this one).
+// =======================================================================
+
+namespace {
+
+// Confirms the real, specific alternating-pair structure the ticket calls
+// out as the one pitfall this frame class is exposed to: both PLUS and X
+// repeat each of six physical-position angles TWICE (a top/bottom motor
+// pair), and the two motors of each pair must have EXACTLY OPPOSITE yaw
+// factors (one CW, one CCW) and the SAME roll/pitch (since they share the
+// same angle). A copy-paste bug that collapsed a pair into two IDENTICAL
+// yaw factors would still populate 12 motors with plausible angles and
+// would NOT be caught by checkAngleFrame() alone if the expected-value
+// table itself were copy-pasted the same wrong way - so this check
+// re-derives the "must be opposite" property structurally (yaw(2i) ==
+// -yaw(2i+1)) rather than only comparing against a second hard-coded
+// expected table.
+void checkAlternatingTopBottomPairs(const MotorsMatrix& m) {
+    for (std::uint8_t pair = 0; pair < 6; ++pair) {
+        const std::uint8_t top = static_cast<std::uint8_t>(pair * 2);
+        const std::uint8_t bottom = static_cast<std::uint8_t>(pair * 2 + 1);
+        INFO("physical position " << static_cast<int>(pair) << " (motors " << static_cast<int>(top) << "/"
+                                   << static_cast<int>(bottom) << ")");
+        REQUIRE(m.motor_enabled(top));
+        REQUIRE(m.motor_enabled(bottom));
+        // Same angle -> same roll/pitch factors for the pair.
+        REQUIRE(m.roll_factor(top) == Approx(m.roll_factor(bottom)).margin(1e-4));
+        REQUIRE(m.pitch_factor(top) == Approx(m.pitch_factor(bottom)).margin(1e-4));
+        // The real pitfall: yaw factors must be EXACT opposites, never
+        // equal - a collapsed/copy-pasted pair would fail this.
+        REQUIRE(m.yaw_factor(top) == Approx(-m.yaw_factor(bottom)).margin(1e-6));
+        REQUIRE(std::fabs(m.yaw_factor(top)) == Approx(1.0f).margin(1e-6));
+        REQUIRE(m.yaw_factor(top) != Approx(m.yaw_factor(bottom)).margin(1e-6));
+    }
+}
+
+} // namespace
+
+TEST_CASE("setup_dodecahexa_matrix: PLUS matches hand-computed angle/yaw/test_order across all twelve motors",
+          "[motors][setup_dodecahexa_matrix][plus]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_dodecahexa_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(m.frame_class_string() == "DODECAHEXA");
+    REQUIRE(m.frame_type_string() == "PLUS");
+    const AngleMotor expected[] = {
+        {0.0f, kYawFactorCcw, 1},    // forward-top
+        {0.0f, kYawFactorCw, 2},     // forward-bottom
+        {60.0f, kYawFactorCw, 3},    // forward-right-top
+        {60.0f, kYawFactorCcw, 4},   // forward-right-bottom
+        {120.0f, kYawFactorCcw, 5},  // back-right-top
+        {120.0f, kYawFactorCw, 6},   // back-right-bottom
+        {180.0f, kYawFactorCw, 7},   // back-top
+        {180.0f, kYawFactorCcw, 8},  // back-bottom
+        {-120.0f, kYawFactorCcw, 9}, // back-left-top
+        {-120.0f, kYawFactorCw, 10}, // back-left-bottom
+        {-60.0f, kYawFactorCw, 11},  // forward-left-top
+        {-60.0f, kYawFactorCcw, 12}, // forward-left-bottom
+    };
+    checkAngleFrame(m, expected, 12);
+    // Motor 12 and beyond must remain untouched - dodecahexa is exactly
+    // 12 motors, not more.
+    for (std::uint8_t i = 12; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+    }
+}
+
+TEST_CASE("setup_dodecahexa_matrix: X matches hand-computed angle/yaw/test_order across all twelve motors",
+          "[motors][setup_dodecahexa_matrix][x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_dodecahexa_matrix(MotorsMatrix::FrameType::X));
+    REQUIRE(m.frame_class_string() == "DODECAHEXA");
+    REQUIRE(m.frame_type_string() == "X");
+    const AngleMotor expected[] = {
+        {30.0f, kYawFactorCcw, 1},   // forward-right-top
+        {30.0f, kYawFactorCw, 2},    // forward-right-bottom
+        {90.0f, kYawFactorCw, 3},    // right-top
+        {90.0f, kYawFactorCcw, 4},   // right-bottom
+        {150.0f, kYawFactorCcw, 5},  // back-right-top
+        {150.0f, kYawFactorCw, 6},   // back-right-bottom
+        {-150.0f, kYawFactorCw, 7},  // back-left-top
+        {-150.0f, kYawFactorCcw, 8}, // back-left-bottom
+        {-90.0f, kYawFactorCcw, 9},  // left-top
+        {-90.0f, kYawFactorCw, 10},  // left-bottom
+        {-30.0f, kYawFactorCw, 11},  // forward-left-top
+        {-30.0f, kYawFactorCcw, 12}, // forward-left-bottom
+    };
+    checkAngleFrame(m, expected, 12);
+    for (std::uint8_t i = 12; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+    }
+}
+
+TEST_CASE("setup_dodecahexa_matrix: PLUS's six top/bottom motor pairs alternate yaw factors, not collapsed to "
+          "identical values - THE ONE PITFALL THIS TICKET GUARDS AGAINST",
+          "[motors][setup_dodecahexa_matrix][plus][pitfall]") {
+    // Per the ticket's own explicit instruction: a test that would catch
+    // a copy-paste bug collapsing a pair into two identical yaw factors
+    // instead of the real alternating CW/CCW pattern.
+    MotorsMatrix m;
+    REQUIRE(m.setup_dodecahexa_matrix(MotorsMatrix::FrameType::Plus));
+    checkAlternatingTopBottomPairs(m);
+}
+
+TEST_CASE("setup_dodecahexa_matrix: X's six top/bottom motor pairs alternate yaw factors, not collapsed to "
+          "identical values - THE ONE PITFALL THIS TICKET GUARDS AGAINST",
+          "[motors][setup_dodecahexa_matrix][x][pitfall]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_dodecahexa_matrix(MotorsMatrix::FrameType::X));
+    checkAlternatingTopBottomPairs(m);
+}
+
+TEST_CASE("setup_dodecahexa_matrix: returns true for every real in-scope frame type and sets frame_class_string "
+          "to DODECAHEXA",
+          "[motors][setup_dodecahexa_matrix]") {
+    const MotorsMatrix::FrameType all_types[] = {
+        MotorsMatrix::FrameType::Plus,
+        MotorsMatrix::FrameType::X,
+    };
+    for (const auto ft : all_types) {
+        MotorsMatrix m;
+        REQUIRE(m.setup_dodecahexa_matrix(ft));
+        REQUIRE(m.frame_class_string() == "DODECAHEXA");
+        // Every real frame type populates all twelve motor slots 0-11
+        // (dodecahexa has twelve motors, unlike setup_quad_matrix's own
+        // four or setup_hexa_matrix's/setup_y6_matrix's own six).
+        for (std::uint8_t i = 0; i < 12; ++i) {
+            REQUIRE(m.motor_enabled(i));
+        }
+    }
+}
+
+TEST_CASE("setup_dodecahexa_matrix: an out-of-range frame type hits the real SIMPLE default branch and returns "
+          "false",
+          "[motors][setup_dodecahexa_matrix][default]") {
+    // Confirms the real upstream default case ("dodeca-hexa frame class
+    // does not support this frame type; return false;") - the SIMPLE
+    // kind, a return to the shape used by setup_quad_matrix's/
+    // setup_hexa_matrix's/setup_octa_matrix's/setup_octaquad_matrix's own
+    // defaults, NOT setup_y6_matrix's own productive default (a
+    // structural departure specific to that one ticket, per its own
+    // banner section).
+    MotorsMatrix m;
+    REQUIRE_FALSE(m.setup_dodecahexa_matrix(static_cast<MotorsMatrix::FrameType>(255)));
+    for (std::uint8_t i = 0; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+    }
+}
+
+TEST_CASE("setup_dodecahexa_matrix: PLUS reuses the SAME FrameType enumerator as setup_quad_matrix's own PLUS, "
+          "but yields dodecahexa-specific values on a twelve-motor table",
+          "[motors][setup_dodecahexa_matrix][setup_quad_matrix][plus]") {
+    // Direct evidence for the file banner's "CCP-007 ADDITION" enum
+    // investigation: MotorsMatrix::FrameType::Plus is the literal same
+    // C++ enumerator passed to both functions (mirroring upstream's real
+    // single shared motor_frame_type enum), yet each function's own frame
+    // table produces its own real, different numeric results - dispatch
+    // is by which FUNCTION is called (i.e. which real motor_frame_class
+    // the caller selected), not by a dodecahexa-specific enumerator
+    // value. This ticket adds ZERO new enumerators to FrameType - see
+    // file banner for the correction of the ticket's own claim that this
+    // would be the first such ticket (it is the second; CCP-003 was
+    // first).
+    MotorsMatrix quad;
+    MotorsMatrix dodecahexa;
+    REQUIRE(quad.setup_quad_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(dodecahexa.setup_dodecahexa_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(quad.frame_class_string() == "QUAD");
+    REQUIRE(dodecahexa.frame_class_string() == "DODECAHEXA");
+    // Quad's PLUS motor 0 sits at 90 degrees (yaw CCW); dodecahexa's PLUS
+    // motor 0 sits at 0 degrees (yaw CCW too, but a different real angle
+    // and therefore different roll/pitch) - genuinely different real
+    // tables behind the same enumerator.
+    REQUIRE(quad.roll_factor(0) != Approx(dodecahexa.roll_factor(0)));
+    // Dodecahexa populates eight motor slots quad never touches.
+    for (std::uint8_t i = 4; i < 12; ++i) {
+        REQUIRE_FALSE(quad.motor_enabled(i));
+        REQUIRE(dodecahexa.motor_enabled(i));
+    }
+}
+

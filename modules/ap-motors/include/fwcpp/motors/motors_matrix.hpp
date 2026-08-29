@@ -663,29 +663,101 @@
 // metadata, out of scope for the same reason as the other four
 // _mav_type writes.
 //
+// CCP-007 ADDITION (setup_dodecahexa_matrix) - upstream AP_MotorsMatrix.cpp,
+// real function at line 1140 (re-verified directly against the pinned
+// worktree; the ticket's own guessed 1140-1188 span matched exactly, with
+// the real AP_MOTORS_FRAME_DODECAHEXA_ENABLED #if/#endif bracketing it at
+// 1139/1189). The real switch(frame_type) has exactly TWO explicit cases -
+// PLUS (1145), X (1164) - plus a real default (1183). A genuine RETURN to
+// every setup_*_matrix's own structure from BEFORE setup_y6_matrix
+// (CCP-002 through CCP-005), NOT a continuation of Y6's own
+// productive-default departure - re-verified directly, not assumed from
+// "the function right after Y6 in the file". Confirmed directly: lines
+// 1183-1185 are `default: // dodeca-hexa frame class does not support
+// this frame type\n return false;` - the SIMPLE kind, matching
+// setup_quad_matrix's/setup_hexa_matrix's/setup_octa_matrix's/
+// setup_octaquad_matrix's own defaults exactly. Both explicit cases are
+// plain add_motors() calls over a static 12-entry MotorDef table -
+// dodecahexa = 12 motors (six physical positions, each with a top/bottom
+// motor pair) - no add_motors_raw()/direct add_motor() calls anywhere in
+// this function, a genuinely simpler shape than several earlier tickets.
+//
+// Dodecahexa's own two real frame types, transcribed exactly from the real
+// source (angle/yaw/order triples, in real array order - upstream's own
+// per-motor comments name each as a top/bottom pair at one of six physical
+// positions: forward, forward-right, back-right, back, back-left,
+// forward-left):
+//   PLUS (1145-1163): (0,CCW,1) (0,CW,2) (60,CW,3) (60,CCW,4) (120,CCW,5)
+//     (120,CW,6) (180,CW,7) (180,CCW,8) (-120,CCW,9) (-120,CW,10)
+//     (-60,CW,11) (-60,CCW,12).
+//   X (1164-1182): (30,CCW,1) (30,CW,2) (90,CW,3) (90,CCW,4) (150,CCW,5)
+//     (150,CW,6) (-150,CW,7) (-150,CCW,8) (-90,CCW,9) (-90,CW,10)
+//     (-30,CW,11) (-30,CCW,12) - same repeated-pair-of-six-positions
+//     structure as PLUS, rotated 30 degrees.
+//
+// THE ONE REAL PITFALL THIS TICKET GUARDS AGAINST, RE-VERIFIED
+// MOTOR-BY-MOTOR: both tables repeat each angle TWICE (a top/bottom pair
+// per physical position) with ALTERNATING yaw factors - CCW,CW,CW,CCW,
+// CCW,CW,CW,CCW,CCW,CW,CW,CCW for both PLUS and X (identical alternation
+// pattern, only the angles differ). A copy-paste error collapsing a pair
+// into two IDENTICAL yaw factors (e.g. both CCW instead of CCW-then-CW)
+// would still compile and still populate all 12 motor slots, but would
+// silently produce a frame with no differential top/bottom yaw authority
+// at that physical position. No such bug is present here (re-verified
+// against the real source above); motors_matrix_test.cpp's own tests
+// check every pair's two yaw factors are opposite, not merely that 12
+// motors exist with plausible-looking angles.
+//
+// FrameType-ENUM INVESTIGATION (this ticket's own explicit question,
+// answered by re-reading the CURRENT enum below directly before writing
+// anything): BOTH of dodecahexa's real frame types, PLUS and X, were
+// CONFIRMED ALREADY PRESENT in this port's own FrameType enum, left over
+// from CCP-002's own setup_quad_matrix work - re-checked directly against
+// the enum's real declaration, not assumed from the ticket text. This
+// ticket therefore adds ZERO new enumerators to FrameType.
+//
+// CORRECTION TO THE TICKET'S OWN CLAIM (found by independently checking
+// this file's own history rather than trusting the ticket's summary, per
+// this ticket's explicit instruction not to trust it as complete): the
+// ticket asserts this would be "the first setup_*_matrix ticket in this
+// arc" to add zero new enumerators. That is NOT correct - CCP-003's own
+// setup_hexa_matrix already added zero new enumerators (see "CCP-003
+// ADDITION" above: "CCP-003 added ZERO new enumerators: all five of
+// setup_hexa_matrix's real frame types... were already present from
+// CCP-002's setup_quad_matrix work"). CCP-007 is therefore the SECOND
+// setup_*_matrix ticket in this arc to add zero new enumerators, not the
+// first - stated here as a positive, independently-verified confirmation
+// (real, checked evidence, not an omission), with the ticket's own
+// over-claim explicitly corrected rather than silently repeated.
+//
+// NOT ported (same disclosed omission class as every other
+// setup_*_matrix's own _mav_type write above): the real upstream also
+// sets `_mav_type = MAV_TYPE_DODECAROTOR;` unconditionally at the top of
+// setup_dodecahexa_matrix (line 1142, before the switch) - pure
+// MAVLink/GCS metadata, out of scope for the same reason as the other
+// five _mav_type writes.
+//
 // DEFERRED FUTURE PHASES (named explicitly, not silently omitted):
 //   1. Remaining frame tables - setup_quad_matrix (line 576) is DONE as of
 //      CCP-002, setup_hexa_matrix (line 775) is DONE as of CCP-003,
 //      setup_octa_matrix (line 854) is DONE as of CCP-004,
-//      setup_octaquad_matrix (line 973) is DONE as of CCP-005, and
-//      setup_y6_matrix (line 1191) is DONE as of CCP-006 (see
+//      setup_octaquad_matrix (line 973) is DONE as of CCP-005,
+//      setup_y6_matrix (line 1191) is DONE as of CCP-006, and
+//      setup_dodecahexa_matrix (line 1140) is DONE as of CCP-007 (see
 //      "CCP-002 ADDITION"/"CCP-003 ADDITION"/"CCP-004 ADDITION"/
-//      "CCP-005 ADDITION"/"CCP-006 ADDITION" above); the REMAINING TWO
-//      frame-class setup functions - setup_dodecahexa_matrix (already
-//      ported's neighbor at upstream line ~1150, confirmed simple
-//      "return false" default per CCP-005's own file-banner note above)
-//      and setup_deca_matrix - and setup_motors' own dispatcher (which
-//      chooses among all seven by frame CLASS - motor_frame_class, see
-//      CCP-003's own enum-sharing investigation above) remain future
-//      phases, named explicitly here so none is silently folded into
-//      another ticket's scope. copter-rust's own COP-005 finding that
-//      Y6's `default:` switch branch is productive - answering for 24 of
-//      the real 64 upstream frame configurations - is now independently
-//      re-verified and resolved by THIS ticket, CCP-006, above; not
-//      deferred further. (COP-005's other two findings - the X8
-//      co-rotating scaling and its real float-vs-double pitfall - were
-//      independently re-verified and resolved by CCP-005; also not
-//      deferred further.)
+//      "CCP-005 ADDITION"/"CCP-006 ADDITION"/"CCP-007 ADDITION" above);
+//      the ONE REMAINING frame-class setup function - setup_deca_matrix -
+//      and setup_motors' own dispatcher (which chooses among all seven by
+//      frame CLASS - motor_frame_class, see CCP-003's own enum-sharing
+//      investigation above) remain future phases, named explicitly here
+//      so neither is silently folded into another ticket's scope.
+//      copter-rust's own COP-005 finding that Y6's `default:` switch
+//      branch is productive - answering for 24 of the real 64 upstream
+//      frame configurations - was independently re-verified and resolved
+//      by CCP-006 above; not deferred further. (COP-005's other two
+//      findings - the X8 co-rotating scaling and its real float-vs-double
+//      pitfall - were independently re-verified and resolved by CCP-005;
+//      also not deferred further.)
 //   2. Output stage (output_to_motors, output_armed_stabilizing,
 //      check_for_failed_motor, thrust_compensation, disable_yaw_torque) -
 //      needs real thrust-linearization/battery-compensation infrastructure
@@ -820,7 +892,15 @@ public:
     // switch this port has ported so far - see file banner's
     // "CCP-006 ADDITION" for the full investigation, including the real
     // PRODUCTIVE `default:` fallback setup_y6_matrix(FrameType) below
-    // reaches for every FrameType value OTHER than these two.
+    // reaches for every FrameType value OTHER than these two. CCP-007
+    // added ZERO new enumerators - both of setup_dodecahexa_matrix's real
+    // frame types (PLUS/X) were re-confirmed already present from
+    // CCP-002's own work and are reused verbatim by
+    // setup_dodecahexa_matrix(FrameType) below - see file banner's
+    // "CCP-007 ADDITION" for the full investigation, including a
+    // correction of the ticket's own (incorrect) claim that this would
+    // be the first such zero-growth ticket in this arc - CCP-003 already
+    // was.
     enum class FrameType : std::uint8_t {
         Plus,
         X,
@@ -1673,6 +1753,80 @@ public:
         // `return false;` anywhere in its body. The default: case above
         // IS a working configuration, not a rejection, so this
         // unconditional `true` is correct, not an oversight.
+        return true;
+    }
+
+    // setup_dodecahexa_matrix - CCP-007 port of upstream
+    // AP_MotorsMatrix::setup_dodecahexa_matrix (AP_MotorsMatrix.cpp line
+    // 1140). Every case's angle/yaw-factor/testing-order values are
+    // transcribed exactly from the real source - see file banner's
+    // "CCP-007 ADDITION" for the full case-list/default-branch/enum
+    // investigation. Takes the SAME FrameType parameter type as every
+    // setup_*_matrix above and reuses its Plus/X enumerators verbatim -
+    // adds ZERO new enumerators (see file banner, including the
+    // correction of the ticket's own claim about which ticket was first
+    // to do so). A RETURN to the SIMPLE default: shape used by
+    // setup_quad_matrix/setup_hexa_matrix/setup_octa_matrix/
+    // setup_octaquad_matrix above, NOT a continuation of
+    // setup_y6_matrix's own productive-default departure. Returns false
+    // (upstream's own real return value) for any FrameType not handled
+    // below.
+    [[nodiscard]] bool setup_dodecahexa_matrix(FrameType frame_type) {
+        frame_class_string_ = "DODECAHEXA";
+        switch (frame_type) {
+        case FrameType::Plus: {
+            // Twelve motors - six physical positions (forward,
+            // forward-right, back-right, back, back-left, forward-left),
+            // each with a top/bottom motor pair sharing the same angle
+            // but ALTERNATING yaw factors - see file banner's "THE ONE
+            // REAL PITFALL" note for why the alternation (not just the
+            // angle) is checked by this ticket's own tests.
+            frame_type_string_ = "PLUS";
+            static constexpr MotorDef motors[] = {
+                {0.0f, kYawFactorCcw, 1},    // forward-top
+                {0.0f, kYawFactorCw, 2},     // forward-bottom
+                {60.0f, kYawFactorCw, 3},    // forward-right-top
+                {60.0f, kYawFactorCcw, 4},   // forward-right-bottom
+                {120.0f, kYawFactorCcw, 5},  // back-right-top
+                {120.0f, kYawFactorCw, 6},   // back-right-bottom
+                {180.0f, kYawFactorCw, 7},   // back-top
+                {180.0f, kYawFactorCcw, 8},  // back-bottom
+                {-120.0f, kYawFactorCcw, 9}, // back-left-top
+                {-120.0f, kYawFactorCw, 10}, // back-left-bottom
+                {-60.0f, kYawFactorCw, 11},  // forward-left-top
+                {-60.0f, kYawFactorCcw, 12}, // forward-left-bottom
+            };
+            add_motors(motors, 12);
+            break;
+        }
+        case FrameType::X: {
+            // Same repeated-pair-of-six-positions structure as PLUS
+            // above, rotated 30 degrees.
+            frame_type_string_ = "X";
+            static constexpr MotorDef motors[] = {
+                {30.0f, kYawFactorCcw, 1},   // forward-right-top
+                {30.0f, kYawFactorCw, 2},    // forward-right-bottom
+                {90.0f, kYawFactorCw, 3},    // right-top
+                {90.0f, kYawFactorCcw, 4},   // right-bottom
+                {150.0f, kYawFactorCcw, 5},  // back-right-top
+                {150.0f, kYawFactorCw, 6},   // back-right-bottom
+                {-150.0f, kYawFactorCw, 7},  // back-left-top
+                {-150.0f, kYawFactorCcw, 8}, // back-left-bottom
+                {-90.0f, kYawFactorCcw, 9},  // left-top
+                {-90.0f, kYawFactorCw, 10},  // left-bottom
+                {-30.0f, kYawFactorCw, 11},  // forward-left-top
+                {-30.0f, kYawFactorCcw, 12}, // forward-left-bottom
+            };
+            add_motors(motors, 12);
+            break;
+        }
+        default:
+            // dodeca-hexa frame class does not support this frame type -
+            // matches upstream's own real default case exactly (see file
+            // banner: this is the SIMPLE kind, a return to the shape used
+            // before setup_y6_matrix's own productive one).
+            return false;
+        }
         return true;
     }
 
