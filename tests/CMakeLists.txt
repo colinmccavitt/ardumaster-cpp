@@ -941,3 +941,12 @@ catch_discover_tests(semaphore_test)
 add_executable(hal_leftover_test hal_leftover_test.cpp)
 target_link_libraries(hal_leftover_test PRIVATE ap-hal Catch2::Catch2WithMain)
 catch_discover_tests(hal_leftover_test)
+
+# CPP-088 slice 2: SITL I2C/SPI Device register access.
+add_executable(i2c_device_test i2c_device_test.cpp)
+target_link_libraries(i2c_device_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(i2c_device_test)
+
+add_executable(spi_device_test spi_device_test.cpp)
+target_link_libraries(spi_device_test PRIVATE ap-hal Catch2::Catch2WithMain)
+catch_discover_tests(spi_device_test)

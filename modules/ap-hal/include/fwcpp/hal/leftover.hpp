@@ -1,8 +1,8 @@
 #pragma once
 
-// CPP-088 completeness: this slice (SITL GPIO + Semaphore) vs remaining
-// AP_HAL device-bus / Util surfaces. remaining_count() > 0 until later
-// slices land I2C/SPI/Device register access, Util, WSPI, and CAN.
+// CPP-088 completeness: slice 2 (SITL I2C/SPI Device register access)
+// vs remaining AP_HAL Util / WSPI / CAN. remaining_count() == 3 until
+// later slices land those surfaces. Slice 1 GPIO + Semaphore is on main.
 
 #include <cstddef>
 #include <cstdint>
@@ -23,17 +23,19 @@ struct HalPortItem {
 };
 
 inline constexpr HalPortItem kHalCompleteness[] = {
-    {"GPIO", PortStatus::kThisSlice,
+    {"GPIO", PortStatus::kOnMain,
      "AP_HAL::GPIO pin mode, digital read/write; SITL 16-pin table"},
-    {"Semaphore", PortStatus::kThisSlice,
+    {"Semaphore", PortStatus::kOnMain,
      "AP_HAL::Semaphore take/give, take_nonblocking (recursive counter)"},
-    {"BinarySemaphore", PortStatus::kThisSlice,
+    {"BinarySemaphore", PortStatus::kOnMain,
      "AP_HAL::BinarySemaphore wait/signal (pending flag, no OS thread)"},
-    {"completeness catalog", PortStatus::kThisSlice, "this table"},
-    {"I2CDevice", PortStatus::kRemaining, "AP_HAL::I2CDevice bus transfers"},
-    {"SPIDevice", PortStatus::kRemaining, "AP_HAL::SPIDevice bus transfers"},
-    {"Device register access", PortStatus::kRemaining,
-     "AP_HAL::Device register r/w, set_speed, periodic callback"},
+    {"completeness catalog", PortStatus::kOnMain, "this table"},
+    {"I2CDevice", PortStatus::kThisSlice,
+     "AP_HAL::I2CDevice in-memory bank transfers (no Linux ioctl)"},
+    {"SPIDevice", PortStatus::kThisSlice,
+     "AP_HAL::SPIDevice in-memory bank transfers (no Linux ioctl)"},
+    {"Device register access", PortStatus::kThisSlice,
+     "AP_HAL::Device read_registers/write_register, set_speed, periodic token"},
     {"Util", PortStatus::kRemaining,
      "AP_HAL::Util safety_switch, system_id, persistent_data"},
     {"WSPI", PortStatus::kRemaining, "AP_HAL::WSPIDevice wrap/quad SPI"},
