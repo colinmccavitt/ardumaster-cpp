@@ -38,7 +38,7 @@ inline constexpr TiltrotorPortItem kTiltrotorCompleteness[] = {
     {"Tiltrotor::binary_update", PortStatus::kThisSlice, "tiltrotor_control.hpp binary_update"},
     {"Tiltrotor::binary_slew", PortStatus::kThisSlice, "tiltrotor_control.hpp binary_slew"},
     {"Tiltrotor::update", PortStatus::kThisSlice, "tiltrotor_control.hpp update dispatch"},
-    {"Tiltrotor::vectoring", PortStatus::kRemaining, "tiltrotor.cpp"},
+    {"Tiltrotor::vectoring", PortStatus::kThisSlice, "tiltrotor_control.hpp vectoring"},
     {"Tiltrotor::bicopter_output", PortStatus::kRemaining, "tiltrotor.cpp"},
     {"tilt_compensate_angle", PortStatus::kRemaining, "tiltrotor.cpp"},
     {"tilt_compensate", PortStatus::kRemaining, "tiltrotor.cpp"},

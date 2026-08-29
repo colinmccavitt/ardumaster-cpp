@@ -95,6 +95,170 @@ struct SlewFlightFlags {
     return current_tilt > std::min(tilt_threshold, get_forward_flight_tilt(flap_angle_deg, flap_auto_slew_pct));
 }
 
+enum class VectoringPath : std::uint8_t {
+    kNone,
+    kDisarmedVtol,
+    kDisarmedFixedWing,
+    kNoYawFixedWing,
+    kVectoredYaw,
+};
+
+struct VectoringGeometry {
+    float total_angle{90.0f};
+    float zero_out{0.0f};
+    float fixed_tilt_limit{0.0f};
+    float level_out{1.0f};
+    float base_output{0.0f};
+};
+
+[[nodiscard]] inline VectoringGeometry vectoring_geometry(float current_tilt, float tilt_yaw_angle,
+                                                         float fixed_angle) {
+    VectoringGeometry g{};
+    g.total_angle = 90.0f + tilt_yaw_angle + fixed_angle;
+    g.zero_out = tilt_yaw_angle / g.total_angle;
+    g.fixed_tilt_limit = fixed_angle / g.total_angle;
+    g.level_out = 1.0f - g.fixed_tilt_limit;
+    g.base_output = g.zero_out + (current_tilt * (g.level_out - g.zero_out));
+    return g;
+}
+
+struct VectoringInputs {
+    float current_tilt{0.0f};
+    float tilt_yaw_angle{kTiltYawAngleDefault};
+    float fixed_angle{kTiltFixAngleDefault};
+    float fixed_gain{kTiltFixGainDefault};
+    std::int32_t options{0};
+    std::uint32_t now_ms{0};
+    std::uint32_t last_armed_change_ms{0};
+    bool armed_and_safety_off{true};
+    bool in_vtol_mode{true};
+    float rudder_control_in{0.0f};
+    float rudder_range{kTiltElevonScale};
+    float elevon_right{0.0f};
+    float elevon_left{0.0f};
+    float elevator{0.0f};
+    bool manual_mode{false};
+    float fw_vector_throttle_scaling{1.0f};
+    float speed_scaler{1.0f};
+    float motors_yaw{0.0f};
+    float motors_yaw_ff{0.0f};
+    float motors_roll{0.0f};
+    float motors_roll_ff{0.0f};
+    float throttle_out{0.0f};
+    float hover_throttle{0.0f};
+    float max_angle_deg{static_cast<float>(kTiltMaxAngleDefaultDeg)};
+    float flap_angle_deg{0.0f};
+    float flap_auto_slew_pct{0.0f};
+};
+
+struct VectoringOutputs {
+    float tilt_left{0.0f};
+    float tilt_right{0.0f};
+    float tilt_rear{0.0f};
+    float tilt_rear_left{0.0f};
+    float tilt_rear_right{0.0f};
+    bool motors_limit_yaw{false};
+    VectoringPath path{VectoringPath::kNone};
+};
+
+[[nodiscard]] inline float scaled_tilt_output(float unit) {
+    return kServoMotorTiltScale * fwcpp::math::constrain_value(unit, 0.0f, 1.0f);
+}
+
+[[nodiscard]] inline VectoringOutputs elevon_tilt_mix(float base_output, float gain, float elevon_right,
+                                                      float elevon_left, float elevator) {
+    const float inv_scale = 1.0f / kTiltElevonScale;
+    const float right = gain * elevon_right * inv_scale;
+    const float left = gain * elevon_left * inv_scale;
+    const float mid = gain * elevator * inv_scale;
+    VectoringOutputs out{};
+    out.tilt_left = scaled_tilt_output(base_output - right);
+    out.tilt_right = scaled_tilt_output(base_output - left);
+    out.tilt_rear_left = scaled_tilt_output(base_output + left);
+    out.tilt_rear_right = scaled_tilt_output(base_output + right);
+    out.tilt_rear = scaled_tilt_output(base_output + mid);
+    return out;
+}
+
+// Upstream Tiltrotor::vectoring: DISARMED_TILT return sits after the delay
+// check (tiltrotor.cpp ~595), so a pending delay skips stick-vectoring and
+// still does not fall through to the armed path.
+[[nodiscard]] inline VectoringOutputs vectoring(const VectoringInputs& in) {
+    const auto geo = vectoring_geometry(in.current_tilt, in.tilt_yaw_angle, in.fixed_angle);
+    const float base_output = geo.base_output;
+    const float zero_out = geo.zero_out;
+    const float fixed_tilt_limit = geo.fixed_tilt_limit;
+
+    if (!in.armed_and_safety_off && (in.options & kQOptionDisarmedTilt) != 0) {
+        VectoringOutputs out{};
+        if ((in.now_ms - in.last_armed_change_ms) > kTiltDelayMs) {
+            if (in.in_vtol_mode) {
+                const float yaw_out = in.rudder_control_in / in.rudder_range;
+                const float yaw_range = zero_out;
+                out.tilt_left = scaled_tilt_output(base_output + yaw_out * yaw_range);
+                out.tilt_right = scaled_tilt_output(base_output - yaw_out * yaw_range);
+                out.tilt_rear = scaled_tilt_output(base_output);
+                out.tilt_rear_left = scaled_tilt_output(base_output + yaw_out * yaw_range);
+                out.tilt_rear_right = scaled_tilt_output(base_output - yaw_out * yaw_range);
+                out.path = VectoringPath::kDisarmedVtol;
+            } else {
+                const float gain = in.fixed_gain * fixed_tilt_limit;
+                out = elevon_tilt_mix(base_output, gain, in.elevon_right, in.elevon_left, in.elevator);
+                out.path = VectoringPath::kDisarmedFixedWing;
+            }
+        }
+        return out;
+    }
+
+    const bool no_yaw = tilt_over_max_angle(in.current_tilt, in.max_angle_deg, in.flap_angle_deg,
+                                           in.flap_auto_slew_pct);
+    if (no_yaw) {
+        const float scaler =
+            in.manual_mode ? 1.0f : (in.fw_vector_throttle_scaling / in.speed_scaler);
+        const float gain = in.fixed_gain * fixed_tilt_limit * scaler;
+        auto out = elevon_tilt_mix(base_output, gain, in.elevon_right, in.elevon_left, in.elevator);
+        out.path = VectoringPath::kNoYawFixedWing;
+        return out;
+    }
+
+    const float yaw_out = in.motors_yaw + in.motors_yaw_ff;
+    const float roll_out = in.motors_roll + in.motors_roll_ff;
+    const float yaw_range = zero_out;
+
+    float throttle_scaler = kVectoringThrottleScaleMax;
+    if (fwcpp::math::is_positive(in.throttle_out)) {
+        throttle_scaler = fwcpp::math::constrain_value(in.hover_throttle / in.throttle_out,
+                                                       kVectoringThrottleScaleMin,
+                                                       kVectoringThrottleScaleMax);
+    }
+
+    const float tilt_rad = fwcpp::math::radians(in.current_tilt * 90.0f);
+    float tilt_scale = throttle_scaler * yaw_out * std::cos(tilt_rad) +
+                       kVectoringAvgRollFactor * roll_out * std::sin(tilt_rad);
+
+    VectoringOutputs out{};
+    out.path = VectoringPath::kVectoredYaw;
+    if (std::fabs(tilt_scale) > 1.0f) {
+        tilt_scale = fwcpp::math::constrain_value(tilt_scale, -1.0f, 1.0f);
+        out.motors_limit_yaw = true;
+    }
+
+    const float tilt_offset = tilt_scale * yaw_range;
+    float left_tilt = base_output + tilt_offset;
+    float right_tilt = base_output - tilt_offset;
+    if (((left_tilt > 1.0f) || (left_tilt < 0.0f)) &&
+        ((right_tilt > 1.0f) || (right_tilt < 0.0f))) {
+        out.motors_limit_yaw = true;
+    }
+
+    out.tilt_left = scaled_tilt_output(left_tilt);
+    out.tilt_right = scaled_tilt_output(right_tilt);
+    out.tilt_rear = scaled_tilt_output(base_output);
+    out.tilt_rear_left = out.tilt_left;
+    out.tilt_rear_right = out.tilt_right;
+    return out;
+}
+
 enum class ContinuousTiltStrategy : std::uint8_t {
     kFixedWingPath,
     kQautotuneZero,
@@ -247,6 +411,7 @@ struct TiltUpdateResult {
     TiltMotorMaskCommand motor_mask{};
     TiltUpdatePath path{TiltUpdatePath::kNone};
     bool ran_vectoring{false};
+    VectoringOutputs vectoring{};
 };
 
 [[nodiscard]] inline SlewFlightFlags flight_flags_from(const ContinuousTiltInputs& in) {
@@ -346,7 +511,8 @@ struct TiltUpdateResult {
 
 [[nodiscard]] inline TiltUpdateResult update(const TiltrotorGate& gate, std::uint16_t tilt_mask, TiltType type,
                                              TiltControlState state, const ContinuousTiltInputs& in,
-                                             const TiltRateParams& rate) {
+                                             const TiltRateParams& rate,
+                                             const VectoringInputs& vectoring_in = {}) {
     TiltUpdateResult out{};
     out.path = resolve_update_path(gate, tilt_mask, type);
     if (out.path == TiltUpdatePath::kNone) {
@@ -359,6 +525,11 @@ struct TiltUpdateResult {
         out = continuous_update(state, in, rate, type, tilt_mask);
         out.path = resolve_update_path(gate, tilt_mask, type);
         out.ran_vectoring = (out.path == TiltUpdatePath::kContinuousThenVectoring);
+        if (out.ran_vectoring) {
+            VectoringInputs vin = vectoring_in;
+            vin.current_tilt = out.state.current_tilt;
+            out.vectoring = vectoring(vin);
+        }
     }
     return out;
 }

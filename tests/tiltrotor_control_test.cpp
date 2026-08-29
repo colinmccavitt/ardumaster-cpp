@@ -16,6 +16,8 @@ using fwcpp::tiltrotor::TiltType;
 using fwcpp::tiltrotor::TiltUpdatePath;
 using fwcpp::tiltrotor::TiltrotorGate;
 using fwcpp::tiltrotor::TiltrotorSetupInputs;
+using fwcpp::tiltrotor::VectoringInputs;
+using fwcpp::tiltrotor::VectoringPath;
 using fwcpp::tiltrotor::apply_binary_slew;
 using fwcpp::tiltrotor::apply_slew;
 using fwcpp::tiltrotor::binary_slew;
@@ -27,8 +29,13 @@ using fwcpp::tiltrotor::fully_up;
 using fwcpp::tiltrotor::get_forward_flight_tilt;
 using fwcpp::tiltrotor::get_fully_forward_tilt;
 using fwcpp::tiltrotor::kFastTiltMinRateDps;
+using fwcpp::tiltrotor::kQOptionDisarmedTilt;
 using fwcpp::tiltrotor::kServoMotorTiltScale;
 using fwcpp::tiltrotor::kThrottleScaledToUnit;
+using fwcpp::tiltrotor::kTiltDelayMs;
+using fwcpp::tiltrotor::kTiltElevonScale;
+using fwcpp::tiltrotor::kVectoringThrottleScaleMax;
+using fwcpp::tiltrotor::kVectoringThrottleScaleMin;
 using fwcpp::tiltrotor::resolve_continuous_strategy;
 using fwcpp::tiltrotor::resolve_setup;
 using fwcpp::tiltrotor::resolve_update_path;
@@ -36,6 +43,8 @@ using fwcpp::tiltrotor::slew;
 using fwcpp::tiltrotor::tilt_max_change;
 using fwcpp::tiltrotor::tilt_over_max_angle;
 using fwcpp::tiltrotor::update;
+using fwcpp::tiltrotor::vectoring;
+using fwcpp::tiltrotor::vectoring_geometry;
 
 TEST_CASE("tiltrotor slew uses flap-range max_change args", "[tiltrotor][control]") {
     TiltRateParams rate{};
@@ -231,4 +240,166 @@ TEST_CASE("tiltrotor update path", "[tiltrotor][control]") {
     const auto none = update(off, 1u, TiltType::kContinuous, {}, in, rate);
     REQUIRE(none.path == TiltUpdatePath::kNone);
     REQUIRE_FALSE(none.ran_vectoring);
+}
+
+TEST_CASE("tiltrotor vectoring base_output geometry", "[tiltrotor][vectoring]") {
+    const auto geo = vectoring_geometry(0.5f, 15.0f, 15.0f);
+    REQUIRE_THAT(geo.total_angle, Catch::Matchers::WithinAbs(120.0f, 1e-6f));
+    REQUIRE_THAT(geo.zero_out, Catch::Matchers::WithinAbs(15.0f / 120.0f, 1e-6f));
+    REQUIRE_THAT(geo.fixed_tilt_limit, Catch::Matchers::WithinAbs(15.0f / 120.0f, 1e-6f));
+    REQUIRE_THAT(geo.level_out, Catch::Matchers::WithinAbs(1.0f - 15.0f / 120.0f, 1e-6f));
+    REQUIRE_THAT(geo.base_output, Catch::Matchers::WithinAbs(0.5f, 1e-6f));
+}
+
+TEST_CASE("tiltrotor vectoring disarmed VTOL rudder after tilt delay", "[tiltrotor][vectoring]") {
+    VectoringInputs in{};
+    in.current_tilt = 0.5f;
+    in.tilt_yaw_angle = 15.0f;
+    in.fixed_angle = 15.0f;
+    in.options = kQOptionDisarmedTilt;
+    in.armed_and_safety_off = false;
+    in.in_vtol_mode = true;
+    in.now_ms = 10000;
+    in.last_armed_change_ms = 10000 - (kTiltDelayMs + 1);
+    in.rudder_control_in = kTiltElevonScale;
+    in.rudder_range = kTiltElevonScale;
+
+    const auto out = vectoring(in);
+    REQUIRE(out.path == VectoringPath::kDisarmedVtol);
+    REQUIRE_THAT(out.tilt_left, Catch::Matchers::WithinAbs(625.0f, 1e-3f));
+    REQUIRE_THAT(out.tilt_right, Catch::Matchers::WithinAbs(375.0f, 1e-3f));
+    REQUIRE_THAT(out.tilt_rear, Catch::Matchers::WithinAbs(500.0f, 1e-3f));
+    REQUIRE_THAT(out.tilt_rear_left, Catch::Matchers::WithinAbs(625.0f, 1e-3f));
+    REQUIRE_THAT(out.tilt_rear_right, Catch::Matchers::WithinAbs(375.0f, 1e-3f));
+    REQUIRE_FALSE(out.motors_limit_yaw);
+}
+
+TEST_CASE("tiltrotor vectoring disarmed delay not elapsed skips stick path", "[tiltrotor][vectoring]") {
+    VectoringInputs in{};
+    in.current_tilt = 0.5f;
+    in.tilt_yaw_angle = 15.0f;
+    in.fixed_angle = 15.0f;
+    in.options = kQOptionDisarmedTilt;
+    in.armed_and_safety_off = false;
+    in.in_vtol_mode = true;
+    in.now_ms = 10000;
+    in.last_armed_change_ms = 10000 - (kTiltDelayMs - 1);
+    in.rudder_control_in = kTiltElevonScale;
+    in.rudder_range = kTiltElevonScale;
+    in.motors_yaw = 1.0f;
+
+    const auto out = vectoring(in);
+    REQUIRE(out.path == VectoringPath::kNone);
+    REQUIRE_THAT(out.tilt_left, Catch::Matchers::WithinAbs(0.0f, 1e-6f));
+    REQUIRE_THAT(out.tilt_right, Catch::Matchers::WithinAbs(0.0f, 1e-6f));
+    REQUIRE_THAT(out.tilt_rear, Catch::Matchers::WithinAbs(0.0f, 1e-6f));
+    REQUIRE_FALSE(out.motors_limit_yaw);
+}
+
+TEST_CASE("tiltrotor vectoring no_yaw elevon mix uses manual scaler 1", "[tiltrotor][vectoring]") {
+    VectoringInputs in{};
+    in.current_tilt = 0.6f;
+    in.tilt_yaw_angle = 0.0f;
+    in.fixed_angle = 15.0f;
+    in.fixed_gain = 1.0f;
+    in.manual_mode = true;
+    in.fw_vector_throttle_scaling = 4.0f;
+    in.speed_scaler = 0.5f;
+    in.elevon_right = kTiltElevonScale;
+    in.elevon_left = 0.0f;
+    in.elevator = kTiltElevonScale;
+    REQUIRE(tilt_over_max_angle(in.current_tilt, in.max_angle_deg, in.flap_angle_deg, in.flap_auto_slew_pct));
+
+    const auto geo = vectoring_geometry(in.current_tilt, in.tilt_yaw_angle, in.fixed_angle);
+    const float gain = in.fixed_gain * geo.fixed_tilt_limit;
+    const auto out = vectoring(in);
+    REQUIRE(out.path == VectoringPath::kNoYawFixedWing);
+    REQUIRE_THAT(out.tilt_left, Catch::Matchers::WithinAbs(kServoMotorTiltScale * (geo.base_output - gain), 1e-3f));
+    REQUIRE_THAT(out.tilt_right, Catch::Matchers::WithinAbs(kServoMotorTiltScale * geo.base_output, 1e-3f));
+    REQUIRE_THAT(out.tilt_rear_left, Catch::Matchers::WithinAbs(kServoMotorTiltScale * geo.base_output, 1e-3f));
+    REQUIRE_THAT(out.tilt_rear_right, Catch::Matchers::WithinAbs(kServoMotorTiltScale * (geo.base_output + gain), 1e-3f));
+    REQUIRE_THAT(out.tilt_rear, Catch::Matchers::WithinAbs(kServoMotorTiltScale * (geo.base_output + gain), 1e-3f));
+}
+
+TEST_CASE("tiltrotor vectoring throttle_scaler clamps hover/throttle", "[tiltrotor][vectoring]") {
+    VectoringInputs in{};
+    in.current_tilt = 0.0f;
+    in.tilt_yaw_angle = 18.0f;
+    in.motors_yaw = 0.2f;
+    in.hover_throttle = 0.5f;
+
+    in.throttle_out = 0.2f;
+    const auto high = vectoring(in);
+    const auto geo = vectoring_geometry(in.current_tilt, in.tilt_yaw_angle, in.fixed_angle);
+    const float high_scale = kVectoringThrottleScaleMax * 0.2f;
+    REQUIRE_THAT(high.tilt_left,
+                 Catch::Matchers::WithinAbs(kServoMotorTiltScale * (geo.base_output + high_scale * geo.zero_out),
+                                            1e-3f));
+
+    in.throttle_out = 2.0f;
+    const auto low = vectoring(in);
+    const float low_scale = kVectoringThrottleScaleMin * 0.2f;
+    REQUIRE_THAT(low.tilt_left,
+                 Catch::Matchers::WithinAbs(kServoMotorTiltScale * (geo.base_output + low_scale * geo.zero_out),
+                                            1e-3f));
+    REQUIRE(high.tilt_left > low.tilt_left);
+    REQUIRE(high.path == VectoringPath::kVectoredYaw);
+}
+
+TEST_CASE("tiltrotor vectoring tilt_scale over one sets yaw limit", "[tiltrotor][vectoring]") {
+    VectoringInputs in{};
+    in.current_tilt = 0.0f;
+    in.tilt_yaw_angle = 18.0f;
+    in.motors_yaw = 1.0f;
+    in.throttle_out = 0.0f;
+
+    const auto out = vectoring(in);
+    REQUIRE(out.motors_limit_yaw);
+    REQUIRE(out.path == VectoringPath::kVectoredYaw);
+    const auto geo = vectoring_geometry(in.current_tilt, in.tilt_yaw_angle, in.fixed_angle);
+    REQUIRE_THAT(out.tilt_left,
+                 Catch::Matchers::WithinAbs(kServoMotorTiltScale * (geo.base_output + geo.zero_out), 1e-3f));
+    REQUIRE_THAT(out.tilt_right,
+                 Catch::Matchers::WithinAbs(kServoMotorTiltScale * (geo.base_output - geo.zero_out), 1e-3f));
+}
+
+TEST_CASE("tiltrotor vectoring dual saturation sets yaw limit", "[tiltrotor][vectoring]") {
+    VectoringInputs in{};
+    in.current_tilt = -0.2f;
+    in.tilt_yaw_angle = 0.0f;
+    in.motors_yaw = 0.0f;
+    REQUIRE_FALSE(tilt_over_max_angle(in.current_tilt, in.max_angle_deg, in.flap_angle_deg, in.flap_auto_slew_pct));
+
+    const auto out = vectoring(in);
+    REQUIRE(out.path == VectoringPath::kVectoredYaw);
+    REQUIRE(out.motors_limit_yaw);
+    REQUIRE_THAT(out.tilt_left, Catch::Matchers::WithinAbs(0.0f, 1e-6f));
+    REQUIRE_THAT(out.tilt_right, Catch::Matchers::WithinAbs(0.0f, 1e-6f));
+    REQUIRE_THAT(out.tilt_rear, Catch::Matchers::WithinAbs(0.0f, 1e-6f));
+}
+
+TEST_CASE("tiltrotor update runs vectoring into TiltUpdateResult", "[tiltrotor][vectoring]") {
+    const auto gate = TiltrotorGate::from_setup(resolve_setup(TiltrotorSetupInputs{.tilt_mask = 1u}));
+    TiltRateParams rate{};
+    ContinuousTiltInputs cin{};
+    cin.qautotune_mode = true;
+    VectoringInputs vin{};
+    vin.current_tilt = 0.5f;
+    vin.tilt_yaw_angle = 15.0f;
+    vin.fixed_angle = 15.0f;
+    vin.options = kQOptionDisarmedTilt;
+    vin.armed_and_safety_off = false;
+    vin.in_vtol_mode = true;
+    vin.now_ms = 4000;
+    vin.last_armed_change_ms = 0;
+    vin.rudder_control_in = kTiltElevonScale;
+    vin.rudder_range = kTiltElevonScale;
+
+    const auto out = update(gate, 1u, TiltType::kVectoredYaw, {}, cin, rate, vin);
+    REQUIRE(out.ran_vectoring);
+    REQUIRE(out.vectoring.path == VectoringPath::kDisarmedVtol);
+    vin.current_tilt = out.state.current_tilt;
+    const auto direct = vectoring(vin);
+    REQUIRE_THAT(out.vectoring.tilt_left, Catch::Matchers::WithinAbs(direct.tilt_left, 1e-6f));
+    REQUIRE_THAT(out.vectoring.tilt_right, Catch::Matchers::WithinAbs(direct.tilt_right, 1e-6f));
 }
