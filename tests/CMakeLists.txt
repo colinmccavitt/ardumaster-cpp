@@ -88,6 +88,7 @@ catch_discover_tests(l1_control_test)
 # real top-level AP_Param Info[] table - no ap-sim needed (not a
 # closed-loop test, see the ticket's own "NOT a SimPlane closed-loop
 # test" instruction, matching CPP-043's own plane_aparm_param_test).
+
 add_executable(l1_control_param_test l1_control_param_test.cpp)
 target_link_libraries(l1_control_param_test PRIVATE ap-nav ap-param Catch2::Catch2WithMain)
 catch_discover_tests(l1_control_param_test)
@@ -200,6 +201,7 @@ catch_discover_tests(ahrs_dcm_test)
 # relative-position production stubs + leftover-complete catalog.
 # Links ap-airspeed (real sensor feeding airspeed_EAS) and ap-ekf
 # (EkfCoreBackend must implement the widened AhrsBackend surface).
+
 add_executable(ahrs_leftover_test ahrs_leftover_test.cpp)
 target_link_libraries(ahrs_leftover_test PRIVATE ap-ahrs ap-airspeed ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ahrs_leftover_test)
@@ -235,6 +237,7 @@ catch_discover_tests(tecs_test)
 # ticket's own scope note restricting changes to tecs.hpp/this test
 # file/this CMakeLists.txt only), so this test target picks up
 # fwcpp/param/'s include path via its own direct ap-param link instead.
+
 add_executable(tecs_param_test tecs_param_test.cpp)
 target_link_libraries(tecs_param_test PRIVATE ap-tecs ap-param Catch2::Catch2WithMain)
 catch_discover_tests(tecs_param_test)
@@ -257,6 +260,7 @@ catch_discover_tests(fw_control_test)
 # integration test) - ap-vehicle itself does not link it, matching how
 # ap-sim deliberately shares no code with ap-ahrs (see sim_plane.hpp's
 # own file banner).
+
 add_executable(vehicle_test vehicle_test.cpp)
 target_link_libraries(vehicle_test PRIVATE ap-vehicle ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(vehicle_test)
@@ -264,6 +268,7 @@ catch_discover_tests(vehicle_test)
 # CPP-043: storage/persistence integration test for Plane::aparm - no
 # ap-sim needed (not a closed-loop test, see the ticket's own "NOT a
 # SimPlane closed-loop test" instruction).
+
 add_executable(plane_aparm_param_test plane_aparm_param_test.cpp)
 target_link_libraries(plane_aparm_param_test PRIVATE ap-vehicle Catch2::Catch2WithMain)
 catch_discover_tests(plane_aparm_param_test)
@@ -273,6 +278,7 @@ catch_discover_tests(plane_aparm_param_test)
 # test, matching CPP-043's own plane_aparm_param_test above). Links
 # ap-param directly (in addition to ap-fw-control) for the same reason
 # fw_control_test does above.
+
 add_executable(roll_controller_param_test roll_controller_param_test.cpp)
 target_link_libraries(roll_controller_param_test PRIVATE ap-fw-control ap-param Catch2::Catch2WithMain)
 catch_discover_tests(roll_controller_param_test)
@@ -291,6 +297,7 @@ catch_discover_tests(compass_test)
 # test proving tick()-driven sensor output changes real vehicle behavior
 # lives in vehicle_test.cpp instead (ap-sim is already a test-only
 # dependency there).
+
 add_executable(airspeed_sensor_test airspeed_sensor_test.cpp)
 target_link_libraries(airspeed_sensor_test PRIVATE ap-airspeed Catch2::Catch2WithMain)
 catch_discover_tests(airspeed_sensor_test)
@@ -305,6 +312,7 @@ catch_discover_tests(steer_controller_test)
 # ap-fw-control's own transitive link chain (ap-pid -> ap-filter -> a
 # PUBLIC ap-param dependency) already brings in ap-param's include path,
 # so no module CMakeLists.txt needs editing for this ticket.
+
 add_executable(pitch_controller_param_test pitch_controller_param_test.cpp)
 target_link_libraries(pitch_controller_param_test PRIVATE ap-fw-control Catch2::Catch2WithMain)
 catch_discover_tests(pitch_controller_param_test)
@@ -314,6 +322,7 @@ catch_discover_tests(pitch_controller_param_test)
 # closed-loop test, see the ticket's own "NOT a SimPlane closed-loop
 # test" instruction); ap-fw-control alone (which transitively pulls in
 # ap-param via ap-pid -> ap-filter -> ap-param) is enough.
+
 add_executable(yaw_controller_param_test yaw_controller_param_test.cpp)
 target_link_libraries(yaw_controller_param_test PRIVATE ap-fw-control Catch2::Catch2WithMain)
 catch_discover_tests(yaw_controller_param_test)
@@ -324,12 +333,14 @@ catch_discover_tests(yaw_controller_param_test)
 # precedent above). Links ap-param directly (in addition to
 # ap-steer-control, whose own module CMakeLists.txt does not depend on
 # ap-param) for the same reason notch_filter_params_test does above.
+
 add_executable(steer_controller_param_test steer_controller_param_test.cpp)
 target_link_libraries(steer_controller_param_test PRIVATE ap-steer-control ap-param Catch2::Catch2WithMain)
 catch_discover_tests(steer_controller_param_test)
 
 # CPP-052 phase 1: strapdown INS mechanization + covariance prediction
 # unit tests, no fusion (see fwcpp/ekf/ekf_core.hpp's scope banner).
+
 add_executable(ekf_core_test ekf_core_test.cpp)
 target_link_libraries(ekf_core_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_core_test)
@@ -337,6 +348,7 @@ catch_discover_tests(ekf_core_test)
 # CPP-056 phase 2: fuse_direct_state_observation() primitive + GPS
 # velocity/position fusion unit tests (see fwcpp/ekf/ekf_core.hpp's
 # "CPP-056, PHASE 2" scope banner section).
+
 add_executable(ekf_fusion_test ekf_fusion_test.cpp)
 target_link_libraries(ekf_fusion_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_fusion_test)
@@ -344,6 +356,7 @@ catch_discover_tests(ekf_fusion_test)
 # CPP-059 phase 5: 3-axis magnetometer fusion (fuse_magnetometer()) unit
 # tests (see fwcpp/ekf/ekf_core.hpp's "CPP-059, PHASE 5" scope banner
 # section).
+
 add_executable(ekf_mag_fusion_test ekf_mag_fusion_test.cpp)
 target_link_libraries(ekf_mag_fusion_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_mag_fusion_test)
@@ -355,6 +368,7 @@ catch_discover_tests(ekf_mag_fusion_test)
 # ap-compass, and ap-vehicle are TEST-ONLY dependencies here (same
 # precedent as vehicle_test.cpp's own ap-sim dependency) - ap-ekf itself
 # links none of them.
+
 add_executable(ekf_closed_loop_test ekf_closed_loop_test.cpp)
 target_link_libraries(ekf_closed_loop_test PRIVATE ap-ekf ap-sim ap-compass ap-vehicle Catch2::Catch2WithMain)
 catch_discover_tests(ekf_closed_loop_test)
@@ -365,6 +379,7 @@ catch_discover_tests(ekf_closed_loop_test)
 # same reasoning phase 5 (CPP-059) used for its own new file: a genuinely
 # independent, self-contained fusion mechanism, not built on
 # fuse_direct_state_observation().
+
 add_executable(ekf_airspeed_fusion_test ekf_airspeed_fusion_test.cpp)
 target_link_libraries(ekf_airspeed_fusion_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_airspeed_fusion_test)
@@ -376,6 +391,7 @@ catch_discover_tests(ekf_airspeed_fusion_test)
 # still links ap-ekf (same include path/namespace as ekf_core.hpp) rather
 # than being a bare Catch2 executable - NOT wired into EkfCore at all,
 # zero change to any existing ap-ekf file.
+
 add_executable(ekf_buffer_test ekf_buffer_test.cpp)
 target_link_libraries(ekf_buffer_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_buffer_test)
@@ -386,6 +402,7 @@ catch_discover_tests(ekf_buffer_test)
 # in ekf_core_test.cpp - update_strapdown_equations_ned()/
 # covariance_prediction()'s own direct-call API and every existing test
 # using it are completely unaffected by tick()'s existence.
+
 add_executable(ekf_tick_test ekf_tick_test.cpp)
 target_link_libraries(ekf_tick_test PRIVATE ap-ekf Catch2::Catch2WithMain)
 catch_discover_tests(ekf_tick_test)
@@ -397,6 +414,7 @@ catch_discover_tests(ekf_tick_test)
 # ekf_backend.hpp, uses fwcpp::ahrs:: sample types (GyroSample/
 # AccelSample/CompassSample/GpsSample) directly - same precedent as
 # tecs_param_test's own direct ap-param link above.
+
 add_executable(ekf_backend_test ekf_backend_test.cpp)
 target_link_libraries(ekf_backend_test PRIVATE ap-ekf ap-ahrs Catch2::Catch2WithMain)
 catch_discover_tests(ekf_backend_test)
@@ -411,6 +429,7 @@ catch_discover_tests(ekf_backend_test)
 # types directly (not just through ap-hal-sitl's own header), so both are
 # linked directly too - same precedent as ekf_backend_test's own direct
 # ap-ahrs link above.
+
 add_executable(sitl_harness_test sitl_harness_test.cpp)
 target_link_libraries(sitl_harness_test PRIVATE ap-hal-sitl ap-vehicle ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sitl_harness_test)
@@ -420,6 +439,7 @@ catch_discover_tests(sitl_harness_test)
 # conversion, remove_motor, normalise_rpy_factors). First test target for
 # the new ap-motors module - see modules/ap-motors/include/fwcpp/motors/
 # motors_matrix.hpp's own file banner for full scope.
+
 add_executable(motors_matrix_test motors_matrix_test.cpp)
 target_link_libraries(motors_matrix_test PRIVATE ap-motors Catch2::Catch2WithMain)
 catch_discover_tests(motors_matrix_test)
@@ -430,6 +450,7 @@ catch_discover_tests(motors_matrix_test)
 # (AP_Motors_Thrust_Linearization.{h,cpp}) - see
 # modules/ap-motors/include/fwcpp/motors/thrust_linearization.hpp's own
 # file banner for full scope.
+
 add_executable(thrust_linearization_test thrust_linearization_test.cpp)
 target_link_libraries(thrust_linearization_test PRIVATE ap-motors Catch2::Catch2WithMain)
 catch_discover_tests(thrust_linearization_test)
@@ -440,6 +461,7 @@ catch_discover_tests(thrust_linearization_test)
 # ang_vel_limit/body_to_euler_limit). First test target for the new
 # ap-control module - see modules/ap-control/include/fwcpp/control/
 # attitude_kinematics.hpp's own file banner for full scope.
+
 add_executable(attitude_kinematics_test attitude_kinematics_test.cpp)
 target_link_libraries(attitude_kinematics_test PRIVATE ap-control Catch2::Catch2WithMain)
 catch_discover_tests(attitude_kinematics_test)
@@ -452,11 +474,13 @@ catch_discover_tests(attitude_kinematics_test)
 # existing ap-math module (no new .cpp, matching matrix3.hpp/postype.hpp/
 # rotations.hpp's own precedent - see modules/ap-math/CMakeLists.txt,
 # unchanged by this ticket), so only this new test target is registered.
+
 add_executable(control_test control_test.cpp)
 target_link_libraries(control_test PRIVATE ap-math Catch2::Catch2WithMain)
 catch_discover_tests(control_test)
 
 # CCP-027: ap-poscontrol slice 1.
+
 add_executable(pos_control_lean_test pos_control_lean_test.cpp)
 target_link_libraries(pos_control_lean_test PRIVATE ap-poscontrol Catch2::Catch2WithMain)
 catch_discover_tests(pos_control_lean_test)
@@ -490,10 +514,12 @@ catch_discover_tests(pos_control_d_limits_test)
 # CCP-028 (copter-cpp effort): fwcpp::wpnav — AC_WPNav first slice
 # (wp_and_spline_init_m + distance/bearing helpers). See
 # modules/ap-wpnav/include/fwcpp/wpnav/wpnav.hpp file banner.
+
 add_executable(wp_and_spline_init_test wp_and_spline_init_test.cpp)
 target_link_libraries(wp_and_spline_init_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
 catch_discover_tests(wp_and_spline_init_test)
 # CCP-028 slice 2: set_wp_destination / update_wpnav
+
 add_executable(set_wp_destination_test set_wp_destination_test.cpp)
 target_link_libraries(set_wp_destination_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
 catch_discover_tests(set_wp_destination_test)
@@ -503,22 +529,25 @@ target_link_libraries(update_wpnav_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
 catch_discover_tests(update_wpnav_test)
 
 # CCP-028 slice 3: advance_wp_target_along_track / update_track_with_speed_accel_limits
+
 add_executable(advance_wp_target_test advance_wp_target_test.cpp)
 target_link_libraries(advance_wp_target_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
 catch_discover_tests(advance_wp_target_test)
 
 # CCP-028 slice 4: AC_Loiter init_target_m / init_target / update leftovers
+
 add_executable(loiter_init_test loiter_init_test.cpp)
 target_link_libraries(loiter_init_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
 catch_discover_tests(loiter_init_test)
-
 
 add_executable(quadplane_setup_test quadplane_setup_test.cpp)
 target_link_libraries(quadplane_setup_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_setup_test)
 
 add_executable(quadplane_options_test quadplane_options_test.cpp)
+
 add_executable(quadplane_poscontrol_test quadplane_poscontrol_test.cpp)
+
 add_executable(quadplane_leftover_test quadplane_leftover_test.cpp)
 target_link_libraries(quadplane_options_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 target_link_libraries(quadplane_poscontrol_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
@@ -526,6 +555,7 @@ target_link_libraries(quadplane_leftover_test PRIVATE ap-quadplane Catch2::Catch
 catch_discover_tests(quadplane_options_test)
 catch_discover_tests(quadplane_poscontrol_test)
 catch_discover_tests(quadplane_leftover_test)
+
 add_executable(quadplane_motors_output_test quadplane_motors_output_test.cpp)
 target_link_libraries(quadplane_motors_output_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_motors_output_test)
@@ -543,6 +573,7 @@ catch_discover_tests(quadplane_setup_navigators_test)
 
 
 # VCP-002 slice 1: ap-vtol-assist enable/check + hysteresis + should_assist stubs.
+
 add_executable(vtol_assist_enable_test vtol_assist_enable_test.cpp)
 target_link_libraries(vtol_assist_enable_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
 catch_discover_tests(vtol_assist_enable_test)
@@ -558,16 +589,19 @@ catch_discover_tests(vtol_assist_should_assist_test)
 add_executable(vtol_assist_completeness_test vtol_assist_completeness_test.cpp)
 target_link_libraries(vtol_assist_completeness_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
 catch_discover_tests(vtol_assist_completeness_test)
+
 add_executable(vtol_assist_alt_angle_test vtol_assist_alt_angle_test.cpp)
 target_link_libraries(vtol_assist_alt_angle_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
 catch_discover_tests(vtol_assist_alt_angle_test)
 
 # VCP-002 slice 3: VTOL fw recovery FSM + spin surface outputs.
+
 add_executable(vtol_assist_recovery_test vtol_assist_recovery_test.cpp)
 target_link_libraries(vtol_assist_recovery_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
 catch_discover_tests(vtol_assist_recovery_test)
 
-# VCP-002 slice 4: Q_ASSIST_OPTIONS recovery paths + in_*_assist GCS getter stubs.
+# VCP-003 slice 1: ap-quadplane-transition FSM scaffold.
+
 add_executable(vtol_assist_gcs_getters_test vtol_assist_gcs_getters_test.cpp)
 target_link_libraries(vtol_assist_gcs_getters_test PRIVATE ap-vtol-assist Catch2::Catch2WithMain)
 catch_discover_tests(vtol_assist_gcs_getters_test)
@@ -577,6 +611,7 @@ target_link_libraries(vtol_assist_recovery_options_test PRIVATE ap-vtol-assist C
 catch_discover_tests(vtol_assist_recovery_options_test)
 
 # VCP-003 slice 1: ap-quadplane-transition FSM scaffold.
+
 add_executable(transition_fsm_test transition_fsm_test.cpp)
 target_link_libraries(transition_fsm_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
 catch_discover_tests(transition_fsm_test)
@@ -584,8 +619,20 @@ catch_discover_tests(transition_fsm_test)
 add_executable(transition_completeness_test transition_completeness_test.cpp)
 target_link_libraries(transition_completeness_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
 catch_discover_tests(transition_completeness_test)
+# VCP-004 slice 1: ap-q-modes QSTABILIZE / QHOVER / QACRO scaffold.
 
-# CCP-028 slice 5: AC_Circle init / set_center / update leftovers
 add_executable(circle_init_test circle_init_test.cpp)
 target_link_libraries(circle_init_test PRIVATE ap-wpnav ap-common Catch2::Catch2WithMain)
 catch_discover_tests(circle_init_test)
+
+add_executable(transition_update_test transition_update_test.cpp)
+target_link_libraries(transition_update_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
+catch_discover_tests(transition_update_test)
+
+add_executable(mode_q_run_test mode_q_run_test.cpp)
+target_link_libraries(mode_q_run_test PRIVATE ap-q-modes Catch2::Catch2WithMain)
+catch_discover_tests(mode_q_run_test)
+
+add_executable(q_modes_completeness_test q_modes_completeness_test.cpp)
+target_link_libraries(q_modes_completeness_test PRIVATE ap-q-modes Catch2::Catch2WithMain)
+catch_discover_tests(q_modes_completeness_test)
