@@ -3750,3 +3750,572 @@ TEST_CASE("output_to_pwm: TRUNCATION, NOT ROUNDING - copter-rust's own COP-004 f
     REQUIRE(result == 1500);
     REQUIRE(result != 1501);
 }
+
+// =======================================================================
+// CCP-016: boost_ratio + output_armed_stabilizing - the real motor-
+// mixing/control-allocation algorithm. See motors_matrix.hpp's own
+// "CCP-016 ADDITION" comment for the full 19-step structure, the
+// set_rpy(true) three-flag finding, and the compensation_gain-can-never-
+// be-zero investigation - all re-verified directly against the real
+// upstream source (AP_MotorsMatrix.cpp lines 206-208/213-403), not
+// trusted from any summary.
+//
+// All tests below use a real, NORMALISED Quad Plus frame (setup_quad_matrix
+// + normalise_rpy_factors, matching real upstream's own init()/setup_motors
+// call sequence - re-verified directly that setup_motors calls
+// normalise_rpy_factors() unconditionally after building the frame). After
+// normalisation the real per-motor factors are:
+//   roll_factor  = [-0.5, 0.5,  0.0,  0.0]
+//   pitch_factor = [ 0.0, 0.0,  0.5, -0.5]
+//   yaw_factor   = [ 0.5, 0.5, -0.5, -0.5]
+//   throttle_factor = [1.0, 1.0, 1.0, 1.0]
+// (hand-derived from setup_quad_matrix's own PLUS case - see that test's
+// own AngleMotor table above - and normalise_rpy_factors' own halving-by-
+// max-magnitude formula; independently re-verified by hand for every test
+// below, not merely asserted here).
+// =======================================================================
+
+namespace {
+
+// MotorsMatrix is deliberately non-copyable/non-movable (it holds a
+// ThrustLinearization member with a deleted copy constructor - see
+// thrust_linearization.hpp) - so this configures an existing instance
+// in place by reference rather than returning one by value.
+void configureQuadPlus(MotorsMatrix& m) {
+    REQUIRE(m.setup_quad_matrix(MotorsMatrix::FrameType::Plus));
+    m.normalise_rpy_factors();
+}
+
+} // namespace
+
+TEST_CASE("boost_ratio: real linear blend - ratio 0 returns normal_value, ratio 1 returns boost_value, ratio "
+          "0.5 averages them",
+          "[motors][output_armed_stabilizing][boost_ratio]") {
+    MotorsMatrix m;
+    m.set_thrust_boost_ratio(0.0f);
+    REQUIRE(m.boost_ratio(10.0f, 4.0f) == Approx(4.0f));
+    m.set_thrust_boost_ratio(1.0f);
+    REQUIRE(m.boost_ratio(10.0f, 4.0f) == Approx(10.0f));
+    m.set_thrust_boost_ratio(0.5f);
+    REQUIRE(m.boost_ratio(10.0f, 4.0f) == Approx(7.0f));
+}
+
+TEST_CASE("output_armed_stabilizing: a simple, well-within-range case on Quad Plus produces hand-computed "
+          "per-motor outputs and engages NO limit flag at all - roll_in=0.1, pitch_in=0.05, yaw_in=0.02, "
+          "filtered_throttle=0.5, all well inside every real saturation boundary",
+          "[motors][output_armed_stabilizing]") {
+    MotorsMatrix m;
+    configureQuadPlus(m);
+    m.set_throttle_thrust_max(1.0f);
+
+    bool limit_roll = true, limit_pitch = true, limit_yaw = true, limit_lower = true, limit_upper = true;
+    m.output_armed_stabilizing(/*roll_in=*/0.1f, /*roll_in_ff=*/0.0f, /*pitch_in=*/0.05f, /*pitch_in_ff=*/0.0f,
+                                /*yaw_in=*/0.02f, /*yaw_in_ff=*/0.0f, /*filtered_throttle=*/0.5f,
+                                /*throttle_avg_max=*/0.5f, /*yaw_headroom=*/0.0f, /*air_density_ratio=*/1.0f,
+                                /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw, limit_lower, limit_upper);
+
+    // All five booleans reset to false at entry, and none of the real
+    // saturation paths fire for this deliberately modest input - every
+    // flag must read false.
+    REQUIRE_FALSE(limit_roll);
+    REQUIRE_FALSE(limit_pitch);
+    REQUIRE_FALSE(limit_yaw);
+    REQUIRE_FALSE(limit_lower);
+    REQUIRE_FALSE(limit_upper);
+
+    // Hand-computed (compensation_gain=1.0 since lift_max_ defaults to
+    // 1.0 and air_density_ratio=1.0): thrust_rpyt_out_ = [0.46, 0.56,
+    // 0.515, 0.465], throttle_out_ = 0.5 - see this ticket's own
+    // investigation notes for the full step-by-step arithmetic.
+    REQUIRE(m.thrust_rpyt_out(0) == Approx(0.46f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(1) == Approx(0.56f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(2) == Approx(0.515f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(3) == Approx(0.465f).margin(1e-4f));
+    REQUIRE(m.throttle_out() == Approx(0.5f).margin(1e-4f));
+}
+
+TEST_CASE("output_armed_stabilizing: throttle saturates LOW via step 4's own sanity clamp - a negative "
+          "filtered_throttle clamps to exactly 0 and sets ONLY limit_throttle_lower",
+          "[motors][output_armed_stabilizing][throttle_lower]") {
+    MotorsMatrix m;
+    configureQuadPlus(m);
+    m.set_throttle_thrust_max(1.0f);
+
+    bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+    m.output_armed_stabilizing(/*roll_in=*/0.0f, 0.0f, /*pitch_in=*/0.0f, 0.0f, /*yaw_in=*/0.0f, 0.0f,
+                                /*filtered_throttle=*/-0.1f, /*throttle_avg_max=*/0.3f, /*yaw_headroom=*/0.0f,
+                                /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                limit_lower, limit_upper);
+
+    REQUIRE(limit_lower);
+    REQUIRE_FALSE(limit_upper);
+    REQUIRE_FALSE(limit_roll);
+    REQUIRE_FALSE(limit_pitch);
+    REQUIRE_FALSE(limit_yaw);
+    // Hand-computed: with throttle clamped to 0 and roll/pitch/yaw all 0,
+    // every subsequent step (5-17) collapses to 0 for every motor.
+    for (std::uint8_t i = 0; i < 4; ++i) {
+        REQUIRE(m.thrust_rpyt_out(i) == Approx(0.0f).margin(1e-6f));
+    }
+    REQUIRE(m.throttle_out() == Approx(0.0f).margin(1e-6f));
+}
+
+TEST_CASE("output_armed_stabilizing: throttle saturates HIGH via step 4's own sanity clamp - a filtered_"
+          "throttle above throttle_thrust_max_ clamps to that ceiling and sets ONLY limit_throttle_upper, "
+          "independent of step 15's own separate ceiling check (roll/pitch/yaw all 0 here, so step 15 never "
+          "engages)",
+          "[motors][output_armed_stabilizing][throttle_upper]") {
+    MotorsMatrix m;
+    configureQuadPlus(m);
+    m.set_throttle_thrust_max(1.0f);
+
+    bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+    m.output_armed_stabilizing(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, /*filtered_throttle=*/2.0f,
+                                /*throttle_avg_max=*/0.5f, /*yaw_headroom=*/0.0f, /*air_density_ratio=*/1.0f,
+                                /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw, limit_lower, limit_upper);
+
+    REQUIRE(limit_upper);
+    REQUIRE_FALSE(limit_lower);
+    REQUIRE_FALSE(limit_roll);
+    REQUIRE_FALSE(limit_pitch);
+    REQUIRE_FALSE(limit_yaw);
+    // Hand-computed: throttle_thrust clamps to 1.0, and with zero roll/
+    // pitch/yaw every motor ends up at throttle_thrust_best_plus_adj =
+    // 1.0 exactly (throttle_factor_[i] == 1.0 for every motor on this
+    // frame).
+    for (std::uint8_t i = 0; i < 4; ++i) {
+        REQUIRE(m.thrust_rpyt_out(i) == Approx(1.0f).margin(1e-4f));
+    }
+    REQUIRE(m.throttle_out() == Approx(1.0f).margin(1e-4f));
+}
+
+TEST_CASE("output_armed_stabilizing: yaw saturates via step 10's own dedicated clamp specifically - "
+          "yaw_in=1.5 exceeds the real per-motor yaw_allowed computation (1.0 on this frame/throttle "
+          "combination), clamping yaw_thrust to +-yaw_allowed and setting ONLY limit_yaw, while rpy_scale "
+          "stays exactly 1.0 so step 15's own set_rpy(true) does NOT also fire (roll_in=pitch_in=0 keeps "
+          "rpy_high-rpy_low pinned at exactly 1.0, not exceeding the real >1.0 shrink threshold)",
+          "[motors][output_armed_stabilizing][yaw_saturation]") {
+    MotorsMatrix m;
+    configureQuadPlus(m);
+    m.set_throttle_thrust_max(1.0f);
+
+    bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+    m.output_armed_stabilizing(/*roll_in=*/0.0f, 0.0f, /*pitch_in=*/0.0f, 0.0f, /*yaw_in=*/1.5f, 0.0f,
+                                /*filtered_throttle=*/0.5f, /*throttle_avg_max=*/0.5f, /*yaw_headroom=*/0.0f,
+                                /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                limit_lower, limit_upper);
+
+    REQUIRE(limit_yaw);
+    REQUIRE_FALSE(limit_roll);
+    REQUIRE_FALSE(limit_pitch);
+    REQUIRE_FALSE(limit_lower);
+    REQUIRE_FALSE(limit_upper);
+    // Hand-computed: yaw_allowed=1.0, yaw_thrust clamps 1.5 -> 1.0, giving
+    // thrust_rpyt_out_ = [1.0, 1.0, 0.0, 0.0], throttle_out_ = 0.5. If
+    // rpy_scale had dropped below 1.0 here, limit_roll/limit_pitch would
+    // ALSO be true (step 15) - they are not, confirming rpy_scale stayed
+    // exactly 1.0 for this input.
+    REQUIRE(m.thrust_rpyt_out(0) == Approx(1.0f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(1) == Approx(1.0f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(2) == Approx(0.0f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(3) == Approx(0.0f).margin(1e-4f));
+    REQUIRE(m.throttle_out() == Approx(0.5f).margin(1e-4f));
+}
+
+TEST_CASE("output_armed_stabilizing: rpy_scale < 1.0 engages step 15's real set_rpy(true) equivalent - ALL "
+          "THREE of limit_roll/limit_pitch/limit_yaw become true together, with yaw_in=0 proving yaw becomes "
+          "true via THIS path specifically (step 10's own dedicated yaw clamp cannot have fired when the "
+          "commanded yaw is exactly zero) - this sub-case has thr_adj==0, so limit_throttle_upper is NOT "
+          "co-activated",
+          "[motors][output_armed_stabilizing][rpy_scale][set_rpy]") {
+    MotorsMatrix m;
+    configureQuadPlus(m);
+    m.set_throttle_thrust_max(1.0f);
+
+    bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+    m.output_armed_stabilizing(/*roll_in=*/1.5f, 0.0f, /*pitch_in=*/0.0f, 0.0f, /*yaw_in=*/0.0f, 0.0f,
+                                /*filtered_throttle=*/0.5f, /*throttle_avg_max=*/0.5f, /*yaw_headroom=*/0.0f,
+                                /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                limit_lower, limit_upper);
+
+    // The real set_rpy(true) three-flag finding (AP_Motors_Class.cpp
+    // lines 344-349): all three fire together, not just roll/pitch.
+    REQUIRE(limit_roll);
+    REQUIRE(limit_pitch);
+    REQUIRE(limit_yaw);
+    REQUIRE_FALSE(limit_lower);
+    REQUIRE_FALSE(limit_upper);
+    // Hand-computed: roll_in=1.5 drives thrust_rpyt_out_ to [-0.75, 0.75,
+    // 0, 0] before scaling; rpy_high-rpy_low=1.5>1.0 gives rpy_scale=2/3.
+    // thr_adj lands at exactly 0 (throttle_thrust_best_rpy re-lands at
+    // 0.5 after the two-stage reassignment), so throttle_upper is NOT
+    // additionally raised. Final thrust_rpyt_out_ = [0.0, 1.0, 0.5, 0.5].
+    REQUIRE(m.thrust_rpyt_out(0) == Approx(0.0f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(1) == Approx(1.0f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(2) == Approx(0.5f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(3) == Approx(0.5f).margin(1e-4f));
+    REQUIRE(m.throttle_out() == Approx(0.5f).margin(1e-4f));
+}
+
+TEST_CASE("output_armed_stabilizing: the SAME rpy_scale < 1.0 path, but with a higher filtered_throttle so "
+          "thr_adj > 0 inside step 15's first branch - limit_throttle_upper IS additionally co-activated "
+          "alongside all three of roll/pitch/yaw, proving the nested `if (thr_adj > 0.0f)` check inside that "
+          "branch",
+          "[motors][output_armed_stabilizing][rpy_scale][set_rpy]") {
+    MotorsMatrix m;
+    configureQuadPlus(m);
+    m.set_throttle_thrust_max(1.0f);
+
+    bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+    m.output_armed_stabilizing(/*roll_in=*/1.5f, 0.0f, 0.0f, 0.0f, /*yaw_in=*/0.0f, 0.0f,
+                                /*filtered_throttle=*/0.7f, /*throttle_avg_max=*/0.5f, /*yaw_headroom=*/0.0f,
+                                /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                limit_lower, limit_upper);
+
+    REQUIRE(limit_roll);
+    REQUIRE(limit_pitch);
+    REQUIRE(limit_yaw);
+    REQUIRE(limit_upper); // the co-activation this test exists to prove
+    REQUIRE_FALSE(limit_lower);
+    // Hand-computed: throttle_avg_max_local gets pulled up to 0.7 by
+    // step 5's own constrain(amt, low=throttle_thrust, high) call (0.5 <
+    // 0.7), rpy_scale is still 2/3, throttle_thrust_best_rpy lands at
+    // 0.5, so thr_adj = 0.7 - 0.5 = 0.2 > 0 BEFORE step 15 zeroes it -
+    // final per-motor outputs match the thr_adj==0 case exactly, since
+    // step 15's first branch always forces thr_adj back to 0 regardless
+    // of the co-activation.
+    REQUIRE(m.thrust_rpyt_out(0) == Approx(0.0f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(1) == Approx(1.0f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(2) == Approx(0.5f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(3) == Approx(0.5f).margin(1e-4f));
+    REQUIRE(m.throttle_out() == Approx(0.5f).margin(1e-4f));
+}
+
+TEST_CASE("output_armed_stabilizing: step 15's MIDDLE branch (thr_adj < 0.0f) sets NO limit flag at all - "
+          "the one branch of the real if/else-if/else-if that raises nothing - and this same scenario "
+          "(thrust_boost_ratio_ = 1.0) independently proves rpy_high's real EXCLUSION of the lost motor in "
+          "step 11 survives all the way to a real behavioral difference: with the lost motor's own extreme "
+          "value fully excluded (boost_ratio ratio=1.0 keeps step 12's blend pinned at the pre-step-12 "
+          "value), rpy_scale never drops below 1.0 at all, so NONE of the five limit flags fire for an input "
+          "that WOULD have saturated roll/pitch/yaw had the lost motor's value been included",
+          "[motors][output_armed_stabilizing][thr_adj][motor_loss][rpy_high]") {
+    MotorsMatrix m;
+    configureQuadPlus(m);
+    m.set_throttle_thrust_max(1.0f);
+    m.set_thrust_boost(true);
+    m.set_thrust_boost_ratio(1.0f); // full boost: step 12's blend keeps the PRE-step-12 (excluded) rpy_high
+    // motor_lost_index_ defaults to 0 - no extra setup needed (a fresh
+    // MotorsMatrix's own real, disclosed-defined initial value - see
+    // motors_matrix.hpp's own CCP-011 "DISCLOSED BUG FIX" comment).
+
+    bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+    m.output_armed_stabilizing(/*roll_in=*/-1.6f, 0.0f, 0.0f, 0.0f, /*yaw_in=*/0.0f, 0.0f,
+                                /*filtered_throttle=*/0.5f, /*throttle_avg_max=*/1.0f, /*yaw_headroom=*/0.0f,
+                                /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                limit_lower, limit_upper);
+
+    // The middle branch's own real "no limit flag" behavior.
+    REQUIRE_FALSE(limit_roll);
+    REQUIRE_FALSE(limit_pitch);
+    REQUIRE_FALSE(limit_yaw);
+    REQUIRE_FALSE(limit_lower);
+    REQUIRE_FALSE(limit_upper);
+    // Hand-computed: roll_in=-1.6 drives thrust_rpyt_out_ (pre-scaling)
+    // to [0.8, -0.8, 0, 0] - motor 0 (the lost motor) carries the HIGH
+    // extreme. rpy_low=-0.8 (from motor 1 - rpy_low has NO exclusion, so
+    // it is unaffected either way). rpy_high, BEFORE step 12, is 0.0
+    // (motor 0 correctly excluded from the step 11 max - motor 1's -0.8
+    // and motor 2/3's 0.0 are the only candidates). Step 12 blends with
+    // ratio=1.0, i.e. `1.0*rpy_high_pre + 0.0*lost_value` = rpy_high_pre
+    // exactly - the exclusion is fully preserved. rpy_high-rpy_low=0.8,
+    // NOT >1.0, so rpy_scale stays 1.0 and step 15's first branch never
+    // engages; throttle_thrust_best_rpy lands at 0.8, thr_adj =
+    // 0.5-0.8 = -0.3 < 0, hitting the real middle branch, forced to 0.
+    // Final: thrust_rpyt_out_ = [1.6, 0.0, 0.8, 0.8] (motor 0's own
+    // final value legitimately exceeds 1.0 here - it is the lost motor
+    // itself, excluded from the saturation math, a real disclosed
+    // upstream consequence, not a port bug), throttle_out_ = 0.8.
+    REQUIRE(m.thrust_rpyt_out(0) == Approx(1.6f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(1) == Approx(0.0f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(2) == Approx(0.8f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(3) == Approx(0.8f).margin(1e-4f));
+    REQUIRE(m.throttle_out() == Approx(0.8f).margin(1e-4f));
+}
+
+TEST_CASE("output_armed_stabilizing: rpy_low has NO lost-motor exclusion (unlike rpy_high) - even with "
+          "thrust_boost_ active, the lost motor's own extreme LOW value is picked up directly by rpy_low's "
+          "running minimum in step 11, exactly as if it were any other motor",
+          "[motors][output_armed_stabilizing][motor_loss][rpy_low][asymmetry]") {
+    MotorsMatrix m;
+    configureQuadPlus(m);
+    m.set_throttle_thrust_max(1.0f);
+    m.set_thrust_boost(true);
+    // thrust_boost_ratio_ defaults to 0.0f - irrelevant here since
+    // rpy_low never calls boost_ratio at all, only rpy_high (step 12)
+    // does.
+
+    bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+    // roll_in=1.6 drives motor 0 (the lost motor, roll_factor=-0.5) to
+    // the most NEGATIVE pre-scaling value (-0.8), and motor 1 (roll_
+    // factor=+0.5) to +0.8 - the mirror image of the rpy_high test
+    // above.
+    m.output_armed_stabilizing(/*roll_in=*/1.6f, 0.0f, 0.0f, 0.0f, /*yaw_in=*/0.0f, 0.0f,
+                                /*filtered_throttle=*/0.5f, /*throttle_avg_max=*/1.0f, /*yaw_headroom=*/0.0f,
+                                /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                limit_lower, limit_upper);
+
+    // Hand-computed: thrust_rpyt_out_ (pre-scaling) = [-0.8, 0.8, 0, 0].
+    // rpy_low, with NO exclusion at all, correctly becomes -0.8 (motor
+    // 0's own value, the lost motor). rpy_high excludes motor 0 (its
+    // 0.8 is the highest candidate but is skipped), landing on motor 1's
+    // 0.8 instead by coincidence of this frame's own symmetry - the SAME
+    // numeric value either way, so this test's real assertion is on
+    // rpy_low's inclusion, not rpy_high's exclusion (see the dedicated
+    // rpy_high test above for that). rpy_high-rpy_low = 0.8-(-0.8) = 1.6
+    // > 1.0, so rpy_scale = 1/1.6 = 0.625 and step 15's first branch
+    // fires - proving rpy_low's own -0.8 (the lost motor's value) was
+    // genuinely used in the shrink calculation, not silently dropped the
+    // way rpy_high would have dropped an equivalent HIGH value.
+    REQUIRE(limit_roll);
+    REQUIRE(limit_pitch);
+    REQUIRE(limit_yaw);
+    REQUIRE_FALSE(limit_lower);
+    REQUIRE_FALSE(limit_upper);
+    REQUIRE(m.thrust_rpyt_out(0) == Approx(0.0f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(1) == Approx(1.0f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(2) == Approx(0.5f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(3) == Approx(0.5f).margin(1e-4f));
+}
+
+TEST_CASE("output_armed_stabilizing: step 7's first per-motor loop OVERWRITES thrust_rpyt_out_ fresh every "
+          "call - a large stale value seeded via set_thrust_rpyt_out beforehand does NOT survive into the "
+          "result, proving step 7 does not accumulate onto any prior value (unlike step 11's own += onto "
+          "step 7's fresh value)",
+          "[motors][output_armed_stabilizing][overwrite_vs_accumulate]") {
+    MotorsMatrix m;
+    configureQuadPlus(m);
+    m.set_throttle_thrust_max(1.0f);
+    // Seed deliberately huge, obviously-stale garbage into every slot -
+    // if step 7 accumulated instead of overwriting, this would leak into
+    // the final result.
+    for (std::uint8_t i = 0; i < 4; ++i) {
+        m.set_thrust_rpyt_out(i, 999.0f);
+    }
+
+    bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+    m.output_armed_stabilizing(/*roll_in=*/0.1f, 0.0f, /*pitch_in=*/0.05f, 0.0f, /*yaw_in=*/0.02f, 0.0f,
+                                /*filtered_throttle=*/0.5f, /*throttle_avg_max=*/0.5f, /*yaw_headroom=*/0.0f,
+                                /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                limit_lower, limit_upper);
+
+    // Identical inputs/expected outputs to this ticket's own first "simple,
+    // well-within-range" test above - the 999.0f seed must have zero
+    // effect.
+    REQUIRE(m.thrust_rpyt_out(0) == Approx(0.46f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(1) == Approx(0.56f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(2) == Approx(0.515f).margin(1e-4f));
+    REQUIRE(m.thrust_rpyt_out(3) == Approx(0.465f).margin(1e-4f));
+    for (std::uint8_t i = 0; i < 4; ++i) {
+        REQUIRE(m.thrust_rpyt_out(i) != Approx(999.0f));
+    }
+}
+
+TEST_CASE("output_armed_stabilizing: step 9's motor-loss yaw-headroom inclusion - outer guard is "
+          "`thrust_boost_ && motor_enabled_[motor_lost_index_]`, a SEPARATE standalone condition. When the "
+          "lost motor is enabled, its own tighter yaw room collapses yaw_allowed and step 10's clamp fires; "
+          "when that SAME motor is fully removed (motor_enabled_ false), the outer guard is false and step "
+          "9 is skipped entirely, so yaw_allowed is untouched and step 10 does NOT fire for the identical "
+          "commanded yaw",
+          "[motors][output_armed_stabilizing][motor_loss][yaw_allowed][step9]") {
+    SECTION("lost motor enabled: step 9 fires, collapsing yaw_allowed and triggering step 10's clamp") {
+        MotorsMatrix m;
+    configureQuadPlus(m);
+        m.set_throttle_thrust_max(1.0f);
+        m.set_thrust_boost(true);
+        // thrust_boost_ratio_ defaults to 0.0f - boost_ratio(a, b) == b,
+        // i.e. step 9's own blend fully adopts the lost motor's own
+        // (tight) motor_yaw_allowed.
+
+        bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+        m.output_armed_stabilizing(/*roll_in=*/-1.0f, 0.0f, 0.0f, 0.0f, /*yaw_in=*/0.3f, 0.0f,
+                                    /*filtered_throttle=*/0.5f, /*throttle_avg_max=*/0.5f, /*yaw_headroom=*/0.0f,
+                                    /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                    limit_lower, limit_upper);
+
+        // Hand-computed: roll_in=-1.0 pushes the lost motor (0) to
+        // exactly the yaw-room boundary (motor_yaw_allowed=0.0), and
+        // ratio=0.0 makes step 9 adopt it fully - yaw_allowed collapses
+        // from 1.0 (steps 7-8) to exactly 0.0, so yaw_in=0.3 now exceeds
+        // it and step 10 clamps yaw_thrust to 0, setting limit_yaw.
+        REQUIRE(limit_yaw);
+        REQUIRE_FALSE(limit_roll);
+        REQUIRE_FALSE(limit_pitch);
+        REQUIRE_FALSE(limit_lower);
+        REQUIRE_FALSE(limit_upper);
+        REQUIRE(m.thrust_rpyt_out(0) == Approx(1.0f).margin(1e-4f));
+        REQUIRE(m.thrust_rpyt_out(1) == Approx(0.0f).margin(1e-4f));
+        REQUIRE(m.thrust_rpyt_out(2) == Approx(0.5f).margin(1e-4f));
+        REQUIRE(m.thrust_rpyt_out(3) == Approx(0.5f).margin(1e-4f));
+    }
+
+    SECTION("lost motor DISABLED (removed): step 9's outer guard is false, yaw_allowed is untouched, step 10 "
+            "does not fire for the SAME commanded yaw") {
+        MotorsMatrix m;
+    configureQuadPlus(m);
+        m.set_throttle_thrust_max(1.0f);
+        m.set_thrust_boost(true);
+        m.remove_motor(0); // the real, disclosed motor-loss scenario itself
+
+        bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+        m.output_armed_stabilizing(/*roll_in=*/-1.0f, 0.0f, 0.0f, 0.0f, /*yaw_in=*/0.3f, 0.0f,
+                                    /*filtered_throttle=*/0.5f, /*throttle_avg_max=*/0.5f, /*yaw_headroom=*/0.0f,
+                                    /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                    limit_lower, limit_upper);
+
+        // With motor 0 removed, step 9's outer guard
+        // (motor_enabled_[motor_lost_index_]) is false, so it never
+        // runs - yaw_allowed stays at its post-step-7/8 value of 1.0,
+        // comfortably above the commanded 0.3, so step 10 never clamps.
+        REQUIRE_FALSE(limit_yaw);
+        REQUIRE_FALSE(limit_roll);
+        REQUIRE_FALSE(limit_pitch);
+        REQUIRE_FALSE(limit_lower);
+        REQUIRE_FALSE(limit_upper);
+        REQUIRE(m.thrust_rpyt_out(1) == Approx(0.15f).margin(1e-4f));
+        REQUIRE(m.thrust_rpyt_out(2) == Approx(0.35f).margin(1e-4f));
+        REQUIRE(m.thrust_rpyt_out(3) == Approx(0.35f).margin(1e-4f));
+    }
+}
+
+TEST_CASE("output_armed_stabilizing: step 12's motor-loss rpy_high inclusion has a DIFFERENT guard shape "
+          "than step 9's own - the enabled-check is INSIDE the inner if's own condition alongside the value "
+          "comparison (`thrust_rpyt_out_[lost] > rpy_high && motor_enabled_[lost]`), not a separate outer "
+          "AND. Enabled: the lost motor's own high value is blended into rpy_high, shrinking rpy_scale and "
+          "engaging step 15. Disabled: the SAME inner condition's enabled-check is false, rpy_high is "
+          "untouched, and rpy_scale stays exactly 1.0 for the identical commanded roll",
+          "[motors][output_armed_stabilizing][motor_loss][rpy_high][step12]") {
+    SECTION("lost motor enabled: step 12 fires, shrinking rpy_scale below 1.0") {
+        MotorsMatrix m;
+    configureQuadPlus(m);
+        m.set_throttle_thrust_max(1.0f);
+        m.set_thrust_boost(true);
+        // thrust_boost_ratio_ defaults to 0.0f - step 12's own blend
+        // fully adopts the lost motor's own (high) value into rpy_high.
+
+        bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+        m.output_armed_stabilizing(/*roll_in=*/-1.6f, 0.0f, 0.0f, 0.0f, /*yaw_in=*/0.0f, 0.0f,
+                                    /*filtered_throttle=*/0.5f, /*throttle_avg_max=*/1.0f, /*yaw_headroom=*/0.0f,
+                                    /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                    limit_lower, limit_upper);
+
+        // Hand-computed: thrust_rpyt_out_ (pre-scale) = [0.8, -0.8, 0, 0].
+        // rpy_high, pre-step-12, excludes motor 0 and lands on 0.0; step
+        // 12 (ratio=0.0) blends it fully to 0.8. rpy_high-rpy_low =
+        // 0.8-(-0.8) = 1.6 > 1.0, rpy_scale = 1/1.6 = 0.625 < 1.0, so
+        // step 15 engages all three of roll/pitch/yaw.
+        REQUIRE(limit_roll);
+        REQUIRE(limit_pitch);
+        REQUIRE(limit_yaw);
+        REQUIRE(m.thrust_rpyt_out(0) == Approx(1.0f).margin(1e-4f));
+        REQUIRE(m.thrust_rpyt_out(1) == Approx(0.0f).margin(1e-4f));
+        REQUIRE(m.thrust_rpyt_out(2) == Approx(0.5f).margin(1e-4f));
+        REQUIRE(m.thrust_rpyt_out(3) == Approx(0.5f).margin(1e-4f));
+    }
+
+    SECTION("lost motor DISABLED (removed): step 12's inner enabled-check is false, rpy_high is untouched, "
+            "rpy_scale stays 1.0 for the identical commanded roll") {
+        MotorsMatrix m;
+    configureQuadPlus(m);
+        m.set_throttle_thrust_max(1.0f);
+        m.set_thrust_boost(true);
+        m.remove_motor(0);
+
+        bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+        m.output_armed_stabilizing(/*roll_in=*/-1.6f, 0.0f, 0.0f, 0.0f, /*yaw_in=*/0.0f, 0.0f,
+                                    /*filtered_throttle=*/0.5f, /*throttle_avg_max=*/1.0f, /*yaw_headroom=*/0.0f,
+                                    /*air_density_ratio=*/1.0f, /*dt_s=*/0.02f, limit_roll, limit_pitch, limit_yaw,
+                                    limit_lower, limit_upper);
+
+        // With motor 0 removed, rpy_high (from motors 1-3 only) stays at
+        // 0.0, rpy_high-rpy_low = 0.0-(-0.8) = 0.8, NOT > 1.0 - rpy_scale
+        // stays exactly 1.0 and step 15 never engages.
+        REQUIRE_FALSE(limit_roll);
+        REQUIRE_FALSE(limit_pitch);
+        REQUIRE_FALSE(limit_yaw);
+        REQUIRE_FALSE(limit_lower);
+        REQUIRE_FALSE(limit_upper);
+        REQUIRE(m.thrust_rpyt_out(1) == Approx(0.0f).margin(1e-4f));
+        REQUIRE(m.thrust_rpyt_out(2) == Approx(0.8f).margin(1e-4f));
+        REQUIRE(m.thrust_rpyt_out(3) == Approx(0.8f).margin(1e-4f));
+        REQUIRE(m.throttle_out() == Approx(0.8f).margin(1e-4f));
+    }
+}
+
+TEST_CASE("output_armed_stabilizing: integration - chaining this function's own real output into "
+          "check_for_failed_motor (CCP-011), threaded through with the SAME dt_s/air_density_ratio "
+          "parameters rather than hardcoded placeholders, across a seeded pseudo-random sweep of realistic "
+          "inputs - every result stays finite (no NaN/Inf) and every limit flag reads as a real bool",
+          "[motors][output_armed_stabilizing][integration][sweep]") {
+    // A small, fixed, hand-rolled LCG (no <random> dependency needed) -
+    // deterministic across runs/platforms, which is what a regression
+    // test needs; "seeded pseudo-random", not a true fuzzer, but it
+    // exercises many more input COMBINATIONS than a handful of literal
+    // cases could, which is this ticket's own explicit ask.
+    std::uint32_t state = 0xC0FFEEu;
+    auto next01 = [&state]() {
+        state = state * 1664525u + 1013904223u;
+        return static_cast<float>(state) / static_cast<float>(0xFFFFFFFFu);
+    };
+    auto nextRange = [&next01](float lo, float hi) { return lo + next01() * (hi - lo); };
+
+    for (int iter = 0; iter < 200; ++iter) {
+        MotorsMatrix m;
+    configureQuadPlus(m);
+        m.set_throttle_thrust_max(1.0f);
+        if (nextRange(0.0f, 1.0f) < 0.2f) {
+            m.set_thrust_boost(true);
+            m.set_thrust_boost_ratio(nextRange(0.0f, 1.0f));
+        }
+
+        const float roll_in = nextRange(-2.0f, 2.0f);
+        const float pitch_in = nextRange(-2.0f, 2.0f);
+        const float yaw_in = nextRange(-2.0f, 2.0f);
+        const float filtered_throttle = nextRange(-0.5f, 1.5f);
+        const float throttle_avg_max = nextRange(0.0f, 1.0f);
+        const float yaw_headroom = nextRange(0.0f, 500.0f);
+        const float air_density_ratio = nextRange(0.4f, 1.4f);
+        const float dt_s = nextRange(0.001f, 0.1f);
+
+        bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+        m.output_armed_stabilizing(roll_in, 0.0f, pitch_in, 0.0f, yaw_in, 0.0f, filtered_throttle, throttle_avg_max,
+                                    yaw_headroom, air_density_ratio, dt_s, limit_roll, limit_pitch, limit_yaw,
+                                    limit_lower, limit_upper);
+
+        INFO("iter " << iter << " roll_in=" << roll_in << " pitch_in=" << pitch_in << " yaw_in=" << yaw_in
+                      << " filtered_throttle=" << filtered_throttle << " throttle_avg_max=" << throttle_avg_max
+                      << " yaw_headroom=" << yaw_headroom << " air_density_ratio=" << air_density_ratio
+                      << " dt_s=" << dt_s);
+
+        for (std::uint8_t i = 0; i < 4; ++i) {
+            const float v = m.thrust_rpyt_out(i);
+            REQUIRE_FALSE(std::isnan(v));
+            REQUIRE_FALSE(std::isinf(v));
+        }
+        REQUIRE_FALSE(std::isnan(m.throttle_out()));
+        REQUIRE_FALSE(std::isinf(m.throttle_out()));
+
+        // output_armed_stabilizing's own step 19 already calls
+        // check_for_failed_motor (CCP-011) internally as its real final
+        // step, threaded through with this SAME iteration's dt_s/
+        // air_density_ratio - not a hardcoded placeholder. Inspect the
+        // real state it updates (thrust_rpyt_out_filt_/motor_lost_index_)
+        // directly here rather than calling it a second time (which would
+        // double-apply the exponential filter and not reflect the real
+        // once-per-cycle call contract).
+        for (std::uint8_t i = 0; i < 4; ++i) {
+            REQUIRE_FALSE(std::isnan(m.thrust_rpyt_out_filt(i)));
+            REQUIRE_FALSE(std::isinf(m.thrust_rpyt_out_filt(i)));
+        }
+        REQUIRE(m.motor_lost_index() < 4);
+    }
+}

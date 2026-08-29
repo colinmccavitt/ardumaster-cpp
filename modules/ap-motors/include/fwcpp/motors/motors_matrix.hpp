@@ -881,8 +881,8 @@
 // ticket's own guessed span, 414-457, undershot the real end by 4 lines
 // - the real closing brace is at line 461, not 457). The real contract
 // comment immediately above (lines 406-413) documents this is intended
-// to run immediately after output_armed_stabilizing (not yet built in
-// this port - see updated "DEFERRED FUTURE PHASES" below), with
+// to run immediately after output_armed_stabilizing (DONE as of
+// CCP-016 - see that ticket's own "CCP-016 ADDITION" above), with
 // throttle_thrust_best_plus_adj = throttle_thrust_best_rpy + thr_adj.
 //
 // THE REAL SIX-STEP STRUCTURE, TRANSCRIBED EXACTLY (re-verified line by
@@ -996,16 +996,19 @@
 // explicit-parameter treatment of AP::battery()/AP::ahrs() state it does
 // not own either).
 //
-// TEST-ONLY GAP, DISCLOSED: output_armed_stabilizing (not yet built -
-// see updated "DEFERRED FUTURE PHASES" below) is upstream's real, sole
+// TEST-ONLY GAP, DISCLOSED (CLOSED BY CCP-016): at the time this ticket
+// (CCP-011) was written, output_armed_stabilizing - upstream's real, sole
 // writer of thrust_rpyt_out_ before check_for_failed_motor's own real
-// call-order contract expects it to run. Since this port has no
-// output_armed_stabilizing yet, a bounds-checked set_thrust_rpyt_out()
-// setter is added purely so tests can populate thrust_rpyt_out_ directly
-// - a real, temporary gap a LATER ticket (the one that actually builds
-// output_armed_stabilizing) closes by computing and writing these values
-// for real before calling this function, exactly matching upstream's own
-// call-order contract.
+// call-order contract expects it to run - did not exist in this port
+// yet, so a bounds-checked set_thrust_rpyt_out() setter was added purely
+// so tests could populate thrust_rpyt_out_ directly. CCP-016 has since
+// built output_armed_stabilizing for real (see "CCP-016 ADDITION"
+// below), which now computes and writes these values for real before
+// calling this function, exactly matching upstream's own call-order
+// contract - set_thrust_rpyt_out() itself is left in place, unchanged,
+// since check_for_failed_motor's own tests still legitimately want to
+// seed thrust_rpyt_out_ directly without going through the full
+// output_armed_stabilizing computation first.
 //
 // CCP-012 ADDITION (set_actuator_with_slew + actuator_spin_up_to_ground_idle)
 // - upstream AP_MotorsMulticopter.cpp (re-verified directly against the
@@ -1292,16 +1295,22 @@
 //      SPOOLING_DOWN, real lines 769-884, "PART 2" - are DONE as of
 //      CCP-014 (see "CCP-014 ADDITION" - search this file), and
 //      output_to_pwm (AP_MotorsMulticopter.cpp line 457) is DONE as of
-//      CCP-015 (see "CCP-015 ADDITION" above). output_to_motors (the real
-//      per-motor dispatcher that calls output_to_pwm once per motor,
-//      needing motor_enabled_/rc_write-equivalent output plumbing this
-//      port has not built), output_armed_stabilizing (the real per-motor
-//      mixing algorithm, ~190 real lines - the single largest remaining
-//      function in this whole output-stage effort), thrust_compensation,
-//      and disable_yaw_torque all remain separate, deliberately deferred
-//      future phases, NOT started by this ticket - output_to_motors
-//      specifically also needs real PWM output plumbing beyond just the
-//      now-ported SpoolState enum and output_to_pwm itself. Actuator
+//      CCP-015 (see "CCP-015 ADDITION" above), and output_armed_stabilizing (the
+//      real per-motor mixing/control-allocation algorithm, ~190 real
+//      lines - the single largest function in this whole output-stage
+//      effort, and its own most complex) is DONE as of CCP-016 (see
+//      "CCP-016 ADDITION" above), which also calls check_for_failed_motor
+//      (CCP-011) as its own real final step. output_to_motors (the real
+//      per-motor dispatcher that calls output_armed_stabilizing/
+//      output_to_pwm once per output cycle, needing motor_enabled_/
+//      rc_write-equivalent output plumbing this port has not built),
+//      thrust_compensation, and disable_yaw_torque all remain separate,
+//      deliberately deferred future phases, NOT started by this ticket -
+//      output_to_motors specifically also needs real PWM output plumbing
+//      beyond just the now-ported SpoolState enum, output_to_pwm, and
+//      output_armed_stabilizing themselves. **Completing output_to_motors
+//      would close out this entire AP_Motors output-stage effort.**
+//      Actuator
 //      slew-rate limiting itself is NOT part of that missing infrastructure, since
 //      CCP-012 already ported it as the unconditional pure function it
 //      really is (see "CCP-012 ADDITION" above for why it needs no
@@ -3261,10 +3270,10 @@ public:
     // file's own "DEFERRED FUTURE PHASES" precedent): output_to_motors
     // (the real per-motor dispatcher that calls this function once per
     // motor, needing motor_enabled_/rc_write-equivalent output plumbing
-    // this port has not built) and output_armed_stabilizing (the real
-    // per-motor mixing algorithm, ~190 real lines - the single largest
-    // remaining function in this whole output-stage effort) are both
-    // separate, deliberately deferred future phases - see updated
+    // this port has not built) remains a separate, deliberately deferred
+    // future phase - output_armed_stabilizing itself (the real per-motor
+    // mixing algorithm, ~190 real lines) is now DONE as of CCP-016 (see
+    // that ticket's own "CCP-016 ADDITION" above) - see updated
     // "DEFERRED FUTURE PHASES" below.
     [[nodiscard]] static std::int16_t output_to_pwm(float actuator, SpoolState spool_state, bool armed,
                                                      bool disarm_disable_pwm, std::int16_t pwm_output_min,
@@ -3344,6 +3353,414 @@ public:
     [[nodiscard]] float yaw_factor(std::uint8_t i) const { return i < kMaxNumMotors ? yaw_factor_[i] : 0.0f; }
     [[nodiscard]] float throttle_factor(std::uint8_t i) const { return i < kMaxNumMotors ? throttle_factor_[i] : 0.0f; }
     [[nodiscard]] std::uint8_t test_order(std::uint8_t i) const { return i < kMaxNumMotors ? test_order_[i] : 0; }
+
+    // boost_ratio - CCP-016 port of upstream AP_MotorsMatrix::boost_ratio
+    // (real function body lines 206-208, re-verified directly against the
+    // pinned worktree): `return _thrust_boost_ratio * boost_value +
+    // (1.0 - _thrust_boost_ratio) * normal_value;` - a linear blend
+    // between a "motor lost"/boosted value and a normal value, driven
+    // entirely by this port's own thrust_boost_ratio_ member (CCP-013/
+    // 014's own state - see this class's own thrust_boost_ratio_
+    // accessor/setter above). thrust_boost_ratio_ of 1.0 returns
+    // boost_value; 0.0 returns normal_value. `const` - reads only
+    // thrust_boost_ratio_, matching upstream's own `const` qualifier.
+    [[nodiscard]] float boost_ratio(float boost_value, float normal_value) const {
+        return thrust_boost_ratio_ * boost_value + (1.0f - thrust_boost_ratio_) * normal_value;
+    }
+
+    // output_armed_stabilizing - CCP-016 port of upstream
+    // AP_MotorsMatrix::output_armed_stabilizing (real function body lines
+    // 213-403, ~190 real lines, re-verified directly against the pinned
+    // worktree multiple times - "the real motor-mixing/control-allocation
+    // algorithm", per this ticket's own framing). Every one of the real
+    // 19 structural steps below is numbered to match this port's own
+    // ticket (CCP-016) and was independently re-derived from the real
+    // source, not trusted from any prior summary.
+    //
+    // REAL EXTERNAL DEPENDENCIES taken as explicit parameters (ADR-0012,
+    // matching every prior output-stage ticket's own convention):
+    // roll_in/roll_in_ff/pitch_in/pitch_in_ff/yaw_in/yaw_in_ff (real
+    // _roll_in/_roll_in_ff/etc. - the attitude controller's rate-PID
+    // output plus feedforward; this port has no AC_AttitudeControl yet),
+    // filtered_throttle (real get_throttle() - the SAME name CCP-014's
+    // own output_logic already established for this exact real concept,
+    // deliberately not reinvented here), air_density_ratio (feeds
+    // thr_lin_.get_compensation_gain() - the SAME explicit-parameter
+    // convention CCP-011 already established for this exact call),
+    // throttle_avg_max (real _throttle_avg_max - hover-throttle-learning
+    // state from a not-yet-built update_throttle_hover; copter-rust's own
+    // COP-004 names update_throttle_hover as remaining/unbuilt on the
+    // Rust side too, so this is a genuinely shared, disclosed gap across
+    // both ports, not a C++-specific shortcut), yaw_headroom (real
+    // _yaw_headroom, the MOT_YAW_HEADROOM parameter's raw AP_Int16 units
+    // - e.g. 350 for the real Y6 recommendation in upstream's own
+    // comment - BEFORE this function's own /1000.0f scale, re-verified
+    // directly at real line 297; real upstream's own comment there reads
+    // "todo: make _yaw_headroom 0 to 1" - the CURRENT, non-aspirational
+    // behavior is transcribed here, not the todo), and dt_s (needed
+    // purely to thread through to the final check_for_failed_motor
+    // (CCP-011) call below, which already requires it as an explicit
+    // parameter of its own).
+    //
+    // throttle_thrust_max_ is DELIBERATELY NOT a parameter here, unlike
+    // check_for_failed_motor's own explicit throttle_thrust_max parameter
+    // (CCP-011 added that BEFORE this port had any real throttle_thrust_
+    // max_ member at all - see that method's own "PARAMETER SHAPE"
+    // comment above). This port now has a real throttle_thrust_max_
+    // member (added afterward, by CCP-013/014's own output_logic), so
+    // this method reads it directly, exactly as real upstream reads its
+    // own _throttle_thrust_max member - no parameter is needed for state
+    // this class already owns. The SAME real member value is threaded
+    // through, unchanged, to the final check_for_failed_motor call below
+    // (satisfying its own throttle_thrust_max parameter) - not a
+    // hardcoded or placeholder value.
+    //
+    // FIVE BOOLEAN LIMIT OUTPUTS - real upstream's AP_Motors_limit struct
+    // (AP_Motors_Class.h lines 202-210, re-verified directly this round)
+    // has exactly five real fields: roll, pitch, yaw, throttle_lower,
+    // throttle_upper. This port has no limit-struct member yet - CCP-013/
+    // 014's own output_logic used a single blanket limits_all_engaged
+    // bool, not fine-grained enough for this function's own real
+    // per-axis distinctions (see that method's own "OUTPUT SHAPE"
+    // comment). Taken here as five explicit bool& parameters
+    // (limit_roll/limit_pitch/limit_yaw/limit_throttle_lower/
+    // limit_throttle_upper) rather than a new output struct type,
+    // matching this file's OWN established convention for fine-grained
+    // boolean outputs (output_logic's own limits_all_engaged/should_set_
+    // spoolup_block bool& parameters, CCP-013) - a single call site does
+    // not need a new aggregate type when this file already has a working
+    // precedent for exactly this shape. Named with an explicit limit_
+    // prefix (rather than bare roll/pitch/yaw) to avoid colliding with
+    // the roll_in/pitch_in/yaw_in parameters above and to read
+    // unambiguously as an output at every call site. ALL FIVE are reset
+    // to false at entry: the real upstream `limit` object is reset ONCE
+    // PER OUTPUT CYCLE by a caller this port does not have yet
+    // (output_to_motors - deferred, see "DEFERRED FUTURE PHASES" below),
+    // and since this port calls this function directly/standalone (in
+    // tests, and until output_to_motors exists), the caller cannot be
+    // trusted to have pre-cleared them itself.
+    //
+    // set_rpy(true) THREE-FLAG FINDING (re-verified directly against
+    // AP_Motors_Class.cpp lines 344-349, `AP_Motors::AP_Motors_limit::
+    // set_rpy(bool flag) { roll = flag; pitch = flag; yaw = flag; }`):
+    // real upstream's own set_rpy sets ALL THREE of roll/pitch/yaw,
+    // INCLUDING yaw, despite the name's own apparent implication that it
+    // only touches roll/pitch. Step 15 below (the rpy_scale < 1.0f
+    // branch) calls this real equivalent directly - limit_roll,
+    // limit_pitch, AND limit_yaw are all set true together there, even
+    // when step 10's own dedicated yaw-saturation clamp did NOT itself
+    // fire. This is a real, disclosed consequence: yaw becomes true for
+    // a reason UNRELATED to yaw itself saturating (the full combined
+    // roll+pitch+yaw range being exhausted, not excess commanded yaw
+    // specifically). See motors_matrix_test.cpp's own dedicated
+    // regression test proving this exact path.
+    //
+    // compensation_gain CAN NEVER BE ZERO (real upstream's own comment
+    // immediately before its final _throttle_out division, real line
+    // 401) - INVESTIGATED AND CONFIRMED TRUE against this port's own
+    // ThrustLinearization::get_compensation_gain (CCP-010,
+    // thrust_linearization.hpp): that method either returns exactly
+    // 1.0f (its own `lift_max_ <= 0.0f` early-return branch) or
+    // `1.0f / lift_max_`, optionally further multiplied by
+    // `1.0f / math::constrain_value(air_density_ratio, 0.5f, 1.25f)`.
+    // The constrain_value call's own [0.5, 1.25] bounds mean that second
+    // factor is always within [0.8, 2.0] whenever it applies, and
+    // `lift_max_ > 0.0f` in the un-early-returned branch means
+    // `1.0f / lift_max_` is always a finite, strictly positive float for
+    // any representable positive lift_max_. So get_compensation_gain's
+    // return value is always strictly positive and can never be exactly
+    // zero - matching this project's "no defensive checks for things
+    // that can't happen" philosophy, NO guard is added around the
+    // throttle_out_ division at step 18 below.
+    //
+    // STEP-BY-STEP STRUCTURE (re-verified directly against the real
+    // source, in order):
+    //   1. compensation_gain = thr_lin_.get_compensation_gain(air_density_ratio).
+    //   2. roll_thrust/pitch_thrust/yaw_thrust/throttle_thrust/
+    //      throttle_avg_max_local computed from the explicit inputs times
+    //      compensation_gain - yaw_thrust/throttle_thrust/throttle_avg_max_local
+    //      are all mutable locals, reassigned further down (throttle_avg_max_local
+    //      and throttle_thrust are this port's own necessarily-renamed
+    //      locals - real upstream reuses the parameter-shaped names
+    //      `throttle_avg_max`/`throttle_thrust` for ITS OWN local
+    //      variables, which this port's own explicit-parameter signature
+    //      cannot do without shadowing - disclosed rename, not a
+    //      behavioral difference).
+    //   3. throttle_thrust_max_local = boost_ratio(1.0, throttle_thrust_max_ * compensation_gain).
+    //   4. Sanity clamps: throttle_thrust <= 0 -> clamp to 0, limit_throttle_lower = true.
+    //      throttle_thrust >= throttle_thrust_max_local -> clamp to that ceiling, limit_throttle_upper = true.
+    //   5. throttle_avg_max_local = constrain(throttle_avg_max_local, throttle_thrust, throttle_thrust_max_local).
+    //   6. throttle_thrust_best_rpy = min(0.5, throttle_avg_max_local) - FIRST
+    //      use of this variable name; REASSIGNED at step 14 to a
+    //      genuinely different value (a real two-stage reuse, re-verified
+    //      directly).
+    //   7. First per-motor loop: thrust_rpyt_out_[i] = roll_thrust *
+    //      roll_factor_[i] + pitch_thrust * pitch_factor_[i] - a fresh
+    //      OVERWRITE each call, not an accumulation onto any prior value.
+    //      For motors with a non-zero yaw factor (excluding the lost
+    //      motor when thrust_boost_ is active), computes motor_room (room
+    //      to the upper limit if yaw_thrust*yaw_factor_[i] is positive,
+    //      else room to the lower limit - the two branches are NOT
+    //      symmetric complements) and tracks yaw_allowed as a running
+    //      minimum, starting at 1.0f.
+    //   8. yaw_allowed_min = yaw_headroom * 0.001f, boosted toward 0.5
+    //      via boost_ratio while thrust_boost_ is active (a real 50%
+    //      yaw-headroom floor during a motor-loss event); yaw_allowed =
+    //      max(yaw_allowed, yaw_allowed_min).
+    //   9. Motor-loss yaw inclusion: outer guard is
+    //      `thrust_boost_ && motor_enabled_[motor_lost_index_]` - a
+    //      SEPARATE, standalone outer condition. Re-derives the SAME
+    //      motor_room/motor_yaw_allowed computation from step 7 for just
+    //      the lost motor, then yaw_allowed = boost_ratio(yaw_allowed,
+    //      min(yaw_allowed, motor_yaw_allowed)) - the nested
+    //      boost_ratio(..., min(...)) composition, re-verified directly.
+    //   10. Dedicated yaw-saturation clamp: fires (and sets limit_yaw)
+    //       ONLY when fabs(yaw_thrust) > yaw_allowed, clamping yaw_thrust
+    //       to [-yaw_allowed, yaw_allowed].
+    //   11. Second per-motor loop: thrust_rpyt_out_[i] += yaw_thrust *
+    //       yaw_factor_[i] - ACCUMULATES onto step 7's own value, unlike
+    //       step 7's fresh overwrite. Tracks rpy_low (running minimum,
+    //       starting 1.0f, NO lost-motor exclusion) and rpy_high (running
+    //       maximum, starting -1.0f, EXCLUDING the lost motor when
+    //       thrust_boost_ is active) - a real, easy-to-miss asymmetry
+    //       between the two, re-verified directly.
+    //   12. Motor-loss rpy_high inclusion: `if (thrust_boost_) { if
+    //       (thrust_rpyt_out_[motor_lost_index_] > rpy_high &&
+    //       motor_enabled_[motor_lost_index_]) { ... } }` - the
+    //       enabled-check is INSIDE the inner if's own condition, NOT a
+    //       separate outer guard like step 9's own shape - a real,
+    //       structural difference between the two motor-loss inclusions,
+    //       re-verified directly. Blends rpy_high = boost_ratio(rpy_high,
+    //       thrust_rpyt_out_[motor_lost_index_]).
+    //   13. rpy_scale = 1.0f; if (rpy_high - rpy_low > 1.0f) rpy_scale =
+    //       1.0f / (rpy_high - rpy_low). Then, INDEPENDENTLY (a second
+    //       `if`, NOT an `else if` - the two conditions are not mutually
+    //       exclusive and the second CAN further shrink rpy_scale even
+    //       after the first already applied): if (throttle_avg_max_local
+    //       + rpy_low < 0) rpy_scale = min(rpy_scale,
+    //       -throttle_avg_max_local / rpy_low).
+    //   14. rpy_high *= rpy_scale; rpy_low *= rpy_scale;
+    //       throttle_thrust_best_rpy = -rpy_low - REASSIGNING the same
+    //       variable name from step 6 to a genuinely different value (the
+    //       two-stage reuse flagged there). thr_adj = throttle_thrust -
+    //       throttle_thrust_best_rpy (a fresh, mutable local, reassigned
+    //       below).
+    //   15. Real three-way, mutually exclusive (if/else if/else if)
+    //       thr_adj adjustment: if (rpy_scale < 1.0f) - full RPY range in
+    //       use - sets limit_roll/limit_pitch/limit_yaw ALL true together
+    //       (the real set_rpy(true) equivalent - see "set_rpy(true)
+    //       THREE-FLAG FINDING" above), ALSO sets limit_throttle_upper if
+    //       thr_adj > 0.0f (a nested condition INSIDE this first branch),
+    //       then forces thr_adj = 0. ELSE IF thr_adj < 0.0f (throttle
+    //       can't be reduced): forces thr_adj = 0, setting NO limit flag
+    //       at all - re-verified this middle branch is the one of the
+    //       three that raises nothing. ELSE IF thr_adj > 1.0f -
+    //       (throttle_thrust_best_rpy + rpy_high) (throttle can't be
+    //       increased): clamps thr_adj to that exact ceiling expression
+    //       and sets limit_throttle_upper.
+    //   16. throttle_thrust_best_plus_adj = throttle_thrust_best_rpy + thr_adj.
+    //   17. Final per-motor assembly loop: thrust_rpyt_out_[i] =
+    //       (throttle_thrust_best_plus_adj * throttle_factor_[i]) +
+    //       (rpy_scale * thrust_rpyt_out_[i]) - REPLACES (does not
+    //       accumulate onto) the per-motor value from steps 7/11, reading
+    //       thrust_rpyt_out_[i]'s OLD value on the right-hand side before
+    //       overwriting. This port uses an explicit `old_thrust_rpyt_out`
+    //       temporary to make that "read-then-write" evaluation order
+    //       unambiguous in its own source - a deliberate, disclosed style
+    //       choice; C++'s own well-defined right-to-left evaluation of a
+    //       plain `=` whose RHS references the same array slot would
+    //       already be correct without it, this is a readability choice
+    //       only, not a correctness fix.
+    //   18. throttle_out_ = throttle_thrust_best_plus_adj /
+    //       compensation_gain - real upstream's own "used for harmonic
+    //       notch" comment; this port has no consumer for it yet, ported
+    //       anyway since it is real, disclosed state a future ticket may
+    //       need, and it costs nothing to carry. See "compensation_gain
+    //       CAN NEVER BE ZERO" investigation above for why no guard is
+    //       added around this division.
+    //   19. Final real call: check_for_failed_motor(throttle_thrust_best_plus_adj,
+    //       throttle_thrust_max_, dt_s, air_density_ratio) - CCP-011's
+    //       own real signature, threaded through with THIS function's own
+    //       throttle_thrust_max_ member and dt_s/air_density_ratio
+    //       parameters, not hardcoded placeholders.
+    //
+    // DEFERRED - NOT this ticket's scope (see updated "DEFERRED FUTURE
+    // PHASES" below): output_to_motors (the real per-motor dispatcher
+    // that calls output_armed_stabilizing/output_to_pwm once per output
+    // cycle and resets the real `limit` struct once per cycle, needing
+    // motor_enabled_/rc_write-equivalent HAL output plumbing this port
+    // has not built), thrust_compensation, and disable_yaw_torque all
+    // remain separate, deliberately deferred future phases. Completing
+    // output_to_motors would close out this entire AP_Motors output-stage
+    // effort.
+    void output_armed_stabilizing(float roll_in, float roll_in_ff, float pitch_in, float pitch_in_ff, float yaw_in,
+                                   float yaw_in_ff, float filtered_throttle, float throttle_avg_max, float yaw_headroom,
+                                   float air_density_ratio, float dt_s, bool& limit_roll, bool& limit_pitch,
+                                   bool& limit_yaw, bool& limit_throttle_lower, bool& limit_throttle_upper) {
+        limit_roll = false;
+        limit_pitch = false;
+        limit_yaw = false;
+        limit_throttle_lower = false;
+        limit_throttle_upper = false;
+
+        // Step 1.
+        const float compensation_gain = thr_lin_.get_compensation_gain(air_density_ratio);
+
+        // Step 2. throttle_avg_max_local/throttle_thrust are this port's
+        // own necessarily-renamed locals (see "STEP-BY-STEP STRUCTURE"
+        // comment above) - real upstream reuses the bare parameter-shaped
+        // names for its own locals, which this port's explicit-parameter
+        // signature cannot do without shadowing.
+        const float roll_thrust = (roll_in + roll_in_ff) * compensation_gain;
+        const float pitch_thrust = (pitch_in + pitch_in_ff) * compensation_gain;
+        float yaw_thrust = (yaw_in + yaw_in_ff) * compensation_gain;
+        float throttle_thrust = filtered_throttle * compensation_gain;
+        float throttle_avg_max_local = throttle_avg_max * compensation_gain;
+
+        // Step 3.
+        const float throttle_thrust_max_local = boost_ratio(1.0f, throttle_thrust_max_ * compensation_gain);
+
+        // Step 4.
+        if (throttle_thrust <= 0.0f) {
+            throttle_thrust = 0.0f;
+            limit_throttle_lower = true;
+        }
+        if (throttle_thrust >= throttle_thrust_max_local) {
+            throttle_thrust = throttle_thrust_max_local;
+            limit_throttle_upper = true;
+        }
+
+        // Step 5.
+        throttle_avg_max_local =
+            math::constrain_value(throttle_avg_max_local, throttle_thrust, throttle_thrust_max_local);
+
+        // Step 6.
+        float throttle_thrust_best_rpy = std::min(0.5f, throttle_avg_max_local);
+
+        // Step 7.
+        float yaw_allowed = 1.0f;
+        for (std::size_t i = 0; i < kMaxNumMotors; ++i) {
+            if (motor_enabled_[i]) {
+                thrust_rpyt_out_[i] = roll_thrust * roll_factor_[i] + pitch_thrust * pitch_factor_[i];
+
+                if (!math::is_zero(yaw_factor_[i]) && (!thrust_boost_ || i != motor_lost_index_)) {
+                    const float thrust_rp_best_throttle = throttle_thrust_best_rpy + thrust_rpyt_out_[i];
+                    float motor_room;
+                    if (math::is_positive(yaw_thrust * yaw_factor_[i])) {
+                        motor_room = 1.0f - thrust_rp_best_throttle;
+                    } else {
+                        motor_room = thrust_rp_best_throttle;
+                    }
+                    const float motor_yaw_allowed = std::max(motor_room, 0.0f) / std::fabs(yaw_factor_[i]);
+                    yaw_allowed = std::min(yaw_allowed, motor_yaw_allowed);
+                }
+            }
+        }
+
+        // Step 8.
+        float yaw_allowed_min = yaw_headroom * 0.001f;
+        yaw_allowed_min = boost_ratio(0.5f, yaw_allowed_min);
+        yaw_allowed = std::max(yaw_allowed, yaw_allowed_min);
+
+        // Step 9.
+        if (thrust_boost_ && motor_enabled_[motor_lost_index_]) {
+            if (!math::is_zero(yaw_factor_[motor_lost_index_])) {
+                const float thrust_rp_best_throttle = throttle_thrust_best_rpy + thrust_rpyt_out_[motor_lost_index_];
+                float motor_room;
+                if (math::is_positive(yaw_thrust * yaw_factor_[motor_lost_index_])) {
+                    motor_room = 1.0f - thrust_rp_best_throttle;
+                } else {
+                    motor_room = thrust_rp_best_throttle;
+                }
+                const float motor_yaw_allowed =
+                    std::max(motor_room, 0.0f) / std::fabs(yaw_factor_[motor_lost_index_]);
+                yaw_allowed = boost_ratio(yaw_allowed, std::min(yaw_allowed, motor_yaw_allowed));
+            }
+        }
+
+        // Step 10.
+        if (std::fabs(yaw_thrust) > yaw_allowed) {
+            yaw_thrust = math::constrain_value(yaw_thrust, -yaw_allowed, yaw_allowed);
+            limit_yaw = true;
+        }
+
+        // Step 11.
+        float rpy_low = 1.0f;
+        float rpy_high = -1.0f;
+        for (std::size_t i = 0; i < kMaxNumMotors; ++i) {
+            if (motor_enabled_[i]) {
+                thrust_rpyt_out_[i] = thrust_rpyt_out_[i] + yaw_thrust * yaw_factor_[i];
+
+                if (thrust_rpyt_out_[i] < rpy_low) {
+                    rpy_low = thrust_rpyt_out_[i];
+                }
+                if (thrust_rpyt_out_[i] > rpy_high && (!thrust_boost_ || i != motor_lost_index_)) {
+                    rpy_high = thrust_rpyt_out_[i];
+                }
+            }
+        }
+
+        // Step 12.
+        if (thrust_boost_) {
+            if (thrust_rpyt_out_[motor_lost_index_] > rpy_high && motor_enabled_[motor_lost_index_]) {
+                rpy_high = boost_ratio(rpy_high, thrust_rpyt_out_[motor_lost_index_]);
+            }
+        }
+
+        // Step 13.
+        float rpy_scale = 1.0f;
+        if (rpy_high - rpy_low > 1.0f) {
+            rpy_scale = 1.0f / (rpy_high - rpy_low);
+        }
+        if (throttle_avg_max_local + rpy_low < 0.0f) {
+            rpy_scale = std::min(rpy_scale, -throttle_avg_max_local / rpy_low);
+        }
+
+        // Step 14.
+        rpy_high *= rpy_scale;
+        rpy_low *= rpy_scale;
+        throttle_thrust_best_rpy = -rpy_low;
+        float thr_adj = throttle_thrust - throttle_thrust_best_rpy;
+
+        // Step 15.
+        if (rpy_scale < 1.0f) {
+            limit_roll = true;
+            limit_pitch = true;
+            limit_yaw = true;
+            if (thr_adj > 0.0f) {
+                limit_throttle_upper = true;
+            }
+            thr_adj = 0.0f;
+        } else if (thr_adj < 0.0f) {
+            thr_adj = 0.0f;
+        } else if (thr_adj > 1.0f - (throttle_thrust_best_rpy + rpy_high)) {
+            thr_adj = 1.0f - (throttle_thrust_best_rpy + rpy_high);
+            limit_throttle_upper = true;
+        }
+
+        // Step 16.
+        const float throttle_thrust_best_plus_adj = throttle_thrust_best_rpy + thr_adj;
+
+        // Step 17.
+        for (std::size_t i = 0; i < kMaxNumMotors; ++i) {
+            if (motor_enabled_[i]) {
+                const float old_thrust_rpyt_out = thrust_rpyt_out_[i];
+                thrust_rpyt_out_[i] =
+                    (throttle_thrust_best_plus_adj * throttle_factor_[i]) + (rpy_scale * old_thrust_rpyt_out);
+            }
+        }
+
+        // Step 18.
+        throttle_out_ = throttle_thrust_best_plus_adj / compensation_gain;
+
+        // Step 19.
+        check_for_failed_motor(throttle_thrust_best_plus_adj, throttle_thrust_max_, dt_s, air_density_ratio);
+    }
+
+    // Read accessor for output_armed_stabilizing's own new state
+    // (CCP-016) - real upstream's own _throttle_out, "used for harmonic
+    // notch" (see step 18 above); no consumer in this port yet.
+    [[nodiscard]] float throttle_out() const { return throttle_out_; }
 
 private:
     bool initialised_ok_ = false;
@@ -3439,6 +3856,13 @@ private:
     float idle_time_ = 0.0f;
     bool spin_up_complete_ = false;
     float thrust_boost_ratio_ = 0.0f;
+
+    // CCP-016 addition - real upstream _throttle_out, written by
+    // output_armed_stabilizing's own step 18 ("used for harmonic notch" -
+    // see that method's own comment). No consumer in this port yet;
+    // ported anyway since it is real, disclosed state a future ticket may
+    // need.
+    float throttle_out_ = 0.0f;
 };
 
 } // namespace fwcpp::motors
