@@ -503,6 +503,11 @@ add_executable(advance_wp_target_test advance_wp_target_test.cpp)
 target_link_libraries(advance_wp_target_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
 catch_discover_tests(advance_wp_target_test)
 
+# CCP-028 slice 4: AC_Loiter init_target_m / init_target / update leftovers
+add_executable(loiter_init_test loiter_init_test.cpp)
+target_link_libraries(loiter_init_test PRIVATE ap-wpnav Catch2::Catch2WithMain)
+catch_discover_tests(loiter_init_test)
+
 
 add_executable(quadplane_setup_test quadplane_setup_test.cpp)
 target_link_libraries(quadplane_setup_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
