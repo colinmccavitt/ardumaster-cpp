@@ -38,7 +38,7 @@ inline constexpr QuadPlanePortItem kQuadPlaneCompleteness[] = {
     {"TECS stick mixing", PortStatus::kThisSlice, "quadplane_tecs_mixing.hpp"},
     {"logging QControl", PortStatus::kOutOfScope, "no logger"},
     {"scripting dynamic motors", PortStatus::kOutOfScope, "no scripting"},
-    {"hover/pilot-input", PortStatus::kRemaining, "hold_hover get_pilot_* climb lean yaw"},
+    {"hover/pilot-input", PortStatus::kThisSlice, "quadplane_pilot_input.hpp hold_hover get_pilot_*"},
     {"land detector", PortStatus::kRemaining, "land_detector check_land_complete/final"},
     {"takeoff_controller", PortStatus::kRemaining, "takeoff_controller waypoint_controller"},
 };

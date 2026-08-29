@@ -12,6 +12,7 @@
 #include <fwcpp/quadplane/quadplane_motor_test.hpp>
 #include <fwcpp/quadplane/quadplane_motors_output.hpp>
 #include <fwcpp/quadplane/quadplane_options.hpp>
+#include <fwcpp/quadplane/quadplane_pilot_input.hpp>
 #include <fwcpp/quadplane/quadplane_poscontrol_approach.hpp>
 #include <fwcpp/quadplane/quadplane_poscontrol_fsm.hpp>
 #include <fwcpp/quadplane/quadplane_poscontrol_stub.hpp>
@@ -312,6 +313,73 @@ public:
         return should_disable_TECS(wired);
     }
 
+    void set_throttle_expo(float v) { throttle_expo_ = v; }
+    [[nodiscard]] float throttle_expo() const { return throttle_expo_; }
+    void set_pilot_speed_z_max_up_ms(float v) { pilot_speed_z_max_up_ms_ = v; }
+    [[nodiscard]] float pilot_speed_z_max_up_ms() const { return pilot_speed_z_max_up_ms_; }
+    void set_pilot_speed_z_max_dn_ms(float v) { pilot_speed_z_max_dn_ms_ = v; }
+    [[nodiscard]] float pilot_speed_z_max_dn_ms() const { return pilot_speed_z_max_dn_ms_; }
+    void set_pilot_accel_z_mss(float v) { pilot_accel_z_mss_ = v; }
+    [[nodiscard]] float pilot_accel_z_mss() const { return pilot_accel_z_mss_; }
+
+    [[nodiscard]] std::uint16_t get_pilot_velocity_z_max_dn_m() const {
+        return fwcpp::quadplane::get_pilot_velocity_z_max_dn_m(pilot_speed_z_max_dn_ms_,
+                                                               pilot_speed_z_max_up_ms_);
+    }
+
+    [[nodiscard]] float get_pilot_throttle(PilotThrottleInputs in) const {
+        in.throttle_expo = throttle_expo_;
+        return fwcpp::quadplane::get_pilot_throttle(in);
+    }
+
+    [[nodiscard]] PilotLeanAngles get_pilot_desired_lean_angles(const PilotLeanAngleInputs& in) const {
+        return fwcpp::quadplane::get_pilot_desired_lean_angles(in);
+    }
+
+    [[nodiscard]] float get_pilot_land_throttle(const PilotLandThrottleInputs& in) const {
+        return fwcpp::quadplane::get_pilot_land_throttle(in);
+    }
+
+    [[nodiscard]] float get_pilot_input_yaw_rate_cds(PilotYawRateInputs in) const {
+        in.air_mode_active = air_mode_active();
+        in.tailsitter_enabled = tailsitter().enabled();
+        in.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        return fwcpp::quadplane::get_pilot_input_yaw_rate_cds(in);
+    }
+
+    [[nodiscard]] float get_desired_yaw_rate_cds(DesiredYawRateInputs in) const {
+        in.assisted_flight = assisted_flight_;
+        in.pilot.air_mode_active = air_mode_active();
+        in.pilot.tailsitter_enabled = tailsitter().enabled();
+        in.pilot.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.pilot.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        return fwcpp::quadplane::get_desired_yaw_rate_cds(in);
+    }
+
+    [[nodiscard]] float get_pilot_desired_climb_rate_cms(PilotClimbRateInputs in) const {
+        in.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        return fwcpp::quadplane::get_pilot_desired_climb_rate_cms(in);
+    }
+
+    [[nodiscard]] HoldHoverTick hold_hover(float target_climb_rate_cms, DesiredYawRateInputs yaw) const {
+        yaw.assisted_flight = assisted_flight_;
+        yaw.should_weathervane = false;
+        yaw.pilot.air_mode_active = air_mode_active();
+        yaw.pilot.tailsitter_enabled = tailsitter().enabled();
+        yaw.pilot.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        yaw.pilot.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        const HoldHoverInputs in{
+            .target_climb_rate_cms = target_climb_rate_cms,
+            .pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_,
+            .pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_,
+            .pilot_accel_z_mss = pilot_accel_z_mss_,
+            .yaw = yaw,
+        };
+        return fwcpp::quadplane::hold_hover(in);
+    }
+
     QuadPlaneUpdateTick update(const QuadPlaneUpdateView& view) {
         QuadPlaneUpdateView wired = view;
         wired.motor_test_running = fwcpp::quadplane::motor_test_running(motor_test_);
@@ -368,6 +436,10 @@ private:
     PosControlSetStateSink last_set_state_sink_{};
     fwcpp::quadplane_transition::SltTransition slt_transition_{
         fwcpp::quadplane_transition::SltTransition::with_defaults()};
+    float throttle_expo_{kThrottleExpoDefault};
+    float pilot_speed_z_max_up_ms_{kPilotSpeedZMaxUpMsDefault};
+    float pilot_speed_z_max_dn_ms_{kPilotSpeedZMaxDnMsDefault};
+    float pilot_accel_z_mss_{kPilotAccelZMssDefault};
 };
 
 }  // namespace fwcpp::quadplane
