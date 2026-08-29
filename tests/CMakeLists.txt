@@ -594,6 +594,14 @@ target_link_libraries(quadplane_vtol_position_controller_test PRIVATE ap-quadpla
 catch_discover_tests(quadplane_air_mode_test)
 catch_discover_tests(quadplane_mode_predicates_test)
 catch_discover_tests(quadplane_vtol_position_controller_test)
+add_executable(quadplane_auto_vtol_mission_test quadplane_auto_vtol_mission_test.cpp)
+target_link_libraries(quadplane_auto_vtol_mission_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_auto_vtol_mission_test)
+
+add_executable(quadplane_tecs_mixing_test quadplane_tecs_mixing_test.cpp)
+target_link_libraries(quadplane_tecs_mixing_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_tecs_mixing_test)
+
 
 
 

@@ -31,11 +31,11 @@ inline constexpr QuadPlanePortItem kQuadPlaneCompleteness[] = {
     {"update transition FSM", PortStatus::kThisSlice, "quadplane_update.hpp SLT wiring"},
     {"tailsitter tiltrotor", PortStatus::kRemaining, "subsystems"},
     {"vtol controllers landing", PortStatus::kThisSlice, "vtol_position_controller stub"},
-    {"AUTO VTOL mission", PortStatus::kRemaining, "do_vtol verify"},
+    {"AUTO VTOL mission", PortStatus::kThisSlice, "quadplane_auto_vtol_mission.hpp"},
     {"motors_output motor_test", PortStatus::kThisSlice, "motors_output.hpp gating stub"},
     {"guided in_vtol_mode", PortStatus::kThisSlice, "compute_in_vtol_mode"},
     {"air_mode active latch", PortStatus::kThisSlice, "air_mode aux latch"},
-    {"TECS stick mixing", PortStatus::kRemaining, "should_disable_TECS"},
+    {"TECS stick mixing", PortStatus::kThisSlice, "quadplane_tecs_mixing.hpp"},
     {"logging QControl", PortStatus::kOutOfScope, "no logger"},
     {"scripting dynamic motors", PortStatus::kOutOfScope, "no scripting"},
 };

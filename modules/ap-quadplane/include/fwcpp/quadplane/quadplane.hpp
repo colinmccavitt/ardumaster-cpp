@@ -16,6 +16,8 @@
 #include <fwcpp/quadplane/quadplane_poscontrol_stub.hpp>
 #include <fwcpp/quadplane/quadplane_setup_channels.hpp>
 #include <fwcpp/quadplane/quadplane_setup_navigators.hpp>
+#include <fwcpp/quadplane/quadplane_auto_vtol_mission.hpp>
+#include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
 #include <fwcpp/quadplane/quadplane_update.hpp>
 #include <fwcpp/quadplane_transition/transition_fsm.hpp>
 
@@ -208,6 +210,64 @@ public:
         return slt_transition_;
     }
     fwcpp::quadplane_transition::SltTransition& slt_transition_mut() { return slt_transition_; }
+
+
+    [[nodiscard]] DoVtolTakeoffResult do_vtol_takeoff_mission(const DoVtolTakeoffInputs& in) {
+        DoVtolTakeoffResult out = do_vtol_takeoff(in);
+        if (out.throttle_wait_cleared) {
+            throttle_wait_ = false;
+        }
+        return out;
+    }
+
+    [[nodiscard]] DoVtolLandResult do_vtol_land_mission(const DoVtolLandInputs& in) {
+        DoVtolLandResult out = do_vtol_land(in);
+        if (out.throttle_wait_cleared) {
+            throttle_wait_ = false;
+        }
+        if (out.init_approach && available()) {
+            poscontrol_init_approach({}, {});
+        }
+        return out;
+    }
+
+    [[nodiscard]] VerifyVtolTakeoffResult verify_vtol_takeoff_mission(const VerifyVtolTakeoffInputs& in) const {
+        VerifyVtolTakeoffInputs wired = in;
+        wired.available = available();
+        return verify_vtol_takeoff(wired);
+    }
+
+    [[nodiscard]] bool verify_vtol_land_mission(const VerifyVtolLandInputs& in) const {
+        VerifyVtolLandInputs wired = in;
+        wired.available = available();
+        wired.pos_state = poscontrol_.state;
+        return verify_vtol_land(wired);
+    }
+
+    [[nodiscard]] HandleDoVtolTransitionResult handle_do_vtol_transition_mission(
+        const HandleDoVtolTransitionInputs& in) const {
+        HandleDoVtolTransitionInputs wired = in;
+        wired.available = available();
+        return handle_do_vtol_transition(wired);
+    }
+
+    [[nodiscard]] bool in_vtol_land_descent(const InVtolLandDescentInputs& in) const {
+        InVtolLandDescentInputs wired = in;
+        wired.available = available();
+        wired.pos_state = poscontrol_.state;
+        wired.options = options_;
+        return compute_in_vtol_land_descent(wired);
+    }
+
+    [[nodiscard]] bool should_disable_tecs(const ShouldDisableTecsInputs& in) const {
+        ShouldDisableTecsInputs wired = in;
+        wired.land_descent.available = available();
+        wired.land_descent.options = options_;
+        if (wired.land_descent.pos_state == PositionControlState::kNone) {
+            wired.land_descent.pos_state = poscontrol_.state;
+        }
+        return should_disable_TECS(wired);
+    }
 
     QuadPlaneUpdateTick update(const QuadPlaneUpdateView& view) {
         return run_quadplane_update(slt_transition_, available(), assisted_flight_, options_, view);
