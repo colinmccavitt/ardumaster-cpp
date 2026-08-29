@@ -20,6 +20,9 @@ struct PosControlState {
     PositionControlState state{PositionControlState::kNone};
     float correction_north_m{0.f};
     float correction_east_m{0.f};
+    float target_ned_n_m{0.f};
+    float target_ned_e_m{0.f};
+    float target_ned_d_m{0.f};
     float velocity_match_north_ms{0.f};
     float velocity_match_east_ms{0.f};
     std::uint32_t last_velocity_match_ms{0};
@@ -46,6 +49,9 @@ struct PosControlState {
         state = PositionControlState::kNone;
         correction_north_m = 0.f;
         correction_east_m = 0.f;
+        target_ned_n_m = 0.f;
+        target_ned_e_m = 0.f;
+        target_ned_d_m = 0.f;
         velocity_match_north_ms = 0.f;
         velocity_match_east_ms = 0.f;
         last_velocity_match_ms = 0;

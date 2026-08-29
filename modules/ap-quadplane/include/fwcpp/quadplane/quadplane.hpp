@@ -20,6 +20,7 @@
 #include <fwcpp/quadplane/quadplane_setup_navigators.hpp>
 #include <fwcpp/quadplane/quadplane_auto_vtol_mission.hpp>
 #include <fwcpp/quadplane/quadplane_land_detector.hpp>
+#include <fwcpp/quadplane/quadplane_takeoff_controller.hpp>
 #include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
 #include <fwcpp/quadplane/quadplane_vtol_subsystems.hpp>
 #include <fwcpp/quadplane/quadplane_subsystems.hpp>
@@ -388,6 +389,56 @@ public:
         return fwcpp::quadplane::check_land_final(poscontrol_land_, in);
     }
 
+    void set_takeoff_navalt_min_m(float v) { takeoff_navalt_min_m_ = v; }
+    [[nodiscard]] float takeoff_navalt_min_m() const { return takeoff_navalt_min_m_; }
+    void set_guided_takeoff(bool v) { guided_takeoff_ = v; }
+    [[nodiscard]] bool guided_takeoff() const { return guided_takeoff_; }
+    [[nodiscard]] const TakeoffNavState& takeoff_nav() const { return takeoff_nav_; }
+    TakeoffNavState& takeoff_nav_mut() { return takeoff_nav_; }
+
+    [[nodiscard]] SetupTargetPositionTick setup_target_position(SetupTargetPositionInputs in) {
+        in.correction_north_m = poscontrol_.correction_north_m;
+        in.correction_east_m = poscontrol_.correction_east_m;
+        in.pos_state = poscontrol_.state;
+        in.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        in.pilot_accel_z_mss = pilot_accel_z_mss_;
+        return fwcpp::quadplane::setup_target_position(poscontrol_, in);
+    }
+
+    [[nodiscard]] TakeoffControllerTick takeoff_controller(TakeoffControllerInputs in) {
+        in.target.correction_north_m = poscontrol_.correction_north_m;
+        in.target.correction_east_m = poscontrol_.correction_east_m;
+        in.target.pos_state = poscontrol_.state;
+        in.target.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.target.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        in.target.pilot_accel_z_mss = pilot_accel_z_mss_;
+        in.velocity_match_north_ms = poscontrol_.velocity_match_north_ms;
+        in.velocity_match_east_ms = poscontrol_.velocity_match_east_ms;
+        in.last_velocity_match_ms = poscontrol_.last_velocity_match_ms;
+        in.takeoff_navalt_min_m = takeoff_navalt_min_m_;
+        in.guided_takeoff = guided_takeoff_;
+        in.tiltrotor_enabled = subsystems_.tiltrotor.enabled();
+        in.pilot_yaw.air_mode_active = air_mode_active();
+        in.pilot_yaw.tailsitter_enabled = tailsitter().enabled();
+        in.pilot_yaw.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.pilot_yaw.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        if (wp_nav_inited_) {
+            in.wp_nav_default_speed_up_ms = wp_nav_.default_speed_up_ms();
+        }
+        return fwcpp::quadplane::takeoff_controller(takeoff_nav_, poscontrol_, in);
+    }
+
+    [[nodiscard]] WaypointControllerTick waypoint_controller(WaypointControllerInputs in) {
+        in.target.correction_north_m = poscontrol_.correction_north_m;
+        in.target.correction_east_m = poscontrol_.correction_east_m;
+        in.target.pos_state = poscontrol_.state;
+        in.target.pilot_speed_z_max_up_ms = pilot_speed_z_max_up_ms_;
+        in.target.pilot_speed_z_max_dn_ms = pilot_speed_z_max_dn_ms_;
+        in.target.pilot_accel_z_mss = pilot_accel_z_mss_;
+        return fwcpp::quadplane::waypoint_controller(takeoff_nav_, poscontrol_, in);
+    }
+
     [[nodiscard]] HoldHoverTick hold_hover(float target_climb_rate_cms, DesiredYawRateInputs yaw) const {
         yaw.assisted_flight = assisted_flight_;
         yaw.should_weathervane = false;
@@ -466,6 +517,9 @@ private:
     float pilot_speed_z_max_up_ms_{kPilotSpeedZMaxUpMsDefault};
     float pilot_speed_z_max_dn_ms_{kPilotSpeedZMaxDnMsDefault};
     float pilot_accel_z_mss_{kPilotAccelZMssDefault};
+    float takeoff_navalt_min_m_{0.f};
+    bool guided_takeoff_{false};
+    TakeoffNavState takeoff_nav_{};
 };
 
 }  // namespace fwcpp::quadplane

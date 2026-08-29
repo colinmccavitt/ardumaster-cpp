@@ -40,7 +40,7 @@ inline constexpr QuadPlanePortItem kQuadPlaneCompleteness[] = {
     {"scripting dynamic motors", PortStatus::kOutOfScope, "no scripting"},
     {"hover/pilot-input", PortStatus::kThisSlice, "quadplane_pilot_input.hpp hold_hover get_pilot_*"},
     {"land detector", PortStatus::kThisSlice, "quadplane_land_detector.hpp should_relax land_detector check_land_*"},
-    {"takeoff_controller", PortStatus::kRemaining, "takeoff_controller waypoint_controller"},
+    {"takeoff_controller", PortStatus::kThisSlice, "quadplane_takeoff_controller.hpp setup_target_position takeoff waypoint"},
 };
 
 [[nodiscard]] inline constexpr std::size_t quadplane_completeness_size() {
