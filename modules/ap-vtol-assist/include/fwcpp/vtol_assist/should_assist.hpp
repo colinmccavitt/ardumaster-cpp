@@ -19,6 +19,7 @@ struct ShouldAssistGates {
     float throttle_input{0.0f};
     bool is_flying{false};
     FlareMode flare_mode{FlareMode::kDisabled};
+    bool fly_inverted{false};
 };
 
 [[nodiscard]] inline bool should_assist_gates_open(const ShouldAssistGates& gates) {
@@ -75,6 +76,8 @@ struct ShouldAssistHysteresis {
     }
 };
 
+inline void reset_vtol_assist(ShouldAssistHysteresis& hysteresis) { hysteresis.reset(); }
+
 struct ShouldAssistResult {
     bool requested{false};
     bool force_assist{false};
@@ -117,7 +120,7 @@ struct ShouldAssistResult {
         out.alt_assist = hysteresis.alt_error.is_active();
     }
 
-    if (assist.angle() <= 0) {
+    if (assist.angle() <= 0 || gates.fly_inverted) {
         hysteresis.angle_error.reset();
     } else {
         const bool angle_trigger = evaluate_angle_assist_trigger(

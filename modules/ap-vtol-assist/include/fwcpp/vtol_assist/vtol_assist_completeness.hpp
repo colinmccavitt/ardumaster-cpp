@@ -42,7 +42,10 @@ inline constexpr VtolAssistPortItem kVtolAssistCompleteness[] = {
      "assist_gcs_getters.hpp in_*_assist + STATUSTEXT stubs"},
     {"Q_ASSIST_OPTIONS recovery paths", PortStatus::kThisSlice,
      "assist_recovery_options.hpp FW_FORCE / SPIN paths"},
-    {"AP_Param var_info", PortStatus::kRemaining, "parameter tree on QuadPlane"},
+    {"reset() and fly_inverted", PortStatus::kThisSlice,
+     "reset_vtol_assist + angle hysteresis skip when inverted"},
+    {"AP_Param var_info", PortStatus::kOutOfScope,
+     "parameter tree on QuadPlane; inject via VtolAssist setters"},
     {"QuadPlane& wiring", PortStatus::kOutOfScope,
      "ADR-0012 inject inputs; no Plane singleton"},
 };

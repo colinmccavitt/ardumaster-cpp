@@ -4,16 +4,18 @@
 using fwcpp::vtol_assist::PortStatus;
 using fwcpp::vtol_assist::completeness_has;
 using fwcpp::vtol_assist::on_main_count;
+using fwcpp::vtol_assist::out_of_scope_count;
 using fwcpp::vtol_assist::remaining_count;
 using fwcpp::vtol_assist::this_slice_count;
 using fwcpp::vtol_assist::vtol_assist_completeness_size;
 
 TEST_CASE("vtol assist catalog", "[vtol_assist][catalog]") {
     REQUIRE(on_main_count() == 0);
-    REQUIRE(this_slice_count() == 12);
-    REQUIRE(remaining_count() == 1);
+    REQUIRE(this_slice_count() == 13);
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(out_of_scope_count() == 2);
     REQUIRE(vtol_assist_completeness_size() ==
-            on_main_count() + this_slice_count() + remaining_count() + 1);
+            on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("enable/check gate", PortStatus::kThisSlice));
     REQUIRE(completeness_has("speed assist trigger", PortStatus::kThisSlice));
     REQUIRE(completeness_has("altitude assist trigger", PortStatus::kThisSlice));
@@ -23,4 +25,6 @@ TEST_CASE("vtol assist catalog", "[vtol_assist][catalog]") {
     REQUIRE(completeness_has("output_spin_recovery", PortStatus::kThisSlice));
     REQUIRE(completeness_has("logging/GCS getters", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Q_ASSIST_OPTIONS recovery paths", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("reset() and fly_inverted", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("AP_Param var_info", PortStatus::kOutOfScope));
 }
