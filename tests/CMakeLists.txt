@@ -993,3 +993,8 @@ catch_discover_tests(hw_backend_test)
 add_executable(mode_stabilize_test mode_stabilize_test.cpp)
 target_link_libraries(mode_stabilize_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_stabilize_test)
+
+# CCP-039 slice 2: ModeAcro run via input_rate_bf.
+add_executable(mode_acro_test mode_acro_test.cpp)
+target_link_libraries(mode_acro_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(mode_acro_test)

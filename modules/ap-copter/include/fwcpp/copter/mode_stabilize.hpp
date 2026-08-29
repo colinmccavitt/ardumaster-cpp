@@ -10,7 +10,7 @@
 // is remaining (catalogued). set_throttle_out returns the throttle value
 // plus angle_boost=true; boost math is not ported this slice.
 //
-// ACRO and ALTHOLD run() stay empty this slice.
+// ACRO run is mode_acro.hpp (CCP-039 slice 2). ALTHOLD run() stays empty.
 
 #include <cstddef>
 #include <cstdint>
@@ -175,9 +175,11 @@ inline constexpr PortItem kCompleteness[] = {
     {"reset_yaw_target_and_rate / reset_I bodies", PortStatus::kRemaining,
      "attitude_kinematics leftover; flags only this slice"},
     {"acro_run", PortStatus::kRemaining,
-     "mode_acro.cpp; needs get_pilot_desired_rates"},
+     "mode_acro.cpp; rates this slice live in mode_acro leftover"},
     {"althold_run", PortStatus::kRemaining,
      "mode_althold.cpp; needs get_pilot_desired_climb_rate leftover"},
+    {"trainer LEVEL/LIMITED", PortStatus::kRemaining,
+     "mode_acro.cpp ~133-193; earth-frame level mix; catalogued in acro leftover"},
 };
 
 [[nodiscard]] inline constexpr std::size_t completeness_size() {
