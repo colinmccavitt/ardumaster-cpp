@@ -1,8 +1,8 @@
 #pragma once
 
-// CPP-090 completeness: this slice (memory backend WriteBlock) vs remaining
-// AP_Logger / DataFlash surfaces. remaining_count() > 0 until later slices
-// land FMT, file backend, transfer, streaming, and erase/rotate.
+// CPP-090 completeness: this slice (FMT registry + Fill_Format / Write_Format)
+// vs remaining AP_Logger / DataFlash surfaces. remaining_count() > 0 until
+// later slices land file backend, transfer, streaming, and erase/rotate.
 
 #include <cstddef>
 #include <cstdint>
@@ -32,8 +32,8 @@ inline constexpr LoggerPortItem kLoggerCompleteness[] = {
      "page-based DataFlash layout; this slice is an in-memory buffer"},
     {"POSIX/SD file backend", PortStatus::kRemaining,
      "AP_Logger_File on a real filesystem; no filesystem in this slice"},
-    {"FMT registry", PortStatus::kRemaining,
-     "LogStructure / FMT table and msg_fmt_for_name lookup"},
+    {"FMT registry", PortStatus::kThisSlice,
+     "LogStructure / log_Format, Fill_Format, Write_Format, lookup by name/type"},
     {"streaming", PortStatus::kRemaining,
      "WriteStreaming rate-limit gate (1000/rate_hz ms)"},
     {"transfer", PortStatus::kRemaining,
