@@ -1300,29 +1300,46 @@
 //      lines - the single largest function in this whole output-stage
 //      effort, and its own most complex) is DONE as of CCP-016 (see
 //      "CCP-016 ADDITION" above), which also calls check_for_failed_motor
-//      (CCP-011) as its own real final step. output_to_motors (the real
-//      per-motor dispatcher that calls output_armed_stabilizing/
-//      output_to_pwm once per output cycle, needing motor_enabled_/
-//      rc_write-equivalent output plumbing this port has not built),
-//      thrust_compensation, and disable_yaw_torque all remain separate,
-//      deliberately deferred future phases, NOT started by this ticket -
-//      output_to_motors specifically also needs real PWM output plumbing
-//      beyond just the now-ported SpoolState enum, output_to_pwm, and
-//      output_armed_stabilizing themselves. **Completing output_to_motors
-//      would close out this entire AP_Motors output-stage effort.**
-//      Actuator
-//      slew-rate limiting itself is NOT part of that missing infrastructure, since
-//      CCP-012 already ported it as the unconditional pure function it
-//      really is (see "CCP-012 ADDITION" above for why it needs no
-//      SpoolState awareness of its own). The full thrust-boost MECHANISM
-//      itself (whatever sets thrust_boost_ true from a real motor-failure
-//      trigger, and whatever reacts to get_lost_motor()) is also
-//      deferred - CCP-011 only ported the thrust_boost_-reading/
-//      off-switching logic INSIDE check_for_failed_motor, and CCP-013
-//      only ported output_logic's own thrust_boost_/thrust_boost_ratio_
-//      RESETS inside SHUT_DOWN/GROUND_IDLE, not the rest of the
-//      mechanism. This is also where add_motor_num()'s real SRV_Channels
-//      registration belongs (see NO-OP above).
+//      (CCP-011) as its own real final step. **output_to_motors itself
+//      (AP_MotorsMatrix.cpp, real function body lines 143-183) is now
+//      DONE as of CCP-017 (see "CCP-017 ADDITION" - search this file) -
+//      the real three-group SpoolState switch dispatch plus the separate,
+//      final PWM-conversion loop, tying together every real dependency
+//      this whole arc has built (spool_state_, set_actuator_with_slew /
+//      actuator_spin_up_to_ground_idle, thr_lin_.thrust_to_actuator,
+//      thrust_rpyt_out_, output_to_pwm). THIS CLOSES OUT THIS EFFORT'S
+//      ENTIRE AP_Motors SCOPE FOR copter-cpp** - per efforts/copter-cpp.md's
+//      own charter, the next phase after this ticket is
+//      AC_AttitudeControl/AC_PosControl/AC_WPNav, a genuinely separate,
+//      much larger area of work, not a continuation of AP_Motors itself.
+//      Explicitly, deliberately DEFERRED as a separate future ticket, NOT
+//      built by CCP-017 and NOT silently skipped: real scaled-vs-pulse-
+//      width PWM output-type handling and DShot-protocol detection (the
+//      real additional complexity copter-rust's own output.rs `rc_write`,
+//      lines ~299-320 of that file, already ports, that this port's own
+//      much simpler output_to_pwm, CCP-015, does not model at all), AND
+//      the actual HAL/hardware write-out itself (real upstream's own
+//      `rc_write(i, output_to_pwm(...))` side effect of sending a PWM
+//      value to a physical/simulated output channel) - CCP-017's own
+//      output_to_motors stores each motor's computed PWM in a new
+//      pwm_out_ member array instead, with a read accessor, calling no
+//      injected HAL callback and introducing no singleton to reach real
+//      hardware. thrust_compensation and disable_yaw_torque remain
+//      separate, deliberately deferred future phases (genuinely distinct
+//      upstream functions, never in output_to_motors' own real call
+//      chain). Actuator slew-rate limiting itself was never part of any
+//      missing infrastructure, since CCP-012 already ported it as the
+//      unconditional pure function it really is (see "CCP-012 ADDITION"
+//      above for why it needs no SpoolState awareness of its own). The
+//      full thrust-boost MECHANISM itself (whatever sets thrust_boost_
+//      true from a real motor-failure trigger, and whatever reacts to
+//      get_lost_motor()) is also still deferred - CCP-011 only ported the
+//      thrust_boost_-reading/off-switching logic INSIDE
+//      check_for_failed_motor, and CCP-013 only ported output_logic's own
+//      thrust_boost_/thrust_boost_ratio_ RESETS inside SHUT_DOWN/
+//      GROUND_IDLE, not the rest of the mechanism. This is also where
+//      add_motor_num()'s real SRV_Channels registration belongs (see
+//      NO-OP above).
 //   3. set_throttle_factor/set_update_rate/set_frame_class_and_type/
 //      output_test_num/_output_test_seq/get_factors - small real
 //      accessors/setters not needed by this ticket's own core scope; add
@@ -3266,15 +3283,15 @@ public:
     // explicit parameter - so it is `static` rather than an ordinary
     // instance method, for the exact same reason.
     //
-    // DEFERRED - NOT this ticket's scope (named explicitly, matching this
-    // file's own "DEFERRED FUTURE PHASES" precedent): output_to_motors
-    // (the real per-motor dispatcher that calls this function once per
-    // motor, needing motor_enabled_/rc_write-equivalent output plumbing
-    // this port has not built) remains a separate, deliberately deferred
-    // future phase - output_armed_stabilizing itself (the real per-motor
-    // mixing algorithm, ~190 real lines) is now DONE as of CCP-016 (see
-    // that ticket's own "CCP-016 ADDITION" above) - see updated
-    // "DEFERRED FUTURE PHASES" below.
+    // output_to_motors (the real per-motor dispatcher that calls this
+    // function once per motor) is now DONE as of CCP-017 (see that
+    // ticket's own "CCP-017 ADDITION" below) - it stores each motor's
+    // result in a new pwm_out_ member array rather than calling a real
+    // rc_write-equivalent HAL write-out, which remains a separate,
+    // deliberately deferred future ticket (see updated "DEFERRED FUTURE
+    // PHASES" above). output_armed_stabilizing itself (the real per-motor
+    // mixing algorithm, ~190 real lines) was DONE as of CCP-016 (see that
+    // ticket's own "CCP-016 ADDITION" above).
     [[nodiscard]] static std::int16_t output_to_pwm(float actuator, SpoolState spool_state, bool armed,
                                                      bool disarm_disable_pwm, std::int16_t pwm_output_min,
                                                      std::int16_t pwm_output_max) {
@@ -3584,15 +3601,22 @@ public:
     //       throttle_thrust_max_ member and dt_s/air_density_ratio
     //       parameters, not hardcoded placeholders.
     //
-    // DEFERRED - NOT this ticket's scope (see updated "DEFERRED FUTURE
-    // PHASES" below): output_to_motors (the real per-motor dispatcher
-    // that calls output_armed_stabilizing/output_to_pwm once per output
-    // cycle and resets the real `limit` struct once per cycle, needing
-    // motor_enabled_/rc_write-equivalent HAL output plumbing this port
-    // has not built), thrust_compensation, and disable_yaw_torque all
-    // remain separate, deliberately deferred future phases. Completing
-    // output_to_motors would close out this entire AP_Motors output-stage
-    // effort.
+    // output_to_motors (the real per-motor dispatcher that calls this
+    // function/output_to_pwm once per output cycle) is now DONE as of
+    // CCP-017 (see that ticket's own "CCP-017 ADDITION" below) - closing
+    // out this entire AP_Motors scope for copter-cpp. thrust_compensation
+    // and disable_yaw_torque remain separate, deliberately deferred
+    // future phases (genuinely distinct upstream functions, never in
+    // output_to_motors' own real call chain).
+    //
+    // CORRECTION - this comment previously speculated output_to_motors
+    // "resets the real `limit` struct once per cycle". Re-verified
+    // directly against the real function body (AP_MotorsMatrix.cpp lines
+    // 143-183, see "CCP-017 ADDITION" below) and found FALSE:
+    // output_to_motors touches no limit-related state at all. Whatever
+    // real upstream code does that (if it exists) lives elsewhere,
+    // outside this ticket's own real scope. Corrected here, not silently
+    // dropped.
     void output_armed_stabilizing(float roll_in, float roll_in_ff, float pitch_in, float pitch_in_ff, float yaw_in,
                                    float yaw_in_ff, float filtered_throttle, float throttle_avg_max, float yaw_headroom,
                                    float air_density_ratio, float dt_s, bool& limit_roll, bool& limit_pitch,
@@ -3762,6 +3786,210 @@ public:
     // notch" (see step 18 above); no consumer in this port yet.
     [[nodiscard]] float throttle_out() const { return throttle_out_; }
 
+    // CCP-017 ADDITION (output_to_motors) - THE CLOSING TICKET of this
+    // whole AP_Motors arc. Upstream AP_MotorsMatrix::output_to_motors,
+    // real function body lines 143-183 (~37 real lines of logic; 183 is
+    // the function's own closing brace - re-verified directly against the
+    // pinned worktree, NOT trusted from the ticket's own "143-179"
+    // transcription, which stopped one line short of the closing brace):
+    //
+    //   void AP_MotorsMatrix::output_to_motors()
+    //   {
+    //       int8_t i;
+    //       switch (_spool_state) {
+    //           case SpoolState::SHUT_DOWN: {
+    //               for (i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+    //                   if (motor_enabled_mask(i)) {
+    //                       _actuator[i] = 0.0f;
+    //                   }
+    //               }
+    //               break;
+    //           }
+    //           case SpoolState::GROUND_IDLE:
+    //               for (i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+    //                   if (motor_enabled[i]) {
+    //                       set_actuator_with_slew(_actuator[i], actuator_spin_up_to_ground_idle());
+    //                   }
+    //               }
+    //               break;
+    //           case SpoolState::SPOOLING_UP:
+    //           case SpoolState::THROTTLE_UNLIMITED:
+    //           case SpoolState::SPOOLING_DOWN:
+    //               for (i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+    //                   if (motor_enabled[i]) {
+    //                       set_actuator_with_slew(_actuator[i], thr_lin.thrust_to_actuator(_thrust_rpyt_out[i]));
+    //                   }
+    //               }
+    //               break;
+    //       }
+    //       for (i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
+    //           if (motor_enabled[i]) {
+    //               rc_write(i, output_to_pwm(_actuator[i]));
+    //           }
+    //       }
+    //   }
+    //
+    // THREE REAL SWITCH GROUPS, re-verified directly, exactly as above:
+    // SHUT_DOWN alone (real lines 148-156); GROUND_IDLE alone (157-164);
+    // and a genuine three-case-labels-one-body fall-through covering
+    // SPOOLING_UP/THROTTLE_UNLIMITED/SPOOLING_DOWN together (165-174) -
+    // the SAME real C++ fall-through idiom this port's own setup_deca_
+    // matrix (CCP-008) already established a precedent for with its own
+    // `case FrameType::X: case FrameType::CwX: { ... }`. Ported below the
+    // identical way: `case SpoolState::SpoolingUp: case
+    // SpoolState::ThrottleUnlimited: case SpoolState::SpoolingDown: { ... }`.
+    //
+    // motor_enabled_mask(i) vs motor_enabled[i] - REAL, RE-VERIFIED
+    // ASYMMETRY IN UPSTREAM ITSELF: SHUT_DOWN alone guards with
+    // `motor_enabled_mask(i)`; GROUND_IDLE and the SPOOLING_*/
+    // THROTTLE_UNLIMITED group both guard with plain `motor_enabled[i]`
+    // instead - re-verified this is genuinely upstream's own real,
+    // deliberate difference, not a transcription slip. `motor_enabled_
+    // mask(i)` (AP_MotorsMulticopter.h lines 228-229) is `motor_enabled[i]
+    // && (_motor_mask_override & (1U << i)) == 0` - `_motor_mask_override`
+    // is real, "mask of overridden motors (used by quadplane tiltrotors)"
+    // state (line 226), ALWAYS zero for a real ArduCopter vehicle. This
+    // port has no tiltrotor/QuadPlane scope at all (matching this whole
+    // effort's own established exclusion of QuadPlane-only frame types,
+    // e.g. NYT_PLUS/NYT_X from CCP-002 - see file banner's "CCP-002
+    // ADDITION"), so motor_enabled_mask(i) and plain motor_enabled_[i] are
+    // functionally IDENTICAL within this port's own real scope.
+    // SCOPE-NARROWING DECISION: use plain motor_enabled_[i] uniformly
+    // across ALL THREE switch groups below, including SHUT_DOWN - NOT
+    // introducing a _motor_mask_override-equivalent member this port will
+    // never meaningfully use. Agreement with this decision is stated
+    // explicitly in this ticket's own commit message, per the ticket's
+    // own request.
+    //
+    // A SEPARATE, FINAL LOOP (real lines 177-182) - re-verified this is
+    // genuinely OUTSIDE/AFTER the switch, not nested inside any one case -
+    // converts every enabled motor's actuator_[i] to PWM via CCP-015's own
+    // already-built output_to_pwm, called with that method's own required
+    // parameters (spool_state_, armed, disarm_disable_pwm, pwm_output_min,
+    // pwm_output_max).
+    //
+    // copter-rust's own INVESTIGATION, CONFIRMED - `output.rs`
+    // (plane-fw-rust/crates/ap-motors/src/output.rs) has real, merged
+    // ports of set_actuator_with_slew, actuator_spin_up_to_ground_idle,
+    // output_to_pwm, and a real rc_write (lines ~299-320) - but NO
+    // output_to_motors function exists anywhere in that file (confirmed by
+    // reading it directly and grepping for `fn output_to_motors` - zero
+    // matches). This is genuinely novel dispatcher-assembly territory for
+    // BOTH ports, the same situation CCP-016 was in for
+    // output_armed_stabilizing.
+    //
+    // SCOPE-NARROWING DECISION, STATED EXPLICITLY (agreement recorded in
+    // this ticket's own commit message) - the real Rust rc_write (lines
+    // ~299-320 of output.rs) is a significantly MORE elaborate port than
+    // this ticket needs: it distinguishes real scaled-vs-pulse-width PWM
+    // output types (PwmType::is_digital, MotorPwmScaled) and does
+    // DShot-protocol-aware channel routing - real additional complexity
+    // this port's own much simpler output_to_pwm (CCP-015) does not model
+    // at all (CCP-015 only does a plain linear min/max PWM remap). This
+    // ticket does NOT build that additional complexity. output_to_motors
+    // below only calls CCP-015's own already-built output_to_pwm per
+    // motor and stores the resulting int16_t in a new pwm_out_ member
+    // array (with a read accessor, matching thrust_rpyt_out_'s own
+    // established per-motor-array pattern from CCP-011) - it calls NO
+    // injected HAL callback and introduces NO singleton to reach real
+    // hardware. Real scaled-output/DShot-protocol PWM handling AND the
+    // actual HAL/hardware write-out itself (rc_write's own real side
+    // effect of sending a PWM value to a physical/simulated output
+    // channel) are explicitly, deliberately DEFERRED as a separate future
+    // ticket - not silently built, not silently skipped.
+    //
+    // PARAMETER SHAPE - explicit parameters throughout, per ADR-0012,
+    // reusing established names for consistency: `slew_up_time`/
+    // `slew_dn_time` are set_actuator_with_slew's own CCP-012 parameters;
+    // `spin_min` is actuator_spin_up_to_ground_idle's own CCP-012
+    // parameter, the SAME real concept output_logic's own CCP-013/014
+    // signature already takes under the identical name; `params` (a
+    // ThrustLinParams) is exactly the type/name thrust_to_actuator's own
+    // CCP-010 signature already expects; `armed`/`disarm_disable_pwm`/
+    // `pwm_output_min`/`pwm_output_max` are output_to_pwm's own CCP-015
+    // parameters, reused verbatim rather than reinvented under different
+    // names for the same real concepts; `dt_s` is the same real per-cycle
+    // timestep every other method in this file's own output stage already
+    // takes explicitly. spool_state_ itself is read directly from this
+    // instance (matching output_to_pwm's own call site immediately
+    // below), not re-taken as a redundant explicit parameter.
+    //
+    // NEW STATE - `actuator_`/`pwm_out_` (both kMaxNumMotors-sized,
+    // zero-initialized, matching this class's own established convention
+    // of never leaving a member indeterminate) are genuinely NEW here;
+    // real upstream's own `_actuator`/no-pwm_out-equivalent (rc_write
+    // fires immediately, storing nothing) are the closest real
+    // counterparts - this port stores the PWM result instead of writing
+    // it out immediately, per the SCOPE-NARROWING DECISION above.
+    void output_to_motors(bool armed, bool disarm_disable_pwm, float slew_up_time, float slew_dn_time, float spin_min,
+                           const ThrustLinParams& params, float dt_s, std::int16_t pwm_output_min,
+                           std::int16_t pwm_output_max) {
+        switch (spool_state_) {
+            case SpoolState::ShutDown: {
+                for (std::size_t i = 0; i < kMaxNumMotors; ++i) {
+                    if (motor_enabled_[i]) {
+                        actuator_[i] = 0.0f;
+                    }
+                }
+                break;
+            }
+            case SpoolState::GroundIdle: {
+                for (std::size_t i = 0; i < kMaxNumMotors; ++i) {
+                    if (motor_enabled_[i]) {
+                        set_actuator_with_slew(actuator_[i],
+                                                actuator_spin_up_to_ground_idle(spin_up_ratio_, spin_min),
+                                                slew_up_time, slew_dn_time, dt_s);
+                    }
+                }
+                break;
+            }
+            case SpoolState::SpoolingUp:
+            case SpoolState::ThrottleUnlimited:
+            case SpoolState::SpoolingDown: {
+                for (std::size_t i = 0; i < kMaxNumMotors; ++i) {
+                    if (motor_enabled_[i]) {
+                        set_actuator_with_slew(actuator_[i], thr_lin_.thrust_to_actuator(params, thrust_rpyt_out_[i]),
+                                                slew_up_time, slew_dn_time, dt_s);
+                    }
+                }
+                break;
+            }
+        }
+
+        // Separate, final loop (real lines 177-182) - NOT nested inside
+        // any case above.
+        for (std::size_t i = 0; i < kMaxNumMotors; ++i) {
+            if (motor_enabled_[i]) {
+                pwm_out_[i] = output_to_pwm(actuator_[i], spool_state_, armed, disarm_disable_pwm, pwm_output_min,
+                                             pwm_output_max);
+            }
+        }
+    }
+
+    // Read accessors for output_to_motors' own new state (CCP-017) -
+    // bounds-checked, matching thrust_rpyt_out's own established accessor
+    // pattern (CCP-011).
+    [[nodiscard]] float actuator(std::uint8_t i) const { return i < kMaxNumMotors ? actuator_[i] : 0.0f; }
+    [[nodiscard]] std::int16_t pwm_out(std::uint8_t i) const { return i < kMaxNumMotors ? pwm_out_[i] : 0; }
+
+    // Test-only mutators (CCP-017), matching CCP-011/013's own established
+    // precedent (set_thrust_rpyt_out/set_spool_state) of adding direct
+    // setters where no real upstream setter exists yet for this port to
+    // call - lets tests seed a sentinel actuator_/pwm_out_ value on a
+    // DISABLED motor before calling output_to_motors, to confirm the real
+    // `if (motor_enabled...)` guards leave it untouched rather than
+    // resetting it.
+    void set_actuator(std::uint8_t i, float value) {
+        if (i < kMaxNumMotors) {
+            actuator_[i] = value;
+        }
+    }
+    void set_pwm_out(std::uint8_t i, std::int16_t value) {
+        if (i < kMaxNumMotors) {
+            pwm_out_[i] = value;
+        }
+    }
+
 private:
     bool initialised_ok_ = false;
     std::string frame_type_string_;
@@ -3863,6 +4091,13 @@ private:
     // ported anyway since it is real, disclosed state a future ticket may
     // need.
     float throttle_out_ = 0.0f;
+
+    // CCP-017 additions - see this class's own "CCP-017 ADDITION" comment
+    // above output_to_motors for the full rationale. Zero-initialized,
+    // matching this class's own established convention of never leaving a
+    // member indeterminate.
+    std::array<float, kMaxNumMotors> actuator_{};
+    std::array<std::int16_t, kMaxNumMotors> pwm_out_{};
 };
 
 } // namespace fwcpp::motors

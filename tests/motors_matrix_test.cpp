@@ -4319,3 +4319,249 @@ TEST_CASE("output_armed_stabilizing: integration - chaining this function's own 
         REQUIRE(m.motor_lost_index() < 4);
     }
 }
+
+// ---------------------------------------------------------------------
+// output_to_motors (CCP-017) - upstream AP_MotorsMatrix::output_to_motors,
+// real function body lines 143-183. THE CLOSING TICKET of this whole
+// AP_Motors arc - see motors_matrix.hpp's own "CCP-017 ADDITION" comment
+// for the full real three-group switch dispatch, the motor_enabled_mask
+// investigation, and the disclosed scope-narrowing decision (no scaled-
+// output/DShot PWM handling, no real HAL/hardware write-out - both
+// deferred as a separate future ticket).
+// ---------------------------------------------------------------------
+
+TEST_CASE("output_to_motors: SHUT_DOWN sets every enabled motor's actuator_ to exactly 0.0f directly, with "
+          "NO slew - even a large configured slew_dn_time (which would otherwise limit the drop to a tiny "
+          "step per call) has zero effect, confirming the real upstream `_actuator[i] = 0.0f;` direct "
+          "assignment, NOT a call through set_actuator_with_slew",
+          "[motors][output_to_motors][shut_down]") {
+    MotorsMatrix m;
+    m.add_motor_raw(0, 1.0f, 0.0f, 0.0f, 1);
+    m.set_actuator(0, 0.73f);
+    m.set_spool_state(MotorsMatrix::SpoolState::ShutDown);
+
+    ThrustLinParams params;
+    // A large slew_dn_time would only allow output_delta_dn_max = dt_s /
+    // constrain_value(10, 0, 0.5) = 0.01 / 0.5 = 0.02 per call if
+    // set_actuator_with_slew were (incorrectly) used here instead of a
+    // direct assignment - nowhere near enough to reach 0.0f from 0.73f in
+    // one call.
+    m.output_to_motors(/*armed=*/true, /*disarm_disable_pwm=*/true, /*slew_up_time=*/10.0f, /*slew_dn_time=*/10.0f,
+                        /*spin_min=*/0.15f, params, /*dt_s=*/0.01f, /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+
+    REQUIRE(m.actuator(0) == Approx(0.0f));
+}
+
+TEST_CASE("output_to_motors: GROUND_IDLE drives every enabled motor's actuator_ toward "
+          "actuator_spin_up_to_ground_idle(spin_up_ratio_, spin_min) via set_actuator_with_slew - both the "
+          "exact target (no slew) and a genuine slew-limited step are confirmed",
+          "[motors][output_to_motors][ground_idle]") {
+    MotorsMatrix m;
+    m.add_motor_raw(0, 1.0f, 0.0f, 0.0f, 1);
+    m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+    m.set_spin_up_ratio(0.4f);
+    const float spin_min = 0.5f;
+    const float expected_target = MotorsMatrix::actuator_spin_up_to_ground_idle(0.4f, spin_min); // 0.2
+    ThrustLinParams params;
+
+    SECTION("no slew (slew_up_time=slew_dn_time=0) - reaches the exact real ground-idle-ramp target in one "
+            "call") {
+        m.output_to_motors(/*armed=*/true, /*disarm_disable_pwm=*/true, /*slew_up_time=*/0.0f,
+                            /*slew_dn_time=*/0.0f, spin_min, params, /*dt_s=*/0.02f, /*pwm_output_min=*/1000,
+                            /*pwm_output_max=*/2000);
+        REQUIRE(m.actuator(0) == Approx(expected_target));
+    }
+
+    SECTION("genuine slew limiting - moves by set_actuator_with_slew's own expected per-call step, NOT "
+            "straight to the target") {
+        const float slew_up_time = 0.5f;
+        const float dt_s = 0.02f;
+        // output_delta_up_max = dt_s / constrain_value(slew_up_time, 0, 0.5) = 0.02 / 0.5 = 0.04.
+        m.output_to_motors(/*armed=*/true, /*disarm_disable_pwm=*/true, slew_up_time, /*slew_dn_time=*/0.0f,
+                            spin_min, params, dt_s, /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+        REQUIRE(m.actuator(0) == Approx(0.04f));
+        REQUIRE(m.actuator(0) < expected_target); // did not jump straight there
+    }
+}
+
+TEST_CASE("output_to_motors: SPOOLING_UP, THROTTLE_UNLIMITED, and SPOOLING_DOWN are a REAL "
+          "three-case-labels-one-body fall-through - all THREE independently produce the IDENTICAL "
+          "thr_lin_.thrust_to_actuator(params, thrust_rpyt_out_[i])-derived value via slew, matching the "
+          "SAME shared upstream case body, not just one representative case tested in isolation",
+          "[motors][output_to_motors][spooling]") {
+    const float thrust_in = 0.5f;
+    ThrustLinParams params; // real defaults: curve_expo=0.65, spin_min=0.15, spin_max=0.95
+
+    // Independently-computed expected value - a fresh ThrustLinearization at its own real default state
+    // (lift_max_=1.0, battery filter reset to 1.0), matching what output_to_motors' own internal thr_lin_
+    // must produce for a freshly-constructed MotorsMatrix.
+    ThrustLinearization reference_thr_lin;
+    const float expected_actuator = reference_thr_lin.thrust_to_actuator(params, thrust_in);
+
+    auto run_for = [&](MotorsMatrix::SpoolState state) {
+        MotorsMatrix local;
+        local.add_motor_raw(0, 1.0f, 0.0f, 0.0f, 1);
+        local.set_thrust_rpyt_out(0, thrust_in);
+        local.set_spool_state(state);
+        local.output_to_motors(/*armed=*/true, /*disarm_disable_pwm=*/true, /*slew_up_time=*/0.0f,
+                                /*slew_dn_time=*/0.0f, /*spin_min=*/0.15f, params, /*dt_s=*/0.02f,
+                                /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+        return local.actuator(0);
+    };
+
+    SECTION("SPOOLING_UP") {
+        REQUIRE(run_for(MotorsMatrix::SpoolState::SpoolingUp) == Approx(expected_actuator));
+    }
+    SECTION("THROTTLE_UNLIMITED") {
+        REQUIRE(run_for(MotorsMatrix::SpoolState::ThrottleUnlimited) == Approx(expected_actuator));
+    }
+    SECTION("SPOOLING_DOWN") {
+        REQUIRE(run_for(MotorsMatrix::SpoolState::SpoolingDown) == Approx(expected_actuator));
+    }
+}
+
+TEST_CASE("output_to_motors: a DISABLED motor's actuator_/pwm_out_ are left completely UNCHANGED by a "
+          "call, not zeroed or reset - matches real upstream's own `if (motor_enabled...)` guards, which "
+          "skip a disabled motor entirely in every one of the three switch groups AND the final PWM loop",
+          "[motors][output_to_motors][disabled]") {
+    MotorsMatrix m;
+    m.add_motor_raw(0, 1.0f, 0.0f, 0.0f, 1); // motor 0 enabled, keeps the switch bodies genuinely active
+    REQUIRE_FALSE(m.motor_enabled(1));       // motor 1 never added - disabled
+
+    m.set_actuator(1, 0.42f);
+    m.set_pwm_out(1, 1234);
+
+    ThrustLinParams params;
+    const std::array<MotorsMatrix::SpoolState, 5> all_states = {
+        MotorsMatrix::SpoolState::ShutDown,     MotorsMatrix::SpoolState::GroundIdle,
+        MotorsMatrix::SpoolState::SpoolingUp,   MotorsMatrix::SpoolState::ThrottleUnlimited,
+        MotorsMatrix::SpoolState::SpoolingDown,
+    };
+    for (const auto state : all_states) {
+        m.set_spool_state(state);
+        m.output_to_motors(/*armed=*/true, /*disarm_disable_pwm=*/true, /*slew_up_time=*/0.0f,
+                            /*slew_dn_time=*/0.0f, /*spin_min=*/0.15f, params, /*dt_s=*/0.02f,
+                            /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+        REQUIRE(m.actuator(1) == Approx(0.42f));
+        REQUIRE(m.pwm_out(1) == 1234);
+    }
+}
+
+TEST_CASE("output_to_motors: the separate, final PWM-conversion loop runs for every enabled motor "
+          "regardless of which switch group ran, calling CCP-015's own output_to_pwm with THIS call's own "
+          "armed/disarm_disable_pwm/pwm_output_min/pwm_output_max, not stale/hardcoded values",
+          "[motors][output_to_motors][pwm]") {
+    MotorsMatrix m;
+    m.add_motor_raw(0, 1.0f, 0.0f, 0.0f, 1);
+    m.set_spool_state(MotorsMatrix::SpoolState::ShutDown);
+    ThrustLinParams params;
+
+    // SHUT_DOWN + armed=false + disarm_disable_pwm=true -> output_to_pwm's own real PWM-off case (0).
+    m.output_to_motors(/*armed=*/false, /*disarm_disable_pwm=*/true, /*slew_up_time=*/0.0f,
+                        /*slew_dn_time=*/0.0f, /*spin_min=*/0.15f, params, /*dt_s=*/0.02f,
+                        /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+    REQUIRE(m.pwm_out(0) == 0);
+
+    // Same SHUT_DOWN state, now armed=true - output_to_pwm's own real pwm_output_min case.
+    m.output_to_motors(/*armed=*/true, /*disarm_disable_pwm=*/true, /*slew_up_time=*/0.0f,
+                        /*slew_dn_time=*/0.0f, /*spin_min=*/0.15f, params, /*dt_s=*/0.02f,
+                        /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+    REQUIRE(m.pwm_out(0) == 1000);
+
+    // A non-SHUT_DOWN state with actuator_ pinned at exactly 1.0 (via GROUND_IDLE's own ramp, spin_min=1.0
+    // so the target is 1.0*spin_up_ratio_=1.0) maps to exactly pwm_output_max via the real linear remap.
+    m.set_spool_state(MotorsMatrix::SpoolState::GroundIdle);
+    m.set_spin_up_ratio(1.0f);
+    m.output_to_motors(/*armed=*/true, /*disarm_disable_pwm=*/true, /*slew_up_time=*/0.0f,
+                        /*slew_dn_time=*/0.0f, /*spin_min=*/1.0f, params, /*dt_s=*/0.02f,
+                        /*pwm_output_min=*/1000, /*pwm_output_max=*/2000);
+    REQUIRE(m.actuator(0) == Approx(1.0f));
+    REQUIRE(m.pwm_out(0) == 2000);
+}
+
+TEST_CASE("output_to_motors: full pipeline integration - chaining output_logic (CCP-013/014) -> "
+          "output_armed_stabilizing (CCP-016) -> output_to_motors (this ticket) across a realistic "
+          "multi-step arm/spool-up/fly/spool-down scenario, confirming the whole real per-cycle pipeline "
+          "this effort has built produces sane, stable pwm_out_ values within the configured PWM range "
+          "throughout - the single most valuable test in this file, closing out the entire AP_Motors arc",
+          "[motors][output_to_motors][output_logic][output_armed_stabilizing][integration]") {
+    MotorsMatrix m;
+    configureQuadPlus(m);
+    m.set_throttle_thrust_max(1.0f);
+    m.set_spool_desired(MotorsMatrix::DesiredSpoolState::ThrottleUnlimited);
+
+    const float safe_time = 0.1f;
+    float spool_up_time = 0.1f;
+    const float spool_down_time = 0.1f;
+    const float spin_arm = 0.05f;
+    const float idle_time_delay_s = 0.04f;
+    const float spin_min = 0.15f;
+    const float dt_s = 0.02f;
+    const std::int16_t pwm_output_min = 1000;
+    const std::int16_t pwm_output_max = 2000;
+    ThrustLinParams params;
+    params.spin_min = spin_min;
+
+    bool spoolup_block = false; // never externally raised in this scenario
+    bool limits_all_engaged = false;
+    bool should_set_spoolup_block = false;
+    bool limit_roll = false, limit_pitch = false, limit_yaw = false, limit_lower = false, limit_upper = false;
+
+    auto step = [&](float roll_in, float pitch_in, float yaw_in, float filtered_throttle) {
+        m.output_logic(/*armed=*/true, /*interlock=*/true, /*disarm_disable_pwm=*/true, safe_time, spool_up_time,
+                        spool_down_time, spin_arm, idle_time_delay_s, spin_min, spoolup_block, filtered_throttle,
+                        /*current_limit_max_throttle=*/1.0f, dt_s, limits_all_engaged, should_set_spoolup_block);
+
+        m.output_armed_stabilizing(roll_in, 0.0f, pitch_in, 0.0f, yaw_in, 0.0f, filtered_throttle,
+                                    /*throttle_avg_max=*/0.5f, /*yaw_headroom=*/200.0f,
+                                    /*air_density_ratio=*/1.0f, dt_s, limit_roll, limit_pitch, limit_yaw,
+                                    limit_lower, limit_upper);
+
+        m.output_to_motors(/*armed=*/true, /*disarm_disable_pwm=*/true, /*slew_up_time=*/0.0f,
+                            /*slew_dn_time=*/0.0f, spin_min, params, dt_s, pwm_output_min, pwm_output_max);
+    };
+
+    // Drives SHUT_DOWN -> GROUND_IDLE -> SPOOLING_UP -> THROTTLE_UNLIMITED under a constant, realistic
+    // stick input, then commands GROUND_IDLE (a landing) partway through and drives several more cycles
+    // through SPOOLING_DOWN back to GROUND_IDLE - a genuine multi-state exercise of the whole real
+    // per-cycle pipeline, not a single steady-state snapshot.
+    bool saw_spooling_up = false;
+    bool saw_throttle_unlimited = false;
+    bool saw_spooling_down = false;
+    for (int iter = 0; iter < 60; ++iter) {
+        if (iter == 40) {
+            m.set_spool_desired(MotorsMatrix::DesiredSpoolState::GroundIdle);
+        }
+        step(/*roll_in=*/0.05f, /*pitch_in=*/-0.03f, /*yaw_in=*/0.02f, /*filtered_throttle=*/0.5f);
+
+        switch (m.spool_state()) {
+            case MotorsMatrix::SpoolState::SpoolingUp:
+                saw_spooling_up = true;
+                break;
+            case MotorsMatrix::SpoolState::ThrottleUnlimited:
+                saw_throttle_unlimited = true;
+                break;
+            case MotorsMatrix::SpoolState::SpoolingDown:
+                saw_spooling_down = true;
+                break;
+            default:
+                break;
+        }
+
+        INFO("iter " << iter << " spool_state=" << static_cast<int>(m.spool_state()));
+        for (std::uint8_t i = 0; i < 4; ++i) {
+            REQUIRE_FALSE(std::isnan(m.actuator(i)));
+            REQUIRE_FALSE(std::isinf(m.actuator(i)));
+            const std::int16_t pwm = m.pwm_out(i);
+            REQUIRE(pwm >= pwm_output_min);
+            REQUIRE(pwm <= pwm_output_max);
+        }
+    }
+
+    // Confirms this genuinely exercised every non-trivial real SpoolState along the way, not just
+    // SHUT_DOWN/GROUND_IDLE bookends.
+    REQUIRE(saw_spooling_up);
+    REQUIRE(saw_throttle_unlimited);
+    REQUIRE(saw_spooling_down);
+    REQUIRE(m.spool_state() == MotorsMatrix::SpoolState::GroundIdle);
+}
