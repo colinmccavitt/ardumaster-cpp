@@ -6,14 +6,18 @@
 #include <fwcpp/quadplane/quadplane_defaults.hpp>
 #include <fwcpp/quadplane/quadplane_frame.hpp>
 #include <fwcpp/quadplane/quadplane_motors_init.hpp>
+#include <fwcpp/quadplane/quadplane_motors_output.hpp>
 #include <fwcpp/quadplane/quadplane_options.hpp>
 #include <fwcpp/quadplane/quadplane_poscontrol_stub.hpp>
+#include <fwcpp/quadplane/quadplane_setup_channels.hpp>
 
 namespace fwcpp::quadplane {
 
 struct QuadPlaneSetupInputs {
     bool soft_armed{false};
     std::uint32_t available_memory_bytes{kSetupMinMemoryBytes};
+    AhrsViewCreateInputs ahrs_view{};
+    SetupChannelsSink channels_sink{};
 };
 
 class QuadPlane {
@@ -59,6 +63,10 @@ public:
         return sel->airframe;
     }
 
+    [[nodiscard]] const SetupChannelsSink& setup_channels() const { return setup_channels_; }
+    [[nodiscard]] const AhrsViewSetup& ahrs_view() const { return ahrs_view_; }
+    [[nodiscard]] bool ahrs_view_inited() const { return ahrs_view_inited_; }
+
     bool setup(const QuadPlaneSetupInputs& inputs = {}) {
         if (initialised_) return true;
         if (inputs.soft_armed) return false;
@@ -66,6 +74,15 @@ public:
         if (!enabled()) return false;
         const auto sel = classify_frame(frame_class_, tailsit_enable_, tilt_enable_);
         if (!sel) return false;
+
+        setup_channels_ = inputs.channels_sink;
+        wire_setup_channels(frame_class_, setup_channels_);
+
+        AhrsViewCreateInputs ahrs_in = inputs.ahrs_view;
+        ahrs_in.tailsit_enable = tailsit_enable_;
+        ahrs_view_ = make_ahrs_view_setup(ahrs_in);
+        ahrs_view_inited_ = ahrs_view_.created;
+
         motors_kind_ = sel->motors_kind;
         motors_init_ = make_motors_init_params(frame_class_, frame_type_);
         motors_inited_ = true;
@@ -95,6 +112,15 @@ public:
         return guided_wait_takeoff_on_mode_enter_;
     }
 
+    void set_assisted_flight(bool v) { assisted_flight_ = v; }
+    [[nodiscard]] bool assisted_flight() const { return assisted_flight_; }
+
+    [[nodiscard]] const MotorsOutputState& motors_output_state() const { return motors_output_state_; }
+
+    MotorsOutputTick motors_output(MotorsOutputView view) {
+        return run_motors_output(view, options_, assisted_flight_, motors_output_state_);
+    }
+
     void mode_enter() {
         if (available()) {
             lean_angle_max_cd_ = 0;
@@ -115,9 +141,14 @@ private:
     bool motors_inited_{false};
     MotorsKind motors_kind_{MotorsKind::kMatrix};
     MotorsInitParams motors_init_{};
+    SetupChannelsSink setup_channels_{};
+    AhrsViewSetup ahrs_view_{};
+    bool ahrs_view_inited_{false};
     bool attitude_control_inited_{false};
     bool pos_control_inited_{false};
     bool weathervane_inited_{false};
+    bool assisted_flight_{false};
+    MotorsOutputState motors_output_state_{};
     std::int32_t lean_angle_max_cd_{0};
     PosControlState poscontrol_{};
     bool guided_wait_takeoff_{false};
