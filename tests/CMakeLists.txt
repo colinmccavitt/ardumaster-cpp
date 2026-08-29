@@ -877,3 +877,8 @@ catch_discover_tests(tiltrotor_transition_test)
 add_executable(tiltrotor_setup_flags_test tiltrotor_setup_flags_test.cpp)
 target_link_libraries(tiltrotor_setup_flags_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
 catch_discover_tests(tiltrotor_setup_flags_test)
+
+# VCP-008 slice 6: bicopter_output + get_forward_throttle.
+add_executable(tiltrotor_output_test tiltrotor_output_test.cpp)
+target_link_libraries(tiltrotor_output_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
+catch_discover_tests(tiltrotor_output_test)

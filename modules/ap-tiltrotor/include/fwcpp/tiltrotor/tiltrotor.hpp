@@ -4,6 +4,7 @@
 #include <fwcpp/tiltrotor/tiltrotor_control.hpp>
 #include <fwcpp/tiltrotor/tiltrotor_defaults.hpp>
 #include <fwcpp/tiltrotor/tiltrotor_enable.hpp>
+#include <fwcpp/tiltrotor/tiltrotor_output.hpp>
 #include <fwcpp/tiltrotor/tiltrotor_predicates.hpp>
 #include <fwcpp/tiltrotor/tiltrotor_setup.hpp>
 #include <fwcpp/tiltrotor/tiltrotor_setup_flags.hpp>
