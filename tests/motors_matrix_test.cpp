@@ -2000,3 +2000,262 @@ TEST_CASE("setup_deca_matrix: PLUS reuses the SAME FrameType enumerator as setup
     }
 }
 
+// ---------------------------------------------------------------------
+// setup_motors (CCP-009) - the dispatcher that routes a (FrameClass,
+// FrameType) pair to the correct one of the seven setup_*_matrix
+// functions above, and closes out AP_MotorsMatrix's own
+// construction-time configuration surface. See motors_matrix.hpp's own
+// "CCP-009 ADDITION" file-banner section and setup_motors()'s own
+// method-level comment for the full real seven-step structure this
+// reproduces (real function lines 1290-1349).
+// ---------------------------------------------------------------------
+
+namespace {
+
+// Compares every one of kMaxNumMotors motor slots between two
+// MotorsMatrix instances - not just the ones a particular frame table is
+// expected to populate - so a dispatch bug that enables/leaks an
+// unexpected extra slot (or misses one) is caught just as reliably as a
+// wrong factor value on an expected one.
+void requireSameMotorState(const MotorsMatrix& a, const MotorsMatrix& b) {
+    for (std::uint8_t i = 0; i < kMaxNumMotors; ++i) {
+        INFO("motor index " << static_cast<int>(i));
+        REQUIRE(a.motor_enabled(i) == b.motor_enabled(i));
+        REQUIRE(a.roll_factor(i) == Approx(b.roll_factor(i)).margin(1e-6));
+        REQUIRE(a.pitch_factor(i) == Approx(b.pitch_factor(i)).margin(1e-6));
+        REQUIRE(a.yaw_factor(i) == Approx(b.yaw_factor(i)).margin(1e-6));
+        REQUIRE(a.throttle_factor(i) == Approx(b.throttle_factor(i)).margin(1e-6));
+        REQUIRE(a.test_order(i) == b.test_order(i));
+    }
+}
+
+} // namespace
+
+// NOTE ON THE COMPARISON BELOW: setup_motors's own real structure calls
+// normalise_rpy_factors() UNCONDITIONALLY after the switch (see file
+// banner) - a step none of the seven setup_*_matrix functions themselves
+// perform (each returns immediately after its own add_motors()/
+// add_motors_raw() calls, un-normalised). A literal
+// `setup_motors(...)` vs `setup_X_matrix(...)` comparison would therefore
+// legitimately mismatch on every roll/pitch/yaw/throttle factor (raw
+// angle-derived values vs their normalised, magnitude-0.5-rescaled
+// equivalents) despite the dispatch itself being entirely correct. Each
+// test below therefore also calls normalise_rpy_factors() on the
+// directly-constructed reference instance, reproducing setup_motors's
+// own real post-switch step exactly - this is the faithful equivalent of
+// "the same per-motor values", not a weakening of the test.
+
+TEST_CASE("setup_motors: FrameClass::Quad dispatches to setup_quad_matrix", "[motors][setup_motors][quad]") {
+    MotorsMatrix via_dispatch;
+    via_dispatch.setup_motors(MotorsMatrix::FrameClass::Quad, MotorsMatrix::FrameType::Plus);
+
+    MotorsMatrix direct;
+    REQUIRE(direct.setup_quad_matrix(MotorsMatrix::FrameType::Plus));
+    direct.normalise_rpy_factors();
+
+    REQUIRE(via_dispatch.initialised_ok());
+    REQUIRE(via_dispatch.frame_class_string() == direct.frame_class_string());
+    REQUIRE(via_dispatch.frame_class_string() == "QUAD");
+    REQUIRE(via_dispatch.frame_type_string() == direct.frame_type_string());
+    requireSameMotorState(via_dispatch, direct);
+}
+
+TEST_CASE("setup_motors: FrameClass::Hexa dispatches to setup_hexa_matrix", "[motors][setup_motors][hexa]") {
+    MotorsMatrix via_dispatch;
+    via_dispatch.setup_motors(MotorsMatrix::FrameClass::Hexa, MotorsMatrix::FrameType::Plus);
+
+    MotorsMatrix direct;
+    REQUIRE(direct.setup_hexa_matrix(MotorsMatrix::FrameType::Plus));
+    direct.normalise_rpy_factors();
+
+    REQUIRE(via_dispatch.initialised_ok());
+    REQUIRE(via_dispatch.frame_class_string() == direct.frame_class_string());
+    REQUIRE(via_dispatch.frame_class_string() == "HEXA");
+    REQUIRE(via_dispatch.frame_type_string() == direct.frame_type_string());
+    requireSameMotorState(via_dispatch, direct);
+}
+
+TEST_CASE("setup_motors: FrameClass::Octa dispatches to setup_octa_matrix", "[motors][setup_motors][octa]") {
+    MotorsMatrix via_dispatch;
+    via_dispatch.setup_motors(MotorsMatrix::FrameClass::Octa, MotorsMatrix::FrameType::Plus);
+
+    MotorsMatrix direct;
+    REQUIRE(direct.setup_octa_matrix(MotorsMatrix::FrameType::Plus));
+    direct.normalise_rpy_factors();
+
+    REQUIRE(via_dispatch.initialised_ok());
+    REQUIRE(via_dispatch.frame_class_string() == direct.frame_class_string());
+    REQUIRE(via_dispatch.frame_class_string() == "OCTA");
+    REQUIRE(via_dispatch.frame_type_string() == direct.frame_type_string());
+    requireSameMotorState(via_dispatch, direct);
+}
+
+TEST_CASE("setup_motors: FrameClass::Octaquad dispatches to setup_octaquad_matrix", "[motors][setup_motors][octaquad]") {
+    MotorsMatrix via_dispatch;
+    via_dispatch.setup_motors(MotorsMatrix::FrameClass::Octaquad, MotorsMatrix::FrameType::Plus);
+
+    MotorsMatrix direct;
+    REQUIRE(direct.setup_octaquad_matrix(MotorsMatrix::FrameType::Plus));
+    direct.normalise_rpy_factors();
+
+    REQUIRE(via_dispatch.initialised_ok());
+    REQUIRE(via_dispatch.frame_class_string() == direct.frame_class_string());
+    REQUIRE(via_dispatch.frame_class_string() == "OCTAQUAD");
+    REQUIRE(via_dispatch.frame_type_string() == direct.frame_type_string());
+    requireSameMotorState(via_dispatch, direct);
+}
+
+TEST_CASE("setup_motors: FrameClass::Dodecahexa dispatches to setup_dodecahexa_matrix",
+          "[motors][setup_motors][dodecahexa]") {
+    MotorsMatrix via_dispatch;
+    via_dispatch.setup_motors(MotorsMatrix::FrameClass::Dodecahexa, MotorsMatrix::FrameType::Plus);
+
+    MotorsMatrix direct;
+    REQUIRE(direct.setup_dodecahexa_matrix(MotorsMatrix::FrameType::Plus));
+    direct.normalise_rpy_factors();
+
+    REQUIRE(via_dispatch.initialised_ok());
+    REQUIRE(via_dispatch.frame_class_string() == direct.frame_class_string());
+    REQUIRE(via_dispatch.frame_class_string() == "DODECAHEXA");
+    REQUIRE(via_dispatch.frame_type_string() == direct.frame_type_string());
+    requireSameMotorState(via_dispatch, direct);
+}
+
+TEST_CASE("setup_motors: FrameClass::Y6 dispatches to setup_y6_matrix", "[motors][setup_motors][y6]") {
+    // Uses FrameType::Y6B (a real explicit case in setup_y6_matrix's own
+    // switch, not its productive default) as the representative frame
+    // type - either would exercise the same dispatch, but Y6B avoids
+    // relying on setup_y6_matrix's own separately-tested fallback
+    // behavior here.
+    MotorsMatrix via_dispatch;
+    via_dispatch.setup_motors(MotorsMatrix::FrameClass::Y6, MotorsMatrix::FrameType::Y6B);
+
+    MotorsMatrix direct;
+    REQUIRE(direct.setup_y6_matrix(MotorsMatrix::FrameType::Y6B));
+    direct.normalise_rpy_factors();
+
+    REQUIRE(via_dispatch.initialised_ok());
+    REQUIRE(via_dispatch.frame_class_string() == direct.frame_class_string());
+    REQUIRE(via_dispatch.frame_class_string() == "Y6");
+    REQUIRE(via_dispatch.frame_type_string() == direct.frame_type_string());
+    requireSameMotorState(via_dispatch, direct);
+}
+
+TEST_CASE("setup_motors: FrameClass::Deca dispatches to setup_deca_matrix", "[motors][setup_motors][deca]") {
+    MotorsMatrix via_dispatch;
+    via_dispatch.setup_motors(MotorsMatrix::FrameClass::Deca, MotorsMatrix::FrameType::Plus);
+
+    MotorsMatrix direct;
+    REQUIRE(direct.setup_deca_matrix(MotorsMatrix::FrameType::Plus));
+    direct.normalise_rpy_factors();
+
+    REQUIRE(via_dispatch.initialised_ok());
+    REQUIRE(via_dispatch.frame_class_string() == direct.frame_class_string());
+    REQUIRE(via_dispatch.frame_class_string() == "DECA");
+    REQUIRE(via_dispatch.frame_type_string() == direct.frame_type_string());
+    requireSameMotorState(via_dispatch, direct);
+}
+
+TEST_CASE("setup_motors: an out-of-range FrameClass hits the real default branch, "
+          "clears all motors, and sets frame_class_string to UNSUPPORTED",
+          "[motors][setup_motors][default][unsupported]") {
+    // Confirms the real upstream `default: success = false;` branch (see
+    // file banner), followed unconditionally by normalise_rpy_factors()
+    // (a harmless no-op here, since step 1 already cleared every motor)
+    // and `frame_class_string_ = "UNSUPPORTED";`.
+    MotorsMatrix m;
+    m.setup_motors(static_cast<MotorsMatrix::FrameClass>(255), MotorsMatrix::FrameType::Plus);
+
+    REQUIRE_FALSE(m.initialised_ok());
+    REQUIRE(m.frame_class_string() == "UNSUPPORTED");
+    for (std::uint8_t i = 0; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+        REQUIRE(m.roll_factor(i) == Approx(0.0f));
+        REQUIRE(m.pitch_factor(i) == Approx(0.0f));
+        REQUIRE(m.yaw_factor(i) == Approx(0.0f));
+        REQUIRE(m.throttle_factor(i) == Approx(0.0f));
+    }
+}
+
+TEST_CASE("setup_motors: re-configuring with a DIFFERENT frame class/type leaves no stale motor state "
+          "from the first call - THE SINGLE MOST IMPORTANT TEST THIS TICKET WRITES",
+          "[motors][setup_motors][reconfigure]") {
+    // This is exactly the risk the ticket calls out: the real upstream
+    // structure unconditionally removes ALL motor slots before rebuilding
+    // (see file banner) specifically so a second, different setup_motors
+    // call is a genuine full reset, not an incremental merge on top of
+    // the first call's own state. A port that skipped or narrowed the
+    // remove-all step (e.g. only clearing slots the NEW frame table is
+    // about to populate) would leak the first call's extra motor slots
+    // into the second configuration - octa's own 8 populated slots (0-7)
+    // vs quad's own 4 (0-3) makes any such leak directly observable on
+    // slots 4-7.
+    MotorsMatrix m;
+
+    // First call: octa, 8 motors (0-7) all enabled.
+    m.setup_motors(MotorsMatrix::FrameClass::Octa, MotorsMatrix::FrameType::Plus);
+    REQUIRE(m.initialised_ok());
+    for (std::uint8_t i = 0; i < 8; ++i) {
+        REQUIRE(m.motor_enabled(i));
+    }
+
+    // Second call: a DIFFERENT real frame class AND frame type - quad, X.
+    m.setup_motors(MotorsMatrix::FrameClass::Quad, MotorsMatrix::FrameType::X);
+    REQUIRE(m.initialised_ok());
+    REQUIRE(m.frame_class_string() == "QUAD");
+    REQUIRE(m.frame_type_string() == "X");
+
+    // The final state's motor_enabled flag and all four RPYT factor
+    // arrays must match a fresh instance configured ONLY via quad/X,
+    // across EVERY motor slot - proving no enabled motor or non-zero
+    // roll/pitch/yaw/throttle factor survived from the first octa/Plus
+    // call.
+    MotorsMatrix reference;
+    REQUIRE(reference.setup_quad_matrix(MotorsMatrix::FrameType::X));
+    reference.normalise_rpy_factors();
+    for (std::uint8_t i = 0; i < kMaxNumMotors; ++i) {
+        INFO("motor index " << static_cast<int>(i));
+        REQUIRE(m.motor_enabled(i) == reference.motor_enabled(i));
+        REQUIRE(m.roll_factor(i) == Approx(reference.roll_factor(i)).margin(1e-6));
+        REQUIRE(m.pitch_factor(i) == Approx(reference.pitch_factor(i)).margin(1e-6));
+        REQUIRE(m.yaw_factor(i) == Approx(reference.yaw_factor(i)).margin(1e-6));
+        REQUIRE(m.throttle_factor(i) == Approx(reference.throttle_factor(i)).margin(1e-6));
+    }
+    // test_order for the four motors quad/X actively rebuilds (0-3) must
+    // also match the reference exactly - proving those slots were fully
+    // rebuilt, not merely re-enabled with stale ordering.
+    for (std::uint8_t i = 0; i < 4; ++i) {
+        REQUIRE(m.test_order(i) == reference.test_order(i));
+    }
+
+    // Explicitly, motors 4-7 (populated by the first octa call, never
+    // touched by quad's own 4-motor table) must now be fully DISABLED
+    // with all four RPYT factors zeroed - the direct proof no live motor
+    // or non-zero factor leaked across the reconfiguration.
+    for (std::uint8_t i = 4; i < 8; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+        REQUIRE(m.roll_factor(i) == Approx(0.0f));
+        REQUIRE(m.pitch_factor(i) == Approx(0.0f));
+        REQUIRE(m.yaw_factor(i) == Approx(0.0f));
+        REQUIRE(m.throttle_factor(i) == Approx(0.0f));
+    }
+    // REAL, RE-VERIFIED QUIRK, discovered by this exact test (confirmed
+    // directly against upstream's own real remove_motor, AP_MotorsMatrix.cpp
+    // line 545-552): remove_motor's own real body clears motor_enabled and
+    // all FOUR RPYT factor arrays, but never touches _test_order - upstream
+    // itself has no code path that resets a disabled motor's test_order.
+    // This means motors 4-7's test_order values are the REAL, DELIBERATELY
+    // STALE leftovers from the first octa/Plus call (see that frame table's
+    // own testing_order column above: motor 4=8, 5=6, 6=7, 7=3) - not
+    // reset to 0 - even though those motors are now fully disabled with
+    // zeroed factors. This is upstream's own real, faithfully-reproduced
+    // behavior, not a port bug: test_order is only ever consulted for
+    // motor-test sequencing among ENABLED motors, so a stale value on a
+    // disabled slot is harmless in practice, but a test asserting it reads
+    // 0 here would be asserting behavior upstream itself does not provide.
+    REQUIRE(m.test_order(4) == 8);
+    REQUIRE(m.test_order(5) == 6);
+    REQUIRE(m.test_order(6) == 7);
+    REQUIRE(m.test_order(7) == 3);
+}
+

@@ -824,25 +824,74 @@
 // metadata, out of scope for the same reason as the other six
 // _mav_type writes.
 //
+// CCP-009 ADDITION (setup_motors) - upstream AP_MotorsMatrix::setup_motors
+// (AP_MotorsMatrix.cpp, real function lines 1290-1349, re-verified
+// directly against the pinned worktree; the ticket's own guessed span
+// matched exactly). **THIS CLOSES OUT AP_MotorsMatrix's OWN
+// CONSTRUCTION-TIME CONFIGURATION SURFACE ENTIRELY** - see the updated
+// "DEFERRED FUTURE PHASES" below. setup_motors is the dispatcher that
+// routes a (motor_frame_class, motor_frame_type) pair to the correct one
+// of the seven already-ported setup_*_matrix functions (CCP-002 through
+// CCP-008) - see FrameClass's own class-body comment above and
+// setup_motors()'s own method-level comment below for the full seven-step
+// structure and the exhaustiveness investigation of every real
+// motor_frame_class enumerator (confirming exactly seven of the real
+// eighteen are genuine cases in this switch, and that the other eleven -
+// UNDEFINED/HELI/TRI/SINGLE/COAX/TAILSITTER/HELI_DUAL/HELI_QUAD/
+// SCRIPTING_MATRIX/6DOF_SCRIPTING/DYNAMIC_SCRIPTING_MATRIX - are handled
+// by entirely separate AP_Motors-family classes, never by
+// AP_MotorsMatrix::setup_motors itself).
+//
+// THE THREE REAL STRUCTURAL SURPRISES THIS TICKET RE-VERIFIED DIRECTLY
+// (not trusted from the ticket's own summary): (1) the real `for (int8_t
+// i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) remove_motor(i);` loop and
+// `set_initialised_ok(false);` both run UNCONDITIONALLY before the
+// switch, with no guard on any prior state - this is what makes
+// re-running setup_motors with a different frame class/type a genuine
+// full reset rather than an incremental merge; motors_matrix_test.cpp's
+// own re-configuration test is built specifically to catch a port that
+// forgot this and leaked stale motor slots from a prior call. (2)
+// `normalise_rpy_factors();` runs UNCONDITIONALLY too, confirmed NOT
+// inside an `if (success)` guard - on failure this normalises an
+// all-zero, all-disabled motor set (harmless, since step 1 already
+// cleared everything), and is ported faithfully rather than skipped as
+// "obviously a no-op". (3) a genuine, disclosed QUIRK found while writing
+// the re-configuration test: remove_motor's own real body (AP_MotorsMatrix.cpp
+// lines 545-552, re-verified directly) clears motor_enabled and the four
+// RPYT factor arrays ONLY - it never resets _test_order. This means the
+// "no stale state" guarantee setup_motors's own remove-all-then-rebuild
+// structure provides is real and complete for motor_enabled/roll/pitch/
+// yaw/throttle, but test_order on a slot the new frame table does not
+// repopulate can legitimately retain a stale value from a PRIOR
+// configuration - upstream's own real behavior (test_order only matters
+// for motor-test sequencing among ENABLED motors, so this is harmless in
+// practice), not a port gap. See setup_motors()'s own method-level
+// comment below and motors_matrix_test.cpp's own re-configuration test
+// for the full detail.
+//
+// NOT ported (same disclosed omission class as every setup_*_matrix's
+// own _mav_type write above): the real upstream also writes `_mav_type =
+// MAV_TYPE_GENERIC;` inside setup_motors's own `default:` branch - pure
+// MAVLink/GCS metadata, out of scope for the same reason as the other
+// seven _mav_type writes.
+//
 // DEFERRED FUTURE PHASES (named explicitly, not silently omitted):
 //   1. Remaining frame tables - setup_quad_matrix (line 576) is DONE as of
 //      CCP-002, setup_hexa_matrix (line 775) is DONE as of CCP-003,
 //      setup_octa_matrix (line 854) is DONE as of CCP-004,
 //      setup_octaquad_matrix (line 973) is DONE as of CCP-005,
 //      setup_y6_matrix (line 1191) is DONE as of CCP-006,
-//      setup_dodecahexa_matrix (line 1140) is DONE as of CCP-007, and
-//      setup_deca_matrix (line 1242) is DONE as of CCP-008 (see
+//      setup_dodecahexa_matrix (line 1140) is DONE as of CCP-007,
+//      setup_deca_matrix (line 1242) is DONE as of CCP-008, and
+//      setup_motors (line 1290) is DONE as of CCP-009 (see
 //      "CCP-002 ADDITION"/"CCP-003 ADDITION"/"CCP-004 ADDITION"/
 //      "CCP-005 ADDITION"/"CCP-006 ADDITION"/"CCP-007 ADDITION"/
-//      "CCP-008 ADDITION" above). **THIS WAS THE LAST OF THE SEVEN REAL
-//      setup_*_matrix FRAME-CLASS FUNCTIONS IN THIS PORT'S SCOPE** - no
-//      frame-class setup function remains unported. The ONLY REMAINING
-//      AP_MotorsMatrix frame-table work is now setup_motors' own
-//      dispatcher (which chooses among all seven by frame CLASS -
-//      motor_frame_class, see CCP-003's own enum-sharing investigation
-//      above), a separate, deliberately deferred future phase - named
-//      explicitly here so it is not silently folded into another
-//      ticket's scope.
+//      "CCP-008 ADDITION"/"CCP-009 ADDITION" above). **THIS CLOSES OUT
+//      AP_MotorsMatrix's OWN CONSTRUCTION-TIME CONFIGURATION SURFACE
+//      ENTIRELY** - every real setup_*_matrix frame-class function is
+//      ported, and the dispatcher that chooses among them by frame CLASS
+//      is also ported. No AP_MotorsMatrix construction-time configuration
+//      work remains unported.
 //      copter-rust's own COP-005 finding that Y6's `default:` switch
 //      branch is productive - answering for 24 of the real 64 upstream
 //      frame configurations - was independently re-verified and resolved
@@ -852,11 +901,12 @@
 //      also not deferred further.)
 //   2. Output stage (output_to_motors, output_armed_stabilizing,
 //      check_for_failed_motor, thrust_compensation, disable_yaw_torque) -
-//      needs real thrust-linearization/battery-compensation infrastructure
-//      this port has not built yet (the future C++ analogue of
-//      copter-rust's already-done COP-006), plus real current-limiting.
-//      This is also where add_motor_num()'s real SRV_Channels registration
-//      belongs (see NO-OP above).
+//      a separate, deliberately deferred future phase, NOT started by
+//      this ticket. Needs real thrust-linearization/battery-compensation
+//      infrastructure this port has not built yet (the future C++
+//      analogue of copter-rust's already-done COP-006), plus real
+//      current-limiting. This is also where add_motor_num()'s real
+//      SRV_Channels registration belongs (see NO-OP above).
 //   3. set_throttle_factor/set_update_rate/set_frame_class_and_type/
 //      output_test_num/_output_test_seq/get_factors - small real
 //      accessors/setters not needed by this ticket's own core scope; add
@@ -1018,6 +1068,55 @@ public:
         CwXCor,
         Y6B,
         Y6F,
+    };
+
+    // CCP-009: port of upstream's real `enum motor_frame_class`
+    // (AP_Motors_Class.h lines 54-72, re-verified directly): MOTOR_FRAME_
+    // UNDEFINED=0, MOTOR_FRAME_QUAD=1, MOTOR_FRAME_HEXA=2, MOTOR_FRAME_
+    // OCTA=3, MOTOR_FRAME_OCTAQUAD=4, MOTOR_FRAME_Y6=5, MOTOR_FRAME_HELI=6,
+    // MOTOR_FRAME_TRI=7, MOTOR_FRAME_SINGLE=8, MOTOR_FRAME_COAX=9,
+    // MOTOR_FRAME_TAILSITTER=10, MOTOR_FRAME_HELI_DUAL=11, MOTOR_FRAME_
+    // DODECAHEXA=12, MOTOR_FRAME_HELI_QUAD=13, MOTOR_FRAME_DECA=14,
+    // MOTOR_FRAME_SCRIPTING_MATRIX=15, MOTOR_FRAME_6DOF_SCRIPTING=16,
+    // MOTOR_FRAME_DYNAMIC_SCRIPTING_MATRIX=17. Confirmed directly against
+    // AP_MotorsMatrix::setup_motors's own real switch (AP_MotorsMatrix.cpp
+    // lines 1290-1349, see setup_motors() below for the full dispatcher
+    // investigation) that EXACTLY SEVEN of these eighteen real enumerators
+    // are genuine cases in that switch - MOTOR_FRAME_QUAD, MOTOR_FRAME_
+    // HEXA, MOTOR_FRAME_OCTA, MOTOR_FRAME_OCTAQUAD, MOTOR_FRAME_
+    // DODECAHEXA, MOTOR_FRAME_Y6, MOTOR_FRAME_DECA - the exact seven this
+    // port's own setup_*_matrix functions above already implement
+    // (CCP-002 through CCP-008). Every other real enumerator (UNDEFINED,
+    // HELI, TRI, SINGLE, COAX, TAILSITTER, HELI_DUAL, HELI_QUAD,
+    // SCRIPTING_MATRIX, 6DOF_SCRIPTING, DYNAMIC_SCRIPTING_MATRIX) falls
+    // into setup_motors's own real `default:` branch - NOT because
+    // AP_MotorsMatrix has some other, unported case for them, but because
+    // they are never real motor_frame_class values AP_MotorsMatrix's own
+    // vehicle-level construction logic passes to THIS class at all: HELI/
+    // HELI_DUAL/HELI_QUAD select AP_MotorsHeli(_Dual/_Quad), TRI selects
+    // AP_MotorsTri, SINGLE/COAX select AP_MotorsSingle/AP_MotorsCoax,
+    // TAILSITTER selects AP_MotorsTailsitter, SCRIPTING_MATRIX/6DOF_
+    // SCRIPTING/DYNAMIC_SCRIPTING_MATRIX select the AP_MotorsMatrix_
+    // Scripting family, and UNDEFINED is the real "never configured" zero
+    // value - all real, entirely separate AP_Motors-family classes
+    // instantiated at the vehicle level (AP_Motors_Class.h's own class
+    // hierarchy), never routed through AP_MotorsMatrix::setup_motors at
+    // all. This port's own FrameClass therefore contains ONLY the seven
+    // real, already-ported enumerators - deliberately NOT a full mirror
+    // of the real eighteen-value motor_frame_class, and NOT padded with
+    // placeholder/commented-out entries for the eleven out-of-scope ones,
+    // matching this ticket's own explicit scope. An out-of-range
+    // FrameClass value (e.g. `static_cast<FrameClass>(255)`) exercises
+    // setup_motors's own real `default:` branch exactly as any of those
+    // eleven real-but-out-of-scope enumerators would.
+    enum class FrameClass : std::uint8_t {
+        Quad,
+        Hexa,
+        Octa,
+        Octaquad,
+        Dodecahexa,
+        Y6,
+        Deca,
     };
 
     // Upstream AP_Motors::initialised_ok()/set_initialised_ok() (see file
@@ -2017,6 +2116,124 @@ public:
             return false;
         }
         return true;
+    }
+
+    // setup_motors - CCP-009 port of upstream AP_MotorsMatrix::setup_motors
+    // (AP_MotorsMatrix.cpp, real function lines 1290-1349, re-verified
+    // directly against the pinned worktree; the ticket's own guessed span
+    // matched exactly). This is the dispatcher that closes out
+    // AP_MotorsMatrix's own construction-time configuration surface: it
+    // routes a (FrameClass, FrameType) pair to the correct one of the
+    // seven already-ported setup_*_matrix functions above. The real
+    // seven-step structure, ported exactly:
+    //   1. Unconditionally removes ALL kMaxNumMotors motor slots FIRST,
+    //      via the real `for (int8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS;
+    //      i++) remove_motor(i);` loop - re-verified this runs
+    //      unconditionally, before anything else, not gated on any prior
+    //      state. This is what guarantees a re-configuration (calling
+    //      setup_motors a second time with a different frame class/type)
+    //      leaves no ENABLED motor and no non-zero roll/pitch/yaw/
+    //      throttle factor from the first call - see motors_matrix_test.cpp's
+    //      own dedicated re-configuration test. REAL, RE-VERIFIED QUIRK
+    //      (confirmed directly against upstream's own real remove_motor,
+    //      AP_MotorsMatrix.cpp lines 545-552, see CCP-001's own remove_motor
+    //      formula in the file banner above): remove_motor's real body
+    //      clears motor_enabled and the four RPYT factor arrays ONLY - it
+    //      never touches _test_order. A disabled motor's test_order is
+    //      therefore genuinely NOT reset by this loop and can retain a
+    //      stale value from a PRIOR configuration even after a full
+    //      re-configuration - upstream's own real behavior, not a port
+    //      gap (test_order is only ever consulted for motor-test
+    //      sequencing among ENABLED motors, so a stale value on a
+    //      disabled slot is harmless in practice). motors_matrix_test.cpp's
+    //      own re-configuration test asserts this exact stale-test_order
+    //      behavior directly rather than incorrectly expecting 0.
+    //   2. `set_initialised_ok(false);` immediately after - re-verified
+    //      this runs BEFORE the switch, so the add_motor_raw guard (see
+    //      file banner's GUARD design decision) does not block the
+    //      setup_*_matrix call about to run below.
+    //   3. `switch (frame_class)` with exactly the seven real cases
+    //      (MOTOR_FRAME_QUAD/_HEXA/_OCTA/_OCTAQUAD/_DODECAHEXA/_Y6/_DECA)
+    //      - re-verified directly against the real switch body that these
+    //      are the ONLY seven real cases; see FrameClass's own class-body
+    //      comment above for the full investigation of every other real
+    //      motor_frame_class enumerator and why each is handled by an
+    //      entirely separate AP_Motors-family class, never by this
+    //      switch. Each case stores its setup_*_matrix's own bool return
+    //      in `success` (real upstream default-initializes `success =
+    //      true;` before the switch, matching this port's own
+    //      initialization below).
+    //   4. `default: success = false;` - real upstream also writes
+    //      `_mav_type = MAV_TYPE_GENERIC;` here, pure MAVLink/GCS metadata
+    //      this port has no GCS to report to - same disclosed-omission
+    //      class as every setup_*_matrix's own _mav_type write (see file
+    //      banner).
+    //   5. `normalise_rpy_factors();` called UNCONDITIONALLY - re-verified
+    //      directly this is NOT inside an `if (success)` guard. On
+    //      failure, step 1 already cleared every motor slot, so this
+    //      normalises an all-zero, all-disabled motor set - a real,
+    //      harmless no-op (every early-return inside normalise_rpy_
+    //      factors's own is_zero guards is taken), ported faithfully
+    //      rather than skipped as "obviously unnecessary".
+    //   6. `if (!success) { frame_class_string_ = "UNSUPPORTED"; }` -
+    //      re-verified this exact string and condition. Note this
+    //      OVERWRITES whatever frame_class_string_ an in-range-but-
+    //      frame_type-rejecting setup_*_matrix call already wrote (e.g.
+    //      setup_quad_matrix always sets frame_class_string_ = "QUAD" at
+    //      its own top before checking frame_type) - matching upstream's
+    //      real behavior exactly, since upstream's own _frame_class_
+    //      string is a single shared field with the same overwrite
+    //      semantics.
+    //   7. `set_initialised_ok(success);` as the final statement.
+    // Returns void, matching upstream's real signature exactly (unlike
+    // every setup_*_matrix above, which returns bool) - callers observe
+    // the outcome via initialised_ok()/frame_class_string(), exactly as
+    // upstream's own real callers do.
+    void setup_motors(FrameClass frame_class, FrameType frame_type) {
+        for (std::size_t i = 0; i < kMaxNumMotors; ++i) {
+            remove_motor(static_cast<std::int8_t>(i));
+        }
+        set_initialised_ok(false);
+        bool success = true;
+
+        switch (frame_class) {
+        case FrameClass::Quad:
+            success = setup_quad_matrix(frame_type);
+            break;
+        case FrameClass::Hexa:
+            success = setup_hexa_matrix(frame_type);
+            break;
+        case FrameClass::Octa:
+            success = setup_octa_matrix(frame_type);
+            break;
+        case FrameClass::Octaquad:
+            success = setup_octaquad_matrix(frame_type);
+            break;
+        case FrameClass::Dodecahexa:
+            success = setup_dodecahexa_matrix(frame_type);
+            break;
+        case FrameClass::Y6:
+            success = setup_y6_matrix(frame_type);
+            break;
+        case FrameClass::Deca:
+            success = setup_deca_matrix(frame_type);
+            break;
+        default:
+            // matrix doesn't support the configured class - real upstream
+            // also writes `_mav_type = MAV_TYPE_GENERIC;` here, a
+            // disclosed GCS-metadata omission (see comment above).
+            success = false;
+            break;
+        }
+
+        // normalise factors to magnitude 0.5 - UNCONDITIONAL, real
+        // upstream never guards this on `success` (see comment above).
+        normalise_rpy_factors();
+
+        if (!success) {
+            frame_class_string_ = "UNSUPPORTED";
+        }
+        set_initialised_ok(success);
     }
 
     // frame_type_string()/frame_class_string() - port of upstream's real
