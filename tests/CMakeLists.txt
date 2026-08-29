@@ -654,3 +654,7 @@ catch_discover_tests(mode_q_run_test)
 add_executable(q_modes_completeness_test q_modes_completeness_test.cpp)
 target_link_libraries(q_modes_completeness_test PRIVATE ap-q-modes Catch2::Catch2WithMain)
 catch_discover_tests(q_modes_completeness_test)
+
+add_executable(transition_paths_test transition_paths_test.cpp)
+target_link_libraries(transition_paths_test PRIVATE ap-quadplane-transition Catch2::Catch2WithMain)
+catch_discover_tests(transition_paths_test)

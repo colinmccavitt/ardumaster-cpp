@@ -5,6 +5,11 @@
 
 namespace fwcpp::quadplane_transition {
 
+struct TransitionCompleteEffects {
+    bool assist_reset{false};
+    bool last_fw_pitch_stamped{false};
+};
+
 /// Legal explicit state moves for slice-1 scaffold (full update() later).
 [[nodiscard]] inline constexpr bool can_transition(TransitionState from, TransitionState to) {
     if (from == to) {
@@ -53,6 +58,12 @@ public:
     [[nodiscard]] std::int32_t q_options() const { return q_options_; }
     [[nodiscard]] bool trans_fail_to_fw() const { return trans_fail_to_fw_set(q_options_); }
 
+    [[nodiscard]] std::uint32_t last_fw_mode_ms() const { return last_fw_mode_ms_; }
+    [[nodiscard]] std::int32_t last_fw_nav_pitch_cd() const { return last_fw_nav_pitch_cd_; }
+    [[nodiscard]] float last_throttle() const { return last_throttle_; }
+    [[nodiscard]] bool assist_reset_pending() const { return assist_reset_pending_; }
+    void clear_assist_reset_pending() { assist_reset_pending_ = false; }
+
     void set_transition_time_ms(std::int16_t ms) { transition_time_ms_ = ms; }
     void set_transition_decel_mss(float decel_mss) { transition_decel_mss_ = decel_mss; }
     void set_transition_fail_timeout_s(std::int16_t timeout_s) {
@@ -72,16 +83,45 @@ public:
         return true;
     }
 
-    /// Upstream `SLT_Transition::restart`.
+    /// Upstream `SLT_Transition::restart` (takeoff-complete path).
     void restart() { state_ = TransitionState::kAirspeedWait; }
 
-    /// Upstream `SLT_Transition::force_transition_complete`.
-    void force_transition_complete() {
+    /// Upstream `SLT_Transition::set_last_fw_pitch`.
+    void set_last_fw_pitch(std::uint32_t now_ms, std::int32_t nav_pitch_cd) {
+        last_fw_mode_ms_ = now_ms;
+        last_fw_nav_pitch_cd_ = nav_pitch_cd;
+    }
+
+    /// Clears timers and enters DONE without assist reset (timer / tiltrotor_fwd paths).
+    void mark_transition_done() {
         state_ = TransitionState::kDone;
         in_forced_transition_ = false;
         transition_start_ms_ = 0;
         transition_low_airspeed_ms_ = 0;
+    }
+
+    /// Upstream `SLT_Transition::force_transition_complete`.
+    [[nodiscard]] TransitionCompleteEffects force_transition_complete(std::uint32_t now_ms = 0,
+                                                                      std::int32_t nav_pitch_cd = 0) {
+        mark_transition_done();
         transition_fail_warned_ = false;
+        if (now_ms != 0) {
+            set_last_fw_pitch(now_ms, nav_pitch_cd);
+        }
+        assist_reset_pending_ = true;
+        TransitionCompleteEffects effects{};
+        effects.assist_reset = true;
+        effects.last_fw_pitch_stamped = now_ms != 0;
+        return effects;
+    }
+
+    /// Upstream tiltrotor `fully_fwd` early completion in `update()`.
+    [[nodiscard]] bool try_complete_tiltrotor_fwd(bool rotors_fully_fwd) {
+        if (!rotors_fully_fwd || state_ == TransitionState::kAirspeedWait) {
+            return false;
+        }
+        mark_transition_done();
+        return true;
     }
 
     /// Enter TIMER (does not stamp low-airspeed timer; prefer update_airspeed_wait).
@@ -139,7 +179,7 @@ public:
         const std::uint32_t trans_time_ms = timer_duration_ms();
         const std::uint32_t transition_timer_ms = now_ms - transition_low_airspeed_ms_;
         if (transition_timer_ms > trans_time_ms && tilt_fwd_complete) {
-            force_transition_complete();
+            mark_transition_done();
         }
     }
 
@@ -153,7 +193,11 @@ public:
     }
 
     void update_forward_timing(std::uint32_t now_ms, bool have_airspeed, float aspeed,
-                               float airspeed_min, bool should_assist, bool tilt_fwd_complete) {
+                               float airspeed_min, bool should_assist, bool tilt_fwd_complete,
+                               bool rotors_fully_fwd = false) {
+        if (try_complete_tiltrotor_fwd(rotors_fully_fwd)) {
+            return;
+        }
         apply_assist_back(now_ms, should_assist);
         switch (state_) {
             case TransitionState::kAirspeedWait:
@@ -165,6 +209,20 @@ public:
             case TransitionState::kDone:
                 break;
         }
+    }
+
+    /// Upstream `SLT_Transition::VTOL_update` state prep for the next FW transition.
+    void vtol_update(bool throttle_wait, bool is_flying, float last_throttle) {
+        transition_start_ms_ = 0;
+        transition_low_airspeed_ms_ = 0;
+        last_throttle_ = last_throttle;
+        if (throttle_wait && !is_flying) {
+            in_forced_transition_ = false;
+            state_ = TransitionState::kDone;
+        } else {
+            state_ = TransitionState::kAirspeedWait;
+        }
+        assist_reset_pending_ = true;
     }
 
     [[nodiscard]] float stopping_distance_m(float ground_speed_squared_m) const {
@@ -188,6 +246,10 @@ private:
     std::int16_t transition_fail_action_{kQTransFailActDefault};
     bool transition_fail_warned_{false};
     std::int32_t q_options_{0};
+    std::uint32_t last_fw_mode_ms_{0};
+    std::int32_t last_fw_nav_pitch_cd_{0};
+    float last_throttle_{0.0f};
+    bool assist_reset_pending_{false};
 };
 
 }  // namespace fwcpp::quadplane_transition
