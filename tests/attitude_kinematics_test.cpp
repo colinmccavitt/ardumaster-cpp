@@ -95,10 +95,12 @@
 #include <fwcpp/math/control.hpp>
 #include <fwcpp/math/quaternion.hpp>
 #include <fwcpp/math/scalar.hpp>
+#include <fwcpp/math/vector2.hpp>
 #include <fwcpp/math/vector3.hpp>
 
 using namespace fwcpp::control;
 using fwcpp::math::Quaternion;
+using fwcpp::math::Vector2f;
 using fwcpp::math::Vector3f;
 using Catch::Approx;
 
@@ -1741,4 +1743,282 @@ TEST_CASE("attitude_controller_run_quat: attitude_ang_error uses the post-mutati
 TEST_CASE("attitude_controller_run_quat: kAttitudeThrustErrorAngleRad is exactly radians(30.0f)",
           "[control][attitude_kinematics][attitude_controller_run_quat]") {
     REQUIRE(kAttitudeThrustErrorAngleRad == fwcpp::math::radians(30.0f));
+}
+
+// =======================================================================
+// command_model_rate_predictor (CCP-026) - see attitude_kinematics.hpp's
+// own "CCP-026 ADDENDUM" comment block for the full design writeup: the
+// corrected CCP-022/023 deferral reasoning (this function needed no new
+// per-axis STATE, only plain explicit parameters, exactly like CCP-023
+// already found for thrust_heading_rotation_angles), and the
+// independently re-verified D-025 dt-parameter quirk with this port's
+// chosen resolution (a single dt_s parameter, not a second unused one
+// matching real upstream's own).
+// =======================================================================
+
+namespace {
+// Default gains for command_model_rate_predictor tests. Roll/pitch
+// values are deliberately DIFFERENT from each other everywhere (max
+// rates, accel maxima, kP gains) so a test that accidentally swapped
+// the two axes, or reused one axis's constant for the other, would
+// produce a detectably wrong result rather than an equivalent one.
+struct PredictorGains {
+    float angle_kp_roll = 5.0f;
+    float angle_kp_pitch = 3.0f;
+    Vector3f angle_p_scale{1.1f, 0.8f, 1.0f}; // .z deliberately set too, to prove it is never read
+    float ang_vel_roll_max_degs = 90.0f;
+    float ang_vel_pitch_max_degs = 60.0f;
+    float accel_roll_max_radss = fwcpp::math::radians(400.0f);
+    float accel_pitch_max_radss = fwcpp::math::radians(250.0f);
+    float input_tc = 0.15f;
+    float dt_s = 0.0025f;
+};
+} // namespace
+
+// (1) rate_bf_ff_enabled == true: both axes must delegate to
+// attitude_command_model with the EXACT real argument mapping. Ground
+// truth is built by independently calling this file's own already-
+// verified attitude_command_model with the hand-traced real mapping
+// (wrap_PI(error), literal 0.0 desired_ang_vel, the per-axis max/accel/
+// input_tc/dt_s), then applying the same unconditional final ang_vel_
+// limit re-clamp command_model_rate_predictor itself always applies -
+// not a "plausible-looking" independently-derived number, but the exact
+// same real computation, reproduced call-for-call.
+TEST_CASE("command_model_rate_predictor: rate_bf_ff_enabled == true delegates to attitude_command_model with the "
+          "exact real argument mapping, including its own in/out target_ang_vel_rads/target_ang_accel_rads state",
+          "[control][attitude_kinematics][command_model_rate_predictor]") {
+    const PredictorGains g;
+    // Chosen outside (-pi, pi) on both axes so a port that forgot the
+    // real wrap_PI() call would diverge from one that applied it.
+    const Vector2f error_angle_rad{3.6f, -3.5f};
+
+    // IMPORTANT, independently re-derived while writing this test (see
+    // attitude_kinematics.hpp's own "CCP-026 ADDENDUM" banner's "IMPORTANT"
+    // paragraph): target_ang_vel_rads/target_ang_accel_rads are genuine
+    // in/out STATE in this branch, not fresh outputs - attitude_command_
+    // model's own shape_angle_vel_accel call reads the INCOMING target_
+    // ang_vel as its current-velocity input, and its own final "+=" step
+    // depends on the incoming target_ang_vel too. A first attempt at this
+    // test seeded these with an arbitrary sentinel expecting a full
+    // overwrite - that assumption was WRONG and the test caught its own
+    // author's mistake immediately (a large, easily-diagnosed mismatch,
+    // not a subtle one). Nonzero, axis-distinct starting values below,
+    // matched identically between the "expected" computation and the
+    // real call, so this test exercises the real argument mapping without
+    // repeating that mistake.
+    const Vector2f starting_vel{0.05f, -0.03f};
+    const Vector2f starting_accel{0.2f, -0.1f};
+
+    float expected_vel_x = starting_vel.x, expected_accel_x = starting_accel.x;
+    attitude_command_model(fwcpp::math::wrap_PI(error_angle_rad.x), 0.0f, expected_vel_x, expected_accel_x,
+                            fwcpp::math::radians(g.ang_vel_roll_max_degs), g.accel_roll_max_radss, g.input_tc,
+                            g.dt_s);
+    float expected_vel_y = starting_vel.y, expected_accel_y = starting_accel.y;
+    attitude_command_model(fwcpp::math::wrap_PI(error_angle_rad.y), 0.0f, expected_vel_y, expected_accel_y,
+                            fwcpp::math::radians(g.ang_vel_pitch_max_degs), g.accel_pitch_max_radss, g.input_tc,
+                            g.dt_s);
+    Vector3f expected_ang_vel(expected_vel_x, expected_vel_y, 0.0f);
+    ang_vel_limit(expected_ang_vel, fwcpp::math::radians(g.ang_vel_roll_max_degs),
+                   fwcpp::math::radians(g.ang_vel_pitch_max_degs), 0.0f);
+
+    Vector2f target_ang_vel_rads = starting_vel;
+    Vector2f target_ang_accel_rads = starting_accel;
+    command_model_rate_predictor(error_angle_rad, target_ang_vel_rads, target_ang_accel_rads,
+                                  /*rate_bf_ff_enabled=*/true, g.angle_kp_roll, g.angle_kp_pitch, g.angle_p_scale,
+                                  g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs, g.accel_roll_max_radss,
+                                  g.accel_pitch_max_radss, g.input_tc, g.dt_s);
+
+    REQUIRE(target_ang_vel_rads.x == expected_ang_vel.x);
+    REQUIRE(target_ang_vel_rads.y == expected_ang_vel.y);
+    REQUIRE(target_ang_accel_rads.x == expected_accel_x);
+    REQUIRE(target_ang_accel_rads.y == expected_accel_y);
+
+    // Sanity: the two axes really did produce different numbers here -
+    // if this test would pass with roll/pitch's own distinct constants
+    // silently swapped, it would not actually be testing the mapping.
+    REQUIRE(target_ang_vel_rads.x != target_ang_vel_rads.y);
+
+    // And a genuinely different starting state produces a genuinely
+    // different result, proving the incoming target_ang_vel_rads/
+    // target_ang_accel_rads values really do flow into the computation
+    // rather than being discarded and recomputed from scratch.
+    Vector2f zero_start_vel{0.0f, 0.0f};
+    Vector2f zero_start_accel{0.0f, 0.0f};
+    command_model_rate_predictor(error_angle_rad, zero_start_vel, zero_start_accel, /*rate_bf_ff_enabled=*/true,
+                                  g.angle_kp_roll, g.angle_kp_pitch, g.angle_p_scale, g.ang_vel_roll_max_degs,
+                                  g.ang_vel_pitch_max_degs, g.accel_roll_max_radss, g.accel_pitch_max_radss,
+                                  g.input_tc, g.dt_s);
+    REQUIRE(zero_start_vel.x != target_ang_vel_rads.x);
+    REQUIRE(zero_start_accel.x != target_ang_accel_rads.x);
+}
+
+// (2) rate_bf_ff_enabled == false: the plain proportional formula on
+// both axes, AND target_ang_accel_rads left genuinely untouched by this
+// branch - seeded with a deliberate sentinel beforehand, confirmed to
+// survive the call unmodified. Max rates are set generously large here
+// specifically so the final ang_vel_limit re-clamp does not bind,
+// isolating this test to the proportional formula itself (the clamp
+// binding/pass-through cases are tested separately below).
+TEST_CASE("command_model_rate_predictor: rate_bf_ff_enabled == false computes the plain proportional formula on "
+          "both axes and leaves target_ang_accel_rads completely unchanged",
+          "[control][attitude_kinematics][command_model_rate_predictor]") {
+    PredictorGains g;
+    g.ang_vel_roll_max_degs = 100000.0f;  // large enough the final
+    g.ang_vel_pitch_max_degs = 100000.0f; // re-clamp never binds here.
+    const Vector2f error_angle_rad{0.2f, -0.35f};
+
+    const float expected_vel_x = (g.angle_kp_roll * g.angle_p_scale.x) * fwcpp::math::wrap_PI(error_angle_rad.x);
+    const float expected_vel_y = (g.angle_kp_pitch * g.angle_p_scale.y) * fwcpp::math::wrap_PI(error_angle_rad.y);
+
+    Vector2f target_ang_vel_rads{0.0f, 0.0f};
+    Vector2f target_ang_accel_rads{-777.25f, 888.5f}; // deliberate sentinel
+    command_model_rate_predictor(error_angle_rad, target_ang_vel_rads, target_ang_accel_rads,
+                                  /*rate_bf_ff_enabled=*/false, g.angle_kp_roll, g.angle_kp_pitch, g.angle_p_scale,
+                                  g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs, g.accel_roll_max_radss,
+                                  g.accel_pitch_max_radss, g.input_tc, g.dt_s);
+
+    REQUIRE(target_ang_vel_rads.x == Approx(expected_vel_x).margin(1e-6f));
+    REQUIRE(target_ang_vel_rads.y == Approx(expected_vel_y).margin(1e-6f));
+
+    // The sentinel must survive bit-for-bit - this branch never writes
+    // target_ang_accel_rads at all, and neither does the unconditional
+    // final ang_vel_limit step (it only ever touches target_ang_vel_rads).
+    REQUIRE(target_ang_accel_rads.x == -777.25f);
+    REQUIRE(target_ang_accel_rads.y == 888.5f);
+}
+
+// (3) The final ang_vel_limit re-clamp DOES bind when the pre-limit
+// proportional output genuinely exceeds the configured max. Uses the
+// rate_bf_ff_enabled == false path (the simplest way to construct a
+// large pre-limit value deterministically), with gains chosen so the
+// pre-limit values are confirmed - by an explicit sanity assertion,
+// not merely by construction - to exceed the configured per-axis max
+// before the clamp is even considered.
+TEST_CASE("command_model_rate_predictor: the final ang_vel_limit re-clamp binds when the pre-limit values exceed "
+          "the configured max",
+          "[control][attitude_kinematics][command_model_rate_predictor]") {
+    PredictorGains g;
+    g.angle_kp_roll = 100.0f;
+    g.angle_kp_pitch = 80.0f;
+    g.angle_p_scale = Vector3f{1.0f, 1.0f, 1.0f};
+    g.ang_vel_roll_max_degs = 45.0f;
+    g.ang_vel_pitch_max_degs = 45.0f;
+    const Vector2f error_angle_rad{1.0f, 0.9f};
+
+    const float pre_vel_x = g.angle_kp_roll * fwcpp::math::wrap_PI(error_angle_rad.x);
+    const float pre_vel_y = g.angle_kp_pitch * fwcpp::math::wrap_PI(error_angle_rad.y);
+    // Sanity: this case really does exceed the configured max on both
+    // axes, or the clamp below would not actually be exercised.
+    REQUIRE(std::fabs(pre_vel_x) > fwcpp::math::radians(g.ang_vel_roll_max_degs));
+    REQUIRE(std::fabs(pre_vel_y) > fwcpp::math::radians(g.ang_vel_pitch_max_degs));
+
+    Vector3f expected_ang_vel(pre_vel_x, pre_vel_y, 0.0f);
+    ang_vel_limit(expected_ang_vel, fwcpp::math::radians(g.ang_vel_roll_max_degs),
+                   fwcpp::math::radians(g.ang_vel_pitch_max_degs), 0.0f);
+    // The clamp must have actually changed something, or this test
+    // would not distinguish "clamped" from "coincidentally identical".
+    REQUIRE(expected_ang_vel.x != Approx(pre_vel_x));
+
+    Vector2f target_ang_vel_rads{0.0f, 0.0f};
+    Vector2f target_ang_accel_rads{0.0f, 0.0f};
+    command_model_rate_predictor(error_angle_rad, target_ang_vel_rads, target_ang_accel_rads,
+                                  /*rate_bf_ff_enabled=*/false, g.angle_kp_roll, g.angle_kp_pitch, g.angle_p_scale,
+                                  g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs, g.accel_roll_max_radss,
+                                  g.accel_pitch_max_radss, g.input_tc, g.dt_s);
+
+    REQUIRE(target_ang_vel_rads.x == Approx(expected_ang_vel.x).margin(1e-6f));
+    REQUIRE(target_ang_vel_rads.y == Approx(expected_ang_vel.y).margin(1e-6f));
+}
+
+// (4) The mirror case: pre-limit values that do NOT exceed the
+// configured max pass through completely unchanged (not merely "close
+// to" the pre-limit value).
+TEST_CASE("command_model_rate_predictor: the final ang_vel_limit re-clamp passes pre-limit values through "
+          "unchanged when they do not exceed the configured max",
+          "[control][attitude_kinematics][command_model_rate_predictor]") {
+    PredictorGains g;
+    g.angle_kp_roll = 0.5f;
+    g.angle_kp_pitch = 0.4f;
+    g.angle_p_scale = Vector3f{1.0f, 1.0f, 1.0f};
+    g.ang_vel_roll_max_degs = 90.0f;
+    g.ang_vel_pitch_max_degs = 90.0f;
+    const Vector2f error_angle_rad{0.1f, -0.08f};
+
+    const float pre_vel_x = g.angle_kp_roll * fwcpp::math::wrap_PI(error_angle_rad.x);
+    const float pre_vel_y = g.angle_kp_pitch * fwcpp::math::wrap_PI(error_angle_rad.y);
+    REQUIRE(std::fabs(pre_vel_x) < fwcpp::math::radians(g.ang_vel_roll_max_degs));
+    REQUIRE(std::fabs(pre_vel_y) < fwcpp::math::radians(g.ang_vel_pitch_max_degs));
+
+    Vector2f target_ang_vel_rads{0.0f, 0.0f};
+    Vector2f target_ang_accel_rads{0.0f, 0.0f};
+    command_model_rate_predictor(error_angle_rad, target_ang_vel_rads, target_ang_accel_rads,
+                                  /*rate_bf_ff_enabled=*/false, g.angle_kp_roll, g.angle_kp_pitch, g.angle_p_scale,
+                                  g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs, g.accel_roll_max_radss,
+                                  g.accel_pitch_max_radss, g.input_tc, g.dt_s);
+
+    REQUIRE(target_ang_vel_rads.x == Approx(pre_vel_x).margin(1e-6f));
+    REQUIRE(target_ang_vel_rads.y == Approx(pre_vel_y).margin(1e-6f));
+}
+
+// (5) Yaw is never referenced anywhere in this function - a STRUCTURAL
+// confirmation, not merely a numerical one. error_angle_rad, target_
+// ang_vel_rads, and target_ang_accel_rads are all math::Vector2f - a
+// type with only x/y members, not x/y/z - so there is no yaw-shaped
+// slot anywhere in this function's own signature for a value to flow
+// through in the first place. This is a stronger claim than "yaw
+// happens to be 0.0f in every test case here": there is no third
+// component to BE anything.
+TEST_CASE("command_model_rate_predictor: yaw cannot be referenced anywhere - a structural, not numerical, "
+          "confirmation",
+          "[control][attitude_kinematics][command_model_rate_predictor]") {
+    // Vector2f is exactly two floats - no z member exists for a yaw
+    // component to occupy. (A hypothetical `error_angle_rad.z` would
+    // simply fail to compile - there is nothing to assert about a
+    // member that structurally does not exist.)
+    static_assert(sizeof(Vector2f) == 2 * sizeof(float),
+                  "Vector2f must be exactly {x, y} - no z/yaw slot - for this structural claim to hold.");
+
+    // The function's own real signature (see command_model_rate_
+    // predictor's declaration in attitude_kinematics.hpp) likewise has
+    // no ang_vel_yaw_max_degs, accel_yaw_max_radss, or any other
+    // yaw-suffixed parameter at all, unlike attitude_controller_run_quat
+    // above which genuinely does take yaw parameters throughout. There
+    // is nothing further to assert at runtime here - the absence is in
+    // the type signature itself, confirmed at compile time by the
+    // static_assert above and by this function simply having no such
+    // parameter to pass one through.
+    SUCCEED("no yaw-shaped parameter exists anywhere in this function's signature");
+}
+
+// (6) THE dt_s QUIRK RESOLUTION: this port's command_model_rate_
+// predictor takes exactly ONE dt-shaped parameter (dt_s), deliberately
+// NOT a second, unused one matching real upstream's own D-025-flagged
+// `dt` parameter (see attitude_kinematics.hpp's own "CCP-026 ADDENDUM"
+// banner, "RESOLUTION CHOSEN"). This test proves dt_s is genuinely
+// LIVE, not a phantom unused parameter reintroducing the same hazard
+// under a different name: two otherwise-identical calls differing only
+// in dt_s must produce different outputs, since dt_s is the exact value
+// forwarded into attitude_command_model's own dt parameter (which does
+// read it - see attitude_command_model's own already-established dt
+// tests above) whenever rate_bf_ff_enabled is true.
+TEST_CASE("command_model_rate_predictor: dt_s is the only dt-shaped parameter, and it is genuinely used, not a "
+          "phantom unused one",
+          "[control][attitude_kinematics][command_model_rate_predictor]") {
+    const PredictorGains g;
+    const Vector2f error_angle_rad{0.5f, -0.4f};
+
+    Vector2f vel_a{0.0f, 0.0f}, accel_a{0.0f, 0.0f};
+    command_model_rate_predictor(error_angle_rad, vel_a, accel_a, /*rate_bf_ff_enabled=*/true, g.angle_kp_roll,
+                                  g.angle_kp_pitch, g.angle_p_scale, g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs,
+                                  g.accel_roll_max_radss, g.accel_pitch_max_radss, g.input_tc, /*dt_s=*/0.0025f);
+
+    Vector2f vel_b{0.0f, 0.0f}, accel_b{0.0f, 0.0f};
+    command_model_rate_predictor(error_angle_rad, vel_b, accel_b, /*rate_bf_ff_enabled=*/true, g.angle_kp_roll,
+                                  g.angle_kp_pitch, g.angle_p_scale, g.ang_vel_roll_max_degs, g.ang_vel_pitch_max_degs,
+                                  g.accel_roll_max_radss, g.accel_pitch_max_radss, g.input_tc, /*dt_s=*/0.01f);
+
+    REQUIRE(accel_a.x != accel_b.x);
+    REQUIRE(accel_a.y != accel_b.y);
+    REQUIRE(vel_a.x != vel_b.x);
+    REQUIRE(vel_a.y != vel_b.y);
 }

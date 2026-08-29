@@ -820,6 +820,171 @@
 // naming the identical set as its own next steps.
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// CCP-026 ADDENDUM: command_model_rate_predictor (real lines 1134-1152,
+// re-verified directly via `grep -n` against the pinned upstream tree -
+// matches this ticket's own claimed range exactly: the function opens
+// at real line 1134 and its own closing brace is real line 1152).
+//
+// A SECOND REAL, DISCLOSED CORRECTION TO THIS EFFORT'S OWN EARLIER
+// SCOPING - the same category of mistake CCP-023 already caught once
+// for thrust_heading_rotation_angles (see this file's own "CCP-023
+// ADDENDUM" banner above, "A REAL, DISCLOSED CORRECTION..."). CCP-022's
+// own addendum above (and CCP-023's own addendum, repeating the same
+// claim) deferred this exact function, reasoning it needed real
+// per-axis STATE this port had nowhere to source from
+// (`_rate_bf_ff_enabled`, `_angle_P_scale`). Re-reading the real
+// function body this round shows that reasoning over-scoped the
+// dependency exactly the same way CCP-023 already found for thrust_
+// heading_rotation_angles: every real dependency here is either (a) a
+// function this port has already built (attitude_command_model,
+// CCP-022; ang_vel_limit, CCP-018), or (b) a plain scalar/flag value
+// this port's own established ADR-0012 convention already takes as an
+// explicit parameter - `_rate_bf_ff_enabled` is a plain bool, `_angle_
+// P_scale` is the SAME Vector3f shape CCP-024 already established for
+// `angle_p_scale` (reused directly, not reinvented), and every gain/
+// max-rate/max-accel value is a plain float this file already threads
+// through update_ang_vel_target_from_att_error and attitude_
+// controller_run_quat the identical way. There was no real "missing
+// state" here either - just parameters nobody had yet had a reason to
+// name. This function was genuinely fully unblocked already, no new
+// infrastructure needed - corrected here, the second such correction in
+// this whole effort.
+//
+// THE dt-PARAMETER QUIRK, copter-rust's own COP-007-registered `D-025`,
+// reused directly and independently RE-VERIFIED against the real source
+// here (not trusted on the ticket's own summary): real upstream's own
+// `command_model_rate_predictor(const Vector2f&, Vector2f&, Vector2f&,
+// float dt) const` takes a `dt` PARAMETER but its own real body never
+// reads it anywhere - both internal `attitude_command_model` calls
+// (real lines 1138-1139) pass the MEMBER `_dt_s` explicitly, never the
+// `dt` parameter; the `ang_vel_limit` call needs no dt at all.
+// Confirmed directly against the real function body: `dt` is genuinely
+// dead on arrival. copter-rust's own exact words, reused verbatim: "not
+// an active defect... but a latent hazard, since any future caller
+// asking about a different interval would be answered about the
+// controller's own step [interval]."
+//
+// RESOLUTION CHOSEN: (b), NOT a faithful reproduction of the unused
+// parameter. This port's own signature is being written fresh here, not
+// literally inheriting a broken base-class parameter list the way real
+// upstream's own override mechanics might force - there is no
+// polymorphic caller anywhere in this port that could ever pass a
+// genuinely different `dt` and have it silently ignored, because there
+// is only ever the one real parameter list this function has ever had
+// in this port. Faithfully reproducing a real but pointless footgun
+// here would mean deliberately building a trap for exactly the "future
+// caller asking about a different interval" scenario D-025 itself warns
+// about - the safer, still-fully-disclosed choice is to take only the
+// ONE real dt-shaped value the function's internal calls actually use
+// (matching real upstream's own `_dt_s` member value) as a single
+// explicit parameter, named `dt_s` (not `dt`) specifically so nothing
+// about its name invites a caller to believe it is "the caller's own
+// dt" the way real upstream's misleadingly-named `dt` parameter does.
+// This mirrors copter-rust's own chosen resolution for the identical
+// quirk in its own Rust port (ports/plane-fw-rust/crates/ap-control/src/
+// attitude_controller.rs, `command_model_rate_predictor`, a single `dt:
+// f32` parameter, no second unused one) - independently reached here by
+// the same reasoning, not copied blind. See this file's own test file's
+// dedicated "dt_s is the ONLY dt-shaped parameter, and it is genuinely
+// live" test for the runtime proof this parameter is not itself a
+// second phantom unused one.
+//
+// REAL STRUCTURE, each piece re-verified directly against real lines
+// 1134-1152:
+//   - Vector2f throughout (error_angle_rad in, target_ang_vel_rads/
+//     target_ang_accel_rads out) - roll (.x) and pitch (.y) ONLY. Yaw
+//     is never read or written anywhere in this function's real body -
+//     re-verified directly, and confirmed structurally below (this
+//     port's own signature has no yaw-shaped parameter at all to touch,
+//     not merely "yaw happens to be zero in every test case").
+//   - `if (_rate_bf_ff_enabled)`: TWO real attitude_command_model
+//     calls, one per axis. Re-verified EXACT real argument mapping for
+//     roll: `wrap_PI(error_angle_rad.x)` -> error_angle, literal `0.0`
+//     -> desired_ang_vel, `target_ang_vel_rads.x`/`target_ang_accel_
+//     rads.x` -> the two float& parameters, `radians(_ang_vel_roll_max_
+//     degs)` -> max_ang_vel, `get_accel_roll_max_radss()` -> accel_max,
+//     `_input_tc` -> input_tc, and real upstream's own `_dt_s` (NOT its
+//     own `dt` parameter - the quirk above) -> dt. Pitch mirrors this
+//     exactly with `.y`/pitch-suffixed values.
+//   - IMPORTANT, independently re-derived while writing this ticket's own
+//     tests (not stated explicitly by either the ticket or CCP-022's own
+//     addendum above): in THIS branch, target_ang_vel_rads.x/.y and
+//     target_ang_accel_rads.x/.y are genuine in/out STATE, not fresh
+//     outputs computed from scratch. attitude_command_model's own
+//     shape_angle_vel_accel call reads the INCOMING target_ang_vel as its
+//     own current-velocity input (BY VALUE - see this file's own
+//     CCP-022 ADDENDUM banner's THE ARGUMENT MAPPING section), and
+//     its own final `target_ang_vel += target_ang_accel * dt` step
+//     depends on whatever target_ang_vel already held on entry; target_
+//     ang_accel is threaded similarly through shape_accel's own jerk-
+//     limiting. This matches real upstream's own non-const `Vector2f&`
+//     signature exactly - the caller is expected to hold this Vector2f
+//     pair across repeated calls (e.g. one call per control loop tick),
+//     not to re-zero it each time. This is precisely the real, ordinary
+//     explicit-reference-parameter shape ADR-0012 already sanctions
+//     (the caller owns the state, threads it through by reference) - not
+//     the real per-axis STATE infrastructure CCP-022's own now-
+//     corrected deferral reasoning worried about, which meant something
+//     this port would have needed to newly build. Pinned below by a
+//     dedicated test starting from a nonzero, axis-distinct prior state
+//     and confirming the result genuinely differs from a fresh
+//     zero-started call.
+//   - `else`: `angleP_roll = angle_kp_roll * angle_p_scale.x`; `target_
+//     ang_vel_rads.x = angleP_roll * wrap_PI(error_angle_rad.x)` (pitch
+//     mirrors). Re-verified directly: `target_ang_accel_rads` is NEVER
+//     assigned anywhere in this branch - real upstream's own Vector2f&
+//     output parameter, so this leaves the CALLER's own prior value
+//     completely untouched, not zeroed and not re-derived. Pinned below
+//     by a dedicated sentinel test.
+//   - Unconditionally after the branch: builds a real, temporary
+//     `Vector3f ang_vel_rads(target_ang_vel_rads.x, target_ang_vel_
+//     rads.y, 0.0f)` (re-verified the explicit `0.0f` yaw component),
+//     calls this file's own already-merged ang_vel_limit (CCP-018) with
+//     `radians(_ang_vel_roll_max_degs)`, `radians(_ang_vel_pitch_max_
+//     degs)`, and a literal `0.0f` for the yaw-limit parameter -
+//     re-verified this exact real `0.0f`, meaning ang_vel_limit's own
+//     "zero means unlimited" convention leaves yaw completely
+//     unconstrained here, consistent with this function never touching
+//     yaw at all.
+//   - Writes the (possibly re-limited) `ang_vel_rads.x`/`.y` back into
+//     `target_ang_vel_rads.x`/`.y`. Re-verified `target_ang_accel_rads`
+//     is NEVER touched by this final step - only by the earlier `_rate_
+//     bf_ff_enabled`-true branch.
+//
+// SIGNATURE: `error_angle_rad`/`target_ang_vel_rads`/`target_ang_accel_
+// rads` keep real upstream's own Vector2f shape exactly (this
+// function's own real, narrow roll/pitch-only scope, unlike the
+// Vector3f angle_p_scale below, which keeps its unused z component only
+// because CCP-024 already established that shape for the SAME real
+// member elsewhere in this file). `rate_bf_ff_enabled` (bool), `angle_
+// kp_roll`/`angle_kp_pitch` (float, matching thrust_heading_rotation_
+// angles's/update_ang_vel_target_from_att_error's own per-axis-gain
+// convention above), `angle_p_scale` (const Vector3f&, CCP-024's own
+// established shape, reused directly), `ang_vel_roll_max_degs`/`ang_
+// vel_pitch_max_degs` (float, matching attitude_controller_run_quat's
+// own degrees-in convention - converted via math::radians() inside,
+// never hand-typed), `accel_roll_max_radss`/`accel_pitch_max_radss`
+// (float, forwarded straight through to attitude_command_model,
+// matching real upstream's own get_accel_roll_max_radss()/get_accel_
+// pitch_max_radss() accessors exactly - already-in-radians, no
+// conversion needed), `input_tc` (float, forwarded straight through,
+// matching real upstream's own `_input_tc`), and `dt_s` (float, the
+// chosen single dt-shaped parameter, resolution (b) above).
+//
+// DEFERRED, explicitly, still NOT started here, and NOT retroactively
+// unblocked by this ticket's own correction above - matching copter-
+// rust's own COP-007 notes, which confirm these genuinely still need
+// real new infrastructure this port does not have yet (a stateful
+// AttitudeController-equivalent, or a real AHRS-reading integration
+// point), unlike this ticket's own now-corrected situation: the input_*
+// entry points (input_euler_angle_or_mag_rate, input_euler_rate_roll_
+// pitch_yaw, input_rate_bf_roll_pitch_yaw, input_thrust_vector_rate_
+// heading, input_thrust_vector_heading, input_quaternion, etc.) and the
+// relax/reset paths (relax, reset_target_and_rate, reset_yaw_target_
+// and_rate, inertial_frame_reset).
+// ---------------------------------------------------------------------
+
 #include <algorithm>
 #include <cmath>
 
@@ -1438,6 +1603,63 @@ inline void attitude_controller_run_quat(
 
     // Step 9: ang_vel_body_rads, as left by whichever branch ran above,
     // is this function's own real primary output.
+}
+
+// command_model_rate_predictor - upstream AC_AttitudeControl::
+// command_model_rate_predictor (real lines 1134-1152). CCP-026 - see
+// this file's own "CCP-026 ADDENDUM" banner above for the full design
+// writeup: the corrected CCP-022/023 deferral reasoning, the D-025
+// dt-parameter quirk and this port's chosen resolution (a single dt_s
+// parameter, deliberately not a second unused one), and the exact real
+// argument mapping into attitude_command_model/ang_vel_limit.
+//
+// Predicts the rate/acceleration targets an angle-error command would
+// produce, without touching any real controller state - upstream's own
+// use case is letting a caller (e.g. the position controller) ask "what
+// rate would this angle request produce" ahead of time, without
+// disturbing anything. Roll and pitch ONLY; this port's own signature
+// has no yaw-shaped parameter anywhere, matching real upstream's own
+// narrow Vector2f scope exactly.
+inline void command_model_rate_predictor(const math::Vector2f& error_angle_rad, math::Vector2f& target_ang_vel_rads,
+                                          math::Vector2f& target_ang_accel_rads, bool rate_bf_ff_enabled,
+                                          float angle_kp_roll, float angle_kp_pitch,
+                                          const math::Vector3f& angle_p_scale, float ang_vel_roll_max_degs,
+                                          float ang_vel_pitch_max_degs, float accel_roll_max_radss,
+                                          float accel_pitch_max_radss, float input_tc, float dt_s) {
+    if (rate_bf_ff_enabled) {
+        // dt_s (matching real upstream's own _dt_s member) is passed
+        // here - see this file's own "CCP-026 ADDENDUM" banner's "THE
+        // dt-PARAMETER QUIRK" section for why this port deliberately
+        // takes only this one dt-shaped parameter, not a second, unused
+        // one matching real upstream's own misleadingly-named `dt`.
+        attitude_command_model(math::wrap_PI(error_angle_rad.x), 0.0f, target_ang_vel_rads.x,
+                                target_ang_accel_rads.x, math::radians(ang_vel_roll_max_degs), accel_roll_max_radss,
+                                input_tc, dt_s);
+        attitude_command_model(math::wrap_PI(error_angle_rad.y), 0.0f, target_ang_vel_rads.y,
+                                target_ang_accel_rads.y, math::radians(ang_vel_pitch_max_degs), accel_pitch_max_radss,
+                                input_tc, dt_s);
+    } else {
+        // target_ang_accel_rads is deliberately left UNTOUCHED here -
+        // real upstream's own Vector2f& output parameter is simply
+        // never assigned anywhere in this branch. See this file's own
+        // "CCP-026 ADDENDUM" banner and the dedicated sentinel test
+        // below.
+        const float angleP_roll = angle_kp_roll * angle_p_scale.x;
+        const float angleP_pitch = angle_kp_pitch * angle_p_scale.y;
+        target_ang_vel_rads.x = angleP_roll * math::wrap_PI(error_angle_rad.x);
+        target_ang_vel_rads.y = angleP_pitch * math::wrap_PI(error_angle_rad.y);
+    }
+
+    // Re-clamp against the configured rate limits, unconditionally,
+    // regardless of which branch ran above. Real upstream's own literal
+    // 0.0f yaw-limit argument below leaves yaw completely unconstrained
+    // (ang_vel_limit's own "zero means unlimited" convention),
+    // consistent with this function never touching yaw anywhere.
+    math::Vector3f ang_vel_rads(target_ang_vel_rads.x, target_ang_vel_rads.y, 0.0f);
+    ang_vel_limit(ang_vel_rads, math::radians(ang_vel_roll_max_degs), math::radians(ang_vel_pitch_max_degs), 0.0f);
+
+    target_ang_vel_rads.x = ang_vel_rads.x;
+    target_ang_vel_rads.y = ang_vel_rads.y;
 }
 
 } // namespace fwcpp::control
