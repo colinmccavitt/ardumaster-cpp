@@ -57,6 +57,7 @@ struct AhrsPosControlEstimateInputs {
 inline void init_pos_terrain_d_m(PosControlD& d, DTerrain& terrain, float pos_terrain_d_m) {
     d.pos_desired_m -= (math::postype_t{pos_terrain_d_m} - terrain.pos_m);
     terrain.pos_m = math::postype_t{pos_terrain_d_m};
+    terrain.pos_target_m = math::postype_t{pos_terrain_d_m};
     terrain.vel_ms = 0.0f;
     terrain.accel_mss = 0.0f;
 }

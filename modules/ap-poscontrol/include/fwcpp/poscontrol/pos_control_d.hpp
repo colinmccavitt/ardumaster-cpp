@@ -33,6 +33,7 @@ struct DTerrain {
     math::postype_t pos_m{};
     float vel_ms = 0.0f;
     float accel_mss = 0.0f;
+    math::postype_t pos_target_m{};
 };
 
 struct DEstimates {

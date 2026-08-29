@@ -36,7 +36,7 @@ inline constexpr PosControlPortItem kPosControlCompleteness[] = {
     {"AP_Param var_info and gain subgroups", PortStatus::kRemaining,
      "NE/D PID parameter tree"},
     {"update_estimates", PortStatus::kThisSlice, "pos_control_accessors.hpp update_estimates()"},
-    {"3D input_pos_NED_m path shaper", PortStatus::kRemaining, "terrain-aware 3D shaping"},
+    {"3D input_pos_NED_m path shaper", PortStatus::kThisSlice, "pos_control_path.hpp input_pos_ned_m()"},
     {"NE_set_max_speed_accel_* / NE limits", PortStatus::kThisSlice,
      "NeLimits + ne_set_max_speed_accel_* (pos_control_ne.hpp)"},
     {"NE input_* / init / relax / soften / stop", PortStatus::kThisSlice,
