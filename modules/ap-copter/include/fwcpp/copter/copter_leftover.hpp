@@ -1,9 +1,9 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 3 lands throttle_loop
-// as a leftover dispatcher. remaining_count() > 0 is expected after
-// this slice.
+// (Copter.cpp / Copter.h / system.cpp). Slice 4 lands
+// run_rate_controller_main and read_inertia as leftover ticks.
+// remaining_count() > 0 is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
 // Subsystem objects are injected as inputs on later leftover ticks.
@@ -38,11 +38,13 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::motors_output / motors_output_main", PortStatus::kOnMain,
      "motors_output.hpp; AFS skip, arming delay, interlock, drive, push"},
     {"Copter::read_AHRS", PortStatus::kOnMain, "read_ahrs.hpp; skip_ins_update"},
-    {"Copter::throttle_loop", PortStatus::kThisSlice,
+    {"Copter::throttle_loop", PortStatus::kOnMain,
      "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
     {"Copter::init_ardupilot", PortStatus::kRemaining, "system.cpp init"},
-    {"Copter::run_rate_controller_main", PortStatus::kRemaining, "FAST_TASK body"},
-    {"Copter::read_inertia", PortStatus::kRemaining, "FAST_TASK body"},
+    {"Copter::run_rate_controller_main", PortStatus::kThisSlice,
+     "run_rate_controller.hpp; set_dt_s + rate_controller_run iff !rate thread"},
+    {"Copter::read_inertia", PortStatus::kThisSlice,
+     "read_inertia.hpp; pos_control estimates, lat/lng, alt-above-home"},
     {"Copter::check_ekf_reset", PortStatus::kRemaining, "FAST_TASK body"},
     {"Copter::update_flight_mode", PortStatus::kRemaining, "FAST_TASK body"},
     {"Copter::update_home_from_EKF", PortStatus::kRemaining, "FAST_TASK body"},

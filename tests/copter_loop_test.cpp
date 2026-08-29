@@ -3,12 +3,17 @@
 #include <string_view>
 
 #include <fwcpp/copter/copter.hpp>
+#include <fwcpp/location.hpp>
 
+using fwcpp::AltitudeContext;
+using fwcpp::Location;
 using fwcpp::copter::ModeSwitchReadInputs;
 using fwcpp::copter::ModeSwitchReadLeftover;
 using fwcpp::copter::MotorsOutputInputs;
 using fwcpp::copter::MotorsOutputMainLeftover;
 using fwcpp::copter::PortStatus;
+using fwcpp::copter::RateControllerMainInputs;
+using fwcpp::copter::ReadInertiaInputs;
 using fwcpp::copter::TaskKind;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
@@ -28,16 +33,18 @@ using fwcpp::copter::on_main_count;
 using fwcpp::copter::out_of_scope_count;
 using fwcpp::copter::rc_loop;
 using fwcpp::copter::read_ahrs;
+using fwcpp::copter::read_inertia;
 using fwcpp::copter::read_mode_switch;
 using fwcpp::copter::remaining_count;
+using fwcpp::copter::run_rate_controller_main;
 using fwcpp::copter::scheduler_task_count;
 using fwcpp::copter::this_slice_count;
 using fwcpp::copter::throttle_loop;
 
-TEST_CASE("catalog remaining_count stays open after slice 3", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 29);
-    REQUIRE(this_slice_count() >= 1);
-    REQUIRE(on_main_count() == 6);
+TEST_CASE("catalog remaining_count stays open after slice 4", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 27);
+    REQUIRE(this_slice_count() == 3);
+    REQUIRE(on_main_count() == 7);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -46,9 +53,13 @@ TEST_CASE("catalog remaining_count stays open after slice 3", "[copter][leftover
     REQUIRE(completeness_has("Copter::get_scheduler_tasks", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::motors_output / motors_output_main", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::read_AHRS", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::throttle_loop", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::throttle_loop", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::run_rate_controller_main", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::read_inertia", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::update_flight_mode", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
 }
 
@@ -250,5 +261,164 @@ TEST_CASE("throttle_loop leftover always-on mix auto_armed gnd-effect ekf-terrai
     REQUIRE(row->rate_hz == 50.0f);
     REQUIRE(row->max_time_micros == 75);
     REQUIRE(row->priority == 6);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("run_rate_controller_main skips rate_controller_run on rate thread",
+          "[copter][run_rate_controller]") {
+    RateControllerMainInputs in{};
+    in.last_loop_time_s = 0.0025f;
+    in.using_rate_thread = true;
+    const auto skipped = run_rate_controller_main(in);
+    REQUIRE(skipped.last_loop_time_s == 0.0025f);
+    REQUIRE(skipped.pos_control_set_dt_s);
+    REQUIRE(skipped.attitude_control_set_dt_s);
+    REQUIRE_FALSE(skipped.motors_set_dt_s);
+    REQUIRE_FALSE(skipped.rate_controller_run);
+    REQUIRE(skipped.rate_controller_target_reset);
+
+    in.using_rate_thread = false;
+    const auto on_main = run_rate_controller_main(in);
+    REQUIRE(on_main.pos_control_set_dt_s);
+    REQUIRE(on_main.attitude_control_set_dt_s);
+    REQUIRE(on_main.motors_set_dt_s);
+    REQUIRE(on_main.rate_controller_run);
+    REQUIRE(on_main.rate_controller_target_reset);
+
+    const auto* row = find_scheduler_task("run_rate_controller_main");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kFast);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("run_rate_controller_main always rate_controller_target_reset",
+          "[copter][run_rate_controller]") {
+    REQUIRE(run_rate_controller_main({.using_rate_thread = false}).rate_controller_target_reset);
+    REQUIRE(run_rate_controller_main({.using_rate_thread = true}).rate_controller_target_reset);
+}
+
+TEST_CASE("read_inertia no-alt early return copies lat/lng only", "[copter][read_inertia]") {
+    Location current;
+    current.set_alt_m(50.0f, Location::AltFrame::ABOVE_HOME);
+    const std::int32_t prior_alt = current.alt;
+    REQUIRE(prior_alt == 5000);
+
+    ReadInertiaInputs in{};
+    in.high_vibes = true;
+    in.follow_enabled = true;
+    in.ahrs_lat = -353632621;
+    in.ahrs_lng = 1491652374;
+    in.has_rel_pos_d = false;
+    in.pos_d_m = -12.0f;
+    in.home_is_set = true;
+
+    AltitudeContext ctx{};
+    ctx.home_is_set = true;
+    ctx.origin_is_set = true;
+
+    const auto fx = read_inertia(in, current, ctx);
+    REQUIRE(fx.pos_control_update_estimates);
+    REQUIRE(fx.high_vibes);
+    REQUIRE(fx.update_follow_estimates);
+    REQUIRE_FALSE(fx.alt_written);
+    REQUIRE_FALSE(fx.set_alt_above_home_fallback);
+    REQUIRE(current.lat == -353632621);
+    REQUIRE(current.lng == 1491652374);
+    REQUIRE(current.alt == prior_alt);
+    REQUIRE(current.get_alt_frame() == Location::AltFrame::ABOVE_HOME);
+}
+
+TEST_CASE("read_inertia home not set falls back to origin metres as above-home",
+          "[copter][read_inertia]") {
+    Location current;
+    current.alt = 999;
+    ReadInertiaInputs in{};
+    in.high_vibes = false;
+    in.ahrs_lat = 100;
+    in.ahrs_lng = 200;
+    in.has_rel_pos_d = true;
+    in.pos_d_m = -10.0f;
+    in.home_is_set = false;
+
+    AltitudeContext ctx{};
+    ctx.home_is_set = false;
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = Location(0, 0, 8000, Location::AltFrame::ABSOLUTE);
+
+    const auto fx = read_inertia(in, current, ctx);
+    REQUIRE(fx.pos_control_update_estimates);
+    REQUIRE_FALSE(fx.high_vibes);
+    REQUIRE_FALSE(fx.update_follow_estimates);
+    REQUIRE(fx.alt_written);
+    REQUIRE(fx.set_alt_above_home_fallback);
+    REQUIRE(current.lat == 100);
+    REQUIRE(current.lng == 200);
+    REQUIRE(current.alt == 1000);
+    REQUIRE(current.get_alt_frame() == Location::AltFrame::ABOVE_HOME);
+}
+
+TEST_CASE("read_inertia home set converts ABOVE_ORIGIN to ABOVE_HOME",
+          "[copter][read_inertia]") {
+    Location current;
+    ReadInertiaInputs in{};
+    in.ahrs_lat = 11;
+    in.ahrs_lng = 22;
+    in.has_rel_pos_d = true;
+    in.pos_d_m = -10.0f;
+    in.home_is_set = true;
+
+    AltitudeContext ctx{};
+    ctx.home_is_set = true;
+    ctx.home = Location(0, 0, 10000, Location::AltFrame::ABSOLUTE);
+    ctx.origin_is_set = true;
+    ctx.ekf_origin = Location(0, 0, 8000, Location::AltFrame::ABSOLUTE);
+
+    const auto fx = read_inertia(in, current, ctx);
+    REQUIRE(fx.alt_written);
+    REQUIRE_FALSE(fx.set_alt_above_home_fallback);
+    REQUIRE(current.lat == 11);
+    REQUIRE(current.lng == 22);
+    // 10 m above origin; origin 80 m AMSL, home 100 m AMSL → -10 m above home.
+    REQUIRE(current.alt == -1000);
+    REQUIRE(current.get_alt_frame() == Location::AltFrame::ABOVE_HOME);
+}
+
+TEST_CASE("read_inertia home set but change_alt_frame fails uses origin metres",
+          "[copter][read_inertia]") {
+    Location current;
+    ReadInertiaInputs in{};
+    in.ahrs_lat = 1;
+    in.ahrs_lng = 2;
+    in.has_rel_pos_d = true;
+    in.pos_d_m = -5.0f;
+    in.home_is_set = true;
+
+    AltitudeContext ctx{};
+    ctx.home_is_set = true;
+    ctx.home = Location(0, 0, 10000, Location::AltFrame::ABSOLUTE);
+    ctx.origin_is_set = false;
+
+    const auto fx = read_inertia(in, current, ctx);
+    REQUIRE(fx.alt_written);
+    REQUIRE(fx.set_alt_above_home_fallback);
+    REQUIRE(current.alt == 500);
+    REQUIRE(current.get_alt_frame() == Location::AltFrame::ABOVE_HOME);
+}
+
+TEST_CASE("read_inertia high_vibes passed through to pos_control leftover",
+          "[copter][read_inertia]") {
+    Location current;
+    AltitudeContext ctx{};
+    ReadInertiaInputs in{};
+    in.has_rel_pos_d = false;
+
+    in.high_vibes = true;
+    REQUIRE(read_inertia(in, current, ctx).high_vibes);
+    in.high_vibes = false;
+    REQUIRE_FALSE(read_inertia(in, current, ctx).high_vibes);
+
+    const auto* row = find_scheduler_task("read_inertia");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kFast);
     REQUIRE(row->gate == nullptr);
 }
