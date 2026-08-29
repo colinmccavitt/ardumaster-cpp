@@ -21,6 +21,7 @@ using fwcpp::copter::RateControllerMainInputs;
 using fwcpp::copter::ReadInertiaInputs;
 using fwcpp::copter::TaskKind;
 using fwcpp::copter::UpdateFlightModeInputs;
+using fwcpp::copter::UpdateHomeFromEkfInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -48,6 +49,7 @@ using fwcpp::copter::scheduler_task_count;
 using fwcpp::copter::this_slice_count;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::update_flight_mode;
+using fwcpp::copter::update_home_from_ekf;
 
 namespace {
 
@@ -63,10 +65,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 6", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 25);
+TEST_CASE("catalog remaining_count stays open after slice 7", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 24);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 10);
+    REQUIRE(on_main_count() == 11);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -79,8 +81,9 @@ TEST_CASE("catalog remaining_count stays open after slice 6", "[copter][leftover
     REQUIRE(completeness_has("Copter::run_rate_controller_main", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::read_inertia", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::check_ekf_reset", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::update_flight_mode", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_flight_mode", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::update_home_from_EKF", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -575,4 +578,113 @@ TEST_CASE("update_flight_mode invokes current run including Stabilize AltHold no
     REQUIRE(update_flight_mode(in).run_called);
     in.current = &althold;
     REQUIRE(update_flight_mode(in).run_called);
+}
+
+TEST_CASE("update_home_from_ekf home already set is a no-op", "[copter][update_home_from_ekf]") {
+    Location home(-353632621, 1491652374, 3300, Location::AltFrame::ABSOLUTE);
+    const Location prior = home;
+
+    UpdateHomeFromEkfInputs in{};
+    in.home_is_set = true;
+    in.armed = true;
+    in.get_location_ok = true;
+    in.location = Location(99, 88, 1000, Location::AltFrame::ABSOLUTE);
+    in.get_origin_ok = true;
+    in.origin = Location(1, 2, 5000, Location::AltFrame::ABOVE_ORIGIN);
+
+    const auto fx = update_home_from_ekf(in, home);
+    REQUIRE(fx.home_is_set);
+    REQUIRE_FALSE(fx.set_home_called);
+    REQUIRE_FALSE(fx.set_home_ok);
+    REQUIRE_FALSE(fx.lock_home);
+    REQUIRE_FALSE(fx.copy_alt_from_origin);
+    REQUIRE_FALSE(fx.inflight);
+    REQUIRE_FALSE(fx.smart_rtl_set_home);
+    REQUIRE(home.lat == prior.lat);
+    REQUIRE(home.lng == prior.lng);
+    REQUIRE(home.alt == prior.alt);
+
+    const auto* row = find_scheduler_task("update_home_from_EKF");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kFast);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("update_home_from_ekf disarmed + location writes home", "[copter][update_home_from_ekf]") {
+    Location home;
+    home.alt = 999;
+
+    UpdateHomeFromEkfInputs in{};
+    in.home_is_set = false;
+    in.armed = false;
+    in.get_location_ok = true;
+    in.location = Location(-353632621, 1491652374, 1234, Location::AltFrame::ABSOLUTE);
+    in.get_origin_ok = true;
+    in.origin = Location(0, 0, 8000, Location::AltFrame::ABSOLUTE);
+
+    const auto fx = update_home_from_ekf(in, home);
+    REQUIRE(fx.set_home_called);
+    REQUIRE(fx.set_home_ok);
+    REQUIRE(fx.home_is_set);
+    REQUIRE_FALSE(fx.lock_home);
+    REQUIRE_FALSE(fx.inflight);
+    REQUIRE_FALSE(fx.copy_alt_from_origin);
+    REQUIRE_FALSE(fx.smart_rtl_set_home);
+    REQUIRE(home.lat == -353632621);
+    REQUIRE(home.lng == 1491652374);
+    REQUIRE(home.alt == 1234);
+}
+
+TEST_CASE("update_home_from_ekf disarmed + no location leaves home unset",
+          "[copter][update_home_from_ekf]") {
+    Location home;
+    home.alt = 999;
+
+    UpdateHomeFromEkfInputs in{};
+    in.armed = false;
+    in.get_location_ok = false;
+    in.location = Location(1, 2, 3, Location::AltFrame::ABSOLUTE);
+    in.get_origin_ok = true;
+
+    const auto fx = update_home_from_ekf(in, home);
+    REQUIRE_FALSE(fx.set_home_called);
+    REQUIRE_FALSE(fx.set_home_ok);
+    REQUIRE_FALSE(fx.home_is_set);
+    REQUIRE_FALSE(fx.inflight);
+    REQUIRE(home.alt == 999);
+}
+
+TEST_CASE("update_home_from_ekf armed inflight copies origin alt; missing origin skips",
+          "[copter][update_home_from_ekf]") {
+    Location home;
+    UpdateHomeFromEkfInputs in{};
+    in.armed = true;
+    in.get_location_ok = true;
+    in.location = Location(-353632621, 1491652374, 1000, Location::AltFrame::ABSOLUTE);
+    in.get_origin_ok = true;
+    in.origin = Location(0, 0, 8000, Location::AltFrame::ABOVE_ORIGIN);
+
+    const auto fx = update_home_from_ekf(in, home);
+    REQUIRE(fx.inflight);
+    REQUIRE(fx.copy_alt_from_origin);
+    REQUIRE(fx.set_home_called);
+    REQUIRE(fx.set_home_ok);
+    REQUIRE(fx.home_is_set);
+    REQUIRE_FALSE(fx.lock_home);
+    REQUIRE_FALSE(fx.smart_rtl_set_home);
+    REQUIRE(home.lat == -353632621);
+    REQUIRE(home.lng == 1491652374);
+    REQUIRE(home.alt == 8000);
+    REQUIRE(home.get_alt_frame() == Location::AltFrame::ABOVE_ORIGIN);
+
+    Location skipped;
+    skipped.alt = 42;
+    in.get_origin_ok = false;
+    const auto miss = update_home_from_ekf(in, skipped);
+    REQUIRE(miss.inflight);
+    REQUIRE_FALSE(miss.copy_alt_from_origin);
+    REQUIRE_FALSE(miss.set_home_called);
+    REQUIRE_FALSE(miss.set_home_ok);
+    REQUIRE_FALSE(miss.home_is_set);
+    REQUIRE(skipped.alt == 42);
 }

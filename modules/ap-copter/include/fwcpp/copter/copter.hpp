@@ -13,3 +13,4 @@
 #include <fwcpp/copter/scheduler_tasks.hpp>
 #include <fwcpp/copter/throttle_loop.hpp>
 #include <fwcpp/copter/update_flight_mode.hpp>
+#include <fwcpp/copter/update_home_from_ekf.hpp>
