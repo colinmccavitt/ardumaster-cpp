@@ -19,6 +19,7 @@
 #include <fwcpp/quadplane/quadplane_setup_channels.hpp>
 #include <fwcpp/quadplane/quadplane_setup_navigators.hpp>
 #include <fwcpp/quadplane/quadplane_auto_vtol_mission.hpp>
+#include <fwcpp/quadplane/quadplane_land_detector.hpp>
 #include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
 #include <fwcpp/quadplane/quadplane_vtol_subsystems.hpp>
 #include <fwcpp/quadplane/quadplane_subsystems.hpp>
@@ -231,6 +232,9 @@ public:
     void set_approach_distance_m(float v) { approach_distance_m_ = v; }
     [[nodiscard]] float approach_distance_m() const { return approach_distance_m_; }
     [[nodiscard]] const PosControlLandStub& poscontrol_land() const { return poscontrol_land_; }
+    PosControlLandStub& poscontrol_land_mut() { return poscontrol_land_; }
+    void set_land_final_alt_m(float v) { land_final_alt_m_ = v; }
+    [[nodiscard]] float land_final_alt_m() const { return land_final_alt_m_; }
     [[nodiscard]] const PosControlTransitionPrep& last_transition_prep() const {
         return last_transition_prep_;
     }
@@ -363,6 +367,27 @@ public:
         return fwcpp::quadplane::get_pilot_desired_climb_rate_cms(in);
     }
 
+    [[nodiscard]] bool should_relax(const ShouldRelaxInputs& in) {
+        return fwcpp::quadplane::should_relax(poscontrol_land_, in);
+    }
+
+    [[nodiscard]] bool land_detector(std::uint32_t timeout_ms, LandDetectorInputs in) {
+        in.pilot_correction_active = poscontrol_.pilot_correction_active;
+        return fwcpp::quadplane::land_detector(timeout_ms, poscontrol_land_, in);
+    }
+
+    [[nodiscard]] CheckLandCompleteResult check_land_complete(const CheckLandCompleteInputs& in) {
+        auto out = fwcpp::quadplane::check_land_complete(poscontrol_, poscontrol_land_, in);
+        last_set_state_sink_ = out.set_state_sink;
+        return out;
+    }
+
+    [[nodiscard]] bool check_land_final(CheckLandFinalInputs in) {
+        in.detector.pilot_correction_active = poscontrol_.pilot_correction_active;
+        in.land_final_alt_m = land_final_alt_m_;
+        return fwcpp::quadplane::check_land_final(poscontrol_land_, in);
+    }
+
     [[nodiscard]] HoldHoverTick hold_hover(float target_climb_rate_cms, DesiredYawRateInputs yaw) const {
         yaw.assisted_flight = assisted_flight_;
         yaw.should_weathervane = false;
@@ -432,6 +457,7 @@ private:
     bool guided_wait_takeoff_on_mode_enter_{false};
     float approach_distance_m_{kApproachDistanceDefaultM};
     PosControlLandStub poscontrol_land_{};
+    float land_final_alt_m_{kLandFinalAltDefaultM};
     PosControlTransitionPrep last_transition_prep_{};
     PosControlSetStateSink last_set_state_sink_{};
     fwcpp::quadplane_transition::SltTransition slt_transition_{

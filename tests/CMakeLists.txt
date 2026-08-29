@@ -568,6 +568,10 @@ add_executable(quadplane_pilot_input_test quadplane_pilot_input_test.cpp)
 target_link_libraries(quadplane_pilot_input_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_pilot_input_test)
 
+add_executable(quadplane_land_detector_test quadplane_land_detector_test.cpp)
+target_link_libraries(quadplane_land_detector_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(quadplane_land_detector_test)
+
 add_executable(quadplane_motors_output_test quadplane_motors_output_test.cpp)
 target_link_libraries(quadplane_motors_output_test PRIVATE ap-quadplane Catch2::Catch2WithMain)
 catch_discover_tests(quadplane_motors_output_test)

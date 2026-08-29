@@ -17,12 +17,18 @@ struct PosControlSetStateSink {
     std::uint8_t qpos_log_writes{0};
 };
 
+/// Q_LAND_ALTCHG default — landing_detect.detect_alt_change_m.
+inline constexpr float kDetectAltChangeDefaultM = 0.2f;
+
 /// QuadPlane landing fields touched by QPOS `set_state` (not AC_PosControl).
 struct PosControlLandStub {
     bool thr_ctrl_land{false};
     float land_descend_start_alt_m{0.f};
     std::uint32_t land_start_ms{0};
     std::uint32_t lower_limit_start_ms{0};
+    float vpos_start_m{0.f};
+    float last_land_final_agl_m{0.f};
+    float detect_alt_change_m{kDetectAltChangeDefaultM};
 };
 
 struct PosControlSetStateInputs {
