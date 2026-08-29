@@ -7,6 +7,7 @@
 
 using fwcpp::AltitudeContext;
 using fwcpp::Location;
+using fwcpp::copter::CheckEkfResetInputs;
 using fwcpp::copter::ModeSwitchReadInputs;
 using fwcpp::copter::ModeSwitchReadLeftover;
 using fwcpp::copter::MotorsOutputInputs;
@@ -27,6 +28,7 @@ using fwcpp::copter::kRcLoopMaxTimeMicros;
 using fwcpp::copter::kRcLoopPriority;
 using fwcpp::copter::kRcLoopRateHz;
 using fwcpp::copter::kSchedulerTasks;
+using fwcpp::copter::check_ekf_reset;
 using fwcpp::copter::motors_output;
 using fwcpp::copter::motors_output_main;
 using fwcpp::copter::on_main_count;
@@ -41,10 +43,10 @@ using fwcpp::copter::scheduler_task_count;
 using fwcpp::copter::this_slice_count;
 using fwcpp::copter::throttle_loop;
 
-TEST_CASE("catalog remaining_count stays open after slice 4", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 27);
-    REQUIRE(this_slice_count() == 3);
-    REQUIRE(on_main_count() == 7);
+TEST_CASE("catalog remaining_count stays open after slice 5", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 26);
+    REQUIRE(this_slice_count() == 2);
+    REQUIRE(on_main_count() == 9);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -54,8 +56,9 @@ TEST_CASE("catalog remaining_count stays open after slice 4", "[copter][leftover
     REQUIRE(completeness_has("Copter::motors_output / motors_output_main", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::read_AHRS", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::throttle_loop", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::run_rate_controller_main", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::read_inertia", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::run_rate_controller_main", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::read_inertia", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::check_ekf_reset", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
@@ -421,4 +424,77 @@ TEST_CASE("read_inertia high_vibes passed through to pos_control leftover",
     REQUIRE(row != nullptr);
     REQUIRE(row->kind == TaskKind::kFast);
     REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("check_ekf_reset yaw reset edge sets inertial_frame_reset and log",
+          "[copter][check_ekf_reset]") {
+    CheckEkfResetInputs in{};
+    in.last_yaw_reset_ms = 0;
+    in.new_ekf_yaw_reset_ms = 1234;
+    in.yaw_angle_change_rad = 0.25f;
+    in.primary_core_index = 0;
+    in.new_primary_core_index = 0;
+
+    const auto fx = check_ekf_reset(in);
+    REQUIRE(fx.inertial_frame_reset);
+    REQUIRE(fx.last_yaw_reset_ms == 1234);
+    REQUIRE(fx.log_ekf_yaw_reset);
+    REQUIRE(fx.primary_core_index == 0);
+    REQUIRE_FALSE(fx.log_ekf_primary_error);
+    REQUIRE_FALSE(fx.gcs_text);
+
+    const auto* row = find_scheduler_task("check_ekf_reset");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kFast);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("check_ekf_reset same-ms is a no-op", "[copter][check_ekf_reset]") {
+    CheckEkfResetInputs in{};
+    in.last_yaw_reset_ms = 500;
+    in.new_ekf_yaw_reset_ms = 500;
+    in.yaw_angle_change_rad = 1.0f;
+    in.primary_core_index = 1;
+    in.new_primary_core_index = 1;
+
+    const auto fx = check_ekf_reset(in);
+    REQUIRE_FALSE(fx.inertial_frame_reset);
+    REQUIRE(fx.last_yaw_reset_ms == 500);
+    REQUIRE_FALSE(fx.log_ekf_yaw_reset);
+    REQUIRE(fx.primary_core_index == 1);
+    REQUIRE_FALSE(fx.log_ekf_primary_error);
+    REQUIRE_FALSE(fx.gcs_text);
+}
+
+TEST_CASE("check_ekf_reset primary -1 is ignored", "[copter][check_ekf_reset]") {
+    CheckEkfResetInputs in{};
+    in.last_yaw_reset_ms = 10;
+    in.new_ekf_yaw_reset_ms = 10;
+    in.primary_core_index = 0;
+    in.new_primary_core_index = -1;
+
+    const auto fx = check_ekf_reset(in);
+    REQUIRE_FALSE(fx.inertial_frame_reset);
+    REQUIRE(fx.last_yaw_reset_ms == 10);
+    REQUIRE_FALSE(fx.log_ekf_yaw_reset);
+    REQUIRE(fx.primary_core_index == 0);
+    REQUIRE_FALSE(fx.log_ekf_primary_error);
+    REQUIRE_FALSE(fx.gcs_text);
+}
+
+TEST_CASE("check_ekf_reset primary change logs EKF_PRIMARY and gcs_text",
+          "[copter][check_ekf_reset]") {
+    CheckEkfResetInputs in{};
+    in.last_yaw_reset_ms = 42;
+    in.new_ekf_yaw_reset_ms = 42;
+    in.primary_core_index = 0;
+    in.new_primary_core_index = 1;
+
+    const auto fx = check_ekf_reset(in);
+    REQUIRE(fx.inertial_frame_reset);
+    REQUIRE(fx.last_yaw_reset_ms == 42);
+    REQUIRE_FALSE(fx.log_ekf_yaw_reset);
+    REQUIRE(fx.primary_core_index == 1);
+    REQUIRE(fx.log_ekf_primary_error);
+    REQUIRE(fx.gcs_text);
 }

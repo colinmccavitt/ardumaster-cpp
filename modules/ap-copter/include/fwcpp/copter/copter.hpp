@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fwcpp/copter/check_ekf_reset.hpp>
 #include <fwcpp/copter/copter_leftover.hpp>
 #include <fwcpp/copter/motors_output.hpp>
 #include <fwcpp/copter/rc_loop.hpp>

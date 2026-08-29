@@ -920,7 +920,8 @@ target_link_libraries(logger_completeness_test PRIVATE ap-logger Catch2::Catch2W
 catch_discover_tests(logger_completeness_test)
 
 # CCP-035: ap-copter scheduler table + leftover ticks (rc_loop, motors_output,
-# read_AHRS, throttle_loop, run_rate_controller_main, read_inertia).
+# read_AHRS, throttle_loop, run_rate_controller_main, read_inertia,
+# check_ekf_reset).
 add_executable(copter_loop_test copter_loop_test.cpp)
 target_link_libraries(copter_loop_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(copter_loop_test)
