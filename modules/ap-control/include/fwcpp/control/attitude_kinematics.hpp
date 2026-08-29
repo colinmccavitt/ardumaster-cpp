@@ -1908,6 +1908,7 @@ struct EulerAngleRateShapingGains {
     float ang_vel_roll_max_degs = 0.0f;
     float ang_vel_pitch_max_degs = 0.0f;
     float ang_vel_yaw_max_degs = 0.0f;
+    float rate_wp_yaw_max_degs = 0.0f;
     float accel_roll_max_radss = 0.0f;
     float accel_pitch_max_radss = 0.0f;
     float accel_yaw_max_radss = 0.0f;
@@ -2037,6 +2038,121 @@ inline void input_euler_angle_roll_pitch_euler_rate_yaw_cd(
         math::cd_to_rad(euler_roll_angle_cd), math::cd_to_rad(euler_pitch_angle_cd),
         math::cd_to_rad(euler_yaw_rate_cds), state, attitude_body, gyro_body_rads, gains, dt, thrust_angle_rad,
         thrust_error_angle_rad, feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+}
+
+
+// ---------------------------------------------------------------------
+// CCP-030 ADDENDUM: get_slew_yaw_max_rads (real lines 211-217),
+// input_euler_angle_roll_pitch_yaw_rad (real lines 476-540), and its
+// trivial centidegree wrapper input_euler_angle_roll_pitch_yaw_cd (real
+// lines 461-468). Mirrors copter-rust COP-007's "autonomous entry
+// point" investigation verbatim: a mode that knows where it wants to
+// point commands a heading, not a rate.
+//
+// TWO LOAD-BEARING DIFFERENCES FROM CCP-029's rate-yaw entry point,
+// reused directly from COP-007: (1) slew_yaw swaps the ordinary yaw rate
+// limit for ATC_SLEW_YAW (get_slew_yaw_max_rads) - mission turn rate vs
+// pilot spin rate on the same path. (2) yaw is shaped with input_tc
+// like roll and pitch here - all three attitude_command_model calls
+// share the IDENTICAL argument shape wrap_PI(input - target), 0.0,
+// ..., input_tc - the OPPOSITE of CCP-029's asymmetric yaw-as-rate
+// shape (0.0, yaw_rate, ..., rate_y_tc).
+//
+// ACOS PRECISION CLIFF (COP-007, reused verbatim): for small errors
+// thrust_error uses acos(dot) with cos(theta)~1-theta^2/2; in f32
+// within ~6e-8 of 1.0 rounds to 1.0 so acos returns zero. Combined
+// roll-pitch error ~3.2e-4 is the boundary (~5e-8 for 1-cos). Tests
+// below deliberately command errors well above that (~0.15 rad).
+//
+// ADR-0012: get_slew_yaw_max_rads takes ang_vel_yaw_max_degs and
+// rate_wp_yaw_max_degs as explicit parameters; rate_wp_yaw_max_degs
+// also lives on EulerAngleRateShapingGains for callers that bundle
+// vehicle tuning.
+// ---------------------------------------------------------------------
+
+// get_slew_yaw_max_rads - upstream AC_AttitudeControl::get_slew_yaw_max_rads.
+[[nodiscard]] inline float get_slew_yaw_max_rads(float ang_vel_yaw_max_degs, float rate_wp_yaw_max_degs) {
+    if (!math::is_positive(ang_vel_yaw_max_degs)) {
+        return math::radians(rate_wp_yaw_max_degs);
+    }
+    return std::min(math::radians(ang_vel_yaw_max_degs), math::radians(rate_wp_yaw_max_degs));
+}
+
+inline void input_euler_angle_roll_pitch_yaw_rad(
+    float euler_roll_angle_rad, float euler_pitch_angle_rad, float euler_yaw_angle_rad, bool slew_yaw,
+    AttitudeTargetState& state, const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    update_attitude_target(state.attitude_target, state.ang_vel_target_rads, dt);
+    state.attitude_target.to_euler(state.euler_angle_target_rad);
+
+    float yaw_rate_max_rads = math::radians(gains.ang_vel_yaw_max_degs);
+    if (slew_yaw) {
+        yaw_rate_max_rads = get_slew_yaw_max_rads(gains.ang_vel_yaw_max_degs, gains.rate_wp_yaw_max_degs);
+    }
+
+    if (gains.rate_bf_ff_enabled) {
+        const math::Vector3f euler_accel_radss = body_to_euler_limit(
+            state.attitude_target,
+            math::Vector3f{gains.accel_roll_max_radss, gains.accel_pitch_max_radss, gains.accel_yaw_max_radss});
+        const math::Vector3f euler_rate_max_rads = body_to_euler_limit(
+            state.attitude_target,
+            math::Vector3f{math::radians(gains.ang_vel_roll_max_degs), math::radians(gains.ang_vel_pitch_max_degs),
+                           yaw_rate_max_rads});
+
+        math::Vector3f euler_accel_target_rads;
+        (void)body_to_euler_derivative(state.attitude_target, state.ang_accel_target_rads, euler_accel_target_rads);
+
+        attitude_command_model(math::wrap_PI(euler_roll_angle_rad - state.euler_angle_target_rad.x), 0.0f,
+                                state.euler_rate_target_rads.x, euler_accel_target_rads.x,
+                                std::fabs(euler_rate_max_rads.x), euler_accel_radss.x, gains.input_tc, dt);
+        attitude_command_model(math::wrap_PI(euler_pitch_angle_rad - state.euler_angle_target_rad.y), 0.0f,
+                                state.euler_rate_target_rads.y, euler_accel_target_rads.y,
+                                std::fabs(euler_rate_max_rads.y), euler_accel_radss.y, gains.input_tc, dt);
+        attitude_command_model(math::wrap_PI(euler_yaw_angle_rad - state.euler_angle_target_rad.z), 0.0f,
+                                state.euler_rate_target_rads.z, euler_accel_target_rads.z,
+                                std::fabs(euler_rate_max_rads.z), euler_accel_radss.z, gains.input_tc, dt);
+
+        state.ang_vel_target_rads = euler_derivative_to_body(state.attitude_target, state.euler_rate_target_rads);
+        state.ang_accel_target_rads = euler_derivative_to_body(state.attitude_target, euler_accel_target_rads);
+    } else {
+        state.euler_angle_target_rad.x = euler_roll_angle_rad;
+        state.euler_angle_target_rad.y = euler_pitch_angle_rad;
+
+        if (math::is_positive(yaw_rate_max_rads)) {
+            const float yaw_error = math::wrap_PI(euler_yaw_angle_rad - state.euler_angle_target_rad.z);
+            const float yaw_step =
+                math::constrain_value(yaw_error, -yaw_rate_max_rads * dt, yaw_rate_max_rads * dt);
+            state.euler_angle_target_rad.z = math::wrap_PI(state.euler_angle_target_rad.z + yaw_step);
+        } else {
+            state.euler_angle_target_rad.z = euler_yaw_angle_rad;
+        }
+
+        state.attitude_target.from_euler(state.euler_angle_target_rad);
+
+        state.euler_rate_target_rads.zero();
+        state.ang_vel_target_rads.zero();
+        state.ang_accel_target_rads.zero();
+    }
+
+    attitude_controller_run_quat(state.attitude_target, attitude_body, state.ang_vel_target_rads, gyro_body_rads,
+                                  gains.rate_yaw_kp, gains.angle_yaw_kp, gains.angle_kp_roll, gains.angle_kp_pitch,
+                                  gains.angle_kp_yaw, gains.angle_p_scale, gains.accel_roll_max_radss,
+                                  gains.accel_pitch_max_radss, gains.accel_yaw_max_radss, gains.use_sqrt_controller,
+                                  gains.ang_vel_roll_max_degs, gains.ang_vel_pitch_max_degs,
+                                  gains.ang_vel_yaw_max_degs, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                  feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
+}
+
+inline void input_euler_angle_roll_pitch_yaw_cd(
+    float euler_roll_angle_cd, float euler_pitch_angle_cd, float euler_yaw_angle_cd, bool slew_yaw,
+    AttitudeTargetState& state, const math::Quaternion& attitude_body, const math::Vector3f& gyro_body_rads,
+    const EulerAngleRateShapingGains& gains, float dt, float& thrust_angle_rad, float& thrust_error_angle_rad,
+    float& feedforward_scalar, math::Quaternion& attitude_ang_error, math::Vector3f& ang_vel_body_rads) {
+    input_euler_angle_roll_pitch_yaw_rad(math::cd_to_rad(euler_roll_angle_cd), math::cd_to_rad(euler_pitch_angle_cd),
+                                          math::cd_to_rad(euler_yaw_angle_cd), slew_yaw, state, attitude_body,
+                                          gyro_body_rads, gains, dt, thrust_angle_rad, thrust_error_angle_rad,
+                                          feedforward_scalar, attitude_ang_error, ang_vel_body_rads);
 }
 
 } // namespace fwcpp::control

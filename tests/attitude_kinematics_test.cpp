@@ -1403,6 +1403,7 @@ struct ControllerGains {
     float ang_vel_roll_max_degs = 220.0f;
     float ang_vel_pitch_max_degs = 220.0f;
     float ang_vel_yaw_max_degs = 200.0f;
+    float rate_wp_yaw_max_degs = 45.0f;
 };
 
 // Reconstructs the pre-branch quantities (steps 1-6 of
@@ -2066,6 +2067,7 @@ struct EntryPointGains {
         g.ang_vel_roll_max_degs = ang_vel_roll_max_degs;
         g.ang_vel_pitch_max_degs = ang_vel_pitch_max_degs;
         g.ang_vel_yaw_max_degs = ang_vel_yaw_max_degs;
+        g.rate_wp_yaw_max_degs = rate_wp_yaw_max_degs;
         g.accel_roll_max_radss = accel_roll_max_radss;
         g.accel_pitch_max_radss = accel_pitch_max_radss;
         g.accel_yaw_max_radss = accel_yaw_max_radss;
@@ -2084,6 +2086,7 @@ struct EntryPointGains {
     float ang_vel_roll_max_degs = 220.0f;
     float ang_vel_pitch_max_degs = 220.0f;
     float ang_vel_yaw_max_degs = 200.0f;
+    float rate_wp_yaw_max_degs = 45.0f;
     float accel_roll_max_radss = fwcpp::math::radians(400.0f);
     float accel_pitch_max_radss = fwcpp::math::radians(400.0f);
     float accel_yaw_max_radss = fwcpp::math::radians(200.0f);
@@ -2511,3 +2514,179 @@ TEST_CASE("input_euler_angle_roll_pitch_euler_rate_yaw_cd: converts centidegrees
     REQUIRE(ang_vel_body_rads_cd.y == ang_vel_body_rads_rad.y);
     REQUIRE(ang_vel_body_rads_cd.z == ang_vel_body_rads_rad.z);
 }
+
+
+// =======================================================================
+// CCP-030: get_slew_yaw_max_rads, input_euler_angle_roll_pitch_yaw_rad (+ _cd)
+// =======================================================================
+
+void step_yaw_angle(float roll_rad, float pitch_rad, float yaw_rad, bool slew_yaw, AttitudeTargetState& state,
+                    const EulerAngleRateShapingGains& gains, float dt) {
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    float thrust_angle = 0.0f, thrust_error_angle = 0.0f, feedforward_scalar = 0.0f;
+    Quaternion attitude_ang_error;
+    Vector3f ang_vel_body_rads;
+    input_euler_angle_roll_pitch_yaw_rad(roll_rad, pitch_rad, yaw_rad, slew_yaw, state, body, gyro, gains, dt,
+                                          thrust_angle, thrust_error_angle, feedforward_scalar, attitude_ang_error,
+                                          ang_vel_body_rads);
+}
+
+AttitudeTargetState state_with_roll_offset(float roll_rad) {
+    AttitudeTargetState s = fresh_state();
+    s.euler_angle_target_rad.x = roll_rad;
+    s.attitude_target.from_euler(s.euler_angle_target_rad);
+    return s;
+}
+
+TEST_CASE("get_slew_yaw_max_rads: non-positive ang_vel_yaw_max uses wp yaw rate only",
+          "[control][attitude_kinematics][get_slew_yaw_max_rads][CCP-030]") {
+    REQUIRE(get_slew_yaw_max_rads(0.0f, 720.0f) == Approx(fwcpp::math::radians(720.0f)).margin(1e-6f));
+    REQUIRE(get_slew_yaw_max_rads(-10.0f, 45.0f) == Approx(fwcpp::math::radians(45.0f)).margin(1e-6f));
+}
+
+TEST_CASE("get_slew_yaw_max_rads: positive ang_vel_yaw_max returns min with wp yaw rate",
+          "[control][attitude_kinematics][get_slew_yaw_max_rads][CCP-030]") {
+    const float slow = get_slew_yaw_max_rads(200.0f, 45.0f);
+    REQUIRE(slow == Approx(fwcpp::math::radians(45.0f)).margin(1e-6f));
+    const float fast = get_slew_yaw_max_rads(360.0f, 720.0f);
+    REQUIRE(fast == Approx(fwcpp::math::radians(360.0f)).margin(1e-6f));
+}
+
+TEST_CASE("input_euler_angle_roll_pitch_yaw_rad: yaw uses angle shaping with input_tc, not CCP-029 rate-y_tc asymmetry",
+          "[control][attitude_kinematics][input_euler_angle_roll_pitch_yaw][CCP-030][symmetry]") {
+    EntryPointGains eg;
+    EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.0025f;
+    const int kSteps = 120;
+    const float yaw_angle_cmd = 0.35f;
+
+    AttitudeTargetState state = fresh_state();
+    for (int i = 0; i < kSteps; ++i) {
+        step_yaw_angle(0.0f, 0.0f, yaw_angle_cmd, false, state, gains, dt);
+    }
+
+    float correct_rate = 0.0f, correct_accel = 0.0f;
+    float target_z = 0.0f;
+    for (int i = 0; i < kSteps; ++i) {
+        attitude_command_model(fwcpp::math::wrap_PI(yaw_angle_cmd - target_z), 0.0f, correct_rate, correct_accel,
+                                std::fabs(fwcpp::math::radians(gains.ang_vel_yaw_max_degs)), gains.accel_yaw_max_radss,
+                                gains.input_tc, dt);
+        target_z += correct_rate * dt;
+    }
+
+    float wrong_rate = 0.0f, wrong_accel = 0.0f;
+    for (int i = 0; i < kSteps; ++i) {
+        attitude_command_model(0.0f, yaw_angle_cmd, wrong_rate, wrong_accel,
+                                std::fabs(fwcpp::math::radians(gains.ang_vel_yaw_max_degs)), gains.accel_yaw_max_radss,
+                                gains.rate_y_tc, dt);
+    }
+
+    REQUIRE(std::fabs(correct_rate - wrong_rate) > 0.15f);
+    REQUIRE(state.euler_rate_target_rads.z == Approx(correct_rate).margin(1e-4f));
+}
+
+TEST_CASE("input_euler_angle_roll_pitch_yaw_rad: slew_yaw selects slower yaw rate limit in shaped branch",
+          "[control][attitude_kinematics][input_euler_angle_roll_pitch_yaw][CCP-030][slew_yaw]") {
+    EntryPointGains eg;
+    eg.ang_vel_yaw_max_degs = 360.0f;
+    eg.rate_wp_yaw_max_degs = 30.0f;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.0025f;
+    const float yaw_cmd = 0.5f;
+
+    AttitudeTargetState fast_state = fresh_state();
+    AttitudeTargetState slow_state = fresh_state();
+    for (int i = 0; i < 80; ++i) {
+        step_yaw_angle(0.0f, 0.0f, yaw_cmd, false, fast_state, gains, dt);
+        step_yaw_angle(0.0f, 0.0f, yaw_cmd, true, slow_state, gains, dt);
+    }
+
+    REQUIRE(std::fabs(slow_state.euler_rate_target_rads.z) < std::fabs(fast_state.euler_rate_target_rads.z));
+}
+
+TEST_CASE("input_euler_angle_roll_pitch_yaw_rad: unshaped branch slews yaw target by yaw_rate_max*dt",
+          "[control][attitude_kinematics][input_euler_angle_roll_pitch_yaw][CCP-030][unshaped]") {
+    EntryPointGains eg;
+    EulerAngleRateShapingGains gains = eg.gains();
+    gains.rate_bf_ff_enabled = false;
+    gains.ang_vel_yaw_max_degs = 100.0f;
+    const float dt = 0.05f;
+    const float yaw_rate_max = fwcpp::math::radians(gains.ang_vel_yaw_max_degs);
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+
+    AttitudeTargetState clamped = fresh_state();
+    float t1 = 0.0f, te1 = 0.0f, ff1 = 0.0f;
+    Quaternion err1;
+    Vector3f av1;
+    input_euler_angle_roll_pitch_yaw_rad(0.0f, 0.0f, 1.0f, false, clamped, body, gyro, gains, dt, t1, te1, ff1, err1,
+                                          av1);
+    REQUIRE(clamped.euler_angle_target_rad.z == Approx(yaw_rate_max * dt).margin(1e-5f));
+
+    AttitudeTargetState passthrough = fresh_state();
+    float t2 = 0.0f, te2 = 0.0f, ff2 = 0.0f;
+    Quaternion err2;
+    Vector3f av2;
+    input_euler_angle_roll_pitch_yaw_rad(0.0f, 0.0f, 0.02f, false, passthrough, body, gyro, gains, dt, t2, te2, ff2,
+                                          err2, av2);
+    REQUIRE(passthrough.euler_angle_target_rad.z == Approx(0.02f).margin(1e-5f));
+
+    gains.ang_vel_yaw_max_degs = 0.0f;
+    AttitudeTargetState direct = fresh_state();
+    float t3 = 0.0f, te3 = 0.0f, ff3 = 0.0f;
+    Quaternion err3;
+    Vector3f av3;
+    input_euler_angle_roll_pitch_yaw_rad(0.0f, 0.0f, 0.75f, false, direct, body, gyro, gains, dt, t3, te3, ff3, err3,
+                                          av3);
+    REQUIRE(direct.euler_angle_target_rad.z == Approx(0.75f).margin(1e-5f));
+}
+
+TEST_CASE("input_euler_angle_roll_pitch_yaw_rad: scripted heading sequence stays clear of acos cliff",
+          "[control][attitude_kinematics][input_euler_angle_roll_pitch_yaw][CCP-030][sequence]") {
+    // Start ~0.15 rad off level (>> 3.2e-4 acos cliff documented in COP-007).
+    EntryPointGains eg;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.0025f;
+    AttitudeTargetState state = state_with_roll_offset(0.15f);
+
+    for (int i = 0; i < 300; ++i) {
+        const float roll = (i < 100) ? 0.20f : 0.10f;
+        const float pitch = (i < 200) ? -0.12f : 0.05f;
+        const float yaw = (i < 150) ? 0.40f : -0.25f;
+        step_yaw_angle(roll, pitch, yaw, true, state, gains, dt);
+    }
+
+    REQUIRE(std::fabs(state.euler_angle_target_rad.x) > 0.05f);
+    REQUIRE(std::fabs(state.euler_rate_target_rads.z) < fwcpp::math::radians(eg.ang_vel_yaw_max_degs));
+}
+
+TEST_CASE("input_euler_angle_roll_pitch_yaw_cd: converts centidegrees and forwards",
+          "[control][attitude_kinematics][input_euler_angle_roll_pitch_yaw][CCP-030]") {
+    EntryPointGains eg;
+    const EulerAngleRateShapingGains gains = eg.gains();
+    const float dt = 0.0025f;
+    const Quaternion body = attitude(0.0f, 0.0f, 0.0f);
+    const Vector3f gyro{0.0f, 0.0f, 0.0f};
+    const float roll_cd = 800.0f;
+    const float pitch_cd = -400.0f;
+    const float yaw_cd = 1200.0f;
+
+    AttitudeTargetState state_cd = fresh_state();
+    float t_cd = 0.0f, te_cd = 0.0f, ff_cd = 0.0f;
+    Quaternion err_cd;
+    Vector3f av_cd;
+    input_euler_angle_roll_pitch_yaw_cd(roll_cd, pitch_cd, yaw_cd, false, state_cd, body, gyro, gains, dt, t_cd,
+                                         te_cd, ff_cd, err_cd, av_cd);
+
+    AttitudeTargetState state_rad = fresh_state();
+    float t_rad = 0.0f, te_rad = 0.0f, ff_rad = 0.0f;
+    Quaternion err_rad;
+    Vector3f av_rad;
+    input_euler_angle_roll_pitch_yaw_rad(fwcpp::math::cd_to_rad(roll_cd), fwcpp::math::cd_to_rad(pitch_cd),
+                                          fwcpp::math::cd_to_rad(yaw_cd), false, state_rad, body, gyro, gains, dt,
+                                          t_rad, te_rad, ff_rad, err_rad, av_rad);
+
+    REQUIRE(state_cd.euler_rate_target_rads.z == Approx(state_rad.euler_rate_target_rads.z).margin(1e-6f));
+}
+
