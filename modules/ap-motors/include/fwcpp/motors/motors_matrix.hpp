@@ -737,20 +737,112 @@
 // MAVLink/GCS metadata, out of scope for the same reason as the other
 // five _mav_type writes.
 //
+// CCP-008 ADDITION (setup_deca_matrix) - upstream AP_MotorsMatrix.cpp, real
+// function at line 1242 (re-verified directly against the pinned worktree;
+// the ticket's own guessed 1242-1287 span matched exactly, with the real
+// AP_MOTORS_FRAME_DECA_ENABLED #if/#endif bracketing it at 1241/1288).
+// **THIS IS THE LAST OF THE SEVEN REAL setup_*_matrix FRAME-CLASS
+// FUNCTIONS IN THIS PORT'S SCOPE** - see updated "DEFERRED FUTURE PHASES"
+// below. The real switch(frame_type) has exactly TWO explicit case
+// labels covering THREE enumerator values - PLUS (1245), and a combined
+// `case MOTOR_FRAME_TYPE_X: case MOTOR_FRAME_TYPE_CW_X:` fall-through
+// (1258-1259) - plus a real SIMPLE default (1281-1282: `default: // deca
+// frame class does not support this frame type\n return false;`),
+// re-verified directly, matching setup_quad_matrix's/setup_hexa_matrix's/
+// setup_octa_matrix's/setup_octaquad_matrix's/setup_dodecahexa_matrix's
+// own simple defaults exactly, NOT setup_y6_matrix's own real productive
+// fallback.
+//
+// THE REAL X/CW_X FALL-THROUGH - A GENUINELY DISTINCT STRUCTURAL PATTERN
+// FROM EVERY PRIOR TICKET, RE-VERIFIED DIRECTLY AGAINST THE REAL SWITCH:
+// unlike every earlier setup_*_matrix in this arc (where X and CW_X, when
+// both present, are always two SEPARATE case labels with two DIFFERENT
+// tables - e.g. setup_octaquad_matrix's own X_COR/CW_X_COR in CCP-005 are
+// a genuinely different subset-scaling pair, and setup_quad_matrix's/
+// setup_hexa_matrix's/setup_octa_matrix's/setup_octaquad_matrix's own
+// plain X/CW_X cases each have their own distinct MotorDef table),
+// setup_deca_matrix's own real source has X and CW_X share the EXACT SAME
+// case body and the EXACT SAME 10-motor table, with a single combined
+// `_frame_type_string = "X/CW_X"` label (not two separate strings) - a
+// real, deliberate C++ fall-through
+// (`case MOTOR_FRAME_TYPE_X: case MOTOR_FRAME_TYPE_CW_X: { ... }`), not a
+// transcription error and not something that "should" be split into two
+// differently-valued cases. Ported below as the direct, faithful C++
+// equivalent: `case FrameType::X: case FrameType::CwX: { ... }`.
+// motors_matrix_test.cpp's own dedicated test below constructs the port's
+// own MotorsMatrix twice - once via FrameType::X, once via FrameType::CwX
+// - and confirms both produce EXACTLY the same per-motor roll/pitch/yaw/
+// test_order values, proving the shared table was faithfully reproduced
+// rather than accidentally split into two different (wrong) tables.
+//
+// Deca's own frame types, transcribed exactly from the real source (deca
+// = 10 motors; both PLUS and the shared X/CW_X table are plain
+// add_motors() calls over a static 10-entry MotorDef table - no
+// add_motors_raw()/direct add_motor() calls anywhere in this function,
+// same simple shape as setup_dodecahexa_matrix's own):
+//   PLUS (1245-1257): angles evenly spaced 36 degrees apart around the
+//     full circle starting at 0, alternating CCW/CW yaw factors, testing
+//     orders 1 through 10 in strict array order:
+//     (0,CCW,1) (36,CW,2) (72,CCW,3) (108,CW,4) (144,CCW,5) (180,CW,6)
+//     (-144,CCW,7) (-108,CW,8) (-72,CCW,9) (-36,CW,10).
+//   X/CW_X (1258-1276, SHARED by both FrameType::X and FrameType::CwX):
+//     same evenly-spaced-36-degrees pattern as PLUS, rotated 18 degrees,
+//     same alternating CCW/CW yaw factors, testing orders 1 through 10 in
+//     strict array order:
+//     (18,CCW,1) (54,CW,2) (90,CCW,3) (126,CW,4) (162,CCW,5) (-162,CW,6)
+//     (-126,CCW,7) (-90,CW,8) (-54,CCW,9) (-18,CW,10).
+//
+// FrameType-ENUM INVESTIGATION (this ticket's own explicit question,
+// answered by re-reading the CURRENT enum directly before writing
+// anything, and independently against the real header
+// AP_Motors_Class.h): all three real enumerators this ticket's switch
+// names - MOTOR_FRAME_TYPE_PLUS, MOTOR_FRAME_TYPE_X, MOTOR_FRAME_TYPE_
+// CW_X - were CONFIRMED ALREADY PRESENT in this port's own FrameType enum
+// (Plus/X from CCP-002's own setup_quad_matrix work, CwX likewise from
+// CCP-002 - re-checked one by one against the enum's real declaration,
+// not assumed from the ticket text). This ticket therefore adds ZERO new
+// enumerators to FrameType - CONFIRMED, matching the ticket's own
+// expectation.
+//
+// THE RUNNING ZERO-GROWTH COUNT, INDEPENDENTLY RE-VERIFIED AGAINST THIS
+// FILE'S OWN BANNER HISTORY (per this ticket's own explicit instruction
+// not to trust the ticket's summary as complete): CCP-003's own
+// setup_hexa_matrix added zero new enumerators (see "CCP-003 ADDITION"
+// above), and CCP-007's own setup_dodecahexa_matrix added zero new
+// enumerators (see "CCP-007 ADDITION" above, including that ticket's own
+// correction of an earlier miscount). CCP-008 (this ticket) is therefore
+// the THIRD setup_*_matrix ticket in this arc to add zero new
+// enumerators - re-counted directly against this file's own history
+// (CCP-003, CCP-007, CCP-008), matching the ticket's own claim exactly
+// this time (unlike CCP-007's own ticket text, which miscounted itself as
+// "the first").
+//
+// NOT ported (same disclosed omission class as every other
+// setup_*_matrix's own _mav_type write above): the real upstream also
+// sets `_mav_type = MAV_TYPE_DECAROTOR;` unconditionally at the top of
+// setup_deca_matrix (line 1244, before the switch) - pure MAVLink/GCS
+// metadata, out of scope for the same reason as the other six
+// _mav_type writes.
+//
 // DEFERRED FUTURE PHASES (named explicitly, not silently omitted):
 //   1. Remaining frame tables - setup_quad_matrix (line 576) is DONE as of
 //      CCP-002, setup_hexa_matrix (line 775) is DONE as of CCP-003,
 //      setup_octa_matrix (line 854) is DONE as of CCP-004,
 //      setup_octaquad_matrix (line 973) is DONE as of CCP-005,
-//      setup_y6_matrix (line 1191) is DONE as of CCP-006, and
-//      setup_dodecahexa_matrix (line 1140) is DONE as of CCP-007 (see
+//      setup_y6_matrix (line 1191) is DONE as of CCP-006,
+//      setup_dodecahexa_matrix (line 1140) is DONE as of CCP-007, and
+//      setup_deca_matrix (line 1242) is DONE as of CCP-008 (see
 //      "CCP-002 ADDITION"/"CCP-003 ADDITION"/"CCP-004 ADDITION"/
-//      "CCP-005 ADDITION"/"CCP-006 ADDITION"/"CCP-007 ADDITION" above);
-//      the ONE REMAINING frame-class setup function - setup_deca_matrix -
-//      and setup_motors' own dispatcher (which chooses among all seven by
-//      frame CLASS - motor_frame_class, see CCP-003's own enum-sharing
-//      investigation above) remain future phases, named explicitly here
-//      so neither is silently folded into another ticket's scope.
+//      "CCP-005 ADDITION"/"CCP-006 ADDITION"/"CCP-007 ADDITION"/
+//      "CCP-008 ADDITION" above). **THIS WAS THE LAST OF THE SEVEN REAL
+//      setup_*_matrix FRAME-CLASS FUNCTIONS IN THIS PORT'S SCOPE** - no
+//      frame-class setup function remains unported. The ONLY REMAINING
+//      AP_MotorsMatrix frame-table work is now setup_motors' own
+//      dispatcher (which chooses among all seven by frame CLASS -
+//      motor_frame_class, see CCP-003's own enum-sharing investigation
+//      above), a separate, deliberately deferred future phase - named
+//      explicitly here so it is not silently folded into another
+//      ticket's scope.
 //      copter-rust's own COP-005 finding that Y6's `default:` switch
 //      branch is productive - answering for 24 of the real 64 upstream
 //      frame configurations - was independently re-verified and resolved
@@ -900,7 +992,14 @@ public:
     // "CCP-007 ADDITION" for the full investigation, including a
     // correction of the ticket's own (incorrect) claim that this would
     // be the first such zero-growth ticket in this arc - CCP-003 already
-    // was.
+    // was. CCP-008 (setup_deca_matrix, the LAST of the seven real
+    // setup_*_matrix functions) also added ZERO new enumerators - all
+    // three of its real frame types (PLUS/X/CW_X, the latter two sharing
+    // a real fall-through case, see file banner's "CCP-008 ADDITION")
+    // were re-confirmed already present from CCP-002's own work - the
+    // THIRD such zero-growth ticket in this arc (CCP-003, CCP-007,
+    // CCP-008), independently re-counted against this file's own history
+    // rather than trusted from any one ticket's own claim.
     enum class FrameType : std::uint8_t {
         Plus,
         X,
@@ -1825,6 +1924,96 @@ public:
             // matches upstream's own real default case exactly (see file
             // banner: this is the SIMPLE kind, a return to the shape used
             // before setup_y6_matrix's own productive one).
+            return false;
+        }
+        return true;
+    }
+
+    // setup_deca_matrix - CCP-008 port of upstream
+    // AP_MotorsMatrix::setup_deca_matrix (AP_MotorsMatrix.cpp line 1242).
+    // **THE LAST OF THE SEVEN REAL setup_*_matrix FRAME-CLASS FUNCTIONS IN
+    // THIS PORT'S SCOPE** - see file banner's "CCP-008 ADDITION" and
+    // "DEFERRED FUTURE PHASES" for what remains (setup_motors' own
+    // dispatcher only). Every case's angle/yaw-factor/testing-order values
+    // are transcribed exactly from the real source - see file banner for
+    // the full case-list/default-branch/enum investigation. Takes the SAME
+    // FrameType parameter type as every setup_*_matrix above and reuses
+    // its Plus/X/CwX enumerators verbatim - adds ZERO new enumerators (the
+    // THIRD such zero-growth ticket in this arc; see file banner).
+    //
+    // REAL, GENUINELY DISTINCT STRUCTURAL PATTERN FROM EVERY PRIOR TICKET:
+    // FrameType::X and FrameType::CwX below share the EXACT SAME case body
+    // and the EXACT SAME 10-motor table, mirroring the real upstream
+    // `case MOTOR_FRAME_TYPE_X: case MOTOR_FRAME_TYPE_CW_X:` fall-through
+    // exactly - a single combined `frame_type_string_ = "X/CW_X"`, not two
+    // separate strings. This is NOT the same shape as setup_octaquad_
+    // matrix's own X_COR/CW_X_COR (CCP-005), which are two SEPARATE cases
+    // with two genuinely DIFFERENT tables - see file banner for the full
+    // comparison. motors_matrix_test.cpp's own dedicated test below
+    // constructs two separate MotorsMatrix instances, one via
+    // setup_deca_matrix(FrameType::X) and one via
+    // setup_deca_matrix(FrameType::CwX), and confirms both produce
+    // EXACTLY the same per-motor values, proving the shared fall-through
+    // table is faithfully reproduced rather than accidentally split into
+    // two different (wrong) tables.
+    //
+    // Returns false (upstream's own real return value) for any FrameType
+    // not handled below - the SIMPLE kind of default, matching
+    // setup_quad_matrix's/setup_hexa_matrix's/setup_octa_matrix's/
+    // setup_octaquad_matrix's/setup_dodecahexa_matrix's own defaults
+    // exactly, NOT setup_y6_matrix's own real productive fallback.
+    [[nodiscard]] bool setup_deca_matrix(FrameType frame_type) {
+        frame_class_string_ = "DECA";
+        switch (frame_type) {
+        case FrameType::Plus: {
+            // Ten motors, angles evenly spaced 36 degrees apart around the
+            // full circle starting at 0, alternating CCW/CW yaw factors.
+            frame_type_string_ = "PLUS";
+            static constexpr MotorDef motors[] = {
+                {0.0f, kYawFactorCcw, 1},
+                {36.0f, kYawFactorCw, 2},
+                {72.0f, kYawFactorCcw, 3},
+                {108.0f, kYawFactorCw, 4},
+                {144.0f, kYawFactorCcw, 5},
+                {180.0f, kYawFactorCw, 6},
+                {-144.0f, kYawFactorCcw, 7},
+                {-108.0f, kYawFactorCw, 8},
+                {-72.0f, kYawFactorCcw, 9},
+                {-36.0f, kYawFactorCw, 10},
+            };
+            add_motors(motors, 10);
+            break;
+        }
+        case FrameType::X:
+        case FrameType::CwX: {
+            // REAL, RE-VERIFIED FALL-THROUGH (see class-level comment
+            // above and file banner's "CCP-008 ADDITION"): upstream's own
+            // switch has ONE case body shared by BOTH MOTOR_FRAME_TYPE_X
+            // and MOTOR_FRAME_TYPE_CW_X, with a single combined
+            // "X/CW_X" frame_type_string - not two separate cases with
+            // two different tables. Same evenly-spaced-36-degrees pattern
+            // as PLUS above, rotated 18 degrees.
+            frame_type_string_ = "X/CW_X";
+            static constexpr MotorDef motors[] = {
+                {18.0f, kYawFactorCcw, 1},
+                {54.0f, kYawFactorCw, 2},
+                {90.0f, kYawFactorCcw, 3},
+                {126.0f, kYawFactorCw, 4},
+                {162.0f, kYawFactorCcw, 5},
+                {-162.0f, kYawFactorCw, 6},
+                {-126.0f, kYawFactorCcw, 7},
+                {-90.0f, kYawFactorCw, 8},
+                {-54.0f, kYawFactorCcw, 9},
+                {-18.0f, kYawFactorCw, 10},
+            };
+            add_motors(motors, 10);
+            break;
+        }
+        default:
+            // deca frame class does not support this frame type - matches
+            // upstream's own real default case exactly (see file banner:
+            // this is the SIMPLE kind, not setup_y6_matrix's own
+            // productive one).
             return false;
         }
         return true;

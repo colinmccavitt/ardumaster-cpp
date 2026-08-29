@@ -1826,3 +1826,177 @@ TEST_CASE("setup_dodecahexa_matrix: PLUS reuses the SAME FrameType enumerator as
     }
 }
 
+// =======================================================================
+// CCP-008: setup_deca_matrix - THE LAST setup_*_matrix ticket in this arc.
+// Every case's angle/yaw/test_order values are checked against
+// hand-computed values from the real upstream inputs (AP_MotorsMatrix.cpp
+// lines 1242-1287) using checkAngleFrame() above (both PLUS and the
+// shared X/CW_X table are plain add_motors() calls over a 10-entry
+// MotorDef table). Both real frame types (PLUS, and X/CW_X) reuse
+// FrameType enumerators setup_quad_matrix's own tests above already
+// exercise - this ticket adds ZERO new enumerators, the THIRD such
+// zero-growth ticket in this arc (CCP-003, CCP-007, CCP-008) - see
+// motors_matrix.hpp's file banner "CCP-008 ADDITION" for the full
+// investigation. The single most important test in this section is the
+// X/CW_X fall-through test below, which proves the real shared-table case
+// (a genuinely distinct structural pattern from every prior ticket) was
+// faithfully reproduced rather than accidentally split into two
+// different tables.
+// =======================================================================
+
+TEST_CASE("setup_deca_matrix: PLUS matches hand-computed angle/yaw/test_order across all ten motors",
+          "[motors][setup_deca_matrix][plus]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_deca_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(m.frame_class_string() == "DECA");
+    REQUIRE(m.frame_type_string() == "PLUS");
+    const AngleMotor expected[] = {
+        {0.0f, kYawFactorCcw, 1},   {36.0f, kYawFactorCw, 2},   {72.0f, kYawFactorCcw, 3},
+        {108.0f, kYawFactorCw, 4},  {144.0f, kYawFactorCcw, 5}, {180.0f, kYawFactorCw, 6},
+        {-144.0f, kYawFactorCcw, 7}, {-108.0f, kYawFactorCw, 8}, {-72.0f, kYawFactorCcw, 9},
+        {-36.0f, kYawFactorCw, 10},
+    };
+    checkAngleFrame(m, expected, 10);
+    // Deca is exactly 10 motors - motor 10 and beyond must remain untouched.
+    for (std::uint8_t i = 10; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+    }
+}
+
+TEST_CASE("setup_deca_matrix: X matches hand-computed angle/yaw/test_order across all ten motors",
+          "[motors][setup_deca_matrix][x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_deca_matrix(MotorsMatrix::FrameType::X));
+    REQUIRE(m.frame_class_string() == "DECA");
+    // Real upstream sets a single COMBINED frame_type_string for this
+    // shared case - "X/CW_X", not "X" alone - transcribed exactly, not
+    // picking one name over the other.
+    REQUIRE(m.frame_type_string() == "X/CW_X");
+    const AngleMotor expected[] = {
+        {18.0f, kYawFactorCcw, 1},  {54.0f, kYawFactorCw, 2},   {90.0f, kYawFactorCcw, 3},
+        {126.0f, kYawFactorCw, 4},  {162.0f, kYawFactorCcw, 5}, {-162.0f, kYawFactorCw, 6},
+        {-126.0f, kYawFactorCcw, 7}, {-90.0f, kYawFactorCw, 8}, {-54.0f, kYawFactorCcw, 9},
+        {-18.0f, kYawFactorCw, 10},
+    };
+    checkAngleFrame(m, expected, 10);
+    for (std::uint8_t i = 10; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+    }
+}
+
+TEST_CASE("setup_deca_matrix: CW_X matches hand-computed angle/yaw/test_order across all ten motors "
+          "(the SAME table as X, not a separate one)",
+          "[motors][setup_deca_matrix][cw_x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_deca_matrix(MotorsMatrix::FrameType::CwX));
+    REQUIRE(m.frame_class_string() == "DECA");
+    REQUIRE(m.frame_type_string() == "X/CW_X");
+    const AngleMotor expected[] = {
+        {18.0f, kYawFactorCcw, 1},  {54.0f, kYawFactorCw, 2},   {90.0f, kYawFactorCcw, 3},
+        {126.0f, kYawFactorCw, 4},  {162.0f, kYawFactorCcw, 5}, {-162.0f, kYawFactorCw, 6},
+        {-126.0f, kYawFactorCcw, 7}, {-90.0f, kYawFactorCw, 8}, {-54.0f, kYawFactorCcw, 9},
+        {-18.0f, kYawFactorCw, 10},
+    };
+    checkAngleFrame(m, expected, 10);
+    for (std::uint8_t i = 10; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+    }
+}
+
+TEST_CASE("setup_deca_matrix: X and CW_X are a REAL fall-through sharing the IDENTICAL table - "
+          "THE SINGLE MOST IMPORTANT TEST THIS TICKET WRITES",
+          "[motors][setup_deca_matrix][x][cw_x][fallthrough]") {
+    // This is the exact risk the ticket calls out: a careless port could
+    // split upstream's real `case MOTOR_FRAME_TYPE_X: case
+    // MOTOR_FRAME_TYPE_CW_X:` fall-through into two separate cases and
+    // invent a second, DIFFERENT (wrong) table for CW_X - as every other
+    // X/CW_X pair ported so far in this arc genuinely does have two
+    // different tables (e.g. setup_octaquad_matrix's own X_COR/CW_X_COR
+    // in CCP-005). Constructing two independent MotorsMatrix instances,
+    // one via each enumerator, and requiring every one of the ten motors'
+    // roll/pitch/yaw/test_order to match exactly (not merely
+    // approximately similar) is the direct proof the shared table was
+    // faithfully reproduced.
+    MotorsMatrix x;
+    MotorsMatrix cw_x;
+    REQUIRE(x.setup_deca_matrix(MotorsMatrix::FrameType::X));
+    REQUIRE(cw_x.setup_deca_matrix(MotorsMatrix::FrameType::CwX));
+
+    REQUIRE(x.frame_class_string() == cw_x.frame_class_string());
+    REQUIRE(x.frame_type_string() == cw_x.frame_type_string());
+    REQUIRE(x.frame_type_string() == "X/CW_X");
+
+    for (std::uint8_t i = 0; i < 10; ++i) {
+        INFO("motor index " << static_cast<int>(i));
+        REQUIRE(x.motor_enabled(i));
+        REQUIRE(cw_x.motor_enabled(i));
+        REQUIRE(x.roll_factor(i) == Approx(cw_x.roll_factor(i)).margin(1e-6));
+        REQUIRE(x.pitch_factor(i) == Approx(cw_x.pitch_factor(i)).margin(1e-6));
+        REQUIRE(x.yaw_factor(i) == Approx(cw_x.yaw_factor(i)).margin(1e-6));
+        REQUIRE(x.test_order(i) == cw_x.test_order(i));
+    }
+}
+
+TEST_CASE("setup_deca_matrix: returns true for every real in-scope frame type and sets frame_class_string to DECA",
+          "[motors][setup_deca_matrix]") {
+    const MotorsMatrix::FrameType all_types[] = {
+        MotorsMatrix::FrameType::Plus,
+        MotorsMatrix::FrameType::X,
+        MotorsMatrix::FrameType::CwX,
+    };
+    for (const auto ft : all_types) {
+        MotorsMatrix m;
+        REQUIRE(m.setup_deca_matrix(ft));
+        REQUIRE(m.frame_class_string() == "DECA");
+        // Every real frame type populates all ten motor slots 0-9 (deca
+        // has ten motors, unlike setup_dodecahexa_matrix's own twelve).
+        for (std::uint8_t i = 0; i < 10; ++i) {
+            REQUIRE(m.motor_enabled(i));
+        }
+    }
+}
+
+TEST_CASE("setup_deca_matrix: an out-of-range frame type hits the real SIMPLE default branch and returns false",
+          "[motors][setup_deca_matrix][default]") {
+    // Confirms the real upstream default case ("deca frame class does not
+    // support this frame type; return false;") - the SIMPLE kind, matching
+    // every other setup_*_matrix's own default above except
+    // setup_y6_matrix's own real productive fallback (a structural
+    // departure specific to that one ticket).
+    MotorsMatrix m;
+    REQUIRE_FALSE(m.setup_deca_matrix(static_cast<MotorsMatrix::FrameType>(255)));
+    for (std::uint8_t i = 0; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+    }
+}
+
+TEST_CASE("setup_deca_matrix: PLUS reuses the SAME FrameType enumerator as setup_quad_matrix's own PLUS, "
+          "but yields deca-specific values on a ten-motor table",
+          "[motors][setup_deca_matrix][setup_quad_matrix][plus]") {
+    // Direct evidence for the file banner's "CCP-008 ADDITION" enum
+    // investigation: MotorsMatrix::FrameType::Plus is the literal same
+    // C++ enumerator passed to both functions (mirroring upstream's real
+    // single shared motor_frame_type enum), yet each function's own frame
+    // table produces its own real, different numeric results - dispatch
+    // is by which FUNCTION is called (i.e. which real motor_frame_class
+    // the caller selected), not by a deca-specific enumerator value. This
+    // ticket adds ZERO new enumerators to FrameType - the THIRD such
+    // zero-growth ticket in this arc (CCP-003, CCP-007, CCP-008).
+    MotorsMatrix quad;
+    MotorsMatrix deca;
+    REQUIRE(quad.setup_quad_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(deca.setup_deca_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(quad.frame_class_string() == "QUAD");
+    REQUIRE(deca.frame_class_string() == "DECA");
+    // Quad's PLUS motor 0 sits at 90 degrees (yaw CCW); deca's PLUS motor
+    // 0 sits at 0 degrees (yaw CCW too, but a different real angle and
+    // therefore different roll/pitch) - genuinely different real tables
+    // behind the same enumerator.
+    REQUIRE(quad.roll_factor(0) != Approx(deca.roll_factor(0)));
+    // Deca populates six motor slots quad never touches.
+    for (std::uint8_t i = 4; i < 10; ++i) {
+        REQUIRE_FALSE(quad.motor_enabled(i));
+        REQUIRE(deca.motor_enabled(i));
+    }
+}
+
