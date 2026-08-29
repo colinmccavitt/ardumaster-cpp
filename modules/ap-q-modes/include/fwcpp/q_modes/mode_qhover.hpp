@@ -27,6 +27,7 @@ enum class QHoverRunPhase : std::uint8_t {
 struct QHoverRunInputs {
     bool tailsitter_in_vtol_transition{false};
     bool throttle_wait{false};
+    float pilot_climb_rate_cms{0.0f};
 };
 
 [[nodiscard]] inline QHoverRunPhase qhover_run_phase(const QHoverRunInputs& in) {
@@ -46,12 +47,13 @@ struct QHoverRunActions {
     bool relax_pos_z{false};
     bool assign_tilt_to_fwd_thr{false};
     bool hold_hover{false};
+    float hold_hover_climb_rate_cms{0.0f};
     bool stabilize_fw_surfaces{false};
     bool center_rudder{false};
     bool output_spin_recovery{false};
 };
 
-[[nodiscard]] inline QHoverRunActions qhover_run_actions(QHoverRunPhase phase) {
+[[nodiscard]] inline QHoverRunActions qhover_run_actions(QHoverRunPhase phase, float pilot_climb_rate_cms = 0.0f) {
     QHoverRunActions out{};
     out.check_vtol_recovery = true;
     switch (phase) {
@@ -65,10 +67,34 @@ struct QHoverRunActions {
         case QHoverRunPhase::kHoldHover:
             out.assign_tilt_to_fwd_thr = true;
             out.hold_hover = true;
+            out.hold_hover_climb_rate_cms = pilot_climb_rate_cms;
             out.stabilize_fw_surfaces = true;
             out.center_rudder = true;
             out.output_spin_recovery = true;
             break;
+    }
+    return out;
+}
+
+struct QHoverRunResult {
+    QHoverRunPhase phase{QHoverRunPhase::kHoldHover};
+    QHoverRunActions actions{};
+    QRunFwSurfaceFollowup fw_followup{};
+    bool delegate_mode_run{false};
+};
+
+/// Port of ModeQHover::run (assist recovery check, throttle wait vs hold_hover, FW surfaces + spin recovery).
+[[nodiscard]] inline QHoverRunResult qhover_run(const QHoverRunInputs& in) {
+    QHoverRunResult out{};
+    out.phase = qhover_run_phase(in);
+    if (out.phase == QHoverRunPhase::kFwTransitionControllers) {
+        out.delegate_mode_run = true;
+        out.actions.check_vtol_recovery = true;
+        return out;
+    }
+    out.actions = qhover_run_actions(out.phase, in.pilot_climb_rate_cms);
+    if (out.actions.stabilize_fw_surfaces) {
+        out.fw_followup = q_run_fw_surface_followup();
     }
     return out;
 }

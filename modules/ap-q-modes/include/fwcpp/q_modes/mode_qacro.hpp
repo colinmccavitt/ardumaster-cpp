@@ -24,10 +24,28 @@ enum class QAcroRunPhase : std::uint8_t {
     kAcroRates = 2,
 };
 
+enum class QAcroRateInputVariant : std::uint8_t {
+    kNoLocking2 = 0,
+    kLocking3 = 1,
+};
+
 struct QAcroRunInputs {
     bool tailsitter_in_vtol_transition{false};
     bool throttle_wait{false};
+    bool acro_locking{false};
+    float roll_norm{0.0f};
+    float pitch_norm{0.0f};
+    float yaw_norm{0.0f};
+    float acro_roll_rate{0.0f};
+    float acro_pitch_rate{0.0f};
+    float acro_yaw_rate{0.0f};
+    bool tailsitter_enabled{false};
+    float pilot_throttle_scaled{0.0f};
 };
+
+[[nodiscard]] inline QAcroRateInputVariant qacro_rate_input_variant(bool acro_locking) {
+    return acro_locking ? QAcroRateInputVariant::kLocking3 : QAcroRateInputVariant::kNoLocking2;
+}
 
 [[nodiscard]] inline QAcroRunPhase qacro_run_phase(const QAcroRunInputs& in) {
     if (run_delegates_to_fw_controllers(in.tailsitter_in_vtol_transition)) {
@@ -50,7 +68,9 @@ struct QAcroRunActions {
     bool relax_attitude{false};
     bool throttle_unlimited_spool{false};
     bool input_rate_bf{false};
+    QAcroRateInputVariant rate_input{QAcroRateInputVariant::kNoLocking2};
     bool throttle_out_no_angle_boost{false};
+    float throttle_out{0.0f};
     bool run_mode_acro_fw{false};
     QAcroBodyRates rates{};
 };
@@ -72,7 +92,7 @@ struct QAcroRunActions {
     return out;
 }
 
-[[nodiscard]] inline QAcroRunActions qacro_run_actions(QAcroRunPhase phase) {
+[[nodiscard]] inline QAcroRunActions qacro_run_actions(QAcroRunPhase phase, const QAcroRunInputs& in) {
     QAcroRunActions out{};
     switch (phase) {
         case QAcroRunPhase::kFwTransitionControllers:
@@ -84,10 +104,32 @@ struct QAcroRunActions {
         case QAcroRunPhase::kAcroRates:
             out.throttle_unlimited_spool = true;
             out.input_rate_bf = true;
+            out.rate_input = qacro_rate_input_variant(in.acro_locking);
+            out.rates = qacro_body_rates_from_sticks(in.roll_norm, in.pitch_norm, in.yaw_norm, in.acro_roll_rate,
+                                                     in.acro_pitch_rate, in.acro_yaw_rate, in.tailsitter_enabled);
             out.throttle_out_no_angle_boost = true;
+            out.throttle_out = in.pilot_throttle_scaled;
             out.run_mode_acro_fw = true;
             break;
     }
+    return out;
+}
+
+struct QAcroRunResult {
+    QAcroRunPhase phase{QAcroRunPhase::kAcroRates};
+    QAcroRunActions actions{};
+    bool delegate_mode_run{false};
+};
+
+/// Port of ModeQAcro::run (throttle wait vs body-frame rates + mode_acro FW stabilize).
+[[nodiscard]] inline QAcroRunResult qacro_run(const QAcroRunInputs& in) {
+    QAcroRunResult out{};
+    out.phase = qacro_run_phase(in);
+    if (out.phase == QAcroRunPhase::kFwTransitionControllers) {
+        out.delegate_mode_run = true;
+        return out;
+    }
+    out.actions = qacro_run_actions(out.phase, in);
     return out;
 }
 
