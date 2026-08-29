@@ -25,6 +25,7 @@
 #include <fwcpp/quadplane/quadplane_xy_controller.hpp>
 #include <fwcpp/quadplane/quadplane_throttle.hpp>
 #include <fwcpp/quadplane/quadplane_guided.hpp>
+#include <fwcpp/quadplane/quadplane_landing.hpp>
 #include <fwcpp/quadplane/quadplane_takeoff_controller.hpp>
 #include <fwcpp/quadplane/quadplane_tecs_mixing.hpp>
 #include <fwcpp/quadplane/quadplane_vtol_subsystems.hpp>
@@ -243,6 +244,8 @@ public:
     PosControlLandStub& poscontrol_land_mut() { return poscontrol_land_; }
     void set_land_final_alt_m(float v) { land_final_alt_m_ = v; }
     [[nodiscard]] float land_final_alt_m() const { return land_final_alt_m_; }
+    void set_land_final_speed_ms(float v) { land_final_speed_ms_ = v; }
+    [[nodiscard]] float land_final_speed_ms() const { return land_final_speed_ms_; }
     [[nodiscard]] const PosControlTransitionPrep& last_transition_prep() const {
         return last_transition_prep_;
     }
@@ -608,6 +611,35 @@ public:
         return tick;
     }
 
+    [[nodiscard]] LandingDescentRateTick landing_descent_rate_ms(float height_above_ground_m,
+                                                                LandingDescentRateInputs in) {
+        in.options = options_;
+        in.land_final_alt_m = land_final_alt_m_;
+        in.land_final_speed_ms = land_final_speed_ms_;
+        if (wp_nav_inited_) {
+            in.default_speed_down_ms = wp_nav_.default_speed_down_ms();
+            in.default_speed_up_ms = wp_nav_.default_speed_up_ms();
+        }
+        return fwcpp::quadplane::landing_descent_rate_ms(poscontrol_, poscontrol_land_,
+                                                         height_above_ground_m, in);
+    }
+
+    [[nodiscard]] LandPositioningTick update_land_positioning(LandPositioningInputs in) {
+        in.options = options_;
+        if (wp_nav_inited_) {
+            in.wp_accel_mss = wp_nav_.wp_acceleration_mss();
+        }
+        return fwcpp::quadplane::update_land_positioning(poscontrol_, in);
+    }
+
+    [[nodiscard]] AbortLandingTick abort_landing(AbortLandingInputs in) {
+        in.land_descent.available = available();
+        in.land_descent.pos_state = poscontrol_.state;
+        in.land_descent.options = options_;
+        auto tick = fwcpp::quadplane::abort_landing(poscontrol_, poscontrol_land_, last_set_state_sink_, in);
+        return tick;
+    }
+
     [[nodiscard]] UserTakeoffTick do_user_takeoff(float takeoff_altitude, UserTakeoffInputs in) {
         in.options = options_;
         in.start.target.correction_north_m = poscontrol_.correction_north_m;
@@ -698,6 +730,7 @@ private:
     float approach_distance_m_{kApproachDistanceDefaultM};
     PosControlLandStub poscontrol_land_{};
     float land_final_alt_m_{kLandFinalAltDefaultM};
+    float land_final_speed_ms_{kLandFinalSpeedMsDefault};
     PosControlTransitionPrep last_transition_prep_{};
     PosControlSetStateSink last_set_state_sink_{};
     fwcpp::quadplane_transition::SltTransition slt_transition_{
