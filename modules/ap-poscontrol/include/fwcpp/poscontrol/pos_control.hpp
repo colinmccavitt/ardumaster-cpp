@@ -5,4 +5,5 @@
 #include <fwcpp/poscontrol/pos_control_defaults.hpp>
 #include <fwcpp/poscontrol/pos_control_lean.hpp>
 #include <fwcpp/poscontrol/pos_control_ne.hpp>
+#include <fwcpp/poscontrol/pos_control_d.hpp>
 #include <fwcpp/poscontrol/pos_control_leftover.hpp>
