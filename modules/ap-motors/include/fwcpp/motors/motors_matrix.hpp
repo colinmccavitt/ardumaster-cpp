@@ -1007,6 +1007,134 @@
 // for real before calling this function, exactly matching upstream's own
 // call-order contract.
 //
+// CCP-012 ADDITION (set_actuator_with_slew + actuator_spin_up_to_ground_idle)
+// - upstream AP_MotorsMulticopter.cpp (re-verified directly against the
+// pinned worktree): set_actuator_with_slew's real function body runs lines
+// 480-503 (ticket's own guessed 480-503 matched exactly), and
+// actuator_spin_up_to_ground_idle's real body runs lines 511-513 (ticket's
+// own guessed span matched exactly too). Both are real, self-contained pure
+// functions of AP_MotorsMulticopter, the still-not-built base class this
+// port has no equivalent of yet - added directly to MotorsMatrix instead,
+// matching CCP-011's own precedent of adding output-stage methods with
+// nowhere else to live.
+//
+// REAL FORMULAS, TRANSCRIBED EXACTLY (re-verified directly against the
+// source above, not trusted from the ticket's own transcription):
+//   set_actuator_with_slew(actuator_output&, input, slew_up_time,
+//   slew_dn_time, dt_s):
+//     output_slew_limit_up = 1.0f;                 // "no slew limit" default
+//     output_slew_limit_dn = 0.0f;                 // "no slew limit" default
+//     if (is_positive(slew_up_time)) {
+//       output_delta_up_max = dt_s / constrain_value(slew_up_time, 0, 0.5);
+//       output_slew_limit_up = constrain_value(actuator_output +
+//                                               output_delta_up_max, 0, 1);
+//     }
+//     if (is_positive(slew_dn_time)) {
+//       output_delta_dn_max = dt_s / constrain_value(slew_dn_time, 0, 0.5);
+//       output_slew_limit_dn = constrain_value(actuator_output -
+//                                               output_delta_dn_max, 0, 1);
+//     }
+//     actuator_output = constrain_value(input, output_slew_limit_dn,
+//                                        output_slew_limit_up);
+//   actuator_spin_up_to_ground_idle(spin_up_ratio, spin_min):
+//     return constrain_value(spin_up_ratio, 0, 1) * spin_min;
+//
+// THE CURRENT-OUTPUT-VS-DESTINATION BOUNDING PITFALL - copter-rust's own
+// COP-004 investigation found this first (crates/ap-motors/src/output.rs:
+// "the limits are computed from the *current* output, so they bound the
+// step rather than the destination"; COP-004's own tracker notes, 2026-08-25
+// entry: "the sweep runs six iterations per case because a port that
+// bounded the destination agrees on iteration one and diverges on iteration
+// two"). Independently re-verified here directly against the real C++
+// source: both output_slew_limit_up/_dn above are computed from
+// `actuator_output` - the value of the OUTPUT parameter BEFORE this call
+// mutates it - never from `input`, the destination this call is trying to
+// reach. A caller that runs this once per control-loop tick, feeding the
+// same variable back in as actuator_output each time, gets a genuine
+// per-step ramp: the "current" value call N reads is exactly what call N-1
+// itself wrote. A port that instead computed either limit relative to
+// `input` would produce a DIFFERENT trajectory toward a distant target -
+// motors_matrix_test.cpp's own dedicated multi-iteration test (several
+// calls toward one large fixed target, the trajectory checked call-by-call
+// against the real step formula, not just the final value) is built
+// specifically to prove this - see that test's own comments; a single-call
+// test cannot tell the two interpretations apart as reliably as watching
+// the actual step size hold constant across repeated calls.
+//
+// THE RESOLVED "NO SHUT_DOWN CHECK" NON-BUG - also from COP-004's own
+// investigation ("Resolved, not a bug: set_actuator_with_slew has no
+// SHUT_DOWN check even though the comment above it says slew limiting is
+// skipped in that state. output_to_motors assigns zero to the actuator
+// directly in SHUT_DOWN and never calls the function..."), independently
+// re-verified here directly: the real comment immediately above
+// set_actuator_with_slew (AP_MotorsMulticopter.cpp lines 476-479) does say
+// "no slew limiting while in SHUT_DOWN to allow immediate motor
+// de-energisation", but the real function BODY (lines 480-503) has no
+// _spool_state/SpoolState reference anywhere - re-confirmed by reading
+// every line. The comment documents set_actuator_with_slew's CALL-SITE
+// CONTRACT (real upstream output_to_motors's own SHUT_DOWN case sets
+// `_actuator[i] = 0.0f` directly and skips calling this function at all in
+// that state), not something the function itself has to enforce. Since
+// output_to_motors and the SpoolState machine are still unbuilt in this
+// port (see updated "DEFERRED FUTURE PHASES" below - output_to_pwm's own
+// real SpoolState dependency is the same reason it is excluded from this
+// ticket too), set_actuator_with_slew below is ported as the real,
+// unconditional pure function it is - NO SpoolState parameter, NO internal
+// check added. A future ticket that builds output_to_motors is the one
+// responsible for skipping this call entirely in SHUT_DOWN, exactly as real
+// upstream does.
+//
+// spin_min PARAMETER CORRECTION (this ticket's own investigation
+// overriding an earlier, wrong assumption of its own ticket text): real
+// upstream's actuator_spin_up_to_ground_idle calls
+// `thr_lin.get_spin_min()`. This port's own ThrustLinearization (CCP-010,
+// thrust_linearization.hpp) does NOT have any get_spin_min() accessor and
+// does NOT own spin_min as internal state at all - confirmed directly by
+// reading that file: ThrustLinParams::spin_min is a plain public field on a
+// separate, caller-owned struct, passed as an explicit parameter to every
+// ThrustLinearization method (thrust_to_actuator, actuator_to_thrust,
+// etc.). The correct port of this one-line formula therefore takes
+// spin_min directly as its own second explicit float parameter and never
+// touches thr_lin_ at all - it needs no ThrustLinearization dependency,
+// unlike check_for_failed_motor's real thr_lin_.get_compensation_gain()
+// call (CCP-011).
+//
+// PARAMETER SHAPE, BOTH FUNCTIONS - explicit parameters throughout, per
+// ADR-0012 and every prior output-stage ticket's own established
+// convention: real upstream reads _slew_up_time/_slew_dn_time/_dt_s as
+// AP_MotorsMulticopter member state (GCS-tunable AP_Float parameters this
+// port has not built, and a dt source ADR-0012 forbids reading from a
+// singleton) and _spin_up_ratio as spool-state-machine output this port has
+// not built either - all four become explicit parameters instead.
+// set_actuator_with_slew(actuator_output&, input, slew_up_time,
+// slew_dn_time, dt_s) mutates its first parameter BY REFERENCE, exactly
+// matching upstream's own `float&` reference parameter (the alternative -
+// returning the new value and requiring the caller to assign it - was
+// considered and rejected: it would silently allow a caller to compute the
+// new value and then forget to write it back, whereas the reference form
+// makes the mutation happen unconditionally, matching upstream's real
+// contract exactly and matching COP-004's own `&mut f32` choice on the Rust
+// side).
+//
+// STATIC METHODS - DESIGN DECISION: neither function reads or writes any
+// MotorsMatrix instance state (no motor_enabled_/roll_factor_/thr_lin_/etc.
+// - re-confirmed against the real formulas above), so both are added as
+// `static` member functions rather than ordinary instance methods. This
+// still satisfies the ticket's own instruction to add them "to
+// fwcpp::motors::MotorsMatrix" (matching CCP-011's own precedent of adding
+// output-stage methods directly to MotorsMatrix, in the absence of a
+// not-yet-built AP_MotorsMulticopter-equivalent base class) without forcing
+// a caller to construct a live MotorsMatrix instance just to call a
+// function that would never touch one.
+//
+// AP_MOTORS_SLEW_TIME_DEFAULT - real default, re-verified directly
+// (AP_MotorsMulticopter.h line 21): 0.0f, for BOTH MOT_SLEW_UP_TIME and
+// MOT_SLEW_DN_TIME - i.e. slew limiting is OFF in both directions by
+// default. No AP_Param-style tunable is added for this (this port has
+// never used AP_Param for pure numeric tuning constants - see
+// thrust_linearization.hpp's own "NO AP_Param" precedent, CCP-010) - the
+// real default value is only asserted directly in a test.
+//
 // DEFERRED FUTURE PHASES (named explicitly, not silently omitted):
 //   1. Remaining frame tables - setup_quad_matrix (line 576) is DONE as of
 //      CCP-002, setup_hexa_matrix (line 775) is DONE as of CCP-003,
@@ -1032,19 +1160,29 @@
 //      pitfall - were independently re-verified and resolved by CCP-005;
 //      also not deferred further.)
 //   2. Output stage - check_for_failed_motor is DONE as of CCP-011 (see
-//      "CCP-011 ADDITION" above). output_to_motors, output_armed_
-//      stabilizing, thrust_compensation, and disable_yaw_torque remain
-//      separate, deliberately deferred future phases, NOT started by
-//      this ticket. output_armed_stabilizing and output_to_motors in
-//      particular need substantial new AP_MotorsMulticopter-level
-//      infrastructure this port has not built yet: a SpoolState state
-//      machine, actuator slew-rate limiting, and PWM output plumbing.
-//      The full thrust-boost MECHANISM itself (whatever sets
-//      thrust_boost_ true, and whatever reacts to get_lost_motor()) is
-//      also deferred - this ticket only ported the thrust_boost_-
-//      reading/off-switching logic INSIDE check_for_failed_motor, not
-//      the rest of the mechanism. This is also where add_motor_num()'s
-//      real SRV_Channels registration belongs (see NO-OP above).
+//      "CCP-011 ADDITION" above), and set_actuator_with_slew /
+//      actuator_spin_up_to_ground_idle are DONE as of CCP-012 (see
+//      "CCP-012 ADDITION" above). output_to_pwm (AP_MotorsMulticopter.cpp
+//      line 457) is explicitly NOT ported by CCP-012 - it has a real
+//      dependency on a not-yet-built SpoolState enum
+//      (`_spool_state == SpoolState::SHUT_DOWN`) - a separate, deliberately
+//      deferred future ticket. output_to_motors, output_armed_stabilizing,
+//      thrust_compensation, and disable_yaw_torque also remain separate,
+//      deliberately deferred future phases, NOT started by this ticket.
+//      output_armed_stabilizing, output_to_motors, and output_to_pwm all
+//      need the same substantial new infrastructure this port has not
+//      built yet: a SpoolState enum/spool-state machine, and (for
+//      output_to_pwm specifically) PWM output plumbing - actuator
+//      slew-rate limiting itself is NO LONGER part of that missing
+//      infrastructure, since CCP-012 already ported it as the
+//      unconditional pure function it really is (see "CCP-012 ADDITION"
+//      above for why it needs no SpoolState awareness of its own). The
+//      full thrust-boost MECHANISM itself (whatever sets thrust_boost_
+//      true, and whatever reacts to get_lost_motor()) is also deferred -
+//      CCP-011 only ported the thrust_boost_-reading/off-switching logic
+//      INSIDE check_for_failed_motor, not the rest of the mechanism. This
+//      is also where add_motor_num()'s real SRV_Channels registration
+//      belongs (see NO-OP above).
 //   3. set_throttle_factor/set_update_rate/set_frame_class_and_type/
 //      output_test_num/_output_test_seq/get_factors - small real
 //      accessors/setters not needed by this ticket's own core scope; add
@@ -2482,6 +2620,55 @@ public:
     // the default lift_max_ == 1.0 path.
     [[nodiscard]] ThrustLinearization& thrust_linearization() { return thr_lin_; }
     [[nodiscard]] const ThrustLinearization& thrust_linearization() const { return thr_lin_; }
+
+    // set_actuator_with_slew - CCP-012 port of upstream
+    // AP_MotorsMulticopter::set_actuator_with_slew (real function body
+    // lines 480-503). See file banner's "CCP-012 ADDITION" for the full
+    // formula derivation, the real current-output-vs-destination bounding
+    // pitfall (COP-004's own finding, independently re-verified here), and
+    // the resolved "no SHUT_DOWN check" non-bug. `static` - see file
+    // banner's "STATIC METHODS" - this function touches no MotorsMatrix
+    // instance state.
+    //
+    // Mutates actuator_output BY REFERENCE, exactly matching upstream's own
+    // `float&` reference parameter (see file banner's "PARAMETER SHAPE"). A
+    // caller running this every control-loop tick keeps the same
+    // actuator_output variable alive across calls - the CURRENT value this
+    // function reads on call N is the value IT ITSELF wrote on call N-1,
+    // which is exactly what makes the limits bound the STEP rather than the
+    // destination.
+    static void set_actuator_with_slew(float& actuator_output, float input, float slew_up_time, float slew_dn_time,
+                                        float dt_s) {
+        // "No slew limit" defaults - re-verified directly, NOT both 0 or
+        // both 1 (see file banner).
+        float output_slew_limit_up = 1.0f;
+        float output_slew_limit_dn = 0.0f;
+
+        if (math::is_positive(slew_up_time)) {
+            const float output_delta_up_max = dt_s / math::constrain_value(slew_up_time, 0.0f, 0.5f);
+            // Relative to the CURRENT actuator_output - the bounding
+            // pitfall (file banner).
+            output_slew_limit_up = math::constrain_value(actuator_output + output_delta_up_max, 0.0f, 1.0f);
+        }
+
+        if (math::is_positive(slew_dn_time)) {
+            const float output_delta_dn_max = dt_s / math::constrain_value(slew_dn_time, 0.0f, 0.5f);
+            output_slew_limit_dn = math::constrain_value(actuator_output - output_delta_dn_max, 0.0f, 1.0f);
+        }
+
+        actuator_output = math::constrain_value(input, output_slew_limit_dn, output_slew_limit_up);
+    }
+
+    // actuator_spin_up_to_ground_idle - CCP-012 port of upstream
+    // AP_MotorsMulticopter::actuator_spin_up_to_ground_idle (real function
+    // body lines 511-513). Takes spin_min directly rather than calling
+    // thr_lin_.get_spin_min() - see file banner's "spin_min PARAMETER
+    // CORRECTION": no such accessor exists, spin_min is a plain public
+    // field on the caller-owned ThrustLinParams (CCP-010). `static` - see
+    // file banner's "STATIC METHODS".
+    [[nodiscard]] static float actuator_spin_up_to_ground_idle(float spin_up_ratio, float spin_min) {
+        return math::constrain_value(spin_up_ratio, 0.0f, 1.0f) * spin_min;
+    }
 
     // Accessors - not upstream methods (upstream reaches these fields as
     // protected member arrays from within the class hierarchy itself, or

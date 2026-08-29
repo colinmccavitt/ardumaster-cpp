@@ -2512,3 +2512,159 @@ TEST_CASE("check_for_failed_motor: sets thrust_boost_ false when throttle headro
     REQUIRE(m2.thrust_boost());
 }
 
+
+// ---------------------------------------------------------------------
+// set_actuator_with_slew (CCP-012) - upstream AP_MotorsMulticopter's real
+// function body, AP_MotorsMulticopter.cpp lines 480-503. See
+// motors_matrix.hpp's file banner ("CCP-012 ADDITION") for the full
+// formula derivation, the real current-output-vs-destination bounding
+// pitfall (COP-004's own finding), and the resolved "no SHUT_DOWN check"
+// non-bug.
+// ---------------------------------------------------------------------
+
+TEST_CASE("set_actuator_with_slew: real AP_MOTORS_SLEW_TIME_DEFAULT (0.0f, both directions) applies NO "
+          "limiting regardless of how large the jump is",
+          "[motors][set_actuator_with_slew]") {
+    // AP_MOTORS_SLEW_TIME_DEFAULT = 0.0f (AP_MotorsMulticopter.h line 21,
+    // re-verified directly) - both MOT_SLEW_UP_TIME/MOT_SLEW_DN_TIME
+    // default to this, and is_positive(0.0f) is false, so neither branch
+    // ever executes: output_slew_limit_up/_dn stay at their "no limit"
+    // defaults (1.0f/0.0f) regardless of dt_s or the jump size.
+    const float slew_up_time = 0.0f;
+    const float slew_dn_time = 0.0f;
+    const float dt_s = 0.02f;
+
+    float actuator_output = 0.0f;
+    MotorsMatrix::set_actuator_with_slew(actuator_output, 1.0f, slew_up_time, slew_dn_time, dt_s);
+    REQUIRE(actuator_output == Approx(1.0f)); // full jump, instantly
+
+    actuator_output = 1.0f;
+    MotorsMatrix::set_actuator_with_slew(actuator_output, 0.0f, slew_up_time, slew_dn_time, dt_s);
+    REQUIRE(actuator_output == Approx(0.0f)); // full drop, instantly
+}
+
+TEST_CASE("set_actuator_with_slew: limits are computed from the CURRENT actuator_output, not from the "
+          "destination input - a multi-iteration ramp toward a large target proves the step-by-step "
+          "trajectory (COP-004's own test shape: a destination-relative port would jump straight to the "
+          "target on the very first call instead of ramping in equal steps)",
+          "[motors][set_actuator_with_slew]") {
+    const float slew_up_time = 0.1f;
+    const float dt_s = 0.02f;
+    // output_delta_up_max = dt_s / constrain_value(slew_up_time, 0, 0.5) = 0.02 / 0.1 = 0.2 per call.
+    const float expected_step = 0.2f;
+
+    float actuator_output = 0.0f;
+    const float target = 1.0f; // a large target, several steps away
+
+    // Real formula: output_slew_limit_up = constrain_value(actuator_output + step, 0, 1), THEN
+    // actuator_output = constrain_value(input, output_slew_limit_dn, output_slew_limit_up). slew_dn_time
+    // is left at 0 (unset) here, so only the up-limit ever binds - down movement stays unlimited (see
+    // the dedicated up/down-independence test below).
+    float expected = 0.0f;
+    for (int i = 0; i < 5; ++i) {
+        MotorsMatrix::set_actuator_with_slew(actuator_output, target, slew_up_time, /*slew_dn_time=*/0.0f, dt_s);
+        expected += expected_step;
+        if (expected > 1.0f) {
+            expected = 1.0f;
+        }
+        REQUIRE(actuator_output == Approx(expected).margin(1e-6f));
+    }
+    // After exactly 5 steps of 0.2 each, the ramp has reached the target exactly (0.2, 0.4, 0.6, 0.8,
+    // 1.0) - a genuine multi-call trajectory, not the instantaneous first-call jump to 1.0 a
+    // destination-relative port (computing the limit from `input` instead of `actuator_output`) would
+    // produce instead.
+    REQUIRE(actuator_output == Approx(1.0f).margin(1e-6f));
+}
+
+TEST_CASE("set_actuator_with_slew: up-slew and down-slew are independent - setting only one leaves "
+          "movement in the OTHER direction completely unlimited, at each direction's own configured rate",
+          "[motors][set_actuator_with_slew]") {
+    const float dt_s = 0.1f;
+
+    // Only slew_up_time set (0.2s -> delta = 0.1/0.2 = 0.5 per call); slew_dn_time stays 0 (unlimited).
+    {
+        float actuator_output = 0.0f;
+        MotorsMatrix::set_actuator_with_slew(actuator_output, 1.0f, /*slew_up_time=*/0.2f, /*slew_dn_time=*/0.0f, dt_s);
+        REQUIRE(actuator_output == Approx(0.5f)); // limited going up
+
+        // Coming back down from 0.5 to 0.0 in one call - fully unlimited since slew_dn_time is 0.
+        MotorsMatrix::set_actuator_with_slew(actuator_output, 0.0f, /*slew_up_time=*/0.2f, /*slew_dn_time=*/0.0f, dt_s);
+        REQUIRE(actuator_output == Approx(0.0f));
+    }
+
+    // Only slew_dn_time set (0.4s -> delta = 0.1/0.4 = 0.25 per call); slew_up_time stays 0 (unlimited).
+    {
+        float actuator_output = 1.0f;
+        MotorsMatrix::set_actuator_with_slew(actuator_output, 0.0f, /*slew_up_time=*/0.0f, /*slew_dn_time=*/0.4f, dt_s);
+        REQUIRE(actuator_output == Approx(0.75f)); // limited going down: 1.0 - 0.25
+
+        // Going back up from 0.75 to 1.0 in one call - fully unlimited since slew_up_time is 0.
+        MotorsMatrix::set_actuator_with_slew(actuator_output, 1.0f, /*slew_up_time=*/0.0f, /*slew_dn_time=*/0.4f, dt_s);
+        REQUIRE(actuator_output == Approx(1.0f));
+    }
+}
+
+TEST_CASE("set_actuator_with_slew: the real [0, 0.5] clamp on slew_up_time/slew_dn_time themselves - an "
+          "absurdly large configured slew time behaves exactly as if clamped to 0.5s",
+          "[motors][set_actuator_with_slew]") {
+    const float dt_s = 0.1f;
+
+    // slew_up_time = 1000.0f (absurdly large) must behave exactly as slew_up_time = 0.5f: both compute
+    // output_delta_up_max = dt_s / 0.5 = 0.2.
+    float actuator_output_absurd = 0.0f;
+    MotorsMatrix::set_actuator_with_slew(actuator_output_absurd, 1.0f, /*slew_up_time=*/1000.0f, 0.0f, dt_s);
+
+    float actuator_output_clamped = 0.0f;
+    MotorsMatrix::set_actuator_with_slew(actuator_output_clamped, 1.0f, /*slew_up_time=*/0.5f, 0.0f, dt_s);
+
+    REQUIRE(actuator_output_absurd == Approx(actuator_output_clamped));
+    REQUIRE(actuator_output_absurd == Approx(0.2f));
+
+    // Same for slew_dn_time.
+    float dn_absurd = 1.0f;
+    MotorsMatrix::set_actuator_with_slew(dn_absurd, 0.0f, 0.0f, /*slew_dn_time=*/1000.0f, dt_s);
+    float dn_clamped = 1.0f;
+    MotorsMatrix::set_actuator_with_slew(dn_clamped, 0.0f, 0.0f, /*slew_dn_time=*/0.5f, dt_s);
+    REQUIRE(dn_absurd == Approx(dn_clamped));
+    REQUIRE(dn_absurd == Approx(0.8f)); // 1.0 - (dt_s / 0.5) = 1.0 - 0.2
+}
+
+// ---------------------------------------------------------------------
+// actuator_spin_up_to_ground_idle (CCP-012) - upstream
+// AP_MotorsMulticopter::actuator_spin_up_to_ground_idle, real function
+// body AP_MotorsMulticopter.cpp lines 511-513. Takes spin_min directly
+// (see motors_matrix.hpp's file banner "spin_min PARAMETER CORRECTION" -
+// ThrustLinearization has no get_spin_min() accessor; spin_min is a plain
+// public field on the caller-owned ThrustLinParams struct, CCP-010).
+// ---------------------------------------------------------------------
+
+TEST_CASE("actuator_spin_up_to_ground_idle: mid-range spin_up_ratio scales spin_min linearly",
+          "[motors][actuator_spin_up_to_ground_idle]") {
+    REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(0.5f, 0.2f) == Approx(0.1f));
+    REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(1.0f, 0.2f) == Approx(0.2f));
+    REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(0.0f, 0.2f) == Approx(0.0f));
+}
+
+TEST_CASE("actuator_spin_up_to_ground_idle: out-of-range spin_up_ratio is clamped to [0, 1] before scaling",
+          "[motors][actuator_spin_up_to_ground_idle]") {
+    // Negative clamps to 0.
+    REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(-0.5f, 0.3f) == Approx(0.0f));
+    // >1 clamps to 1 - matches real upstream's own ramp, which is stepped before it is checked and can
+    // be fractionally past 1 for one iteration (COP-004's own note on the identical Rust port).
+    REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(1.5f, 0.3f) == Approx(0.3f));
+    REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(100.0f, 0.3f) == Approx(0.3f));
+}
+
+TEST_CASE("actuator_spin_up_to_ground_idle: depends on the caller-supplied spin_min parameter directly, "
+          "not on any ThrustLinearization accessor - varying spin_min scales the output",
+          "[motors][actuator_spin_up_to_ground_idle]") {
+    // ThrustLinearization (CCP-010) has no get_spin_min() accessor - spin_min is a plain public field on
+    // the caller-owned ThrustLinParams, taken directly as this function's own second parameter (see
+    // motors_matrix.hpp's file banner, "spin_min PARAMETER CORRECTION"). Varying it here at a fixed
+    // spin_up_ratio confirms the real dependency without needing a MotorsMatrix/ThrustLinearization
+    // instance at all - this is a static, dependency-free function.
+    const float ratio = 0.6f;
+    REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(ratio, 0.10f) == Approx(0.06f));
+    REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(ratio, 0.15f) == Approx(0.09f));
+    REQUIRE(MotorsMatrix::actuator_spin_up_to_ground_idle(ratio, 0.20f) == Approx(0.12f));
+}
