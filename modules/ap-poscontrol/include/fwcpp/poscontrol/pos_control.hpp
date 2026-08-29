@@ -8,4 +8,5 @@
 #include <fwcpp/poscontrol/pos_control_d.hpp>
 #include <fwcpp/poscontrol/pos_control_accessors.hpp>
 #include <fwcpp/poscontrol/pos_control_path.hpp>
+#include <fwcpp/poscontrol/pos_control_class.hpp>
 #include <fwcpp/poscontrol/pos_control_leftover.hpp>

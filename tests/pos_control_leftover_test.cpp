@@ -7,8 +7,8 @@ using namespace fwcpp::poscontrol;
 
 TEST_CASE("poscontrol catalog counts", "[poscontrol][leftover][catalog]") {
     REQUIRE(on_main_count() == 0);
-    REQUIRE(this_slice_count() >= 19);
-    REQUIRE(remaining_count() >= 1);
+    REQUIRE(this_slice_count() >= 20);
+    REQUIRE(remaining_count() == 0);
     REQUIRE(out_of_scope_count() >= 2);
     REQUIRE(pos_control_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -24,4 +24,6 @@ TEST_CASE("poscontrol catalog counts", "[poscontrol][leftover][catalog]") {
     REQUIRE(completeness_has("update_estimates", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Offsets / terrain / stopping point accessors", PortStatus::kThisSlice));
     REQUIRE(completeness_has("3D input_pos_NED_m path shaper", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("AC_PosControl class / constructor / singleton", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("AP_Param var_info and gain subgroups", PortStatus::kOutOfScope));
 }

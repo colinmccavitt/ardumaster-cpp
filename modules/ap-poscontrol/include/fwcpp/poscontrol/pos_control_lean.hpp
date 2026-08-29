@@ -3,8 +3,8 @@
 // CCP-027 slice 1: lean-angle / thrust-direction helpers from AC_PosControl
 // (Plane-4.7.0 AC_PosControl.cpp get_lean_angle_max_rad,
 // lean_angles_rad_to_accel_NED_mss, accel_NE_mss_to_lean_angles_rad,
-// get_thrust_vector). Free functions with explicit inputs — the full
-// AC_PosControl class lands in later slices.
+// get_thrust_vector). Free functions with explicit inputs ΓÇö the full
+// AC_PosControl class: pos_control_class.hpp (slice 8).
 
 #include <algorithm>
 #include <cmath>
