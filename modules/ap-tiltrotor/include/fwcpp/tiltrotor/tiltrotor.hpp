@@ -6,5 +6,6 @@
 #include <fwcpp/tiltrotor/tiltrotor_enable.hpp>
 #include <fwcpp/tiltrotor/tiltrotor_predicates.hpp>
 #include <fwcpp/tiltrotor/tiltrotor_setup.hpp>
+#include <fwcpp/tiltrotor/tiltrotor_setup_flags.hpp>
 #include <fwcpp/tiltrotor/tiltrotor_transition.hpp>
 #include <fwcpp/tiltrotor/tiltrotor_types.hpp>

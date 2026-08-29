@@ -868,3 +868,8 @@ catch_discover_tests(tiltrotor_control_test)
 add_executable(tiltrotor_transition_test tiltrotor_transition_test.cpp)
 target_link_libraries(tiltrotor_transition_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
 catch_discover_tests(tiltrotor_transition_test)
+
+# VCP-008 slice 5: leftover Tiltrotor::setup() motor scan / SRV / callback.
+add_executable(tiltrotor_setup_flags_test tiltrotor_setup_flags_test.cpp)
+target_link_libraries(tiltrotor_setup_flags_test PRIVATE ap-tiltrotor Catch2::Catch2WithMain)
+catch_discover_tests(tiltrotor_setup_flags_test)
