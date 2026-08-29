@@ -7,8 +7,9 @@
 // setup_quad_matrix (AP_MotorsMatrix.cpp ~line 576-711) - PLUS (CCP-003)
 // the second, setup_hexa_matrix (AP_MotorsMatrix.cpp line 775-851) - PLUS
 // (CCP-004) the third, setup_octa_matrix (AP_MotorsMatrix.cpp line
-// 854-970). Deliberately NOT the remaining four frame-class setup
-// functions (setup_octaquad_matrix, setup_dodecahexa_matrix,
+// 854-970) - PLUS (CCP-005) the fourth, setup_octaquad_matrix
+// (AP_MotorsMatrix.cpp line 973-1140). Deliberately NOT the remaining
+// three frame-class setup functions (setup_dodecahexa_matrix,
 // setup_y6_matrix, setup_deca_matrix), NOT setup_motors' own
 // dispatcher, and NOT the output stage (output_to_motors/
 // output_armed_stabilizing/check_for_failed_motor/thrust_compensation/
@@ -418,39 +419,183 @@
 // this port's own already-established kNumServoChannels precedent, so 32
 // is used directly (kMaxNumMotors below), not invented.
 //
+// CCP-005 ADDITION (setup_octaquad_matrix) - upstream AP_MotorsMatrix.cpp,
+// real function at line 973 (re-verified directly against the pinned
+// worktree; the ticket's own guessed ~973-1140 span matched exactly - the
+// real function, including its closing brace, runs 973-1140, with the
+// real AP_MOTORS_FRAME_OCTAQUAD_ENABLED #if/#endif bracketing it at
+// 972/1141). The real switch(frame_type) has exactly these cases, in this
+// order: PLUS (977), X (992), V (1009), H (1028), CW_X (1050),
+// BF_X (1069), BF_X_REV (1085), X_COR (1102), CW_X_COR (1122),
+// default (1136). Nine in-scope cases - exhaustive, re-counted directly
+// against the real file; no gated #if blocks appear anywhere inside the
+// function body (same check CCP-003's/CCP-004's own banner sections
+// performed).
+//
+// DEFAULT BRANCH - confirmed the SIMPLE kind: line 1136-1137 is
+// `default: // octaquad frame class does not support this frame type
+//          return false;` - matching setup_quad_matrix's/setup_hexa_
+// matrix's/setup_octa_matrix's own simple defaults exactly, NOT
+// setup_y6_matrix's own real productive fallback (still a separate,
+// later-ticket concern per COP-005 - see "DEFERRED FUTURE PHASES" below).
+//
+// FrameType-ENUM INVESTIGATION (this ticket's own explicit question,
+// answered by re-reading the CURRENT enum below directly before writing
+// anything): of octaquad's nine real frame types, SEVEN (PLUS, X, V, H,
+// CW_X, BF_X, BF_X_REV) were CONFIRMED ALREADY PRESENT in this port's own
+// FrameType enum, left over from CCP-002's/CCP-004's own quad/octa work
+// (the existing Plus, X, V, H, CwX, BfX, BfXRev enumerators) - re-checked
+// one by one against the enum's real declaration, not assumed from the
+// ticket text. Exactly TWO, MOTOR_FRAME_TYPE_X_COR and
+// MOTOR_FRAME_TYPE_CW_X_COR, are genuinely new and are the only
+// enumerators this ticket adds - named `XCor`/`CwXCor` below (appended
+// after the existing `I`), following this enum's own established
+// abbreviation convention exactly (`CwX` for CW_X, `BfX` for BF_X, `DjiX`
+// for DJI_X - each upstream underscore-word boundary becomes a
+// capitalized run with no separator). This confirms the ticket's own
+// guess of "exactly two new enumerators" exactly.
+//
+// Octaquad's own seven "plain" frame types, transcribed exactly from the
+// real source (octaquad = eight motors; all seven are plain add_motors()
+// calls over a static MotorDef table - no add_motors_raw()/direct
+// add_motor() calls anywhere in this function, unlike octa's own V/H/I):
+//   PLUS (977-989): angle/yaw/order octuple (0,CCW,1) (-90,CW,7)
+//     (180,CCW,5) (90,CW,3) (-90,CCW,8) (0,CW,2) (90,CCW,4) (180,CW,6).
+//   X (992-1004): (45,CCW,1) (-45,CW,7) (-135,CCW,5) (135,CW,3)
+//     (-45,CCW,8) (45,CW,2) (135,CCW,4) (-135,CW,6).
+//   V (1009-1021) - REAL, RE-VERIFIED: this is a MotorDef table (angle
+//     degrees + yaw_factor), matching setup_quad_matrix's own V case
+//     exactly in SHAPE (angle-derived roll/pitch, non-+-1 explicit
+//     yaw_factor) - NOT a MotorDefRaw (roll_fac, pitch_fac) table like
+//     octa's own V. Same real non-round 0.7981f/1.0000f literals as
+//     quad's V: (45,0.7981f,1) (-45,-0.7981f,7) (-135,1.0000f,5)
+//     (135,-1.0000f,3) (-45,0.7981f,8) (45,-0.7981f,2) (135,1.0000f,4)
+//     (-135,-1.0000f,6).
+//   H (1028-1040) - upstream's own comment: "same as X but motors spin in
+//     opposite directions": (45,CW,1) (-45,CCW,7) (-135,CW,5) (135,CCW,3)
+//     (-45,CW,8) (45,CCW,2) (135,CW,4) (-135,CCW,6).
+//   CW_X (1050-1062): (45,CCW,1) (45,CW,2) (135,CW,3) (135,CCW,4)
+//     (-135,CCW,5) (-135,CW,6) (-45,CW,7) (-45,CCW,8).
+//   BF_X (1069-1081) - upstream's own comment: betaflight octa-quad X
+//     order using two 4-in-1 ESCs: (135,CW,3) (45,CCW,1) (-135,CCW,5)
+//     (-45,CW,7) (135,CCW,4) (45,CW,2) (-135,CW,6) (-45,CCW,8).
+//   BF_X_REV (1085-1097) - same table as BF_X with every yaw_factor
+//     sign-flipped, matching quad's own BfX/BfXRev sign-negation
+//     relationship: (135,CCW,3) (45,CW,1) (-135,CW,5) (-45,CCW,7)
+//     (135,CW,4) (45,CCW,2) (-135,CCW,6) (-45,CW,8).
+//
+// THE REAL X8 CO-ROTATING PITFALL (X_COR/CW_X_COR, lines 1102-1134) -
+// copter-rust's own COP-005 investigation found this first (see that
+// ticket's 2026-08-25 note, finding #2/#3); re-verified independently
+// here against the real source rather than trusted from that note. Both
+// cases call add_motors() with their own 8-motor MotorDef table, THEN
+// apply a real, SEPARATE per-motor rescaling `for` loop AFTER the table
+// is applied - ported below as its own explicit second step, exactly
+// mirroring this real two-step structure, NOT folded into the table:
+//   X_COR (1102-1120): table is IDENTICAL to X's own table above except
+//     motors at testing_order 8/2/4/6 use CW/CCW/CW/CCW yaw instead of
+//     CCW/CW/CCW/CW (re-verify directly, do not assume it equals X's
+//     table verbatim) - (45,CCW,1) (-45,CW,7) (-135,CCW,5) (135,CW,3)
+//     (-45,CW,8) (45,CCW,2) (135,CW,4) (-135,CCW,6). THEN:
+//     `for (uint8_t i=0; i<4; i++)` - scales array indices 0,1,2,3 (the
+//     FIRST FOUR motors in array/table order) by
+//     AP_MOTORS_FRAME_OCTAQUAD_COROTATING_SCALE_FACTOR.
+//   CW_X_COR (1122-1134): table is (45,CCW,1) (45,CCW,2) (135,CW,3)
+//     (135,CW,4) (-135,CCW,5) (-135,CCW,6) (-45,CW,7) (-45,CW,8). THEN:
+//     `for (uint8_t i=0; i<8; i+=2)` - scales array indices 0,2,4,6
+//     (EVERY OTHER motor, starting from index 0) by the SAME scale
+//     constant - a genuinely DIFFERENT subset of motors from X_COR's own
+//     first-four, re-verified directly against the real source (not
+//     assumed to match).
+//   BOTH loops scale ALL FOUR factor arrays for every affected index -
+//     `_roll_factor[i] *=`, `_pitch_factor[i] *=`, `_yaw_factor[i] *=`,
+//     AND `_throttle_factor[i] *=` - re-verified directly; neither
+//     X_COR's nor CW_X_COR's own MotorDef table sets an explicit
+//     throttle_factor (MotorDef has no such field - only add_motor_raw's
+//     own default parameter does), so the value the throttle scaling
+//     multiplies is add_motor_raw's own default `throttle_factor=1.0f`
+//     (CCP-001) for every affected motor - i.e. the scaled result is
+//     exactly `kOctaquadCorotatingScaleFactor` itself for throttle, not
+//     some other pre-existing value. A port that only scaled
+//     roll/pitch/yaw and left throttle untouched would silently under-
+//     mix the top rotor layer's real throttle contribution - confirmed
+//     this is NOT the case here, and motors_matrix_test.cpp tests this
+//     directly for both frame types.
+//
+// THE REAL FLOAT-VS-DOUBLE PITFALL, DESIGN DECISION MADE HERE:
+// AP_MOTORS_FRAME_OCTAQUAD_COROTATING_SCALE_FACTOR is defined in
+// AP_Motors_config.h (re-verified directly against the pinned worktree,
+// lines 64-66) as `#define AP_MOTORS_FRAME_OCTAQUAD_COROTATING_SCALE_
+// FACTOR 0.9` - a bare, UNSUFFIXED floating-point literal, confirmed NOT
+// `0.9f` in the real header. Upstream's real effective numeric behavior
+// is nonetheless `float`-precision `0.9f * factor`, because upstream's
+// ENTIRE build applies `-fsingle-precision-constant`, which coerces every
+// bare floating literal in the translation unit to `float` regardless of
+// its own spelling - this is exactly the pitfall copter-rust's own
+// COP-005 investigation found and wrote up as ADR-0011 ("applies to
+// every bare literal in the tree, not just this one"). THIS PORT'S OWN
+// `ap-motors` module does NOT link `fwcpp_upstream_flags` (re-verified
+// directly against modules/ap-motors/CMakeLists.txt - still true as of
+// this ticket, unchanged since CCP-001), so a bare unsuffixed `0.9`
+// written in this port's own code would compute in `double` precision
+// and produce a result numerically DIFFERENT (by a few ULP after the
+// narrowing store into a `float` factor array) from upstream's real
+// `float`-precision `0.9f * factor` - the exact discrepancy COP-005
+// measured ("two ulp"). DECISION MADE (the ticket's own recommended,
+// simplest fix, adopted as-is after independent judgment - the
+// alternative of linking `fwcpp_upstream_flags` into this module was
+// considered and rejected: it would coerce EVERY bare literal in this
+// entire header, not just this one constant, which is a much larger and
+// less-targeted behavior change than this ticket's own narrow scope
+// warrants, for a module whose only other literals are already all
+// explicitly float-suffixed): `kOctaquadCorotatingScaleFactor` below is
+// defined as an explicit `0.9f` `float` literal - matching this whole
+// file's own already-established convention of explicit `f`-suffixed
+// literals everywhere else (e.g. V's own `0.7981f`) - which reproduces
+// upstream's real EFFECTIVE numeric behavior without needing to change
+// `ap-motors`'s own CMake link configuration. motors_matrix_test.cpp
+// verifies this decision was correct with a test that compares the
+// scaled result against a reference computed with an explicitly
+// `float`-typed `0.9f * value` multiplication, tight enough (exact
+// equality) to catch a few-ULP discrepancy, not just "approximately 0.9
+// times the original" (see that file's own comments).
+//
+// Real upstream also has a compile-time check immediately before X_COR's
+// own case body (line 1102, re-verified directly):
+// `static_assert(AP_MOTORS_FRAME_OCTAQUAD_COROTATING_SCALE_FACTOR < 1.0,
+// "...")` - ported below as a `static_assert` on `kOctaquadCorotating
+// ScaleFactor` at namespace scope, since it is a real `constexpr` this
+// port can assert against directly (cheap, real, worth keeping exactly
+// as upstream does).
+//
+// NOT ported (same disclosed omission class as setup_quad_matrix's/
+// setup_hexa_matrix's/setup_octa_matrix's own _mav_type writes above):
+// the real upstream also sets `_mav_type = MAV_TYPE_OCTOROTOR;`
+// unconditionally at the top of setup_octaquad_matrix (line 975, before
+// the switch) - pure MAVLink/GCS metadata, out of scope for the same
+// reason as the other three _mav_type writes.
+//
 // DEFERRED FUTURE PHASES (named explicitly, not silently omitted):
 //   1. Remaining frame tables - setup_quad_matrix (line 576) is DONE as of
-//      CCP-002, setup_hexa_matrix (line 775) is DONE as of CCP-003, and
-//      setup_octa_matrix (line 854) is DONE as of CCP-004 (see
-//      "CCP-002 ADDITION"/"CCP-003 ADDITION"/"CCP-004 ADDITION" above);
-//      the REMAINING FOUR frame-class setup functions -
-//      setup_octaquad_matrix, setup_dodecahexa_matrix, setup_y6_matrix,
+//      CCP-002, setup_hexa_matrix (line 775) is DONE as of CCP-003,
+//      setup_octa_matrix (line 854) is DONE as of CCP-004, and
+//      setup_octaquad_matrix (line 973) is DONE as of CCP-005 (see
+//      "CCP-002 ADDITION"/"CCP-003 ADDITION"/"CCP-004 ADDITION"/
+//      "CCP-005 ADDITION" above); the REMAINING THREE frame-class setup
+//      functions - setup_dodecahexa_matrix, setup_y6_matrix,
 //      setup_deca_matrix - and setup_motors' own dispatcher (which
 //      chooses among all seven by frame CLASS - motor_frame_class, see
 //      CCP-003's own enum-sharing investigation above - remaining
-//      upstream lines across those four plus the dispatcher) remain
+//      upstream lines across those three plus the dispatcher) remain
 //      future phases, named explicitly here so none is silently folded
 //      into another ticket's scope. A future phase MUST independently
-//      re-verify (not blindly trust) copter-rust's own COP-005 findings:
-//        a. Y6's `default:` switch branch is productive - it answers for
-//           24 of the real 64 upstream frame configurations. A naive
-//           switch-by-switch transcription silently drops all 24.
-//        b. The co-rotating X8 frames (X_COR/CW_X_COR) scale their top
-//           rotor layer by 0.9 AFTER the frame table is applied, and
-//           disagree about which motors that applies to (X_COR: first
-//           four; CW_X_COR: every other one of eight).
-//        c. That 0.9 is a real `float` literal (upstream builds with
-//           -fsingle-precision-constant). THIS PORT'S OWN root
-//           CMakeLists.txt already defines an `fwcpp_upstream_flags`
-//           INTERFACE target carrying -fsingle-precision-constant
-//           (confirmed present, read directly) - so a future frame-table
-//           module that links it as PRIVATE (matching ap-math/ap-common/
-//           ap-filter's own established precedent, see those modules'
-//           CMakeLists.txt) inherits the correct literal-typing behavior
-//           for free. NOT independently re-confirmed end-to-end against a
-//           compiled 0.9-scaling frame here (this ticket has no X8 frame
-//           code to compile yet) - the future phase must still confirm it
-//           empirically once that code exists, not just trust this note.
+//      re-verify (not blindly trust) copter-rust's own COP-005 finding
+//      that Y6's `default:` switch branch is productive - it answers for
+//      24 of the real 64 upstream frame configurations. A naive
+//      switch-by-switch transcription silently drops all 24. (COP-005's
+//      other two findings - the X8 co-rotating scaling and its real
+//      float-vs-double pitfall - are now independently re-verified and
+//      resolved by THIS ticket, CCP-005, above; not deferred further.)
 //   2. Output stage (output_to_motors, output_armed_stabilizing,
 //      check_for_failed_motor, thrust_compensation, disable_yaw_torque) -
 //      needs real thrust-linearization/battery-compensation infrastructure
@@ -463,12 +608,17 @@
 //      accessors/setters not needed by this ticket's own core scope; add
 //      only when a real future test/caller needs one.
 //
-// THIS TICKET'S OWN LITERALS ARE ALL EXPLICITLY float-SUFFIXED (0.5f,
-// 0.0f) IN BOTH UPSTREAM AND HERE - unlike the frame tables' bare `0.9`,
-// -fsingle-precision-constant has no observable effect on this file's own
-// arithmetic, so this module does not link fwcpp_upstream_flags (matching
-// ap-compass/ap-gps's own precedent of not linking it for header-only
-// INTERFACE modules with no ambiguously-typed literals).
+// LITERAL-TYPING NOTE (updated for CCP-005): every literal in this file
+// EXCEPT `kOctaquadCorotatingScaleFactor` is already explicitly
+// float-suffixed (0.5f, 0.0f, 0.7981f, ...) in both upstream and here, so
+// -fsingle-precision-constant has no observable effect on the REST of
+// this file's own arithmetic. `kOctaquadCorotatingScaleFactor` is the one
+// exception, and is handled by writing it as an explicit `0.9f` literal
+// directly (see "THE REAL FLOAT-VS-DOUBLE PITFALL" above) rather than by
+// linking `fwcpp_upstream_flags` - so this module still does not link
+// that target, matching ap-compass/ap-gps's own precedent of not linking
+// it for header-only INTERFACE modules with no literal that actually
+// needs it.
 
 #include <array>
 #include <cmath>
@@ -490,6 +640,23 @@ inline constexpr std::size_t kMaxNumMotors = 32;
 // float-typed yaw_factor position.
 inline constexpr float kYawFactorCw = -1.0f;
 inline constexpr float kYawFactorCcw = 1.0f;
+
+// CCP-005: AP_MOTORS_FRAME_OCTAQUAD_COROTATING_SCALE_FACTOR
+// (AP_Motors_config.h lines 64-66, re-verified directly: `#define
+// AP_MOTORS_FRAME_OCTAQUAD_COROTATING_SCALE_FACTOR 0.9`, a bare
+// UNSUFFIXED double literal in the real header) - ported here as an
+// explicit `0.9f` `float` literal, NOT the bare `0.9` upstream's own
+// header spells it as. See file banner's "THE REAL FLOAT-VS-DOUBLE
+// PITFALL" section for the full design-decision writeup: upstream's real
+// EFFECTIVE behavior is float-precision only because its entire build
+// applies -fsingle-precision-constant, and this port's own ap-motors
+// module does not link the fwcpp_upstream_flags target that carries that
+// flag, so an explicit `f` suffix here is what reproduces upstream's real
+// numeric result rather than silently computing in double precision.
+inline constexpr float kOctaquadCorotatingScaleFactor = 0.9f;
+static_assert(kOctaquadCorotatingScaleFactor < 1.0f,
+              "kOctaquadCorotatingScaleFactor must be less than 1.0 - matches upstream's own real "
+              "static_assert on AP_MOTORS_FRAME_OCTAQUAD_COROTATING_SCALE_FACTOR (AP_MotorsMatrix.cpp line 1102)");
 
 // MotorsMatrix - port of AP_MotorsMatrix's core per-motor factor storage
 // and arithmetic (CCP-001). See file banner for exactly what upstream
@@ -546,7 +713,17 @@ public:
     // setup_octa_matrix(FrameType) below - see file banner's
     // "CCP-004 ADDITION" for the full investigation. Named/shaped per
     // this port's own house style for small state enums (e.g.
-    // CalibrationState, fwcpp/airspeed/airspeed_sensor.hpp).
+    // CalibrationState, fwcpp/airspeed/airspeed_sensor.hpp). CCP-005
+    // added EXACTLY TWO new enumerators, `XCor`/`CwXCor` (appended below
+    // after `I`) - the only two of setup_octaquad_matrix's nine real
+    // frame types not already present; the other seven (PLUS/X/V/H/
+    // CW_X/BF_X/BF_X_REV) were re-confirmed already present from
+    // CCP-002's/CCP-004's own work and are reused verbatim by
+    // setup_octaquad_matrix(FrameType) below - see file banner's
+    // "CCP-005 ADDITION" for the full investigation. `XCor`/`CwXCor`
+    // follow this enum's own established abbreviation convention exactly
+    // (each upstream underscore-word boundary becomes a capitalized run
+    // with no separator, e.g. `CwX` for CW_X) applied to X_COR/CW_X_COR.
     enum class FrameType : std::uint8_t {
         Plus,
         X,
@@ -561,6 +738,8 @@ public:
         PlusRev,
         Y4,
         I,
+        XCor,
+        CwXCor,
     };
 
     // Upstream AP_Motors::initialised_ok()/set_initialised_ok() (see file
@@ -1102,6 +1281,211 @@ public:
             // upstream's own real default case exactly (see file banner:
             // this is the SIMPLE kind of default, not setup_y6_matrix's
             // own productive one).
+            return false;
+        }
+        return true;
+    }
+
+    // setup_octaquad_matrix - CCP-005 port of upstream
+    // AP_MotorsMatrix::setup_octaquad_matrix (AP_MotorsMatrix.cpp line
+    // 973). Every case's angle/factor/testing-order values are
+    // transcribed exactly from the real source - see file banner's
+    // "CCP-005 ADDITION" for the full case-list/default-branch/enum
+    // investigation. Takes the SAME FrameType parameter type as
+    // setup_quad_matrix/setup_hexa_matrix/setup_octa_matrix above; reuses
+    // Plus/X/V/H/CwX/BfX/BfXRev verbatim (all seven already existed) and
+    // introduces exactly two new enumerators, XCor/CwXCor (see file
+    // banner). XCor/CwXCor additionally apply a real, separate per-motor
+    // rescaling step AFTER their own add_motors() call - see file
+    // banner's "THE REAL X8 CO-ROTATING PITFALL" for the exact motor-
+    // index subsets and the float-vs-double design decision behind
+    // kOctaquadCorotatingScaleFactor. Returns false (upstream's own real
+    // return value) for any FrameType not handled below, matching every
+    // other setup_*_matrix method's own real "not supported" semantics
+    // exactly.
+    [[nodiscard]] bool setup_octaquad_matrix(FrameType frame_type) {
+        frame_class_string_ = "OCTAQUAD";
+        switch (frame_type) {
+        case FrameType::Plus: {
+            frame_type_string_ = "PLUS";
+            static constexpr MotorDef motors[] = {
+                {0.0f, kYawFactorCcw, 1},
+                {-90.0f, kYawFactorCw, 7},
+                {180.0f, kYawFactorCcw, 5},
+                {90.0f, kYawFactorCw, 3},
+                {-90.0f, kYawFactorCcw, 8},
+                {0.0f, kYawFactorCw, 2},
+                {90.0f, kYawFactorCcw, 4},
+                {180.0f, kYawFactorCw, 6},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        case FrameType::X: {
+            frame_type_string_ = "X";
+            static constexpr MotorDef motors[] = {
+                {45.0f, kYawFactorCcw, 1},
+                {-45.0f, kYawFactorCw, 7},
+                {-135.0f, kYawFactorCcw, 5},
+                {135.0f, kYawFactorCw, 3},
+                {-45.0f, kYawFactorCcw, 8},
+                {45.0f, kYawFactorCw, 2},
+                {135.0f, kYawFactorCcw, 4},
+                {-135.0f, kYawFactorCw, 6},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        case FrameType::V: {
+            // Real MotorDef table (angle-derived roll/pitch, non-+-1
+            // explicit yaw_factor) - same SHAPE as setup_quad_matrix's
+            // own V case, NOT a MotorDefRaw table like setup_octa_matrix's
+            // own V (see file banner's "CCP-005 ADDITION").
+            frame_type_string_ = "V";
+            static constexpr MotorDef motors[] = {
+                {45.0f, 0.7981f, 1},
+                {-45.0f, -0.7981f, 7},
+                {-135.0f, 1.0000f, 5},
+                {135.0f, -1.0000f, 3},
+                {-45.0f, 0.7981f, 8},
+                {45.0f, -0.7981f, 2},
+                {135.0f, 1.0000f, 4},
+                {-135.0f, -1.0000f, 6},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        case FrameType::H: {
+            // H frame set-up - same as X but motors spin in opposite
+            // directions.
+            frame_type_string_ = "H";
+            static constexpr MotorDef motors[] = {
+                {45.0f, kYawFactorCw, 1},
+                {-45.0f, kYawFactorCcw, 7},
+                {-135.0f, kYawFactorCw, 5},
+                {135.0f, kYawFactorCcw, 3},
+                {-45.0f, kYawFactorCw, 8},
+                {45.0f, kYawFactorCcw, 2},
+                {135.0f, kYawFactorCw, 4},
+                {-135.0f, kYawFactorCcw, 6},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        case FrameType::CwX: {
+            frame_type_string_ = "CW_X";
+            static constexpr MotorDef motors[] = {
+                {45.0f, kYawFactorCcw, 1},
+                {45.0f, kYawFactorCw, 2},
+                {135.0f, kYawFactorCw, 3},
+                {135.0f, kYawFactorCcw, 4},
+                {-135.0f, kYawFactorCcw, 5},
+                {-135.0f, kYawFactorCw, 6},
+                {-45.0f, kYawFactorCw, 7},
+                {-45.0f, kYawFactorCcw, 8},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        case FrameType::BfX: {
+            // BF/X cinelifters using two 4-in-1 ESCs are quite common -
+            // see: https://fpvfrenzy.com/betaflight-motor-order/
+            frame_type_string_ = "BF_X";
+            static constexpr MotorDef motors[] = {
+                {135.0f, kYawFactorCw, 3},
+                {45.0f, kYawFactorCcw, 1},
+                {-135.0f, kYawFactorCcw, 5},
+                {-45.0f, kYawFactorCw, 7},
+                {135.0f, kYawFactorCcw, 4},
+                {45.0f, kYawFactorCw, 2},
+                {-135.0f, kYawFactorCw, 6},
+                {-45.0f, kYawFactorCcw, 8},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        case FrameType::BfXRev: {
+            // betaflight octa quad X order, reversed motors.
+            frame_type_string_ = "X_REV";
+            static constexpr MotorDef motors[] = {
+                {135.0f, kYawFactorCcw, 3},
+                {45.0f, kYawFactorCw, 1},
+                {-135.0f, kYawFactorCw, 5},
+                {-45.0f, kYawFactorCcw, 7},
+                {135.0f, kYawFactorCw, 4},
+                {45.0f, kYawFactorCcw, 2},
+                {-135.0f, kYawFactorCcw, 6},
+                {-45.0f, kYawFactorCw, 8},
+            };
+            add_motors(motors, 8);
+            break;
+        }
+        case FrameType::XCor: {
+            // Real X8 co-rotating pitfall (see file banner's "THE REAL
+            // X8 CO-ROTATING PITFALL"): add_motors() over this frame's
+            // own table, THEN a SEPARATE rescaling step over array
+            // indices 0,1,2,3 (the FIRST FOUR motors) - a genuinely
+            // different subset from CwXCor's own below.
+            frame_type_string_ = "X_COR";
+            static constexpr MotorDef motors[] = {
+                {45.0f, kYawFactorCcw, 1},
+                {-45.0f, kYawFactorCw, 7},
+                {-135.0f, kYawFactorCcw, 5},
+                {135.0f, kYawFactorCw, 3},
+                {-45.0f, kYawFactorCw, 8},
+                {45.0f, kYawFactorCcw, 2},
+                {135.0f, kYawFactorCw, 4},
+                {-135.0f, kYawFactorCcw, 6},
+            };
+            add_motors(motors, 8);
+            // Scale top layer to prevent a beat frequency between layers
+            // in co-rotating setups - real upstream applies this to ALL
+            // FOUR factor arrays, including throttle (whose value here is
+            // add_motor_raw's own default throttle_factor=1.0f, since
+            // this table never sets one explicitly).
+            for (std::uint8_t i = 0; i < 4; ++i) {
+                roll_factor_[i] *= kOctaquadCorotatingScaleFactor;
+                pitch_factor_[i] *= kOctaquadCorotatingScaleFactor;
+                yaw_factor_[i] *= kOctaquadCorotatingScaleFactor;
+                throttle_factor_[i] *= kOctaquadCorotatingScaleFactor;
+            }
+            break;
+        }
+        case FrameType::CwXCor: {
+            // Real X8 co-rotating pitfall (see file banner): add_motors()
+            // over this frame's own table, THEN a SEPARATE rescaling step
+            // over array indices 0,2,4,6 (EVERY OTHER motor, starting
+            // from index 0) - a genuinely different subset from XCor's
+            // own first-four above.
+            frame_type_string_ = "CW_X_COR";
+            static constexpr MotorDef motors[] = {
+                {45.0f, kYawFactorCcw, 1},
+                {45.0f, kYawFactorCcw, 2},
+                {135.0f, kYawFactorCw, 3},
+                {135.0f, kYawFactorCw, 4},
+                {-135.0f, kYawFactorCcw, 5},
+                {-135.0f, kYawFactorCcw, 6},
+                {-45.0f, kYawFactorCw, 7},
+                {-45.0f, kYawFactorCw, 8},
+            };
+            add_motors(motors, 8);
+            // Scale top layer - same mechanism as XCor above, but the
+            // EVEN-INDEXED subset (0,2,4,6), not the first four. All four
+            // factor arrays scaled, including throttle (see XCor's own
+            // comment above for why throttle's pre-scale value is 1.0f).
+            for (std::uint8_t i = 0; i < 8; i += 2) {
+                roll_factor_[i] *= kOctaquadCorotatingScaleFactor;
+                pitch_factor_[i] *= kOctaquadCorotatingScaleFactor;
+                yaw_factor_[i] *= kOctaquadCorotatingScaleFactor;
+                throttle_factor_[i] *= kOctaquadCorotatingScaleFactor;
+            }
+            break;
+        }
+        default:
+            // octaquad frame class does not support this frame type -
+            // matches upstream's own real default case exactly (see file
+            // banner: this is the SIMPLE kind of default, not
+            // setup_y6_matrix's own productive one).
             return false;
         }
         return true;

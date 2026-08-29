@@ -1038,3 +1038,337 @@ TEST_CASE("setup_octa_matrix: PLUS reuses the SAME FrameType enumerator as setup
         REQUIRE(octa.motor_enabled(i));
     }
 }
+
+// =======================================================================
+// CCP-005: setup_octaquad_matrix - every real in-scope frame type,
+// checked against hand-computed values from the real upstream angle/
+// factor inputs (AP_MotorsMatrix.cpp lines 973-1140). All seven "plain"
+// frame types (PLUS/X/V/H/CW_X/BF_X/BF_X_REV) are angle-based MotorDef
+// tables - including V, which (unlike setup_octa_matrix's own raw-factor
+// V) has the SAME shape as setup_quad_matrix's own V: ordinary
+// angle-derived roll/pitch with a real, non-+-1 explicit yaw_factor - so
+// checkAngleFrame() above (which compares yaw_factor by exact value, not
+// just +-1) covers all seven directly. XCor/CwXCor are the real X8
+// co-rotating pitfall this ticket's own acceptance criteria singles out:
+// each applies a real, separate rescaling step to a genuinely different
+// subset of the eight motors AFTER its own add_motors() table is
+// applied - tested explicitly below, including throttle_factor (easy to
+// silently miss - MotorDef has no throttle field, so the pre-scale value
+// comes from add_motor_raw's own default 1.0f) and the real float-vs-
+// double pitfall in kOctaquadCorotatingScaleFactor itself.
+// =======================================================================
+
+TEST_CASE("setup_octaquad_matrix: PLUS matches hand-computed angle/yaw/test_order", "[motors][setup_octaquad_matrix][plus]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(m.frame_class_string() == "OCTAQUAD");
+    REQUIRE(m.frame_type_string() == "PLUS");
+    const AngleMotor expected[] = {
+        {0.0f, kYawFactorCcw, 1},   {-90.0f, kYawFactorCw, 7},  {180.0f, kYawFactorCcw, 5}, {90.0f, kYawFactorCw, 3},
+        {-90.0f, kYawFactorCcw, 8}, {0.0f, kYawFactorCw, 2},    {90.0f, kYawFactorCcw, 4},  {180.0f, kYawFactorCw, 6},
+    };
+    checkAngleFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octaquad_matrix: X matches hand-computed angle/yaw/test_order", "[motors][setup_octaquad_matrix][x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::X));
+    REQUIRE(m.frame_type_string() == "X");
+    const AngleMotor expected[] = {
+        {45.0f, kYawFactorCcw, 1},  {-45.0f, kYawFactorCw, 7},   {-135.0f, kYawFactorCcw, 5}, {135.0f, kYawFactorCw, 3},
+        {-45.0f, kYawFactorCcw, 8}, {45.0f, kYawFactorCw, 2},    {135.0f, kYawFactorCcw, 4},  {-135.0f, kYawFactorCw, 6},
+    };
+    checkAngleFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octaquad_matrix: V uses the real non-angle-derived yaw factors exactly, same MotorDef shape as "
+          "setup_quad_matrix's own V (not setup_octa_matrix's own raw-factor V)",
+          "[motors][setup_octaquad_matrix][v]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::V));
+    REQUIRE(m.frame_type_string() == "V");
+    const AngleMotor expected[] = {
+        {45.0f, 0.7981f, 1},  {-45.0f, -0.7981f, 7}, {-135.0f, 1.0000f, 5}, {135.0f, -1.0000f, 3},
+        {-45.0f, 0.7981f, 8}, {45.0f, -0.7981f, 2},  {135.0f, 1.0000f, 4},  {-135.0f, -1.0000f, 6},
+    };
+    checkAngleFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octaquad_matrix: H matches hand-computed angle/yaw/test_order", "[motors][setup_octaquad_matrix][h]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::H));
+    REQUIRE(m.frame_type_string() == "H");
+    const AngleMotor expected[] = {
+        {45.0f, kYawFactorCw, 1},  {-45.0f, kYawFactorCcw, 7},  {-135.0f, kYawFactorCw, 5}, {135.0f, kYawFactorCcw, 3},
+        {-45.0f, kYawFactorCw, 8}, {45.0f, kYawFactorCcw, 2},   {135.0f, kYawFactorCw, 4},  {-135.0f, kYawFactorCcw, 6},
+    };
+    checkAngleFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octaquad_matrix: CW_X matches hand-computed angle/yaw/test_order", "[motors][setup_octaquad_matrix][cw_x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::CwX));
+    REQUIRE(m.frame_type_string() == "CW_X");
+    const AngleMotor expected[] = {
+        {45.0f, kYawFactorCcw, 1},   {45.0f, kYawFactorCw, 2},   {135.0f, kYawFactorCw, 3},  {135.0f, kYawFactorCcw, 4},
+        {-135.0f, kYawFactorCcw, 5}, {-135.0f, kYawFactorCw, 6}, {-45.0f, kYawFactorCw, 7},  {-45.0f, kYawFactorCcw, 8},
+    };
+    checkAngleFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octaquad_matrix: BF_X matches hand-computed angle/yaw/test_order", "[motors][setup_octaquad_matrix][bf_x]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::BfX));
+    REQUIRE(m.frame_type_string() == "BF_X");
+    const AngleMotor expected[] = {
+        {135.0f, kYawFactorCw, 3},  {45.0f, kYawFactorCcw, 1},  {-135.0f, kYawFactorCcw, 5}, {-45.0f, kYawFactorCw, 7},
+        {135.0f, kYawFactorCcw, 4}, {45.0f, kYawFactorCw, 2},   {-135.0f, kYawFactorCw, 6},  {-45.0f, kYawFactorCcw, 8},
+    };
+    checkAngleFrame(m, expected, 8);
+}
+
+TEST_CASE("setup_octaquad_matrix: BF_X_REV is BF_X with every yaw_factor sign-flipped, matching PLUS/PLUSREV's own "
+          "sign-negation relationship",
+          "[motors][setup_octaquad_matrix][bf_x_rev]") {
+    MotorsMatrix bf_x;
+    MotorsMatrix bf_x_rev;
+    REQUIRE(bf_x.setup_octaquad_matrix(MotorsMatrix::FrameType::BfX));
+    REQUIRE(bf_x_rev.setup_octaquad_matrix(MotorsMatrix::FrameType::BfXRev));
+    REQUIRE(bf_x_rev.frame_type_string() == "X_REV");
+    for (std::uint8_t i = 0; i < 8; ++i) {
+        INFO("motor index " << static_cast<int>(i));
+        REQUIRE(bf_x_rev.roll_factor(i) == Approx(bf_x.roll_factor(i)));
+        REQUIRE(bf_x_rev.pitch_factor(i) == Approx(bf_x.pitch_factor(i)));
+        REQUIRE(bf_x_rev.yaw_factor(i) == Approx(-bf_x.yaw_factor(i)));
+        REQUIRE(bf_x_rev.test_order(i) == bf_x.test_order(i));
+    }
+}
+
+TEST_CASE("setup_octaquad_matrix: X_COR scales motors 0-3 by the real co-rotating factor and leaves motors 4-7 "
+          "genuinely unscaled",
+          "[motors][setup_octaquad_matrix][x_cor]") {
+    // X_COR's own real table (AP_MotorsMatrix.cpp lines 1104-1113) is
+    // angle-based, hand-computed here independently of
+    // motors_matrix.hpp's own implementation, then compared BEFORE
+    // scaling (motors 4-7) and AFTER scaling (motors 0-3, multiplied by
+    // kOctaquadCorotatingScaleFactor) - proving the real SUBSET
+    // distinction directly (genuinely different values, not "close to"
+    // something), not merely that "some scaling happened somewhere".
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::XCor));
+    REQUIRE(m.frame_class_string() == "OCTAQUAD");
+    REQUIRE(m.frame_type_string() == "X_COR");
+
+    const float angles[] = {45.0f, -45.0f, -135.0f, 135.0f, -45.0f, 45.0f, 135.0f, -135.0f};
+    const float yaws[] = {kYawFactorCcw, kYawFactorCw, kYawFactorCcw, kYawFactorCw,
+                           kYawFactorCw,  kYawFactorCcw, kYawFactorCw, kYawFactorCcw};
+
+    for (std::uint8_t i = 0; i < 8; ++i) {
+        INFO("motor index " << static_cast<int>(i));
+        const float unscaled_roll = std::cos(fwcpp::math::radians(angles[i] + 90.0f));
+        const float unscaled_pitch = std::cos(fwcpp::math::radians(angles[i]));
+        if (i < 4) {
+            // Scaled subset (first four) - genuinely DIFFERENT from the
+            // plain angle-derived value, not merely close to it.
+            REQUIRE(m.roll_factor(i) == Approx(unscaled_roll * kOctaquadCorotatingScaleFactor).margin(1e-5));
+            REQUIRE(m.pitch_factor(i) == Approx(unscaled_pitch * kOctaquadCorotatingScaleFactor).margin(1e-5));
+            REQUIRE(m.yaw_factor(i) == Approx(yaws[i] * kOctaquadCorotatingScaleFactor).margin(1e-6));
+            REQUIRE(m.roll_factor(i) != Approx(unscaled_roll).margin(1e-4));
+            REQUIRE(m.pitch_factor(i) != Approx(unscaled_pitch).margin(1e-4));
+        } else {
+            // Unscaled subset (last four) - the plain angle-derived value,
+            // untouched by the co-rotating rescale loop.
+            REQUIRE(m.roll_factor(i) == Approx(unscaled_roll).margin(1e-4));
+            REQUIRE(m.pitch_factor(i) == Approx(unscaled_pitch).margin(1e-4));
+            REQUIRE(m.yaw_factor(i) == Approx(yaws[i]).margin(1e-6));
+        }
+    }
+}
+
+TEST_CASE("setup_octaquad_matrix: CW_X_COR scales the EVEN-index motors (0,2,4,6) and leaves the ODD-index motors "
+          "(1,3,5,7) genuinely unscaled - the mirror-image pattern from X_COR's own first-four",
+          "[motors][setup_octaquad_matrix][cw_x_cor]") {
+    // CW_X_COR's own real table (AP_MotorsMatrix.cpp lines 1123-1132) -
+    // re-verified directly to use a genuinely DIFFERENT motor subset from
+    // X_COR's own (every-other index, not first-four).
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::CwXCor));
+    REQUIRE(m.frame_class_string() == "OCTAQUAD");
+    REQUIRE(m.frame_type_string() == "CW_X_COR");
+
+    const float angles[] = {45.0f, 45.0f, 135.0f, 135.0f, -135.0f, -135.0f, -45.0f, -45.0f};
+    const float yaws[] = {kYawFactorCcw, kYawFactorCcw, kYawFactorCw,  kYawFactorCw,
+                           kYawFactorCcw, kYawFactorCcw, kYawFactorCw, kYawFactorCw};
+
+    for (std::uint8_t i = 0; i < 8; ++i) {
+        INFO("motor index " << static_cast<int>(i));
+        const float unscaled_roll = std::cos(fwcpp::math::radians(angles[i] + 90.0f));
+        const float unscaled_pitch = std::cos(fwcpp::math::radians(angles[i]));
+        if (i % 2 == 0) {
+            // Scaled subset (even indices) - genuinely DIFFERENT from the
+            // plain angle-derived value.
+            REQUIRE(m.roll_factor(i) == Approx(unscaled_roll * kOctaquadCorotatingScaleFactor).margin(1e-5));
+            REQUIRE(m.pitch_factor(i) == Approx(unscaled_pitch * kOctaquadCorotatingScaleFactor).margin(1e-5));
+            REQUIRE(m.yaw_factor(i) == Approx(yaws[i] * kOctaquadCorotatingScaleFactor).margin(1e-6));
+            REQUIRE(m.roll_factor(i) != Approx(unscaled_roll).margin(1e-4));
+            REQUIRE(m.pitch_factor(i) != Approx(unscaled_pitch).margin(1e-4));
+        } else {
+            // Unscaled subset (odd indices) - untouched by the rescale
+            // loop, the mirror image of X_COR's own even/first-four split.
+            REQUIRE(m.roll_factor(i) == Approx(unscaled_roll).margin(1e-4));
+            REQUIRE(m.pitch_factor(i) == Approx(unscaled_pitch).margin(1e-4));
+            REQUIRE(m.yaw_factor(i) == Approx(yaws[i]).margin(1e-6));
+        }
+    }
+}
+
+TEST_CASE("setup_octaquad_matrix: X_COR scales throttle_factor too, not just roll/pitch/yaw",
+          "[motors][setup_octaquad_matrix][x_cor][throttle]") {
+    // Neither X_COR's own MotorDef table nor add_motors() ever sets an
+    // explicit throttle_factor (MotorDef has no such field), so the
+    // PRE-scale value for every motor is add_motor_raw's own default
+    // (1.0f, CCP-001) - scaling it by kOctaquadCorotatingScaleFactor
+    // therefore leaves the scaled result EQUAL to the scale factor itself
+    // for motors 0-3, and untouched at 1.0f for motors 4-7. A port that
+    // forgot to scale throttle (only scaling roll/pitch/yaw) would fail
+    // this test by leaving motors 0-3 at 1.0f too - the exact silent bug
+    // the ticket's own acceptance criteria warns about.
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::XCor));
+    for (std::uint8_t i = 0; i < 4; ++i) {
+        INFO("motor index " << static_cast<int>(i));
+        REQUIRE(m.throttle_factor(i) == Approx(kOctaquadCorotatingScaleFactor));
+        REQUIRE(m.throttle_factor(i) != Approx(1.0f));
+    }
+    for (std::uint8_t i = 4; i < 8; ++i) {
+        INFO("motor index " << static_cast<int>(i));
+        REQUIRE(m.throttle_factor(i) == Approx(1.0f));
+    }
+}
+
+TEST_CASE("setup_octaquad_matrix: CW_X_COR scales throttle_factor too, on the even-index subset",
+          "[motors][setup_octaquad_matrix][cw_x_cor][throttle]") {
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::CwXCor));
+    for (std::uint8_t i = 0; i < 8; i += 2) {
+        INFO("motor index " << static_cast<int>(i));
+        REQUIRE(m.throttle_factor(i) == Approx(kOctaquadCorotatingScaleFactor));
+        REQUIRE(m.throttle_factor(i) != Approx(1.0f));
+    }
+    for (std::uint8_t i = 1; i < 8; i += 2) {
+        INFO("motor index " << static_cast<int>(i));
+        REQUIRE(m.throttle_factor(i) == Approx(1.0f));
+    }
+}
+
+TEST_CASE("setup_octaquad_matrix: X_COR's real 0.9 scale factor computes in float precision, not double - the "
+          "exact float-vs-double pitfall COP-005 found",
+          "[motors][setup_octaquad_matrix][x_cor][float_vs_double]") {
+    // Motor 0's real pre-scale pitch_factor is cos(radians(45deg)) as
+    // float (~0.70710677f). Independently verified (bit-level, outside
+    // this codebase) that multiplying THIS specific value by 0.9
+    // diverges by exactly one ULP between float-precision arithmetic
+    // (0.9f * value, both operands float) and double-precision
+    // arithmetic ((double)0.9 * value, narrowed back to float): the
+    // float path yields bit pattern 0x3f22eada, the double path
+    // 0x3f22eadb. A port whose scale constant is a bare, unsuffixed
+    // `0.9` literal (computing in double, since this module does not
+    // link fwcpp_upstream_flags - see motors_matrix.hpp's file banner)
+    // would produce the double-path bit pattern here: numerically valid-
+    // looking, but one ULP away from upstream's real EFFECTIVE value
+    // (upstream's own build applies -fsingle-precision-constant, forcing
+    // its bare `0.9` to behave as `float`). This test uses EXACT
+    // equality (no Approx()/.margin() - the file's own looser tolerance
+    // used for angle-derived trig comparisons elsewhere would be far too
+    // loose to catch a single ULP) against a reference computed with an
+    // explicitly float-typed `0.9f` multiplication, per the ticket's own
+    // explicit test requirement.
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::XCor));
+
+    const float unscaled_pitch = std::cos(fwcpp::math::radians(45.0f));  // motor 0's real pre-scale pitch_factor
+    const float float_reference = unscaled_pitch * 0.9f;                 // explicit float literal - the correct behavior
+    const float double_reference =
+        static_cast<float>(static_cast<double>(unscaled_pitch) * 0.9);  // bare double literal - the bug this test catches
+
+    // Sanity check on the test itself: these two references really are
+    // numerically DIFFERENT for this specific value (independently
+    // verified at the bit level) - if they were equal, this test would
+    // not actually be able to distinguish a correct float-precision
+    // implementation from a buggy double-precision one.
+    REQUIRE(float_reference != double_reference);
+
+    REQUIRE(m.pitch_factor(0) == float_reference);
+    REQUIRE(m.pitch_factor(0) != double_reference);
+}
+
+TEST_CASE("setup_octaquad_matrix: CW_X_COR's real 0.9 scale factor also computes in float precision, not double",
+          "[motors][setup_octaquad_matrix][cw_x_cor][float_vs_double]") {
+    // Same exact-equality technique as X_COR's own test above, applied to
+    // CW_X_COR's own motor 0 (also at a 45 degree angle, so the identical
+    // pre-scale pitch_factor value and identical one-ULP float-vs-double
+    // divergence applies).
+    MotorsMatrix m;
+    REQUIRE(m.setup_octaquad_matrix(MotorsMatrix::FrameType::CwXCor));
+
+    const float unscaled_pitch = std::cos(fwcpp::math::radians(45.0f));
+    const float float_reference = unscaled_pitch * 0.9f;
+    const float double_reference = static_cast<float>(static_cast<double>(unscaled_pitch) * 0.9);
+    REQUIRE(float_reference != double_reference);
+
+    REQUIRE(m.pitch_factor(0) == float_reference);
+    REQUIRE(m.pitch_factor(0) != double_reference);
+}
+
+TEST_CASE("setup_octaquad_matrix: returns true for every real in-scope frame type and sets frame_class_string to "
+          "OCTAQUAD",
+          "[motors][setup_octaquad_matrix]") {
+    const MotorsMatrix::FrameType all_types[] = {
+        MotorsMatrix::FrameType::Plus, MotorsMatrix::FrameType::X,      MotorsMatrix::FrameType::V,
+        MotorsMatrix::FrameType::H,    MotorsMatrix::FrameType::CwX,    MotorsMatrix::FrameType::BfX,
+        MotorsMatrix::FrameType::BfXRev, MotorsMatrix::FrameType::XCor, MotorsMatrix::FrameType::CwXCor,
+    };
+    for (const auto ft : all_types) {
+        MotorsMatrix m;
+        REQUIRE(m.setup_octaquad_matrix(ft));
+        REQUIRE(m.frame_class_string() == "OCTAQUAD");
+        // Every real frame type populates all eight motor slots 0-7.
+        for (std::uint8_t i = 0; i < 8; ++i) {
+            REQUIRE(m.motor_enabled(i));
+        }
+    }
+}
+
+TEST_CASE("setup_octaquad_matrix: an out-of-range frame type hits the real SIMPLE default branch and returns false",
+          "[motors][setup_octaquad_matrix][default]") {
+    // Confirms the real upstream default case ("octaquad frame class does
+    // not support this frame type; return false;") - the simple kind,
+    // same as every other already-ported setup_*_matrix's own default,
+    // NOT setup_y6_matrix's own productive default (a separate,
+    // later-ticket concern per COP-005).
+    MotorsMatrix m;
+    REQUIRE_FALSE(m.setup_octaquad_matrix(static_cast<MotorsMatrix::FrameType>(255)));
+    for (std::uint8_t i = 0; i < kMaxNumMotors; ++i) {
+        REQUIRE_FALSE(m.motor_enabled(i));
+    }
+}
+
+TEST_CASE("setup_octaquad_matrix: PLUS reuses the SAME FrameType enumerator as setup_quad_matrix's/"
+          "setup_hexa_matrix's/setup_octa_matrix's own PLUS, but yields octaquad-specific values",
+          "[motors][setup_octaquad_matrix][setup_quad_matrix][plus]") {
+    MotorsMatrix quad;
+    MotorsMatrix octaquad;
+    REQUIRE(quad.setup_quad_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(octaquad.setup_octaquad_matrix(MotorsMatrix::FrameType::Plus));
+    REQUIRE(quad.frame_class_string() == "QUAD");
+    REQUIRE(octaquad.frame_class_string() == "OCTAQUAD");
+    // Quad's PLUS motor 0 sits at 90 degrees (yaw CCW); octaquad's PLUS
+    // motor 0 sits at 0 degrees (yaw CCW too, but a different real angle
+    // and therefore different roll/pitch) - genuinely different real
+    // tables behind the same enumerator.
+    REQUIRE(quad.roll_factor(0) != Approx(octaquad.roll_factor(0)));
+    for (std::uint8_t i = 4; i < 8; ++i) {
+        REQUIRE_FALSE(quad.motor_enabled(i));
+        REQUIRE(octaquad.motor_enabled(i));
+    }
+}
