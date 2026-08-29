@@ -35,3 +35,6 @@ add_subdirectory(ap-motors)
 # kinematics - the first ticket of this effort's own AC_AttitudeControl
 # phase, following AP_Motors's completion (CCP-001 through CCP-017).
 add_subdirectory(ap-control)
+
+# ap-poscontrol (CCP-027): AC_PosControl port — slice 1 lean-angle helpers.
+add_subdirectory(ap-poscontrol)

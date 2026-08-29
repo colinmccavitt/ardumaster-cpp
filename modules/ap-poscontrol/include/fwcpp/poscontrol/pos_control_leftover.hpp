@@ -1,0 +1,96 @@
+#pragma once
+
+// CCP-027 completeness catalog for AC_PosControl (Plane-4.7.0).
+
+#include <cstddef>
+#include <cstdint>
+
+namespace fwcpp::poscontrol {
+
+enum class PortStatus : std::uint8_t {
+    kOnMain = 0,
+    kThisSlice = 1,
+    kRemaining = 2,
+    kOutOfScope = 3,
+};
+
+struct PosControlPortItem {
+    const char* name;
+    PortStatus status;
+    const char* note;
+};
+
+inline constexpr PosControlPortItem kPosControlCompleteness[] = {
+    {"POSCONTROL_* default constants", PortStatus::kThisSlice,
+     "pos_control_defaults.hpp mirrors AC_PosControl.h macros"},
+    {"get_lean_angle_max_rad", PortStatus::kThisSlice,
+     "LeanAngleMaxConfig + get_lean_angle_max_rad()"},
+    {"lean_angles_rad_to_accel_NED_mss", PortStatus::kThisSlice,
+     "lean_angles_rad_to_accel_ned_mss() free function"},
+    {"accel_NE_mss_to_lean_angles_rad", PortStatus::kThisSlice,
+     "accel_ne_mss_to_lean_angles_rad() free function"},
+    {"get_thrust_vector", PortStatus::kThisSlice, "get_thrust_vector() free function"},
+    {"leftover-complete catalog", PortStatus::kThisSlice, "this table"},
+    {"AC_PosControl class / constructor / singleton", PortStatus::kRemaining,
+     "needs AHRS, motors, attitude_control wiring"},
+    {"AP_Param var_info and gain subgroups", PortStatus::kRemaining,
+     "NE/D PID parameter tree"},
+    {"update_estimates", PortStatus::kRemaining, "AHRS NED estimate refresh"},
+    {"3D input_pos_NED_m path shaper", PortStatus::kRemaining, "terrain-aware 3D shaping"},
+    {"NE_set_max_speed_accel_* / NE limits", PortStatus::kRemaining,
+     "NeLimits derivation (see Rust pos_control_ne.rs)"},
+    {"NE input_* / init / relax / soften / stop", PortStatus::kRemaining,
+     "horizontal kinematic entry points"},
+    {"NE_update_controller", PortStatus::kRemaining, "horizontal PID loop body"},
+    {"D-axis vertical controller family", PortStatus::kRemaining,
+     "D_set_max_*, D_init_*, D_update_controller, throttle paths"},
+    {"Offsets / terrain / stopping point accessors", PortStatus::kRemaining,
+     "init_terrain, get_stopping_point_*, offset targets"},
+    {"write_log / HAL_LOGGING_ENABLED", PortStatus::kOutOfScope,
+     "no onboard logger in fw-cpp unit port"},
+    {"AP_SCRIPTING_ENABLED LUA offsets", PortStatus::kOutOfScope,
+     "scripting not in scope"},
+    {"ArduPlane get_fwd_pitch_is_limited", PortStatus::kOutOfScope,
+     "fixed-wing-only branch; copter-cpp module"},
+};
+
+[[nodiscard]] inline constexpr std::size_t pos_control_completeness_size() {
+    return sizeof(kPosControlCompleteness) / sizeof(kPosControlCompleteness[0]);
+}
+
+[[nodiscard]] inline constexpr std::size_t count_status(PortStatus status) {
+    std::size_t n = 0;
+    for (const auto& item : kPosControlCompleteness) {
+        if (item.status == status) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+[[nodiscard]] inline constexpr bool completeness_has(const char* name, PortStatus status) {
+    for (const auto& item : kPosControlCompleteness) {
+        bool match = true;
+        const char* a = item.name;
+        const char* b = name;
+        while (*a != '\0' && *b != '\0') {
+            if (*a != *b) {
+                match = false;
+                break;
+            }
+            ++a;
+            ++b;
+        }
+        if (match && *a == '\0' && *b == '\0' && item.status == status) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline constexpr std::size_t remaining_count() { return count_status(PortStatus::kRemaining); }
+[[nodiscard]] inline constexpr std::size_t on_main_count() { return count_status(PortStatus::kOnMain); }
+[[nodiscard]] inline constexpr std::size_t this_slice_count() { return count_status(PortStatus::kThisSlice); }
+[[nodiscard]] inline constexpr std::size_t out_of_scope_count() { return count_status(PortStatus::kOutOfScope); }
+
+}  // namespace fwcpp::poscontrol

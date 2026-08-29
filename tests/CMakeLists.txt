@@ -455,3 +455,12 @@ catch_discover_tests(attitude_kinematics_test)
 add_executable(control_test control_test.cpp)
 target_link_libraries(control_test PRIVATE ap-math Catch2::Catch2WithMain)
 catch_discover_tests(control_test)
+
+# CCP-027: ap-poscontrol slice 1.
+add_executable(pos_control_lean_test pos_control_lean_test.cpp)
+target_link_libraries(pos_control_lean_test PRIVATE ap-poscontrol Catch2::Catch2WithMain)
+catch_discover_tests(pos_control_lean_test)
+
+add_executable(pos_control_leftover_test pos_control_leftover_test.cpp)
+target_link_libraries(pos_control_leftover_test PRIVATE ap-poscontrol Catch2::Catch2WithMain)
+catch_discover_tests(pos_control_leftover_test)
