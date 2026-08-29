@@ -38,3 +38,6 @@ add_subdirectory(ap-control)
 
 # ap-poscontrol (CCP-027): AC_PosControl port — slice 1 lean-angle helpers.
 add_subdirectory(ap-poscontrol)
+
+# ap-wpnav (CCP-028): AC_WPNav, AC_Loiter, AC_Circle.
+add_subdirectory(ap-wpnav)
