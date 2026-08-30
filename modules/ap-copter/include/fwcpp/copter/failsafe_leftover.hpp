@@ -5,9 +5,11 @@
 // remaining_count() does not collide with copter_leftover / land_detector.
 //
 // Slice 1: leftover catalog + leftover_failsafe_radio_check thin gate.
-// Slice 2: leftover_failsafe_radio_on_event FS_THR → FailsafeAction map
-// + leftover_do_failsafe_action flag (do_failsafe_action body remains).
-// Override ladder, GCS failsafe, crash_check, CPU watchdog remain.
+// Slice 2: leftover_failsafe_radio_on_event FS_THR → FailsafeAction map.
+// Slice 3: leftover_do_failsafe_action FailsafeAction → set_mode_* flags
+// (wired from leftover_failsafe_radio_on_event).
+// Override ladder, GCS failsafe, battery/terrain/deadreckon sources,
+// crash_check, CPU watchdog remain.
 
 #include <cstddef>
 #include <cstdint>
@@ -34,7 +36,9 @@ inline constexpr PortItem kCompleteness[] = {
     {"leftover_set_mode_rtl_or_land", PortStatus::kThisSlice,
      "events.cpp ~389 thin flags; no set_mode / land-with-pause body"},
     {"leftover_failsafe_radio_on_event", PortStatus::kThisSlice,
-     "events.cpp ~17-44; FsThrEnable → FailsafeAction; leftover_do_failsafe_action flag"},
+     "events.cpp ~17-44; FsThrEnable → FailsafeAction; wires leftover_do_failsafe_action"},
+    {"leftover_do_failsafe_action", PortStatus::kThisSlice,
+     "events.cpp ~485; FailsafeAction → set_mode_* / terminate flags; no real set_mode"},
     {"failsafe_enable call site", PortStatus::kOnMain,
      "CCP-035 init_ardupilot leftover failsafe_enable flag"},
     {"ModeRTL / ModeLand", PortStatus::kOnMain,
@@ -43,14 +47,14 @@ inline constexpr PortItem kCompleteness[] = {
      "events.cpp ~46-75; should_disarm + continue-landing/auto/guided"},
     {"failsafe_gcs_check / failsafe_gcs_on_event", PortStatus::kRemaining,
      "events.cpp ~125+; heartbeat age edge + FS_GCS_ENABLE table"},
-    {"do_failsafe_action / battery / terrain / deadreckon", PortStatus::kRemaining,
-     "events.cpp action dispatcher + other failsafe sources"},
+    {"battery / terrain / deadreckon failsafe", PortStatus::kRemaining,
+     "events.cpp handle_battery / terrain / deadreckon call sites"},
     {"failsafe.cpp CPU watchdog", PortStatus::kRemaining,
      "failsafe_enable/disable/check; 2s lockup → output_min / disarm"},
     {"crash_check / thrust_loss / yaw_imbalance", PortStatus::kRemaining,
      "crash_check.cpp; events/crash_check remaining"},
     {"ModeBrake failsafe path", PortStatus::kRemaining,
-     "mode_brake.cpp; BRAKE_OR_LAND action"},
+     "mode_brake.cpp; BRAKE_OR_LAND action body"},
     {"GCS / Notify / logger objects", PortStatus::kOutOfScope,
      "ADR-0012; announce_failsafe + notify as bool flags"},
     {"AP:: singletons", PortStatus::kOutOfScope, "ADR-0012 explicit context"},
