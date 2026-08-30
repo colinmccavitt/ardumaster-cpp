@@ -2,8 +2,8 @@
 
 // Copter::init_ardupilot leftover. Upstream ArduCopter/system.cpp
 // ~16-200 (through ap.initialised = true) plus
-// esc_calibration.cpp ~10-72 leftover flags (no while(1) / HAL
-// delay / notify / passthrough bodies). No notify / battery /
+// esc_calibration.cpp ~10-73 leftover flags (no while(1) / HAL
+// delay / notify / passthrough/auto bodies). No notify / battery /
 // barometer / winch /
 // rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
 // SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
@@ -40,11 +40,16 @@
 //     set_esc_scaling. Do not invent motors / SRV / BoardConfig.
 //   esc_calibration_startup_check() leftover flags — brushed skip
 //     (motors->is_brushed_pwm_type() early return). Non-brushed:
-//     radio_wait / notify / passthrough stay remaining-false. RC
-//     cal inject rc_cal_ok (default true); !rc_cal_ok may clear
-//     esc_calibrate then skip switch. Switch leftover +
-//     would_block flag only (NO while(1)) when ESCCAL_NONE and
-//     throttle_control_in >= 950.
+//     radio_wait / notify stay remaining-false. RC cal inject
+//     rc_cal_ok (default true); !rc_cal_ok may clear esc_calibrate
+//     then skip switch. Switch leftover + would_block flag only
+//     (NO while(1)) when ESCCAL_NONE and throttle_control_in >=
+//     950. After would_block: leftover leftover_esc_cal_passthrough
+//     flag (IF_THROTTLE_HIGH && throttle >= 950, or ALWAYS);
+//     leftover leftover_esc_cal_auto flag iff ESCCAL_AUTO;
+//     leftover leftover_esc_cal_clear_after iff != DISABLED.
+//     Do not leftover leftover_esc_cal_passthrough / leftover
+//     leftover_esc_cal_auto bodies.
 //   ap.initialised_params = true
 //   register_timer_failsafe(failsafe_check_static, 1000) — flag only
 //   gps.set_log_gps_bit(MASK_LOG_GPS) + gps.init() leftover flags
@@ -191,7 +196,9 @@ struct InitArdupilotEffects {
     bool esc_cal_high_throttle{false};
     bool esc_cal_would_block{false};    // flag only — NO while(1)
     bool esc_cal_notify{false};         // remaining AP_Notify
-    bool esc_cal_passthrough{false};    // remaining passthrough/auto bodies
+    bool esc_cal_passthrough{false};    // leftover flag only — no passthrough body
+    bool esc_cal_auto{false};           // leftover flag only — no auto body
+    bool esc_cal_clear_after{false};    // leftover leftover_esc_calibrate.set_and_save(NONE)
     bool initialised_params{false};
     bool relay_init{false};             // remaining AP_RELAY
     bool register_timer_failsafe{false};
@@ -281,8 +288,9 @@ struct InitArdupilotEffects {
     fx.update_aux_servo_function = true;
     fx.safety_ignore_mask = true;
     // esc_calibration_startup_check leftover flags. Brushed skip
-    // stays. Non-brushed: radio_wait / notify / passthrough remain
-    // false (HAL delay, AP_Notify, passthrough/auto bodies).
+    // stays. Non-brushed: radio_wait / notify remain false (HAL
+    // delay, AP_Notify). leftover leftover_esc_cal_passthrough /
+    // leftover leftover_esc_cal_auto are flags only — no bodies.
     // would_block is a flag only — do not while(1).
     if (in.is_brushed_pwm) {
         fx.esc_cal_skipped = true;
@@ -300,6 +308,18 @@ struct InitArdupilotEffects {
                 in.throttle_control_in >= kEscCalibrationHighThrottle) {
                 fx.esc_cal_high_throttle = true;
                 fx.esc_cal_would_block = true;
+            }
+            if ((in.esc_calibrate ==
+                     ESCCalibrationModes::ESCCAL_PASSTHROUGH_IF_THROTTLE_HIGH &&
+                 in.throttle_control_in >= kEscCalibrationHighThrottle) ||
+                in.esc_calibrate == ESCCalibrationModes::ESCCAL_PASSTHROUGH_ALWAYS) {
+                fx.esc_cal_passthrough = true;
+            }
+            if (in.esc_calibrate == ESCCalibrationModes::ESCCAL_AUTO) {
+                fx.esc_cal_auto = true;
+            }
+            if (in.esc_calibrate != ESCCalibrationModes::ESCCAL_DISABLED) {
+                fx.esc_cal_clear_after = true;
             }
         }
     }

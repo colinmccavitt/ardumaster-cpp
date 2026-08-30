@@ -129,7 +129,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 45", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 46", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 35);
@@ -2696,6 +2696,8 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE_FALSE(fx.esc_cal_radio_wait);
     REQUIRE_FALSE(fx.esc_cal_notify);
     REQUIRE_FALSE(fx.esc_cal_passthrough);
+    REQUIRE_FALSE(fx.esc_cal_auto);
+    REQUIRE(fx.esc_cal_clear_after);
     REQUIRE(fx.initialised_params);
     REQUIRE_FALSE(fx.relay_init);
     REQUIRE(fx.register_timer_failsafe);
@@ -2745,6 +2747,8 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE_FALSE(fx.esc_cal_radio_wait);
     REQUIRE_FALSE(fx.esc_cal_notify);
     REQUIRE_FALSE(fx.esc_cal_passthrough);
+    REQUIRE_FALSE(fx.esc_cal_auto);
+    REQUIRE(fx.esc_cal_clear_after);
 }
 
 TEST_CASE("init_ardupilot leftover throttle_configured injects radio min max",
@@ -2776,6 +2780,9 @@ TEST_CASE("init_ardupilot leftover brushed pwm skips esc cal body",
     const auto fx = init_ardupilot(in);
     REQUIRE(fx.esc_cal_skipped);
     REQUIRE_FALSE(fx.esc_cal_body);
+    REQUIRE_FALSE(fx.esc_cal_passthrough);
+    REQUIRE_FALSE(fx.esc_cal_auto);
+    REQUIRE_FALSE(fx.esc_cal_clear_after);
     REQUIRE(fx.initialised_params);
     REQUIRE_FALSE(fx.relay_init);
     REQUIRE(fx.register_timer_failsafe);
@@ -2820,5 +2827,73 @@ TEST_CASE("init_ardupilot leftover ESCCAL_NONE high throttle would_block flag",
     REQUIRE(fx.esc_cal_would_block);
     REQUIRE_FALSE(fx.esc_cal_notify);
     REQUIRE_FALSE(fx.esc_cal_passthrough);
+    REQUIRE_FALSE(fx.esc_cal_auto);
+    REQUIRE(fx.esc_cal_clear_after);
     REQUIRE_FALSE(fx.esc_cal_radio_wait);
+}
+
+TEST_CASE("init_ardupilot leftover ESCCAL_PASSTHROUGH_IF_THROTTLE_HIGH high throttle",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.esc_calibrate = ESCCalibrationModes::ESCCAL_PASSTHROUGH_IF_THROTTLE_HIGH;
+    in.throttle_control_in = 950;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_switch);
+    REQUIRE(fx.esc_cal_passthrough);
+    REQUIRE_FALSE(fx.esc_cal_auto);
+    REQUIRE_FALSE(fx.esc_cal_notify);
+    REQUIRE_FALSE(fx.esc_cal_radio_wait);
+    REQUIRE(fx.esc_cal_clear_after);
+    REQUIRE_FALSE(fx.esc_cal_would_block);
+}
+
+TEST_CASE("init_ardupilot leftover ESCCAL_PASSTHROUGH_IF_THROTTLE_HIGH low throttle",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.esc_calibrate = ESCCalibrationModes::ESCCAL_PASSTHROUGH_IF_THROTTLE_HIGH;
+    in.throttle_control_in = 949;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_switch);
+    REQUIRE_FALSE(fx.esc_cal_passthrough);
+    REQUIRE_FALSE(fx.esc_cal_auto);
+    REQUIRE(fx.esc_cal_clear_after);
+}
+
+TEST_CASE("init_ardupilot leftover ESCCAL_PASSTHROUGH_ALWAYS leftover leftover_esc_cal_passthrough",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.esc_calibrate = ESCCalibrationModes::ESCCAL_PASSTHROUGH_ALWAYS;
+    in.throttle_control_in = 0;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_switch);
+    REQUIRE(fx.esc_cal_passthrough);
+    REQUIRE_FALSE(fx.esc_cal_auto);
+    REQUIRE_FALSE(fx.esc_cal_notify);
+    REQUIRE(fx.esc_cal_clear_after);
+}
+
+TEST_CASE("init_ardupilot leftover ESCCAL_AUTO leftover leftover_esc_cal_auto",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.esc_calibrate = ESCCalibrationModes::ESCCAL_AUTO;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_switch);
+    REQUIRE(fx.esc_cal_auto);
+    REQUIRE_FALSE(fx.esc_cal_passthrough);
+    REQUIRE_FALSE(fx.esc_cal_notify);
+    REQUIRE(fx.esc_cal_clear_after);
+}
+
+TEST_CASE("init_ardupilot leftover ESCCAL_DISABLED skips leftover leftover_esc_cal_clear_after",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.esc_calibrate = ESCCalibrationModes::ESCCAL_DISABLED;
+    in.throttle_control_in = 950;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_switch);
+    REQUIRE_FALSE(fx.esc_cal_passthrough);
+    REQUIRE_FALSE(fx.esc_cal_auto);
+    REQUIRE_FALSE(fx.esc_cal_clear_after);
+    REQUIRE_FALSE(fx.esc_cal_would_block);
+    REQUIRE_FALSE(fx.esc_cal_notify);
 }
