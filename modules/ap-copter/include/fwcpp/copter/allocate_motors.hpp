@@ -1,21 +1,29 @@
 #pragma once
 
-// Copter::allocate_motors leftover — motors class selection only.
-// Upstream ArduCopter/system.cpp ~363-430 (the frame_class switch
-// that constructs motors). Stop before ahrs.create_view (~436).
+// Copter::allocate_motors leftover — motors class selection plus
+// ahrs_view / attitude / pos / wp / loiter / circle leftover flags.
+// Upstream ArduCopter/system.cpp ~363-488. Stop before
+// reload_defaults_file / Y6 PID defaults (~490).
 // This port is not heli (FRAME_CONFIG != HELI_FRAME path).
 //
 // No objects: do not NEW_NOTHROW / heap-allocate motors,
 // attitude_control, pos_control, wp_nav, loiter_nav, or circle_nav.
-// Record leftover MotorsKind only. Do not record attitude/pos/wp
-// leftovers this slice. Do not invent AP_BoardConfig.
+// Record leftover MotorsKind + controller flags only. Do not invent
+// AP_BoardConfig or AP_Param.
 //
 // allocation_failed is true only when motors would be nullptr
 // (scripting-off 6DoF / dynamic). scripting is kOutOfScope; inject
-// scripting_enabled (default false).
+// scripting_enabled (default false). Upstream
+// AP_BoardConfig::allocation_error does not return — skip leftover
+// controllers when allocation_failed.
 //
-// Do not port ahrs.create_view, AP_Param::load_object_from_eeprom,
-// Y6/TRI PID defaults, convert_pid_parameters, or
+// Inject ahrs_view_ok (default true) and attitude_ok (default true)
+// for the create_view / NEW_NOTHROW nullptr checks. Inject
+// oapathplanner_enabled (default false) and circle_enabled (default
+// true / MODE_CIRCLE_ENABLED).
+//
+// Do not port Y6/TRI PID set_default, brushed rc_speed,
+// convert_pid_parameters, heli_motors_param_conversions, or
 // Copter::init_ardupilot.
 
 #include <cstdint>
@@ -57,10 +65,22 @@ enum class MotorsKind : std::uint8_t {
     MatrixDynamic = 7,
 };
 
+// Local leftover enum for AC_AttitudeControl class selection.
+// Heli is not this port (FRAME_CONFIG != HELI_FRAME).
+enum class AttitudeKind : std::uint8_t {
+    None = 0,
+    Multi = 1,
+    Multi6DoF = 2,
+};
+
 struct AllocateMotorsInputs {
     MotorFrameClass frame_class{MotorFrameClass::UNDEFINED};
     std::uint16_t loop_rate_hz{400};
     bool scripting_enabled{false};
+    bool ahrs_view_ok{true};
+    bool attitude_ok{true};
+    bool oapathplanner_enabled{false};
+    bool circle_enabled{true};
 };
 
 struct AllocateMotorsEffects {
@@ -68,6 +88,21 @@ struct AllocateMotorsEffects {
     std::uint16_t loop_rate_hz{0};
     bool frame_type_tricopter{false};
     bool allocation_failed{false};
+    bool load_motors_eeprom{false};
+    bool ahrs_view{false};
+    bool ahrs_view_failed{false};
+    AttitudeKind attitude_kind{AttitudeKind::None};
+    bool load_attitude_eeprom{false};
+    bool attitude_failed{false};
+    bool pos_control{false};
+    bool load_pos_eeprom{false};
+    bool wp_nav{false};
+    bool wp_nav_oa{false};
+    bool load_wp_eeprom{false};
+    bool loiter_nav{false};
+    bool load_loiter_eeprom{false};
+    bool circle_nav{false};
+    bool load_circle_eeprom{false};
 };
 
 [[nodiscard]] inline AllocateMotorsEffects allocate_motors(
@@ -123,6 +158,49 @@ struct AllocateMotorsEffects {
             }
             break;
     }
+
+    // allocation_error does not return — skip leftover controllers.
+    if (fx.allocation_failed) {
+        return fx;
+    }
+
+    fx.load_motors_eeprom = true;
+
+    fx.ahrs_view = true;
+    if (!in.ahrs_view_ok) {
+        fx.ahrs_view_failed = true;
+        return fx;
+    }
+
+    if (in.frame_class == MotorFrameClass::SIXDOF_SCRIPTING && in.scripting_enabled) {
+        fx.attitude_kind = AttitudeKind::Multi6DoF;
+    } else {
+        fx.attitude_kind = AttitudeKind::Multi;
+    }
+    if (!in.attitude_ok) {
+        fx.attitude_failed = true;
+        return fx;
+    }
+    fx.load_attitude_eeprom = true;
+
+    fx.pos_control = true;
+    fx.load_pos_eeprom = true;
+
+    if (in.oapathplanner_enabled) {
+        fx.wp_nav_oa = true;
+    } else {
+        fx.wp_nav = true;
+    }
+    fx.load_wp_eeprom = true;
+
+    fx.loiter_nav = true;
+    fx.load_loiter_eeprom = true;
+
+    if (in.circle_enabled) {
+        fx.circle_nav = true;
+        fx.load_circle_eeprom = true;
+    }
+
     return fx;
 }
 

@@ -47,6 +47,7 @@ using fwcpp::copter::UpdateAutoArmedInputs;
 using fwcpp::copter::StartupInsGroundInputs;
 using fwcpp::copter::VehicleClass;
 using fwcpp::copter::AllocateMotorsInputs;
+using fwcpp::copter::AttitudeKind;
 using fwcpp::copter::MotorFrameClass;
 using fwcpp::copter::MotorsKind;
 using fwcpp::copter::DesiredSpoolState;
@@ -124,7 +125,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 30", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 31", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 34);
@@ -2260,12 +2261,35 @@ TEST_CASE("allocate_motors leftover default and QUAD select Matrix",
     REQUIRE(def.loop_rate_hz == 400);
     REQUIRE_FALSE(def.allocation_failed);
     REQUIRE_FALSE(def.frame_type_tricopter);
+    REQUIRE(def.load_motors_eeprom);
+    REQUIRE(def.ahrs_view);
+    REQUIRE_FALSE(def.ahrs_view_failed);
+    REQUIRE(def.attitude_kind == AttitudeKind::Multi);
+    REQUIRE(def.load_attitude_eeprom);
+    REQUIRE_FALSE(def.attitude_failed);
+    REQUIRE(def.pos_control);
+    REQUIRE(def.load_pos_eeprom);
+    REQUIRE(def.wp_nav);
+    REQUIRE_FALSE(def.wp_nav_oa);
+    REQUIRE(def.load_wp_eeprom);
+    REQUIRE(def.loiter_nav);
+    REQUIRE(def.load_loiter_eeprom);
+    REQUIRE(def.circle_nav);
+    REQUIRE(def.load_circle_eeprom);
 
     const auto quad = allocate_motors({.frame_class = MotorFrameClass::QUAD});
     REQUIRE(quad.motors_kind == MotorsKind::Matrix);
     REQUIRE(quad.loop_rate_hz == 400);
     REQUIRE_FALSE(quad.allocation_failed);
     REQUIRE_FALSE(quad.frame_type_tricopter);
+    REQUIRE(quad.load_motors_eeprom);
+    REQUIRE(quad.ahrs_view);
+    REQUIRE(quad.attitude_kind == AttitudeKind::Multi);
+    REQUIRE(quad.pos_control);
+    REQUIRE(quad.wp_nav);
+    REQUIRE_FALSE(quad.wp_nav_oa);
+    REQUIRE(quad.loiter_nav);
+    REQUIRE(quad.circle_nav);
 
     AllocateMotorsInputs in{};
     in.frame_class = MotorFrameClass::QUAD;
@@ -2341,6 +2365,16 @@ TEST_CASE("allocate_motors leftover 6DOF_SCRIPTING depends on scripting",
     REQUIRE(off.allocation_failed);
     REQUIRE_FALSE(off.frame_type_tricopter);
     REQUIRE(off.loop_rate_hz == 400);
+    REQUIRE_FALSE(off.load_motors_eeprom);
+    REQUIRE_FALSE(off.ahrs_view);
+    REQUIRE_FALSE(off.ahrs_view_failed);
+    REQUIRE(off.attitude_kind == AttitudeKind::None);
+    REQUIRE_FALSE(off.load_attitude_eeprom);
+    REQUIRE_FALSE(off.pos_control);
+    REQUIRE_FALSE(off.wp_nav);
+    REQUIRE_FALSE(off.wp_nav_oa);
+    REQUIRE_FALSE(off.loiter_nav);
+    REQUIRE_FALSE(off.circle_nav);
 
     AllocateMotorsInputs on_in{};
     on_in.frame_class = MotorFrameClass::SIXDOF_SCRIPTING;
@@ -2350,6 +2384,15 @@ TEST_CASE("allocate_motors leftover 6DOF_SCRIPTING depends on scripting",
     REQUIRE_FALSE(on.allocation_failed);
     REQUIRE_FALSE(on.frame_type_tricopter);
     REQUIRE(on.loop_rate_hz == 400);
+    REQUIRE(on.load_motors_eeprom);
+    REQUIRE(on.ahrs_view);
+    REQUIRE(on.attitude_kind == AttitudeKind::Multi6DoF);
+    REQUIRE(on.load_attitude_eeprom);
+    REQUIRE(on.pos_control);
+    REQUIRE(on.wp_nav);
+    REQUIRE_FALSE(on.wp_nav_oa);
+    REQUIRE(on.loiter_nav);
+    REQUIRE(on.circle_nav);
 }
 
 TEST_CASE("allocate_motors leftover DYNAMIC_SCRIPTING_MATRIX depends on scripting",
@@ -2365,4 +2408,76 @@ TEST_CASE("allocate_motors leftover DYNAMIC_SCRIPTING_MATRIX depends on scriptin
     const auto on = allocate_motors(on_in);
     REQUIRE(on.motors_kind == MotorsKind::MatrixDynamic);
     REQUIRE_FALSE(on.allocation_failed);
+}
+
+TEST_CASE("allocate_motors leftover QUAD records ahrs_view and controllers",
+          "[copter][allocate_motors]") {
+    const auto fx = allocate_motors({.frame_class = MotorFrameClass::QUAD});
+    REQUIRE(fx.motors_kind == MotorsKind::Matrix);
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE(fx.load_motors_eeprom);
+    REQUIRE(fx.ahrs_view);
+    REQUIRE_FALSE(fx.ahrs_view_failed);
+    REQUIRE(fx.attitude_kind == AttitudeKind::Multi);
+    REQUIRE(fx.load_attitude_eeprom);
+    REQUIRE_FALSE(fx.attitude_failed);
+    REQUIRE(fx.pos_control);
+    REQUIRE(fx.load_pos_eeprom);
+    REQUIRE(fx.wp_nav);
+    REQUIRE_FALSE(fx.wp_nav_oa);
+    REQUIRE(fx.load_wp_eeprom);
+    REQUIRE(fx.loiter_nav);
+    REQUIRE(fx.load_loiter_eeprom);
+    REQUIRE(fx.circle_nav);
+    REQUIRE(fx.load_circle_eeprom);
+}
+
+TEST_CASE("allocate_motors leftover ahrs_view_ok false skips attitude and pos",
+          "[copter][allocate_motors]") {
+    AllocateMotorsInputs in{};
+    in.frame_class = MotorFrameClass::QUAD;
+    in.ahrs_view_ok = false;
+    const auto fx = allocate_motors(in);
+    REQUIRE(fx.motors_kind == MotorsKind::Matrix);
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE(fx.load_motors_eeprom);
+    REQUIRE(fx.ahrs_view);
+    REQUIRE(fx.ahrs_view_failed);
+    REQUIRE(fx.attitude_kind == AttitudeKind::None);
+    REQUIRE_FALSE(fx.load_attitude_eeprom);
+    REQUIRE_FALSE(fx.attitude_failed);
+    REQUIRE_FALSE(fx.pos_control);
+    REQUIRE_FALSE(fx.load_pos_eeprom);
+    REQUIRE_FALSE(fx.wp_nav);
+    REQUIRE_FALSE(fx.wp_nav_oa);
+    REQUIRE_FALSE(fx.loiter_nav);
+    REQUIRE_FALSE(fx.circle_nav);
+}
+
+TEST_CASE("allocate_motors leftover oapathplanner_enabled records wp_nav_oa",
+          "[copter][allocate_motors]") {
+    AllocateMotorsInputs in{};
+    in.frame_class = MotorFrameClass::QUAD;
+    in.oapathplanner_enabled = true;
+    const auto fx = allocate_motors(in);
+    REQUIRE(fx.pos_control);
+    REQUIRE_FALSE(fx.wp_nav);
+    REQUIRE(fx.wp_nav_oa);
+    REQUIRE(fx.load_wp_eeprom);
+    REQUIRE(fx.loiter_nav);
+    REQUIRE(fx.circle_nav);
+}
+
+TEST_CASE("allocate_motors leftover circle_enabled false skips circle_nav",
+          "[copter][allocate_motors]") {
+    AllocateMotorsInputs in{};
+    in.frame_class = MotorFrameClass::QUAD;
+    in.circle_enabled = false;
+    const auto fx = allocate_motors(in);
+    REQUIRE(fx.loiter_nav);
+    REQUIRE(fx.load_loiter_eeprom);
+    REQUIRE_FALSE(fx.circle_nav);
+    REQUIRE_FALSE(fx.load_circle_eeprom);
+    REQUIRE(fx.wp_nav);
+    REQUIRE_FALSE(fx.wp_nav_oa);
 }
