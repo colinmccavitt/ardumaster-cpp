@@ -1,16 +1,19 @@
 #pragma once
 
-// CPP-023 slice 1–3: AP_Param ConversionInfo + convert_old_parameters_scaled
+// CPP-023 slice 1–4: AP_Param ConversionInfo + convert_old_parameters_scaled
 // leftover scaffold (Plane-4.7.0 AP_Param.cpp ~2125-2160, convert_old_parameter
-// ~2068-2121) and _convert_parameter_width leftover (~2222+). ADR-0012: no
-// EEPROM / no AP_Param singleton — injected OldParamStore / NewParamStore and
-// WidthConvertInputs stand in for storage scan, find_var_info, and save.
+// ~2068-2121), _convert_parameter_width leftover (~2222+), and convert_class
+// leftover (~2143-2193). ADR-0012: no EEPROM / no AP_Param singleton —
+// injected OldParamStore / NewParamStore and WidthConvertInputs stand in for
+// storage scan, find_var_info, and save.
 //
 // Slice 1: table loop, inject lookup, scaler apply into NewParamStore by
 // new_name. Slice 2: leftover_convert_parameter_width (configured skip, inject
 // old value, scale or bitmask stub). Slice 3: CONVERT_FLAG_REVERSE / FORCE on
-// convert_old_parameter (inject new_configured). Remaining (bitmasks/centi,
-// convert_class, EEPROM find_old_parameter) in conversion_leftover.hpp.
+// convert_old_parameter (inject new_configured). Slice 4: leftover_convert_class
+// (old class key → ClassConversionInfo table → convert_old_parameter).
+// Remaining (bitmasks/centi, convert_g2, EEPROM find_old_parameter) in
+// conversion_leftover.hpp.
 
 #include <cstddef>
 #include <cstdint>
@@ -189,6 +192,37 @@ inline void convert_old_parameters(const ConversionInfo* table, std::uint8_t tab
                                   std::uint8_t flags, const OldParamStore& old, NewParamStore& neu,
                                   bool new_configured = false) {
     convert_old_parameters_scaled(table, table_size, 1.0f, flags, old, neu, new_configured);
+}
+
+// Inject stand-in for one GroupInfo scalar field in AP_Param::convert_class
+// (AP_Param.cpp ~2143-2193). Upstream walks group_info[], packs
+// old_group_element from idx/group_shift, find_old_parameter, then
+// memcpy+save into object_pointer+offset. This leftover uses new_name +
+// NewParamStore instead of object_pointer; no nested AP_PARAM_GROUP recurse
+// (convert_g2 / recurse_sub_groups remain catalogued).
+//
+// Table rows are {type, new_name} (+ old_group_element for inject matching);
+// shared old class key is the leftover_convert_class param_key argument.
+struct ClassConversionInfo {
+    std::uint8_t old_group_element = 0;
+    std::uint8_t type = 0; // VarType as uint8_t
+    const char* new_name = nullptr;
+};
+
+// Leftover convert_class: shared old class key → walk ClassConversionInfo
+// table → convert_old_parameter(scaler=1, flags=0) per field.
+// new_configured injects configured_in_storage skip. flush() not reproduced.
+inline void leftover_convert_class(std::uint16_t param_key, const ClassConversionInfo* table,
+                                   std::uint8_t table_size, const OldParamStore& old,
+                                   NewParamStore& neu, bool new_configured = false) {
+    if (table == nullptr) {
+        return;
+    }
+    for (std::uint8_t i = 0; i < table_size; ++i) {
+        ConversionInfo info{param_key, table[i].old_group_element, table[i].type,
+                            table[i].new_name};
+        convert_old_parameter(info, 1.0f, 0, old, neu, new_configured);
+    }
 }
 
 // Injected inputs for leftover_convert_parameter_width (no find_var_info /

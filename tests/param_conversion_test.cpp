@@ -6,6 +6,7 @@
 #include <fwcpp/param/param.hpp>
 
 using Catch::Approx;
+using fwcpp::param::ClassConversionInfo;
 using fwcpp::param::ConversionInfo;
 using fwcpp::param::NewParamStore;
 using fwcpp::param::OldParamStore;
@@ -18,6 +19,7 @@ using fwcpp::param::convert_old_parameter;
 using fwcpp::param::convert_old_parameters;
 using fwcpp::param::convert_old_parameters_scaled;
 using fwcpp::param::find_old_parameter;
+using fwcpp::param::leftover_convert_class;
 using fwcpp::param::leftover_convert_parameter_width;
 using fwcpp::param::new_store_find;
 using fwcpp::param::new_store_put;
@@ -209,9 +211,60 @@ TEST_CASE("convert_old_parameter REVERSE then scaler", "[param][conversion][flag
     REQUIRE(out == Approx(2.0f)); // (is_equal(-1)?1:0) * 2.0
 }
 
+TEST_CASE("leftover_convert_class walks field table with shared old key",
+          "[param][conversion][class]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    constexpr std::uint16_t kOldClassKey = 42;
+    REQUIRE(old_store_put(old, kOldClassKey, 0, static_cast<std::uint8_t>(VarType::Float), 1.5f));
+    REQUIRE(old_store_put(old, kOldClassKey, 1, static_cast<std::uint8_t>(VarType::Float), 2.5f));
+    REQUIRE(old_store_put(old, kOldClassKey, 2, static_cast<std::uint8_t>(VarType::Int16), 7.0f));
+    const ClassConversionInfo table[] = {
+        {0, static_cast<std::uint8_t>(VarType::Float), "CLS_A"},
+        {1, static_cast<std::uint8_t>(VarType::Float), "CLS_B"},
+        {2, static_cast<std::uint8_t>(VarType::Int16), "CLS_C"},
+        {3, static_cast<std::uint8_t>(VarType::Float), "CLS_ABSENT"},
+    };
+    leftover_convert_class(kOldClassKey, table, 4, old, neu);
+    float a = 0.0f;
+    float b = 0.0f;
+    float c = 0.0f;
+    float missing = 0.0f;
+    REQUIRE(new_store_find(neu, "CLS_A", a));
+    REQUIRE(a == Approx(1.5f));
+    REQUIRE(new_store_find(neu, "CLS_B", b));
+    REQUIRE(b == Approx(2.5f));
+    REQUIRE(new_store_find(neu, "CLS_C", c));
+    REQUIRE(c == 7.0f);
+    REQUIRE_FALSE(new_store_find(neu, "CLS_ABSENT", missing));
+}
+
+TEST_CASE("leftover_convert_class skips when new_configured",
+          "[param][conversion][class]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    constexpr std::uint16_t kOldClassKey = 9;
+    REQUIRE(old_store_put(old, kOldClassKey, 0, static_cast<std::uint8_t>(VarType::Float), 3.0f));
+    REQUIRE(new_store_put(neu, "KEEP_CLS", 99.0f));
+    const ClassConversionInfo table[] = {
+        {0, static_cast<std::uint8_t>(VarType::Float), "KEEP_CLS"},
+    };
+    leftover_convert_class(kOldClassKey, table, 1, old, neu, /*new_configured=*/true);
+    float out = 0.0f;
+    REQUIRE(new_store_find(neu, "KEEP_CLS", out));
+    REQUIRE(out == 99.0f);
+}
+
+TEST_CASE("leftover_convert_class null table is no-op", "[param][conversion][class]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    leftover_convert_class(1, nullptr, 0, old, neu);
+    REQUIRE(neu.count == 0);
+}
+
 TEST_CASE("conversion leftover catalog remaining_count", "[param][conversion][leftover]") {
-    REQUIRE(remaining_count() == 5);
-    REQUIRE(this_slice_count() == 7);
+    REQUIRE(remaining_count() == 4);
+    REQUIRE(this_slice_count() == 8);
     REQUIRE(on_main_count() == 0);
     REQUIRE(out_of_scope_count() == 1);
     REQUIRE(completeness_size() ==
@@ -220,7 +273,9 @@ TEST_CASE("conversion leftover catalog remaining_count", "[param][conversion][le
     REQUIRE(completeness_has("convert_old_parameters_scaled", PortStatus::kThisSlice));
     REQUIRE(completeness_has("_convert_parameter_width", PortStatus::kThisSlice));
     REQUIRE(completeness_has("convert_old_parameter REVERSE/FORCE", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("convert_class", PortStatus::kThisSlice));
     REQUIRE(completeness_has("bitmask / centi width helpers", PortStatus::kRemaining));
+    REQUIRE(completeness_has("convert_g2 / convert_toplevel objects", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP_Param singleton / EEPROM", PortStatus::kOutOfScope));
-    REQUIRE_FALSE(completeness_has("convert_old_parameter REVERSE/FORCE", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("convert_class", PortStatus::kRemaining));
 }

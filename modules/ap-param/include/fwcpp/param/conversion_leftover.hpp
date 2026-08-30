@@ -1,15 +1,17 @@
 #pragma once
 
 // CPP-023 leftover completeness catalog — AP_Param conversion/upgrade
-// (Plane-4.7.0 AP_Param.cpp convert_old_* / _convert_parameter_width).
-// Nested under fwcpp::param::conversion so remaining_count() does not
-// collide with other param helpers.
+// (Plane-4.7.0 AP_Param.cpp convert_old_* / _convert_parameter_width /
+// convert_class). Nested under fwcpp::param::conversion so remaining_count()
+// does not collide with other param helpers.
 //
 // Slice 1: ConversionInfo + convert_old_parameters_scaled leftover scaffold
 // (inject OldParamStore / NewParamStore; no EEPROM).
 // Slice 2: leftover_convert_parameter_width inject (no EEPROM / find_var_info).
 // Slice 3: convert_old_parameter CONVERT_FLAG_REVERSE / FORCE (inject
-// new_configured). Remaining rows are later CPP-023 work.
+// new_configured).
+// Slice 4: leftover_convert_class (old class key → ClassConversionInfo table →
+// convert_old_parameter). Remaining rows are later CPP-023 work.
 
 #include <cstddef>
 #include <cstdint>
@@ -43,7 +45,8 @@ inline constexpr PortItem kCompleteness[] = {
      "CONVERT_FLAG_REVERSE (_REV→_REVERSED) / FORCE + inject new_configured"},
     {"find_old_parameter EEPROM scan", PortStatus::kRemaining,
      "AP_Param.cpp ~2047-2062 scan()+read_block"},
-    {"convert_class", PortStatus::kRemaining, "AP_Param.cpp ~2143-2193"},
+    {"convert_class", PortStatus::kThisSlice,
+     "AP_Param.cpp ~2143-2193; leftover_convert_class inject; no object_pointer/flush"},
     {"convert_g2 / convert_toplevel objects", PortStatus::kRemaining,
      "AP_Param.cpp ~2197-2218"},
     {"_convert_parameter_width", PortStatus::kThisSlice,
