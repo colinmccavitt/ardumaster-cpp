@@ -1093,3 +1093,8 @@ catch_discover_tests(sitl_copter_harness_test)
 add_executable(copter_sitl_run_test copter_sitl_run_test.cpp)
 target_link_libraries(copter_sitl_run_test PRIVATE ap-hal-sitl ap-copter ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(copter_sitl_run_test)
+
+# CCP-056: remaining in-tree SITL long-tail (vehicles, I2C, serial, SPI, heli swash)
+add_executable(sim_longtail_test sim_longtail_test.cpp)
+target_link_libraries(sim_longtail_test PRIVATE ap-sim ap-motors Catch2::Catch2WithMain)
+catch_discover_tests(sim_longtail_test)
