@@ -43,6 +43,7 @@ using fwcpp::copter::StandbyUpdateInputs;
 using fwcpp::copter::LostVehicleCheckInputs;
 using fwcpp::copter::TakeoffCheckInputs;
 using fwcpp::copter::GetWpDistanceMInputs;
+using fwcpp::copter::UpdateAutoArmedInputs;
 using fwcpp::copter::DesiredSpoolState;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
@@ -84,6 +85,7 @@ using fwcpp::copter::standby_update;
 using fwcpp::copter::lost_vehicle_check;
 using fwcpp::copter::takeoff_check;
 using fwcpp::copter::get_wp_distance_m;
+using fwcpp::copter::update_auto_armed;
 using fwcpp::copter::kLostVehicleDelay;
 using fwcpp::copter::kLostVehicleStickThreshold;
 using fwcpp::copter::kTakeoffCheckAvgLoadMax;
@@ -115,10 +117,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 27", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 4);
+TEST_CASE("catalog remaining_count stays open after slice 28", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 3);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 31);
+    REQUIRE(on_main_count() == 32);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -153,8 +155,9 @@ TEST_CASE("catalog remaining_count stays open after slice 27", "[copter][leftove
     REQUIRE(completeness_has("Copter::standby_update", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::lost_vehicle_check", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::takeoff_check", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::get_wp_distance_m", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::get_wp_distance_m", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::startup_INS_ground", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
 }
@@ -2106,4 +2109,87 @@ TEST_CASE("get_wp_distance_m copies injected distance and always returns true",
     distance = 7.0f;
     REQUIRE(get_wp_distance_m(distance));
     REQUIRE(distance == 0.0f);
+}
+
+TEST_CASE("update_auto_armed already armed clears when motors disarmed",
+          "[copter][update_auto_armed]") {
+    UpdateAutoArmedInputs in{};
+    in.auto_armed = true;
+    in.motors_armed = false;
+    REQUIRE_FALSE(update_auto_armed(in));
+}
+
+TEST_CASE("update_auto_armed already armed clears on manual zero throttle with RC",
+          "[copter][update_auto_armed]") {
+    UpdateAutoArmedInputs in{};
+    in.auto_armed = true;
+    in.motors_armed = true;
+    in.has_manual_throttle = true;
+    in.throttle_zero = true;
+    in.has_valid_input = true;
+    REQUIRE_FALSE(update_auto_armed(in));
+}
+
+TEST_CASE("update_auto_armed already armed stays when RC invalid",
+          "[copter][update_auto_armed]") {
+    UpdateAutoArmedInputs in{};
+    in.auto_armed = true;
+    in.motors_armed = true;
+    in.has_manual_throttle = true;
+    in.throttle_zero = true;
+    in.has_valid_input = false;
+    REQUIRE(update_auto_armed(in));
+}
+
+TEST_CASE("update_auto_armed already armed stays without manual throttle",
+          "[copter][update_auto_armed]") {
+    UpdateAutoArmedInputs in{};
+    in.auto_armed = true;
+    in.motors_armed = true;
+    in.has_manual_throttle = false;
+    in.throttle_zero = true;
+    REQUIRE(update_auto_armed(in));
+}
+
+TEST_CASE("update_auto_armed arm path interlock needs unlimited spool",
+          "[copter][update_auto_armed]") {
+    REQUIRE(static_cast<int>(SpoolState::THROTTLE_UNLIMITED) == 3);
+    REQUIRE(static_cast<int>(DesiredSpoolState::THROTTLE_UNLIMITED) == 2);
+
+    UpdateAutoArmedInputs in{};
+    in.auto_armed = false;
+    in.motors_armed = true;
+    in.using_interlock = true;
+    in.throttle_zero = false;
+    in.spool_state = SpoolState::THROTTLE_UNLIMITED;
+    REQUIRE(update_auto_armed(in));
+
+    in.spool_state = SpoolState::GROUND_IDLE;
+    REQUIRE_FALSE(update_auto_armed(in));
+}
+
+TEST_CASE("update_auto_armed arm path without interlock uses throttle or THROW",
+          "[copter][update_auto_armed]") {
+    UpdateAutoArmedInputs in{};
+    in.auto_armed = false;
+    in.motors_armed = true;
+    in.using_interlock = false;
+    in.throttle_zero = false;
+    REQUIRE(update_auto_armed(in));
+
+    in.throttle_zero = true;
+    in.mode_is_throw = true;
+    REQUIRE(update_auto_armed(in));
+
+    in.mode_is_throw = false;
+    REQUIRE_FALSE(update_auto_armed(in));
+}
+
+TEST_CASE("update_auto_armed disarmed motors stay not auto_armed",
+          "[copter][update_auto_armed]") {
+    UpdateAutoArmedInputs in{};
+    in.auto_armed = false;
+    in.motors_armed = false;
+    REQUIRE_FALSE(update_auto_armed(in));
+    REQUIRE_FALSE(update_auto_armed());
 }
