@@ -101,8 +101,8 @@ inline constexpr ModePortItem kModeCompleteness[] = {
      "home_is_set gate + leftover wp_and_spline/STARTING flags; leftover "
      "leftover_precland_statemachine remaining"},
     {"ModeRTL::run", ModePortStatus::kThisSlice,
-     "armed gate + STARTING leftover leftover_build_path/climb_start + "
-     "INITIAL_CLIMB leftover leftover_return_start + RETURN_HOME leftover leftover_loiterathome_start + LOITER_AT_HOME leftover leftover_land_start/descent_start + leftover leftover_climb_return_run; leftover leftover_loiterathome_run remaining"},
+     "armed gate + STARTING leftover leftover leftover leftover_build_path/climb_start + "
+     "INITIAL_CLIMB leftover leftover leftover leftover_return_start + RETURN_HOME leftover leftover leftover leftover_loiterathome_start + LOITER_AT_HOME leftover leftover leftover leftover_land_start/descent_start + leftover leftover leftover leftover_climb_return_run + leftover leftover leftover leftover_loiterathome_run; leftover leftover leftover leftover_descent_run remaining"},
     {"FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain,
      "Copter::gcs_mode_enabled + AP_Vehicle::block_GCS_mode_change; injected "
      "fltmode_gcsblock; LAND/RTL not in list"},

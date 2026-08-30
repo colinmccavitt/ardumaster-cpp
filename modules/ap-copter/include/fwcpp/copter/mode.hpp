@@ -35,8 +35,8 @@
 // leftover leftover_climb_start + INITIAL_CLIMB leftover leftover_return_start +
 // RETURN_HOME leftover leftover_loiterathome_start + LOITER_AT_HOME leftover
 // leftover leftover_land_start / leftover leftover_descent_start + leftover
-// leftover leftover_climb_return_run flags) is this slice. leftover leftover
-// leftover leftover_loiterathome_run remaining.
+// leftover leftover_climb_return_run + leftover leftover_loiterathome_run
+// flags) is this slice. leftover leftover_descent_run remaining.
 // ModeLand, ModeGuided::run body,
 // land_run_normal_or_precland body, land_run_horizontal_control body, and
 // auto_takeoff.run body stay later.
@@ -623,7 +623,8 @@ public:
     // (LOITER_AT_HOME, this slice; flags only; land_start / descent_start
     // bodies remaining). leftover leftover_climb_return_run is this slice
     // (second switch STARTING / INITIAL_CLIMB / RETURN_HOME).
-    // leftover leftover_loiterathome_run / leftover leftover_descent_run /
+    // leftover leftover_loiterathome_run is this slice (second switch
+    // LOITER_AT_HOME). leftover leftover_descent_run /
     // leftover leftover_rtl_land_run stay false.
     bool leftover_return_start{false};
     bool leftover_climb_return_run{false};
@@ -670,8 +671,9 @@ public:
     // leftover leftover leftover_loiterathome_start, and LOITER_AT_HOME leftover
     // leftover leftover_land_start or leftover leftover leftover_descent_start
     // (injected leftover leftover_rtl_path_land / leftover leftover_failsafe_radio).
-    // FINAL_DESCENT / LAND are upstream no-ops (no leftover leftover_land_start).
-    // Do not change _state. Second switch sets leftover_climb_return_run.
+    // FINAL_DESCENT / LAND are upstream no-ops (no leftover leftover leftover leftover_land_start).
+    // Do not change _state. Second switch sets leftover leftover leftover leftover_climb_return_run
+    // then leftover leftover leftover leftover_loiterathome_run.
     void leftover_run(bool disarm_on_land) {
         leftover_build_path = false;
         leftover_climb_start = false;
@@ -707,6 +709,9 @@ public:
         if (_state == SubMode::STARTING || _state == SubMode::INITIAL_CLIMB ||
             _state == SubMode::RETURN_HOME) {
             leftover_climb_return_run = true;
+        }
+        if (_state == SubMode::LOITER_AT_HOME) {
+            leftover_loiterathome_run = true;
         }
     }
     // upstream mode.h: run() { return run(true); }
