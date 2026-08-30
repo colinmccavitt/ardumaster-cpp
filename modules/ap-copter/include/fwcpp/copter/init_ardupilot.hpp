@@ -1,11 +1,12 @@
 #pragma once
 
 // Copter::init_ardupilot leftover. Upstream ArduCopter/system.cpp
-// ~16-94 (after register_timer_failsafe; stop BEFORE
-// AP_AIRSPEED_ENABLED). No notify / battery / barometer / winch /
-// rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
+// ~16-129 (after compass.init(); stop BEFORE USERHOOK_INIT /
+// barometer.set_log_baro_bit). No notify / battery / barometer /
+// winch / rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
 // SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
-// airspeed / OA objects — record leftover flags only. Do not invoke
+// airspeed / OA / attitude_control / optflow / camera / precland /
+// landinggear objects — record leftover flags only. Do not invoke
 // the allocate_motors() helper body (call-site leftover flag only).
 //
 // Always-on this slice (AP_WINCH_ENABLED / AP_RSSI_ENABLED are not
@@ -38,14 +39,21 @@
 //   register_timer_failsafe(failsafe_check_static, 1000) — flag only
 //   gps.set_log_gps_bit(MASK_LOG_GPS) + gps.init() leftover flags
 //   AP::compass().set_log_bit(MASK_LOG_COMPASS) + init leftover flags
+//   attitude_control->parameter_sanity_check() leftover flag only
 //
 // surface_tracking.init stays false (AP_RANGEFINDER remaining).
 // relay.init stays false (AP_RELAY remaining).
 // airspeed.set_log_bit stays false (AP_AIRSPEED remaining).
 // g2.oa.init stays false (AP_OAPATHPLANNER remaining).
-// The rest of init_ardupilot (ESC cal body, airspeed/OA, attitude
-// sanity, optflow/camera, startup_INS_ground call, etc.) is catalog
-// row "Copter::init_ardupilot rest".
+// optflow.init stays false (AP_OPTICALFLOW remaining).
+// camera_mount.init stays false (HAL_MOUNT remaining).
+// camera.init stays false (AP_CAMERA remaining).
+// init_precland stays false (AC_PRECLAND remaining).
+// landinggear.init stays false (AP_LANDINGGEAR remaining).
+// The rest of init_ardupilot (ESC cal body, barometer.calibrate,
+// rangefinder, mission/SmartRTL, startup_INS_ground call,
+// set_land_complete, failsafe_enable, etc.) is catalog row
+// "Copter::init_ardupilot rest".
 
 #include <cstdint>
 
@@ -128,6 +136,12 @@ struct InitArdupilotEffects {
     bool compass_init{false};
     bool airspeed_set_log_bit{false};   // remaining AP_AIRSPEED
     bool oa_init{false};                // remaining AP_OAPATHPLANNER
+    bool attitude_parameter_sanity_check{false};
+    bool optflow_init{false};           // remaining AP_OPTICALFLOW
+    bool camera_mount_init{false};      // remaining HAL_MOUNT
+    bool camera_init{false};            // remaining AP_CAMERA
+    bool init_precland{false};          // remaining AC_PRECLAND
+    bool landinggear_init{false};       // remaining AP_LANDINGGEAR
 };
 
 [[nodiscard]] inline InitArdupilotEffects init_ardupilot(
@@ -188,6 +202,8 @@ struct InitArdupilotEffects {
     fx.compass_log_bit = kMaskLogCompass;
     fx.compass_init = true;
     // airspeed_set_log_bit / oa_init stay false (remaining)
+    fx.attitude_parameter_sanity_check = true;
+    // optflow / camera_mount / camera / precland / landinggear stay false
     return fx;
 }
 

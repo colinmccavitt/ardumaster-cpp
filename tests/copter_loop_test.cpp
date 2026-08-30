@@ -128,7 +128,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 39", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 40", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 35);
@@ -2703,6 +2703,12 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE(fx.compass_init);
     REQUIRE_FALSE(fx.airspeed_set_log_bit);
     REQUIRE_FALSE(fx.oa_init);
+    REQUIRE(fx.attitude_parameter_sanity_check);
+    REQUIRE_FALSE(fx.optflow_init);
+    REQUIRE_FALSE(fx.camera_mount_init);
+    REQUIRE_FALSE(fx.camera_init);
+    REQUIRE_FALSE(fx.init_precland);
+    REQUIRE_FALSE(fx.landinggear_init);
 }
 
 TEST_CASE("init_ardupilot leftover throttle_configured injects radio min max",
