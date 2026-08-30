@@ -184,6 +184,7 @@ TEST_CASE("!armed SHUT_DOWN spool -> MotorStopped", "[copter][althold]") {
     REQUIRE(out.D_relax_controller);
     REQUIRE(out.D_relax_throttle == 0.0f);
     REQUIRE_FALSE(out.D_set_pos_target_from_climb_rate);
+    REQUIRE(out.D_update_controller);
     REQUIRE(out.input_euler_angle_invoked);
 }
 
@@ -256,9 +257,9 @@ TEST_CASE("Flying sets adjust_roll_pitch_avoidance surface_tracking avoidance", 
     REQUIRE(out.D_set_max_speed_accel);
 }
 
-TEST_CASE("leftover remaining_count is not zero", "[copter][althold][leftover]") {
-    REQUIRE(remaining_count() == 1);
-    REQUIRE(this_slice_count() == 9);
+TEST_CASE("leftover remaining_count is zero", "[copter][althold][leftover]") {
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(this_slice_count() == 10);
     REQUIRE(on_main_count() == 2);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(completeness_size() ==
@@ -269,9 +270,10 @@ TEST_CASE("leftover remaining_count is not zero", "[copter][althold][leftover]")
     REQUIRE(completeness_has("takeoff", PortStatus::kThisSlice));
     REQUIRE(completeness_has("avoidance", PortStatus::kThisSlice));
     REQUIRE(completeness_has("surface_tracking", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("D_update_controller", PortStatus::kThisSlice));
     REQUIRE(completeness_has("stabilize_run", PortStatus::kOnMain));
     REQUIRE(completeness_has("acro_run", PortStatus::kOnMain));
-    REQUIRE(completeness_has("D_update_controller", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("D_update_controller", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("avoidance", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("surface_tracking", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("takeoff", PortStatus::kRemaining));

@@ -6,15 +6,12 @@
 // (ADR-0012). Tests inject sticks, spool, land/takeoff flags, and
 // kinematics state.
 //
-// This slice: call-site-complete Flying avoidance + surface_tracking
-// leftovers (ADR-0012 flags). Flying records
-// adjust_roll_pitch_avoidance (AP_AVOIDANCE_ALTHOLD) / avoidance
-// climbrate / surface_tracking.update_surface_offset. Takeoff still
-// records avoidance climbrate only (no adjust_roll_pitch). Prior
-// slices: update_simple_mode + takeoff flags; real CCP-037 lean / yaw /
-// climb_rate; constrain climb; get_alt_hold_state_D_ms; Flying
-// D_set_pos_target_from_climb_rate. Remaining: D_update_controller
-// (call-site flag; attitude already real). ALWAYS calls the real
+// This slice: call-site-complete D_update_controller after attitude
+// (ADR-0012 flag; no PosControl object). Prior slices: Flying
+// avoidance + surface_tracking; update_simple_mode + takeoff flags;
+// real CCP-037 lean / yaw / climb_rate; constrain climb;
+// get_alt_hold_state_D_ms; Flying D_set_pos_target_from_climb_rate.
+// Catalog remaining_count 0. ALWAYS calls the real
 // input_euler_angle_roll_pitch_euler_rate_yaw_rad (CCP-029).
 //
 // Reuses DesiredSpoolState / SpoolState from mode_stabilize.hpp.
@@ -259,7 +256,8 @@ struct AltHoldRunResult {
         out.feedforward_scalar, out.attitude_ang_error, out.ang_vel_body_rads);
     out.input_euler_angle_invoked = true;
 
-    // pos_control->D_update_controller() call site; body remaining.
+    // Upstream ~102-103: pos_control->D_update_controller(); ADR-0012
+    // call-site flag (no PosControl object in this mode port).
     out.D_update_controller = true;
     return out;
 }
@@ -302,8 +300,8 @@ inline constexpr PortItem kCompleteness[] = {
      "Flying adjust_roll_pitch_avoidance + climbrate flags; Takeoff climbrate; no AC_Avoid body"},
     {"surface_tracking", PortStatus::kThisSlice,
      "mode_althold.cpp ~89-91; Flying surface_tracking flag; no update_surface_offset body"},
-    {"D_update_controller", PortStatus::kRemaining,
-     "pos_control D_update_controller; call-site flag only, no object"},
+    {"D_update_controller", PortStatus::kThisSlice,
+     "mode_althold.cpp ~102-103; after attitude; call-site flag; no PosControl object"},
 };
 
 [[nodiscard]] inline constexpr std::size_t completeness_size() {
