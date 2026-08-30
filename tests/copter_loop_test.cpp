@@ -23,6 +23,7 @@ using fwcpp::copter::TaskKind;
 using fwcpp::copter::SpoolState;
 using fwcpp::copter::UpdateFlightModeInputs;
 using fwcpp::copter::UpdateHomeFromEkfInputs;
+using fwcpp::copter::UpdateAltitudeInputs;
 using fwcpp::copter::UpdateBattCompassInputs;
 using fwcpp::copter::UpdateLandAndCrashDetectorsInputs;
 using fwcpp::copter::UpdateRangefinderTerrainOffsetInputs;
@@ -55,6 +56,7 @@ using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
 using fwcpp::copter::update_home_from_ekf;
+using fwcpp::copter::update_altitude;
 using fwcpp::copter::update_batt_compass;
 using fwcpp::copter::update_land_and_crash_detectors;
 using fwcpp::copter::update_rangefinder_terrain_offset;
@@ -73,10 +75,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 10", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 21);
+TEST_CASE("catalog remaining_count stays open after slice 11", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 20);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 14);
+    REQUIRE(on_main_count() == 15);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -93,9 +95,9 @@ TEST_CASE("catalog remaining_count stays open after slice 10", "[copter][leftove
     REQUIRE(completeness_has("Copter::update_home_from_EKF", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_land_and_crash_detectors", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_rangefinder_terrain_offset", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::update_batt_compass", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_batt_compass", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_altitude", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::update_altitude", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -922,4 +924,48 @@ TEST_CASE("update_batt_compass compass unavailable skips compass path",
     REQUIRE_FALSE(fx.set_voltage);
     REQUIRE(fx.voltage == 0.0f);
     REQUIRE_FALSE(fx.compass_read);
+}
+
+TEST_CASE("update_altitude always read_barometer", "[copter][update_altitude]") {
+    const auto empty = update_altitude({});
+    REQUIRE(empty.read_barometer);
+    REQUIRE(empty.baro_alt_m == 0.0f);
+
+    UpdateAltitudeInputs injected{};
+    injected.baro_alt_m = 12.5f;
+    const auto stored = update_altitude(injected);
+    REQUIRE(stored.read_barometer);
+    REQUIRE(stored.baro_alt_m == 12.5f);
+
+    const auto* row = find_scheduler_task("update_altitude");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 10.0f);
+    REQUIRE(row->max_time_micros == 100);
+    REQUIRE(row->priority == 42);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("update_altitude logging not invoked by default", "[copter][update_altitude]") {
+    const auto fx = update_altitude({});
+    REQUIRE(fx.read_barometer);
+    REQUIRE_FALSE(fx.should_log_ctun);
+    REQUIRE_FALSE(fx.log_write_control_tuning);
+    REQUIRE_FALSE(fx.write_notch_log_messages);
+    REQUIRE_FALSE(fx.gyro_fft_write_log_messages);
+}
+
+TEST_CASE("update_altitude should_log_ctun leftover records without writing logs",
+          "[copter][update_altitude]") {
+    UpdateAltitudeInputs in{};
+    in.baro_alt_m = 3.0f;
+    in.should_log_ctun = true;
+
+    const auto fx = update_altitude(in);
+    REQUIRE(fx.read_barometer);
+    REQUIRE(fx.baro_alt_m == 3.0f);
+    REQUIRE(fx.should_log_ctun);
+    REQUIRE_FALSE(fx.log_write_control_tuning);
+    REQUIRE_FALSE(fx.write_notch_log_messages);
+    REQUIRE_FALSE(fx.gyro_fft_write_log_messages);
 }

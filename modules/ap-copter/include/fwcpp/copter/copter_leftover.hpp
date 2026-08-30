@@ -1,8 +1,8 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 10 lands
-// update_batt_compass as a leftover tick. remaining_count() > 0
+// (Copter.cpp / Copter.h / system.cpp). Slice 11 lands
+// update_altitude as a leftover tick. remaining_count() > 0
 // is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
@@ -55,9 +55,10 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
      "dispatcher + disarmed/landed; crash_check/AND-gate remaining"},
     {"Copter::update_rangefinder_terrain_offset", PortStatus::kOnMain,
      "update_rangefinder_terrain_offset.hpp; down/up LPF; circle leftover"},
-    {"Copter::update_batt_compass", PortStatus::kThisSlice,
+    {"Copter::update_batt_compass", PortStatus::kOnMain,
      "update_batt_compass.hpp; battery.read then compass throttle/voltage"},
-    {"Copter::update_altitude", PortStatus::kRemaining, "10 Hz leftover"},
+    {"Copter::update_altitude", PortStatus::kThisSlice,
+     "update_altitude.hpp; always read_barometer; CTUN/notch/fft leftover"},
     {"Copter::run_nav_updates", PortStatus::kRemaining, "50 Hz leftover"},
     {"Copter::update_throttle_hover", PortStatus::kRemaining, "100 Hz leftover"},
     {"Copter::three_hz_loop", PortStatus::kRemaining, "3 Hz leftover"},
