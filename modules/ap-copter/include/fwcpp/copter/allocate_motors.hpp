@@ -3,31 +3,36 @@
 // Copter::allocate_motors leftover — motors class selection plus
 // ahrs_view / attitude / pos / wp / loiter / circle leftover flags,
 // then reload_defaults_file + Y6/TRI PID set_default leftovers +
-// brushed rc_speed. Upstream ArduCopter/system.cpp ~363-513. Stop
-// before convert_pid_parameters (~516).
-// This port is not heli (FRAME_CONFIG != HELI_FRAME path).
+// brushed rc_speed, then convert_* leftover flags.
+// Upstream ArduCopter/system.cpp ~363-543.
+// This port is not heli (FRAME_CONFIG != HELI_FRAME path) — skip
+// heli_motors_param_conversions.
 //
 // No objects: do not NEW_NOTHROW / heap-allocate motors,
 // attitude_control, pos_control, wp_nav, loiter_nav, or circle_nav.
-// Record leftover MotorsKind + controller flags + PID defaults
-// only. Do not invent AP_BoardConfig or AP_Param.
+// Record leftover MotorsKind + controller flags + PID defaults +
+// convert leftover flags only. Do not invent AP_BoardConfig or
+// AP_Param. Do not implement convert_pid_parameters /
+// convert_prx_parameters / AC_*::convert_parameters bodies
+// (no conversion tables).
 //
 // allocation_failed is true only when motors would be nullptr
 // (scripting-off 6DoF / dynamic). scripting is kOutOfScope; inject
 // scripting_enabled (default false). Upstream
 // AP_BoardConfig::allocation_error does not return — skip leftover
-// controllers and PID defaults when allocation_failed.
+// controllers, PID defaults, and convert flags when
+// allocation_failed.
 //
 // Inject ahrs_view_ok (default true) and attitude_ok (default true)
 // for the create_view / NEW_NOTHROW nullptr checks. Inject
 // oapathplanner_enabled (default false) and circle_enabled (default
 // true / MODE_CIRCLE_ENABLED). Inject is_brushed_pwm_type (default
-// false).
+// false). Inject proximity_enabled (default false /
+// HAL_PROXIMITY_ENABLED).
 //
-// Do not port convert_pid_parameters, convert_prx_parameters,
-// attitude/pos/wp/loiter/circle convert_parameters,
-// AP_Param::invalidate_count, heli_motors_param_conversions, or
-// Copter::init_ardupilot.
+// convert_* leftover flags are reached only when
+// !allocation_failed && !ahrs_view_failed && !attitude_failed.
+// Do not port conversion table bodies or Copter::init_ardupilot.
 
 #include <cstdint>
 
@@ -85,6 +90,7 @@ struct AllocateMotorsInputs {
     bool oapathplanner_enabled{false};
     bool circle_enabled{true};
     bool is_brushed_pwm_type{false};
+    bool proximity_enabled{false};
 };
 
 struct AllocateMotorsEffects {
@@ -117,6 +123,14 @@ struct AllocateMotorsEffects {
     float rate_yaw_ki{0};
     float tri_yaw_filt_d_hz{0};
     std::uint16_t rc_speed_default{0};
+    bool convert_pid_parameters{false};
+    bool convert_prx_parameters{false};
+    bool convert_attitude_parameters{false};
+    bool convert_pos_parameters{false};
+    bool convert_wp_nav_parameters{false};
+    bool convert_loiter_parameters{false};
+    bool convert_circle_parameters{false};
+    bool invalidate_count{false};
 };
 
 [[nodiscard]] inline AllocateMotorsEffects allocate_motors(
@@ -240,6 +254,23 @@ struct AllocateMotorsEffects {
     if (in.is_brushed_pwm_type) {
         fx.rc_speed_default = 16000;
     }
+
+    // convert_* leftover flags. Reached only when
+    // !allocation_failed && !ahrs_view_failed &&
+    // !attitude_failed (early returns above). Do not implement
+    // conversion table bodies.
+    fx.convert_pid_parameters = true;
+    if (in.proximity_enabled) {
+        fx.convert_prx_parameters = true;
+    }
+    fx.convert_attitude_parameters = true;
+    fx.convert_pos_parameters = true;
+    fx.convert_wp_nav_parameters = true;
+    fx.convert_loiter_parameters = true;
+    if (fx.circle_nav) {
+        fx.convert_circle_parameters = true;
+    }
+    fx.invalidate_count = true;
 
     return fx;
 }

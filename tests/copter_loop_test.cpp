@@ -125,7 +125,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 32", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 33", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 34);
@@ -2454,6 +2454,14 @@ TEST_CASE("allocate_motors leftover ahrs_view_ok false skips attitude and pos",
     REQUIRE_FALSE(fx.circle_nav);
     REQUIRE_FALSE(fx.reload_defaults_file);
     REQUIRE_FALSE(fx.y6_pid_defaults);
+    REQUIRE_FALSE(fx.convert_pid_parameters);
+    REQUIRE_FALSE(fx.convert_prx_parameters);
+    REQUIRE_FALSE(fx.convert_attitude_parameters);
+    REQUIRE_FALSE(fx.convert_pos_parameters);
+    REQUIRE_FALSE(fx.convert_wp_nav_parameters);
+    REQUIRE_FALSE(fx.convert_loiter_parameters);
+    REQUIRE_FALSE(fx.convert_circle_parameters);
+    REQUIRE_FALSE(fx.invalidate_count);
 }
 
 TEST_CASE("allocate_motors leftover oapathplanner_enabled records wp_nav_oa",
@@ -2482,6 +2490,7 @@ TEST_CASE("allocate_motors leftover circle_enabled false skips circle_nav",
     REQUIRE_FALSE(fx.load_circle_eeprom);
     REQUIRE(fx.wp_nav);
     REQUIRE_FALSE(fx.wp_nav_oa);
+    REQUIRE_FALSE(fx.convert_circle_parameters);
 }
 
 TEST_CASE("allocate_motors leftover QUAD reloads defaults without Y6/TRI/brushed",
@@ -2545,4 +2554,96 @@ TEST_CASE("allocate_motors leftover 6DoF scripting off skips reload_defaults",
     REQUIRE_FALSE(fx.y6_pid_defaults);
     REQUIRE(fx.tri_yaw_filt_d_hz == 0);
     REQUIRE(fx.rc_speed_default == 0);
+    REQUIRE_FALSE(fx.convert_pid_parameters);
+    REQUIRE_FALSE(fx.convert_prx_parameters);
+    REQUIRE_FALSE(fx.convert_attitude_parameters);
+    REQUIRE_FALSE(fx.convert_pos_parameters);
+    REQUIRE_FALSE(fx.convert_wp_nav_parameters);
+    REQUIRE_FALSE(fx.convert_loiter_parameters);
+    REQUIRE_FALSE(fx.convert_circle_parameters);
+    REQUIRE_FALSE(fx.invalidate_count);
+}
+
+TEST_CASE("allocate_motors leftover QUAD records convert leftover flags",
+          "[copter][allocate_motors]") {
+    const auto fx = allocate_motors({.frame_class = MotorFrameClass::QUAD});
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE_FALSE(fx.ahrs_view_failed);
+    REQUIRE_FALSE(fx.attitude_failed);
+    REQUIRE(fx.convert_pid_parameters);
+    REQUIRE_FALSE(fx.convert_prx_parameters);
+    REQUIRE(fx.convert_attitude_parameters);
+    REQUIRE(fx.convert_pos_parameters);
+    REQUIRE(fx.convert_wp_nav_parameters);
+    REQUIRE(fx.convert_loiter_parameters);
+    REQUIRE(fx.convert_circle_parameters);
+    REQUIRE(fx.invalidate_count);
+}
+
+TEST_CASE("allocate_motors leftover proximity_enabled records convert_prx",
+          "[copter][allocate_motors]") {
+    AllocateMotorsInputs in{};
+    in.frame_class = MotorFrameClass::QUAD;
+    in.proximity_enabled = true;
+    const auto fx = allocate_motors(in);
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE(fx.convert_pid_parameters);
+    REQUIRE(fx.convert_prx_parameters);
+    REQUIRE(fx.convert_attitude_parameters);
+    REQUIRE(fx.convert_pos_parameters);
+    REQUIRE(fx.convert_wp_nav_parameters);
+    REQUIRE(fx.convert_loiter_parameters);
+    REQUIRE(fx.convert_circle_parameters);
+    REQUIRE(fx.invalidate_count);
+}
+
+TEST_CASE("allocate_motors leftover circle_enabled false skips convert_circle",
+          "[copter][allocate_motors]") {
+    AllocateMotorsInputs in{};
+    in.frame_class = MotorFrameClass::QUAD;
+    in.circle_enabled = false;
+    const auto fx = allocate_motors(in);
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE_FALSE(fx.circle_nav);
+    REQUIRE(fx.convert_pid_parameters);
+    REQUIRE_FALSE(fx.convert_prx_parameters);
+    REQUIRE(fx.convert_attitude_parameters);
+    REQUIRE(fx.convert_pos_parameters);
+    REQUIRE(fx.convert_wp_nav_parameters);
+    REQUIRE(fx.convert_loiter_parameters);
+    REQUIRE_FALSE(fx.convert_circle_parameters);
+    REQUIRE(fx.invalidate_count);
+}
+
+TEST_CASE("allocate_motors leftover 6DoF scripting off skips convert flags",
+          "[copter][allocate_motors]") {
+    const auto fx = allocate_motors({.frame_class = MotorFrameClass::SIXDOF_SCRIPTING});
+    REQUIRE(fx.allocation_failed);
+    REQUIRE_FALSE(fx.convert_pid_parameters);
+    REQUIRE_FALSE(fx.convert_prx_parameters);
+    REQUIRE_FALSE(fx.convert_attitude_parameters);
+    REQUIRE_FALSE(fx.convert_pos_parameters);
+    REQUIRE_FALSE(fx.convert_wp_nav_parameters);
+    REQUIRE_FALSE(fx.convert_loiter_parameters);
+    REQUIRE_FALSE(fx.convert_circle_parameters);
+    REQUIRE_FALSE(fx.invalidate_count);
+}
+
+TEST_CASE("allocate_motors leftover attitude_ok false skips convert flags",
+          "[copter][allocate_motors]") {
+    AllocateMotorsInputs in{};
+    in.frame_class = MotorFrameClass::QUAD;
+    in.attitude_ok = false;
+    const auto fx = allocate_motors(in);
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE_FALSE(fx.ahrs_view_failed);
+    REQUIRE(fx.attitude_failed);
+    REQUIRE_FALSE(fx.convert_pid_parameters);
+    REQUIRE_FALSE(fx.convert_prx_parameters);
+    REQUIRE_FALSE(fx.convert_attitude_parameters);
+    REQUIRE_FALSE(fx.convert_pos_parameters);
+    REQUIRE_FALSE(fx.convert_wp_nav_parameters);
+    REQUIRE_FALSE(fx.convert_loiter_parameters);
+    REQUIRE_FALSE(fx.convert_circle_parameters);
+    REQUIRE_FALSE(fx.invalidate_count);
 }
