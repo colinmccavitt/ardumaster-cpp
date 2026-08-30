@@ -7,8 +7,9 @@
 // a new vehicle architecture — walk the existing table in order.
 //
 // leftover_copter_tick is the SitlCopterHarness vehicle tick (the Copter
-// analogue of vehicle::tick for Plane). PWM still comes from
-// leftover_apply_collective (motors_output path in the sitl leftover).
+// analogue of vehicle::tick for Plane). PWM is mixed in SitlCopterHarness
+// from AC_PosControl NE lean + D throttle via MotorsMatrix (CCP-065).
+// leftover_apply_collective is not the XY path.
 
 #include <algorithm>
 #include <cstdint>

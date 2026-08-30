@@ -1,6 +1,8 @@
-// CCP-044/045: copter_sitl_run leftover mission on real Frame/Motor plant.
+// CCP-044/045/065: copter_sitl_run leftover mission on real Frame/Motor plant.
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+
+#include <cmath>
 
 #include <fwcpp/copter/leftover_copter.hpp>
 #include <fwcpp/hal_sitl/copter_sitl_run_leftover.hpp>
@@ -63,43 +65,70 @@ TEST_CASE("hoverThrOut holds altitude on the real plant", "[copter][sitl][ccp-04
     REQUIRE((-sim.position.z) == Catch::Approx(10.0f).margin(1.5f));
 }
 
-TEST_CASE("leftover copter sitl mission arm takeoff hold land",
-          "[copter][sitl][ccp-044][ccp-045]") {
+TEST_CASE("leftover copter sitl mission takeoff outbound rtl land",
+          "[copter][sitl][ccp-044][ccp-045][ccp-065]") {
     LeftoverCopter copter{};
     SimMulticopter sim{};
     SitlCopterHarness harness(copter, sim);
     LeftoverMission mission{};
+    mission.outbound_n_m = 12.0f;
     leftover_mission_begin_takeoff(mission);
 
     constexpr float kDt = 0.0025f;
     float max_alt_m = 0.0f;
-    bool saw_hold = false;
-    const int max_ticks = 20 * 400;
+    float max_n_m = 0.0f;
+    bool saw_outbound = false;
+    bool saw_rtl = false;
+    const int max_ticks = 30 * 400;
     for (int i = 0; i < max_ticks; ++i) {
         leftover_copter_sitl_step(harness, mission, kDt);
         const float alt = -sim.position.z;
         if (alt > max_alt_m) {
             max_alt_m = alt;
         }
-        if (mission.phase == MissionPhase::kHold) {
-            saw_hold = true;
+        if (sim.position.x > max_n_m) {
+            max_n_m = sim.position.x;
+        }
+        if (mission.phase == MissionPhase::kOutbound) {
+            saw_outbound = true;
+        }
+        if (mission.phase == MissionPhase::kRtl) {
+            saw_rtl = true;
         }
         if (mission.phase == MissionPhase::kLanded) {
             break;
         }
     }
 
-    REQUIRE(saw_hold);
+    REQUIRE(saw_outbound);
+    REQUIRE(saw_rtl);
     REQUIRE(max_alt_m >= 9.0f);
+    REQUIRE(max_n_m >= 8.0f);
     REQUIRE(mission.phase == MissionPhase::kLanded);
     REQUIRE(copter.land_complete);
     REQUIRE_FALSE(copter.motors_armed);
     REQUIRE(sim.on_ground());
+    REQUIRE(std::hypot(sim.position.x, sim.position.y) < 5.0f);
     REQUIRE(harness.tick_count() > 0);
     REQUIRE(copter.gyro_injected);
     REQUIRE(copter.baro_injected);
 }
 
+
+
+TEST_CASE("main-style first disarmed step then takeoff climbs", "[copter][sitl][ccp-065]") {
+    LeftoverCopter copter{};
+    SimMulticopter sim{};
+    SitlCopterHarness harness(copter, sim);
+    LeftoverMission mission{};
+    leftover_copter_sitl_step(harness, mission, 0.0025f);
+    leftover_mission_begin_takeoff(mission);
+    constexpr float kDt = 0.0025f;
+    for (int i = 0; i < 1200; ++i) {
+        leftover_copter_sitl_step(harness, mission, kDt);
+    }
+    REQUIRE((-sim.position.z) > 2.0f);
+}
 
 TEST_CASE("leftover_hold_command uses AC_PosControl altitude not vz damper",
           "[copter][sitl][ccp-064]") {
@@ -121,9 +150,9 @@ TEST_CASE("leftover_hold_command uses AC_PosControl altitude not vz damper",
 }
 
 TEST_CASE("copter_sitl_run leftover catalog remaining_count",
-          "[copter][sitl][ccp-044][leftover]") {
+          "[copter][sitl][ccp-044][leftover][ccp-065]") {
     REQUIRE(remaining_count() == 0);
-    REQUIRE(this_slice_count() == 8);
+    REQUIRE(this_slice_count() == 10);
     REQUIRE(on_main_count() == 4);
     REQUIRE(out_of_scope_count() == 4);
     REQUIRE(completeness_size() ==
@@ -131,9 +160,11 @@ TEST_CASE("copter_sitl_run leftover catalog remaining_count",
     REQUIRE(completeness_has("leftover_mission_advance", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_hold_command", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_poscontrol_throttle", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("leftover_poscontrol_ne", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("leftover_wpnav_rtl", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_copter_loop", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover_apply_collective", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_copter_sitl_step", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("copter_sitl_run arm/takeoff/hold/land", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("copter_sitl_run takeoff/outbound/rtl/land", PortStatus::kThisSlice));
     REQUIRE(completeness_has("SIM_Multicopter Frame/Motor mixing", PortStatus::kOnMain));
 }

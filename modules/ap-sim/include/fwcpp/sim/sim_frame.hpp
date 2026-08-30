@@ -468,7 +468,41 @@ public:
         for (std::uint8_t i = 0; i < nmot && i < kSimFrameMaxActuators; ++i) {
             motor_store_[i] = src[i];
         }
-        motors = motor_store_.data();
+        rebind_motors();
+    }
+
+    // motor_store_ is the owned Motor array. `motors` must always point at
+    // THIS object's store. Default copy/move copies the raw pointer, which
+    // dangles after Frame::create_frame() returns (SimMulticopter assigns
+    // that temporary). Tests sometimes survived on leftover stack; copter_main
+    // did not — PWM mixed into the wrong servo map and calculate_forces saw
+    // garbage Motor state (no thrust).
+    Frame(const Frame& other) { *this = other; }
+    Frame(Frame&& other) noexcept { *this = other; }
+    Frame& operator=(const Frame& other) {
+        if (this == &other) {
+            return *this;
+        }
+        name = other.name;
+        num_motors = other.num_motors;
+        terminal_velocity = other.terminal_velocity;
+        terminal_rotation_rate = other.terminal_rotation_rate;
+        motor_offset = other.motor_offset;
+        mass_scale = other.mass_scale;
+        sitl = other.sitl;
+        rpm_out = other.rpm_out;
+        battery_dirty = other.battery_dirty;
+        motor_store_ = other.motor_store_;
+        model = other.model;
+        area_cd_ = other.area_cd_;
+        mass_ = other.mass_;
+        battery_voltage_ = other.battery_voltage_;
+        rebind_motors();
+        return *this;
+    }
+    Frame& operator=(Frame&& other) noexcept {
+        *this = static_cast<const Frame&>(other);
+        return *this;
     }
 
     static Frame create_frame(const char* frame_name) {
@@ -698,6 +732,10 @@ public:
             json_get_float(obj, label, model.yaw_factor[j]);
         }
         return true;
+    }
+
+    void rebind_motors() {
+        motors = (num_motors > 0) ? motor_store_.data() : nullptr;
     }
 
 private:

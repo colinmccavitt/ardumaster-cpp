@@ -20,9 +20,12 @@
 #include <fwcpp/location.hpp>
 #include <fwcpp/math/vector3.hpp>
 #include <fwcpp/pid/ac_p_1d.hpp>
+#include <fwcpp/pid/ac_p_2d.hpp>
 #include <fwcpp/pid/ac_pid.hpp>
+#include <fwcpp/pid/ac_pid_2d.hpp>
 #include <fwcpp/pid/ac_pid_basic.hpp>
 #include <fwcpp/poscontrol/pos_control_d.hpp>
+#include <fwcpp/poscontrol/pos_control_ne.hpp>
 namespace fwcpp::copter {
 
 struct LeftoverCopter {
@@ -68,6 +71,15 @@ struct LeftoverCopter {
     poscontrol::DLimits d_limits{};
     bool pos_d_inited{false};
     float throttle_out{0.0f};
+    poscontrol::PosControlNe pos_ne{};
+    pid::AcP2d p_pos_ne{};
+    pid::AcPid2d pid_vel_ne{};
+    poscontrol::NeLimits ne_limits{};
+    poscontrol::NeOffsetState ne_offsets{};
+    poscontrol::NeDisturbance ne_disturb{};
+    bool pos_ne_inited{false};
+    float roll_target_rad{0.0f};
+    float pitch_target_rad{0.0f};
     bool loop_ran_rate_controller{false};
     bool loop_ran_motors_output{false};
     bool loop_ran_read_ahrs{false};
