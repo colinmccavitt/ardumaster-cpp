@@ -234,6 +234,10 @@ add_executable(sim_periph_test sim_periph_test.cpp)
 target_link_libraries(sim_periph_test PRIVATE ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sim_periph_test)
 
+add_executable(sim_i2c_vehicles_test sim_i2c_vehicles_test.cpp)
+target_link_libraries(sim_i2c_vehicles_test PRIVATE ap-sim Catch2::Catch2WithMain)
+catch_discover_tests(sim_i2c_vehicles_test)
+
 add_executable(tecs_test tecs_test.cpp)
 # ap-param added by CPP-049: tecs.hpp itself now #includes several
 # fwcpp/param/ headers for its own "CPP-049 ADDENDUM" (tecs_group_info/
