@@ -41,6 +41,7 @@ using fwcpp::copter::UpdateSuperSimpleBearingInputs;
 using fwcpp::copter::AutoDisarmCheckInputs;
 using fwcpp::copter::StandbyUpdateInputs;
 using fwcpp::copter::LostVehicleCheckInputs;
+using fwcpp::copter::TakeoffCheckInputs;
 using fwcpp::copter::DesiredSpoolState;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
@@ -80,8 +81,12 @@ using fwcpp::copter::update_super_simple_bearing;
 using fwcpp::copter::auto_disarm_check;
 using fwcpp::copter::standby_update;
 using fwcpp::copter::lost_vehicle_check;
+using fwcpp::copter::takeoff_check;
 using fwcpp::copter::kLostVehicleDelay;
 using fwcpp::copter::kLostVehicleStickThreshold;
+using fwcpp::copter::kTakeoffCheckAvgLoadMax;
+using fwcpp::copter::kTakeoffCheckPeakLoadMax;
+using fwcpp::copter::kTakeoffCheckWarningIntervalMs;
 using fwcpp::copter::kSuperSimpleRadiusM;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
@@ -108,10 +113,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 25", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 6);
+TEST_CASE("catalog remaining_count stays open after slice 26", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 5);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 29);
+    REQUIRE(on_main_count() == 30);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -144,8 +149,9 @@ TEST_CASE("catalog remaining_count stays open after slice 25", "[copter][leftove
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::auto_disarm_check", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::standby_update", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::lost_vehicle_check", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::takeoff_check", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::lost_vehicle_check", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::takeoff_check", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::get_wp_distance_m", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -1987,4 +1993,100 @@ TEST_CASE("lost_vehicle_check hold pose increments then sets lost + gcs once",
     REQUIRE(already.soundalarm_counter == kLostVehicleDelay);
     REQUIRE(already.vehicle_lost);
     REQUIRE_FALSE(already.gcs_locate_alarm);
+}
+
+namespace {
+
+[[nodiscard]] TakeoffCheckInputs blocked_landed() {
+    TakeoffCheckInputs in{};
+    in.now_ms = 5000;
+    in.spoolup_block = true;
+    in.land_complete = true;
+    in.warning_ms = 1000;
+    return in;
+}
+
+}  // namespace
+
+TEST_CASE("takeoff_check !spoolup_block resets warning_ms to now",
+          "[copter][takeoff_check]") {
+    REQUIRE(kTakeoffCheckWarningIntervalMs == 2000);
+    REQUIRE(kTakeoffCheckAvgLoadMax == 95.0f);
+    REQUIRE(kTakeoffCheckPeakLoadMax == 99.5f);
+
+    TakeoffCheckInputs in{};
+    in.now_ms = 4242;
+    in.spoolup_block = false;
+    in.warning_ms = 10;
+    in.land_complete = true;
+    in.motor_check_passed = false;
+
+    const auto fx = takeoff_check(in);
+    REQUIRE_FALSE(fx.spoolup_block);
+    REQUIRE(fx.warning_ms == in.now_ms);
+    REQUIRE_FALSE(fx.gcs_cpu_overload);
+
+    const auto* row = find_scheduler_task("takeoff_check");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 50.0f);
+    REQUIRE(row->max_time_micros == 50);
+    REQUIRE(row->priority == 91);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("takeoff_check spoolup_block and !land_complete clears block",
+          "[copter][takeoff_check]") {
+    TakeoffCheckInputs in = blocked_landed();
+    in.land_complete = false;
+    in.motor_check_passed = false;
+
+    const auto fx = takeoff_check(in);
+    REQUIRE_FALSE(fx.spoolup_block);
+    REQUIRE(fx.warning_ms == in.warning_ms);
+    REQUIRE_FALSE(fx.gcs_cpu_overload);
+}
+
+TEST_CASE("takeoff_check block landed motor_check load ok clears block",
+          "[copter][takeoff_check]") {
+    TakeoffCheckInputs in = blocked_landed();
+    in.motor_check_passed = true;
+    in.has_system_load = true;
+    in.avg_load = kTakeoffCheckAvgLoadMax;
+    in.peak_load = kTakeoffCheckPeakLoadMax;
+
+    const auto fx = takeoff_check(in);
+    REQUIRE_FALSE(fx.spoolup_block);
+    REQUIRE(fx.warning_ms == in.warning_ms);
+    REQUIRE_FALSE(fx.gcs_cpu_overload);
+
+    // get_system_load failure leaves load_adequate true.
+    in.has_system_load = false;
+    in.avg_load = 99.0f;
+    in.peak_load = 100.0f;
+    const auto no_load = takeoff_check(in);
+    REQUIRE_FALSE(no_load.spoolup_block);
+    REQUIRE_FALSE(no_load.gcs_cpu_overload);
+}
+
+TEST_CASE("takeoff_check block landed !load stays blocked; 2001ms gcs leftover",
+          "[copter][takeoff_check]") {
+    TakeoffCheckInputs in = blocked_landed();
+    in.motor_check_passed = true;
+    in.has_system_load = true;
+    in.avg_load = 96.0f;
+    in.peak_load = 0.0f;
+    in.warning_ms = 1000;
+    in.now_ms = 1000 + kTakeoffCheckWarningIntervalMs;
+
+    const auto held = takeoff_check(in);
+    REQUIRE(held.spoolup_block);
+    REQUIRE(held.warning_ms == in.warning_ms);
+    REQUIRE_FALSE(held.gcs_cpu_overload);
+
+    in.now_ms = 1000 + kTakeoffCheckWarningIntervalMs + 1;
+    const auto warned = takeoff_check(in);
+    REQUIRE(warned.spoolup_block);
+    REQUIRE(warned.warning_ms == in.now_ms);
+    REQUIRE(warned.gcs_cpu_overload);
 }
