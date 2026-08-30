@@ -38,8 +38,9 @@
 // leftover leftover_climb_return_run + climb_return_run body leftover flags +
 // leftover leftover_loiterathome_run + loiterathome_run body leftover flags +
 // leftover leftover_descent_run + descent_run body leftover flags
-// (disarmed/spool/NE/D) + leftover leftover_rtl_land_run flags) is this
-// slice. land_run body + descent pilot/reposition remaining.
+// (disarmed/spool/NE/D) + leftover leftover_rtl_land_run + land_run body
+// leftover flags (state_complete/disarm/spool/land_run_normal flag)) is this
+// slice. descent pilot/reposition remaining.
 // ModeLand, ModeGuided::run body,
 // land_run_normal_or_precland body, land_run_horizontal_control body, and
 // auto_takeoff.run body stay later.
@@ -589,10 +590,11 @@ public:
 // flags) + leftover leftover_loiterathome_run (mode_rtl.cpp ~272-311 body
 // leftover flags) + leftover leftover_descent_run (mode_rtl.cpp ~328-375
 // body leftover flags: disarmed/spool/NE/D; pilot cancel / land_reposition
-// / attitude / _state_complete remaining) + leftover leftover_rtl_land_run
-// flags, mode_rtl.cpp ~167-190). Do not dump land_start / descent_start /
-// land_run bodies. descent_run body leftover flags are this slice; land_run
-// body remaining. ModeAuto leftover_rtl_run does not call leftover_run.
+// / attitude remaining) + leftover leftover_rtl_land_run + land_run body
+// leftover flags (mode_rtl.cpp ~418-441: state_complete / disarm /
+// spool / land_run_normal flag; land_run_normal_or_precland body remaining).
+// Do not dump land_start / descent_start bodies. ModeAuto leftover_rtl_run
+// does not call leftover_run.
 class ModeRTL : public Mode {
 public:
     enum class SubMode : std::uint8_t {
@@ -634,8 +636,10 @@ public:
     // leftover flags. leftover leftover_loiterathome_run (second switch
     // LOITER_AT_HOME) plus loiterathome_run body leftover flags. leftover
     // leftover_descent_run (FINAL_DESCENT) plus descent_run body leftover
-    // flags (this slice; reuses shared disarmed/spool/pos_D; NE/D slew
-    // new). leftover leftover_rtl_land_run (LAND; body remaining).
+    // flags (reuses shared disarmed/spool/pos_D; NE/D slew). leftover
+    // leftover_rtl_land_run (LAND) plus land_run body leftover flags
+    // (this slice; state_complete/disarm/spool/land_run_normal flag;
+    // land_run_normal_or_precland body remaining).
     bool leftover_return_start{false};
     bool leftover_climb_return_run{false};
     bool leftover_loiterathome_start{false};
@@ -645,13 +649,22 @@ public:
     bool leftover_descent_run{false};
     bool leftover_rtl_land_run{false};
     // Injected is_disarmed_or_landed() for climb_return_run /
-    // loiterathome_run / descent_run. Default false so the flying path
-    // runs without motors / land-complete objects.
+    // loiterathome_run / descent_run / land_run. Default false so the
+    // flying path runs without motors / land-complete objects.
     bool leftover_disarmed_or_landed{false};
     // Leftover make_safe_ground_handling() when disarmed or landed.
     bool leftover_make_safe_ground_handling{false};
     // Leftover motors->set_desired_spool_state(THROTTLE_UNLIMITED).
     bool leftover_desired_spool_unlimited{false};
+    // Injected copter.ap.land_complete for land_run (_state_complete).
+    bool leftover_land_complete{false};
+    // Injected motors->get_spool_state() == GROUND_IDLE for land_run disarm.
+    bool leftover_spool_ground_idle{false};
+    // Leftover arming.disarm(LANDED) when disarm_on_land && land_complete
+    // && spool ground idle. Flag only; does not disarm.
+    bool leftover_disarm_landed{false};
+    // Leftover land_run_normal_or_precland() call-site (body remaining).
+    bool leftover_land_run_normal_or_precland{false};
     // Leftover wp_nav->update_wpnav() (no wp_nav object).
     bool leftover_update_wpnav{false};
     // Leftover copter.failsafe_terrain_set_status (no Copter / wp_nav).
@@ -715,20 +728,24 @@ public:
     // leftover_build_path / leftover leftover_climb_start / leftover
     // leftover_return_start / leftover leftover_loiterathome_start / leftover
     // leftover leftover_land_start / leftover leftover_descent_start / climb_return
-    // and loiterathome and descent body leftover flags at entry so a later
-    // !armed tick or other SubMode does not leave stale true flags. Records
-    // leftover leftover_rtl_run_disarm_on_land. Armed gate then STARTING leftover
-    // leftover leftover_build_path / leftover leftover_climb_start, INITIAL_CLIMB
-    // leftover leftover leftover_return_start, RETURN_HOME leftover leftover
-    // leftover_loiterathome_start, and LOITER_AT_HOME leftover leftover
-    // leftover_land_start or leftover leftover leftover_descent_start (injected
-    // leftover leftover_rtl_path_land / leftover leftover_failsafe_radio).
-    // FINAL_DESCENT / LAND first switch are upstream no-ops. Do not change
-    // _state (STARTING fallthrough assign remaining). Second switch sets
-    // leftover leftover_climb_return_run (with climb_return_run body leftover
-    // flags), leftover leftover_loiterathome_run (with loiterathome_run body
-    // leftover flags), leftover leftover_descent_run (with descent_run body
-    // leftover flags), leftover leftover_rtl_land_run.
+    // and loiterathome and descent and land body leftover flags at entry so a
+    // later !armed tick or other SubMode does not leave stale true flags.
+    // Inject inputs leftover_land_complete / leftover_spool_ground_idle are
+    // not cleared. Records leftover leftover_rtl_run_disarm_on_land. Armed
+    // gate then STARTING leftover leftover leftover_build_path / leftover
+    // leftover_climb_start, INITIAL_CLIMB leftover leftover leftover_return_start,
+    // RETURN_HOME leftover leftover leftover_loiterathome_start, and
+    // LOITER_AT_HOME leftover leftover leftover_land_start or leftover leftover
+    // leftover_descent_start (injected leftover leftover_rtl_path_land /
+    // leftover leftover_failsafe_radio). FINAL_DESCENT / LAND first switch are
+    // upstream no-ops. Do not change _state (STARTING fallthrough assign
+    // remaining). Second switch sets leftover leftover_climb_return_run (with
+    // climb_return_run body leftover flags), leftover leftover_loiterathome_run
+    // (with loiterathome_run body leftover flags), leftover leftover_descent_run
+    // (with descent_run body leftover flags), leftover leftover_rtl_land_run
+    // (with land_run body leftover flags: _state_complete from
+    // leftover_land_complete; leftover_disarm_landed; make_safe or spool +
+    // leftover_land_run_normal_or_precland).
     void leftover_run(bool disarm_on_land) {
         leftover_build_path = false;
         leftover_climb_start = false;
@@ -742,6 +759,8 @@ public:
         leftover_rtl_land_run = false;
         leftover_make_safe_ground_handling = false;
         leftover_desired_spool_unlimited = false;
+        leftover_disarm_landed = false;
+        leftover_land_run_normal_or_precland = false;
         leftover_update_wpnav = false;
         leftover_terrain_failsafe_status = false;
         leftover_pos_D_update = false;
@@ -832,6 +851,18 @@ public:
         }
         if (_state == SubMode::LAND) {
             leftover_rtl_land_run = true;
+            // land_run body leftover (mode_rtl.cpp ~418-441).
+            _state_complete = leftover_land_complete;
+            if (disarm_on_land && leftover_land_complete &&
+                leftover_spool_ground_idle) {
+                leftover_disarm_landed = true;
+            }
+            if (leftover_disarmed_or_landed) {
+                leftover_make_safe_ground_handling = true;
+            } else {
+                leftover_desired_spool_unlimited = true;
+                leftover_land_run_normal_or_precland = true;
+            }
         }
     }
     // upstream mode.h: run() { return run(true); }

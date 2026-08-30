@@ -1116,6 +1116,8 @@ TEST_CASE("ModeAuto run SubMode RTL leftover rtl_run", "[copter][mode]") {
     REQUIRE_FALSE(f.table.mode_rtl.leftover_rtl_land_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_make_safe_ground_handling);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_disarm_landed);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_land_run_normal_or_precland);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_update_wpnav);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_terrain_failsafe_status);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_pos_D_update);
@@ -2006,6 +2008,8 @@ TEST_CASE("ModeRTL leftover leftover_run FINAL_DESCENT leftover leftover leftove
     REQUIRE_FALSE(f.table.mode_rtl.leftover_loiterathome_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_climb_return_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_land_run_normal_or_precland);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_disarm_landed);
     REQUIRE(f.table.mode_rtl.state() == ModeRTL::SubMode::FINAL_DESCENT);
     REQUIRE(f.table.mode_rtl.state_complete());
 }
@@ -2031,6 +2035,7 @@ TEST_CASE("ModeRTL leftover leftover_run FINAL_DESCENT leftover leftover leftove
     REQUIRE_FALSE(f.table.mode_rtl.leftover_land_start);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_loiterathome_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_land_run_normal_or_precland);
     REQUIRE(f.table.mode_rtl.state() == ModeRTL::SubMode::FINAL_DESCENT);
     REQUIRE_FALSE(f.table.mode_rtl.state_complete());
 }
@@ -2093,7 +2098,9 @@ TEST_CASE("ModeRTL leftover leftover_run LAND leftover leftover leftover leftove
     in.position_ok = true;
     REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
     f.table.mode_rtl._state = ModeRTL::SubMode::LAND;
-    f.table.mode_rtl._state_complete = true;
+    f.table.mode_rtl._state_complete = false;
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_disarmed_or_landed);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_land_complete);
     f.table.mode_rtl.leftover_rtl_path_land = true;
     f.table.mode_rtl.run();
     REQUIRE_FALSE(f.table.mode_rtl.leftover_land_start);
@@ -2106,6 +2113,11 @@ TEST_CASE("ModeRTL leftover leftover_run LAND leftover leftover leftover leftove
     REQUIRE_FALSE(f.table.mode_rtl.leftover_ne_update);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_d_set_alt_slew);
     REQUIRE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE(f.table.mode_rtl.leftover_land_run_normal_or_precland);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_make_safe_ground_handling);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_disarm_landed);
+    REQUIRE_FALSE(f.table.mode_rtl.state_complete());
     REQUIRE(f.table.mode_rtl.state() == ModeRTL::SubMode::LAND);
 }
 
@@ -2121,11 +2133,87 @@ TEST_CASE("ModeRTL leftover leftover_run LAND leftover leftover leftover leftove
     REQUIRE(f.table.mode_rtl.motors_armed);
     f.table.mode_rtl.run();
     REQUIRE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE(f.table.mode_rtl.leftover_land_run_normal_or_precland);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_land_start);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_descent_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_loiterathome_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_climb_return_run);
+    REQUIRE_FALSE(f.table.mode_rtl.state_complete());
     REQUIRE(f.table.mode_rtl.state() == ModeRTL::SubMode::LAND);
+}
+
+TEST_CASE("ModeRTL leftover leftover_run LAND land_complete sets state_complete",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    f.table.mode_rtl._state = ModeRTL::SubMode::LAND;
+    f.table.mode_rtl._state_complete = false;
+    f.table.mode_rtl.leftover_land_complete = true;
+    f.table.mode_rtl.run();
+    REQUIRE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE(f.table.mode_rtl.state_complete());
+    REQUIRE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE(f.table.mode_rtl.leftover_land_run_normal_or_precland);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_disarm_landed);
+}
+
+TEST_CASE("ModeRTL leftover leftover_run LAND disarm_on_land with land_complete and ground_idle",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    f.table.mode_rtl._state = ModeRTL::SubMode::LAND;
+    f.table.mode_rtl._state_complete = false;
+    f.table.mode_rtl.leftover_land_complete = true;
+    f.table.mode_rtl.leftover_spool_ground_idle = true;
+    f.table.mode_rtl.leftover_run(true);
+    REQUIRE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE(f.table.mode_rtl.leftover_disarm_landed);
+    REQUIRE(f.table.mode_rtl.state_complete());
+    REQUIRE(f.table.mode_rtl.leftover_rtl_run_disarm_on_land);
+}
+
+TEST_CASE("ModeRTL leftover leftover_run LAND disarm_on_land false skips leftover_disarm_landed",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    f.table.mode_rtl._state = ModeRTL::SubMode::LAND;
+    f.table.mode_rtl._state_complete = false;
+    f.table.mode_rtl.leftover_land_complete = true;
+    f.table.mode_rtl.leftover_spool_ground_idle = true;
+    f.table.mode_rtl.leftover_run(false);
+    REQUIRE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_disarm_landed);
+    REQUIRE(f.table.mode_rtl.state_complete());
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_rtl_run_disarm_on_land);
+}
+
+TEST_CASE("ModeRTL leftover leftover_run LAND land body when disarmed",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    f.table.mode_rtl._state = ModeRTL::SubMode::LAND;
+    f.table.mode_rtl._state_complete = false;
+    f.table.mode_rtl.leftover_disarmed_or_landed = true;
+    f.table.mode_rtl.run();
+    REQUIRE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE(f.table.mode_rtl.leftover_make_safe_ground_handling);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_land_run_normal_or_precland);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_disarm_landed);
+    REQUIRE_FALSE(f.table.mode_rtl.state_complete());
 }
 
 TEST_CASE("ModeRTL leftover leftover_run motors_armed false skips leftover leftover leftover leftover_rtl leftover leftover leftover leftover_land leftover leftover leftover leftover_run",
@@ -2136,12 +2224,20 @@ TEST_CASE("ModeRTL leftover leftover_run motors_armed false skips leftover lefto
     in.position_ok = true;
     REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
     f.table.mode_rtl._state = ModeRTL::SubMode::LAND;
-    f.table.mode_rtl._state_complete = true;
+    f.table.mode_rtl._state_complete = false;
     f.table.mode_rtl.run();
     REQUIRE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE(f.table.mode_rtl.leftover_land_run_normal_or_precland);
     f.table.mode_rtl.motors_armed = false;
+    f.table.mode_rtl.leftover_land_complete = true;
+    f.table.mode_rtl.leftover_spool_ground_idle = true;
     f.table.mode_rtl.leftover_run(true);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_land_run_normal_or_precland);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_disarm_landed);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_make_safe_ground_handling);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_land_start);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_descent_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_loiterathome_run);
