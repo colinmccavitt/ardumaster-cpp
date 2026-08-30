@@ -24,4 +24,5 @@
 #include <fwcpp/copter/update_batt_compass.hpp>
 #include <fwcpp/copter/update_rangefinder_terrain_offset.hpp>
 #include <fwcpp/copter/three_hz_loop.hpp>
+#include <fwcpp/copter/loop_rate_logging.hpp>
 #include <fwcpp/copter/update_throttle_hover.hpp>

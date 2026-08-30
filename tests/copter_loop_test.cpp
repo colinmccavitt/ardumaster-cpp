@@ -28,6 +28,7 @@ using fwcpp::copter::UpdateBattCompassInputs;
 using fwcpp::copter::UpdateLandAndCrashDetectorsInputs;
 using fwcpp::copter::UpdateRangefinderTerrainOffsetInputs;
 using fwcpp::copter::UpdateThrottleHoverInputs;
+using fwcpp::copter::LoopRateLoggingInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -35,6 +36,7 @@ using fwcpp::copter::first_scheduled_always_on;
 using fwcpp::copter::get_scheduler_tasks;
 using fwcpp::copter::kArmingDelayMs;
 using fwcpp::copter::kCopterLoopRateHz;
+using fwcpp::copter::kLoopRateHz;
 using fwcpp::copter::kMaskLogPm;
 using fwcpp::copter::kRcLoopMaxTimeMicros;
 using fwcpp::copter::kRcLoopPriority;
@@ -54,6 +56,7 @@ using fwcpp::copter::run_rate_controller_main;
 using fwcpp::copter::scheduler_task_count;
 using fwcpp::copter::this_slice_count;
 using fwcpp::copter::three_hz_loop;
+using fwcpp::copter::loop_rate_logging;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
@@ -79,10 +82,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 14", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 17);
+TEST_CASE("catalog remaining_count stays open after slice 15", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 16);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 18);
+    REQUIRE(on_main_count() == 19);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -103,9 +106,10 @@ TEST_CASE("catalog remaining_count stays open after slice 14", "[copter][leftove
     REQUIRE(completeness_has("Copter::update_altitude", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::run_nav_updates", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_throttle_hover", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::three_hz_loop", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::three_hz_loop", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::loop_rate_logging", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::loop_rate_logging", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::ten_hz_logging_loop", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
@@ -1135,4 +1139,65 @@ TEST_CASE("three_hz_loop leftover always-on failsafes and low_alt; tuning remain
     REQUIRE(row->max_time_micros == 75);
     REQUIRE(row->priority == 57);
     REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("loop_rate_logging leftover records SPOL always; attitude/rate/PIDS/IMU gated",
+          "[copter][loop_rate_logging]") {
+    const auto empty = loop_rate_logging();
+    REQUIRE(empty.log_write_spol);
+    REQUIRE_FALSE(empty.log_write_attitude);
+    REQUIRE_FALSE(empty.log_write_rate);
+    REQUIRE_FALSE(empty.log_write_pids);
+    REQUIRE_FALSE(empty.write_imu);
+    REQUIRE_FALSE(empty.write_notch_log_messages);
+    REQUIRE_FALSE(empty.should_log_ftn_fast);
+
+    LoopRateLoggingInputs att{};
+    att.should_log_attitude_fast = true;
+    const auto att_fx = loop_rate_logging(att);
+    REQUIRE(att_fx.log_write_attitude);
+    REQUIRE(att_fx.log_write_rate);
+    REQUIRE(att_fx.log_write_pids);
+    REQUIRE(att_fx.log_write_spol);
+    REQUIRE_FALSE(att_fx.write_imu);
+    REQUIRE_FALSE(att_fx.write_notch_log_messages);
+
+    LoopRateLoggingInputs logs_att = att;
+    logs_att.logs_attitude = true;
+    const auto skip = loop_rate_logging(logs_att);
+    REQUIRE_FALSE(skip.log_write_attitude);
+    REQUIRE_FALSE(skip.log_write_rate);
+    REQUIRE_FALSE(skip.log_write_pids);
+    REQUIRE(skip.log_write_spol);
+
+    LoopRateLoggingInputs rate_thr = att;
+    rate_thr.using_rate_thread = true;
+    const auto rate_fx = loop_rate_logging(rate_thr);
+    REQUIRE(rate_fx.log_write_attitude);
+    REQUIRE_FALSE(rate_fx.log_write_rate);
+    REQUIRE_FALSE(rate_fx.log_write_pids);
+    REQUIRE(rate_fx.log_write_spol);
+
+    LoopRateLoggingInputs imu{};
+    imu.should_log_imu_fast = true;
+    const auto imu_fx = loop_rate_logging(imu);
+    REQUIRE(imu_fx.write_imu);
+    REQUIRE(imu_fx.log_write_spol);
+    REQUIRE_FALSE(imu_fx.log_write_attitude);
+
+    LoopRateLoggingInputs ftn{};
+    ftn.should_log_ftn_fast = true;
+    const auto ftn_fx = loop_rate_logging(ftn);
+    REQUIRE(ftn_fx.should_log_ftn_fast);
+    REQUIRE_FALSE(ftn_fx.write_notch_log_messages);
+    REQUIRE(ftn_fx.log_write_spol);
+
+    const auto* row = find_scheduler_task("loop_rate_logging");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == kLoopRateHz);
+    REQUIRE(row->max_time_micros == 50);
+    REQUIRE(row->priority == 75);
+    REQUIRE(row->gate != nullptr);
+    REQUIRE(std::string_view(row->gate) == "HAL_LOGGING_ENABLED");
 }
