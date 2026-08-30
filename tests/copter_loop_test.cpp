@@ -39,6 +39,7 @@ using fwcpp::copter::SimpleMode;
 using fwcpp::copter::UpdateSimpleModeInputs;
 using fwcpp::copter::UpdateSuperSimpleBearingInputs;
 using fwcpp::copter::AutoDisarmCheckInputs;
+using fwcpp::copter::StandbyUpdateInputs;
 using fwcpp::copter::DesiredSpoolState;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
@@ -76,6 +77,7 @@ using fwcpp::copter::init_simple_bearing;
 using fwcpp::copter::update_simple_mode;
 using fwcpp::copter::update_super_simple_bearing;
 using fwcpp::copter::auto_disarm_check;
+using fwcpp::copter::standby_update;
 using fwcpp::copter::kSuperSimpleRadiusM;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
@@ -102,10 +104,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 23", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 8);
+TEST_CASE("catalog remaining_count stays open after slice 24", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 7);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 27);
+    REQUIRE(on_main_count() == 28);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -136,8 +138,9 @@ TEST_CASE("catalog remaining_count stays open after slice 23", "[copter][leftove
     REQUIRE(completeness_has("Copter::init_simple_bearing", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_simple_mode", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::auto_disarm_check", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::standby_update", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::auto_disarm_check", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::standby_update", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::lost_vehicle_check", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -1845,4 +1848,37 @@ TEST_CASE("auto_disarm_check !land_complete resets begin",
     const auto fx = auto_disarm_check(in);
     REQUIRE_FALSE(fx.disarm);
     REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
+}
+
+TEST_CASE("standby_update default / inactive records no resets",
+          "[copter][standby_update]") {
+    const auto empty = standby_update();
+    REQUIRE_FALSE(empty.reset_rate_I);
+    REQUIRE_FALSE(empty.reset_yaw_target_and_rate);
+    REQUIRE_FALSE(empty.ned_standby_reset);
+
+    StandbyUpdateInputs in{};
+    in.standby_active = false;
+    const auto fx = standby_update(in);
+    REQUIRE_FALSE(fx.reset_rate_I);
+    REQUIRE_FALSE(fx.reset_yaw_target_and_rate);
+    REQUIRE_FALSE(fx.ned_standby_reset);
+
+    const auto* row = find_scheduler_task("standby_update");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 100.0f);
+    REQUIRE(row->max_time_micros == 75);
+    REQUIRE(row->priority == 96);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("standby_update active records I-term yaw and NED resets",
+          "[copter][standby_update]") {
+    StandbyUpdateInputs in{};
+    in.standby_active = true;
+    const auto fx = standby_update(in);
+    REQUIRE(fx.reset_rate_I);
+    REQUIRE(fx.reset_yaw_target_and_rate);
+    REQUIRE(fx.ned_standby_reset);
 }
