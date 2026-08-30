@@ -36,8 +36,10 @@
 // RETURN_HOME leftover leftover_loiterathome_start + LOITER_AT_HOME leftover
 // leftover leftover_land_start / leftover leftover_descent_start + leftover
 // leftover leftover_climb_return_run + leftover leftover_loiterathome_run
-// + leftover leftover leftover leftover_descent_run flags) is this slice.
-// leftover leftover leftover leftover_rtl_land_run remaining.
+// + leftover leftover leftover leftover_descent_run + leftover leftover leftover leftover_rtl_land_run
+// flags) is this slice.
+// leftover leftover leftover leftover_rtl_land_run is this slice.
+// leftover leftover leftover leftover_climb_return_run leftover leftover leftover leftover_body remaining.
 // ModeLand, ModeGuided::run body,
 // land_run_normal_or_precland body, land_run_horizontal_control body, and
 // auto_takeoff.run body stay later.
@@ -583,11 +585,12 @@ public:
 // RETURN_HOME leftover leftover_loiterathome_start + LOITER_AT_HOME leftover
 // leftover leftover_land_start / leftover leftover_descent_start + leftover
 // leftover leftover_climb_return_run + leftover leftover leftover leftover_loiterathome_run
-// + leftover leftover leftover leftover_descent_run flags, mode_rtl.cpp ~167-186). Do
+// + leftover leftover leftover leftover_descent_run + leftover leftover leftover leftover_rtl_land_run
+// flags, mode_rtl.cpp ~167-190). Do
 // not dump land_start / descent_start / climb_return_run / loiterathome_run /
 // leftover leftover leftover leftover_descent_run leftover leftover leftover leftover_body /
-// leftover leftover leftover leftover_rtl_land_run leftover leftover leftover leftover_body / LAND.
-// leftover leftover leftover leftover_rtl_land_run remaining. ModeAuto leftover leftover leftover leftover_rtl_run
+// leftover leftover leftover leftover_rtl_land_run leftover leftover leftover leftover_body.
+// leftover leftover leftover leftover_rtl_land_run is this slice. leftover leftover leftover leftover_climb_return_run leftover leftover leftover leftover_body remaining. ModeAuto leftover leftover leftover leftover_rtl_run
 // does not call leftover leftover leftover leftover_run.
 class ModeRTL : public Mode {
 public:
@@ -630,7 +633,7 @@ public:
     // leftover leftover_loiterathome_run is this slice (second switch
     // LOITER_AT_HOME). leftover leftover leftover leftover_descent_run is this slice
     // (second switch FINAL_DESCENT). leftover leftover leftover leftover_rtl_land_run
-    // stays false.
+    // is this slice (second switch LAND; flag only). leftover leftover leftover leftover_climb_return_run leftover leftover leftover leftover_body remaining.
     bool leftover_return_start{false};
     bool leftover_climb_return_run{false};
     bool leftover_loiterathome_start{false};
@@ -678,7 +681,8 @@ public:
     // (injected leftover leftover_rtl_path_land / leftover leftover_failsafe_radio).
     // FINAL_DESCENT / LAND first switch are upstream no-ops (no leftover leftover leftover leftover_land_start).
     // Do not change _state. Second switch sets leftover leftover leftover leftover_climb_return_run
-    // then leftover leftover leftover leftover_loiterathome_run then leftover leftover leftover leftover_descent_run.
+    // then leftover leftover leftover leftover_loiterathome_run then leftover leftover leftover leftover_descent_run
+    // then leftover leftover leftover leftover_rtl_land_run.
     void leftover_run(bool disarm_on_land) {
         leftover_build_path = false;
         leftover_climb_start = false;
@@ -720,6 +724,9 @@ public:
         }
         if (_state == SubMode::FINAL_DESCENT) {
             leftover_descent_run = true;
+        }
+        if (_state == SubMode::LAND) {
+            leftover_rtl_land_run = true;
         }
     }
     // upstream mode.h: run() { return run(true); }
