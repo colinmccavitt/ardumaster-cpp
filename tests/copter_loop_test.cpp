@@ -34,6 +34,8 @@ using fwcpp::copter::TwentyfiveHzLoggingInputs;
 using fwcpp::copter::OneHzLoopInputs;
 using fwcpp::copter::ApValueInputs;
 using fwcpp::copter::InitSimpleBearingInputs;
+using fwcpp::copter::SimpleMode;
+using fwcpp::copter::UpdateSimpleModeInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -67,6 +69,7 @@ using fwcpp::copter::twentyfive_hz_logging;
 using fwcpp::copter::one_hz_loop;
 using fwcpp::copter::ap_value;
 using fwcpp::copter::init_simple_bearing;
+using fwcpp::copter::update_simple_mode;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
@@ -92,10 +95,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 20", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 11);
+TEST_CASE("catalog remaining_count stays open after slice 21", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 10);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 24);
+    REQUIRE(on_main_count() == 25);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -123,8 +126,8 @@ TEST_CASE("catalog remaining_count stays open after slice 20", "[copter][leftove
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::one_hz_loop", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::ap_value", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::init_simple_bearing", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_simple_mode", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::init_simple_bearing", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::update_simple_mode", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
@@ -1507,4 +1510,120 @@ TEST_CASE("init_simple_bearing log flag follows should_log_any",
     InitSimpleBearingInputs logged{};
     logged.should_log_any = true;
     REQUIRE(init_simple_bearing(logged).log_init_simple_bearing);
+}
+
+TEST_CASE("update_simple_mode SimpleMode matches Copter.h NONE SIMPLE SUPERSIMPLE",
+          "[copter][update_simple_mode]") {
+    REQUIRE(static_cast<int>(SimpleMode::NONE) == 0);
+    REQUIRE(static_cast<int>(SimpleMode::SIMPLE) == 1);
+    REQUIRE(static_cast<int>(SimpleMode::SUPERSIMPLE) == 2);
+}
+
+TEST_CASE("update_simple_mode NONE leaves new_radio_frame and sticks",
+          "[copter][update_simple_mode]") {
+    UpdateSimpleModeInputs in{};
+    in.simple_mode = SimpleMode::NONE;
+    in.new_radio_frame = true;
+    in.has_valid_input = true;
+    in.roll_control_in = 100.0f;
+    in.pitch_control_in = -50.0f;
+    in.simple_cos_yaw = 1.0f;
+    in.ahrs_cos_yaw = 1.0f;
+
+    const auto fx = update_simple_mode(in);
+    REQUIRE(fx.new_radio_frame);
+    REQUIRE(fx.roll_control_in == 100.0f);
+    REQUIRE(fx.pitch_control_in == -50.0f);
+    REQUIRE(fx.skipped_none_or_no_frame);
+    REQUIRE_FALSE(fx.rotated);
+}
+
+TEST_CASE("update_simple_mode without new_radio_frame does not rotate",
+          "[copter][update_simple_mode]") {
+    UpdateSimpleModeInputs in{};
+    in.simple_mode = SimpleMode::SIMPLE;
+    in.new_radio_frame = false;
+    in.has_valid_input = true;
+    in.roll_control_in = 80.0f;
+    in.pitch_control_in = 20.0f;
+    in.simple_cos_yaw = 1.0f;
+    in.ahrs_cos_yaw = 1.0f;
+
+    const auto fx = update_simple_mode(in);
+    REQUIRE_FALSE(fx.new_radio_frame);
+    REQUIRE(fx.roll_control_in == 80.0f);
+    REQUIRE(fx.pitch_control_in == 20.0f);
+    REQUIRE(fx.skipped_none_or_no_frame);
+    REQUIRE_FALSE(fx.rotated);
+}
+
+TEST_CASE("update_simple_mode SIMPLE identity rotate consumes frame",
+          "[copter][update_simple_mode]") {
+    UpdateSimpleModeInputs in{};
+    in.simple_mode = SimpleMode::SIMPLE;
+    in.new_radio_frame = true;
+    in.has_valid_input = true;
+    in.roll_control_in = 40.0f;
+    in.pitch_control_in = 15.0f;
+    in.simple_cos_yaw = 1.0f;
+    in.simple_sin_yaw = 0.0f;
+    in.super_simple_cos_yaw = 0.0f;
+    in.super_simple_sin_yaw = 1.0f;
+    in.ahrs_cos_yaw = 1.0f;
+    in.ahrs_sin_yaw = 0.0f;
+
+    const auto fx = update_simple_mode(in);
+    REQUIRE_FALSE(fx.new_radio_frame);
+    REQUIRE(fx.roll_control_in == 40.0f);
+    REQUIRE(fx.pitch_control_in == 15.0f);
+    REQUIRE(fx.rotated);
+    REQUIRE_FALSE(fx.skipped_none_or_no_frame);
+    REQUIRE_FALSE(fx.skipped_invalid_input);
+}
+
+TEST_CASE("update_simple_mode SIMPLE invalid input consumes frame only",
+          "[copter][update_simple_mode]") {
+    UpdateSimpleModeInputs in{};
+    in.simple_mode = SimpleMode::SIMPLE;
+    in.new_radio_frame = true;
+    in.has_valid_input = false;
+    in.roll_control_in = 25.0f;
+    in.pitch_control_in = -10.0f;
+    in.simple_cos_yaw = 1.0f;
+    in.ahrs_cos_yaw = 1.0f;
+
+    const auto fx = update_simple_mode(in);
+    REQUIRE_FALSE(fx.new_radio_frame);
+    REQUIRE(fx.roll_control_in == 25.0f);
+    REQUIRE(fx.pitch_control_in == -10.0f);
+    REQUIRE(fx.skipped_invalid_input);
+    REQUIRE_FALSE(fx.rotated);
+}
+
+TEST_CASE("update_simple_mode SUPERSIMPLE uses super_simple trig",
+          "[copter][update_simple_mode]") {
+    UpdateSimpleModeInputs in{};
+    in.simple_mode = SimpleMode::SUPERSIMPLE;
+    in.new_radio_frame = true;
+    in.has_valid_input = true;
+    in.roll_control_in = 10.0f;
+    in.pitch_control_in = 20.0f;
+    in.simple_cos_yaw = 1.0f;
+    in.simple_sin_yaw = 0.0f;
+    in.super_simple_cos_yaw = 0.0f;
+    in.super_simple_sin_yaw = 1.0f;
+    in.ahrs_cos_yaw = 1.0f;
+    in.ahrs_sin_yaw = 0.0f;
+
+    const auto fx = update_simple_mode(in);
+    REQUIRE_FALSE(fx.new_radio_frame);
+    // super_simple 90deg then identity vehicle yaw: (roll,pitch) -> (-pitch, roll)
+    REQUIRE(fx.roll_control_in == -20.0f);
+    REQUIRE(fx.pitch_control_in == 10.0f);
+    REQUIRE(fx.rotated);
+
+    in.simple_mode = SimpleMode::SIMPLE;
+    const auto simple_fx = update_simple_mode(in);
+    REQUIRE(simple_fx.roll_control_in == 10.0f);
+    REQUIRE(simple_fx.pitch_control_in == 20.0f);
 }
