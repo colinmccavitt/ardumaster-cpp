@@ -1,6 +1,6 @@
 #pragma once
 
-// CPP-023 slice 1–2: AP_Param ConversionInfo + convert_old_parameters_scaled
+// CPP-023 slice 1–3: AP_Param ConversionInfo + convert_old_parameters_scaled
 // leftover scaffold (Plane-4.7.0 AP_Param.cpp ~2125-2160, convert_old_parameter
 // ~2068-2121) and _convert_parameter_width leftover (~2222+). ADR-0012: no
 // EEPROM / no AP_Param singleton — injected OldParamStore / NewParamStore and
@@ -8,9 +8,9 @@
 //
 // Slice 1: table loop, inject lookup, scaler apply into NewParamStore by
 // new_name. Slice 2: leftover_convert_parameter_width (configured skip, inject
-// old value, scale or bitmask stub). Remaining (bitmasks/centi helpers,
-// convert_class, CONVERT_FLAG_REVERSE/FORCE, EEPROM find_old_parameter) in
-// conversion_leftover.hpp.
+// old value, scale or bitmask stub). Slice 3: CONVERT_FLAG_REVERSE / FORCE on
+// convert_old_parameter (inject new_configured). Remaining (bitmasks/centi,
+// convert_class, EEPROM find_old_parameter) in conversion_leftover.hpp.
 
 #include <cstddef>
 #include <cstdint>
@@ -31,10 +31,9 @@ struct ConversionInfo {
     const char* new_name = nullptr;
 };
 
-// Upstream CONVERT_FLAG_* (AP_Param.h ~514-517). Scaffold ignores flags;
-// full REVERSE/FORCE behavior is cataloged as remaining.
-inline constexpr std::uint8_t kConvertFlagReverse = 1;
-inline constexpr std::uint8_t kConvertFlagForce = 2;
+// Upstream CONVERT_FLAG_* (AP_Param.h ~514-517).
+inline constexpr std::uint8_t kConvertFlagReverse = 1; // _REV → _REVERSED
+inline constexpr std::uint8_t kConvertFlagForce = 2;   // ignore configured_in_storage
 
 inline constexpr std::size_t kConversionStoreCap = 16;
 
@@ -142,16 +141,26 @@ struct NewParamStore {
 }
 
 // Leftover convert_old_parameter (AP_Param.cpp ~2068-2121): if old found,
-// apply scaler and store by new_name. No type-memcpy path, no REVERSE/FORCE,
-// no configured_in_storage skip — those remain.
-inline void convert_old_parameter(const ConversionInfo& info, float scaler, std::uint8_t /*flags*/,
-                                  const OldParamStore& old, NewParamStore& neu) {
+// apply REVERSE/FORCE + scaler and store by new_name. No type-memcpy path
+// (same-type flags==0 memcpy) — scalar float path only. new_configured
+// injects ap2->configured_in_storage().
+inline void convert_old_parameter(const ConversionInfo& info, float scaler, std::uint8_t flags,
+                                  const OldParamStore& old, NewParamStore& neu,
+                                  bool new_configured = false) {
     if (info.new_name == nullptr) {
         return;
     }
     float v = 0.0f;
     if (!find_old_parameter(info, old, v)) {
         return;
+    }
+    // Upstream: if (!(flags & FORCE) && configured_in_storage()) return;
+    if ((flags & kConvertFlagForce) == 0 && new_configured) {
+        return;
+    }
+    // Upstream CONVERT_FLAG_REVERSE: _REV (-1/other) → _REVERSED (1/0).
+    if ((flags & kConvertFlagReverse) != 0) {
+        v = math::is_equal(v, -1.0f) ? 1.0f : 0.0f;
     }
     const float scaled = v * scaler;
     float existing = 0.0f;
@@ -162,22 +171,24 @@ inline void convert_old_parameter(const ConversionInfo& info, float scaler, std:
 }
 
 // Upstream convert_old_parameters_scaled (AP_Param.cpp ~2131-2139): loop calling
-// convert_old_parameter. flush() not reproduced (no EEPROM).
+// convert_old_parameter. flush() not reproduced (no EEPROM). new_configured is
+// applied uniformly (inject stand-in for per-name configured_in_storage).
 inline void convert_old_parameters_scaled(const ConversionInfo* table, std::uint8_t table_size,
                                          float scaler, std::uint8_t flags, const OldParamStore& old,
-                                         NewParamStore& neu) {
+                                         NewParamStore& neu, bool new_configured = false) {
     if (table == nullptr) {
         return;
     }
     for (std::uint8_t i = 0; i < table_size; ++i) {
-        convert_old_parameter(table[i], scaler, flags, old, neu);
+        convert_old_parameter(table[i], scaler, flags, old, neu, new_configured);
     }
 }
 
 // Upstream convert_old_parameters → convert_old_parameters_scaled(..., 1.0f, flags).
 inline void convert_old_parameters(const ConversionInfo* table, std::uint8_t table_size,
-                                  std::uint8_t flags, const OldParamStore& old, NewParamStore& neu) {
-    convert_old_parameters_scaled(table, table_size, 1.0f, flags, old, neu);
+                                  std::uint8_t flags, const OldParamStore& old, NewParamStore& neu,
+                                  bool new_configured = false) {
+    convert_old_parameters_scaled(table, table_size, 1.0f, flags, old, neu, new_configured);
 }
 
 // Injected inputs for leftover_convert_parameter_width (no find_var_info /

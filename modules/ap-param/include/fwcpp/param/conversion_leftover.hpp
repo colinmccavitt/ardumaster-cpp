@@ -8,7 +8,8 @@
 // Slice 1: ConversionInfo + convert_old_parameters_scaled leftover scaffold
 // (inject OldParamStore / NewParamStore; no EEPROM).
 // Slice 2: leftover_convert_parameter_width inject (no EEPROM / find_var_info).
-// Remaining rows are later CPP-023 work.
+// Slice 3: convert_old_parameter CONVERT_FLAG_REVERSE / FORCE (inject
+// new_configured). Remaining rows are later CPP-023 work.
 
 #include <cstddef>
 #include <cstdint>
@@ -38,8 +39,8 @@ inline constexpr PortItem kCompleteness[] = {
      "AP_Param.cpp ~2125-2128; scaled with 1.0f"},
     {"find_old_parameter inject", PortStatus::kThisSlice,
      "inject OldParamStore; no EEPROM scan"},
-    {"convert_old_parameter REVERSE/FORCE", PortStatus::kRemaining,
-     "CONVERT_FLAG_REVERSE / CONVERT_FLAG_FORCE + configured_in_storage"},
+    {"convert_old_parameter REVERSE/FORCE", PortStatus::kThisSlice,
+     "CONVERT_FLAG_REVERSE (_REV→_REVERSED) / FORCE + inject new_configured"},
     {"find_old_parameter EEPROM scan", PortStatus::kRemaining,
      "AP_Param.cpp ~2047-2062 scan()+read_block"},
     {"convert_class", PortStatus::kRemaining, "AP_Param.cpp ~2143-2193"},

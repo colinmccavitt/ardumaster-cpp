@@ -12,12 +12,15 @@ using fwcpp::param::OldParamStore;
 using fwcpp::param::VarType;
 using fwcpp::param::WidthConvertEffects;
 using fwcpp::param::WidthConvertInputs;
+using fwcpp::param::kConvertFlagForce;
+using fwcpp::param::kConvertFlagReverse;
 using fwcpp::param::convert_old_parameter;
 using fwcpp::param::convert_old_parameters;
 using fwcpp::param::convert_old_parameters_scaled;
 using fwcpp::param::find_old_parameter;
 using fwcpp::param::leftover_convert_parameter_width;
 using fwcpp::param::new_store_find;
+using fwcpp::param::new_store_put;
 using fwcpp::param::old_store_put;
 using fwcpp::param::conversion::PortStatus;
 using fwcpp::param::conversion::completeness_has;
@@ -145,9 +148,70 @@ TEST_CASE("leftover_convert_parameter_width bitmask uses simple uint32 cast",
     REQUIRE(fx.new_value == 42.0f);
 }
 
+TEST_CASE("convert_old_parameter skips when new_configured without FORCE",
+          "[param][conversion][flags]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    REQUIRE(old_store_put(old, 1, 0, static_cast<std::uint8_t>(VarType::Float), 10.0f));
+    REQUIRE(new_store_put(neu, "KEEP", 99.0f));
+    ConversionInfo info{1, 0, static_cast<std::uint8_t>(VarType::Float), "KEEP"};
+    convert_old_parameter(info, 1.0f, 0, old, neu, /*new_configured=*/true);
+    float out = 0.0f;
+    REQUIRE(new_store_find(neu, "KEEP", out));
+    REQUIRE(out == 99.0f);
+}
+
+TEST_CASE("convert_old_parameter FORCE overwrites configured new value",
+          "[param][conversion][flags]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    REQUIRE(old_store_put(old, 1, 0, static_cast<std::uint8_t>(VarType::Float), 10.0f));
+    REQUIRE(new_store_put(neu, "FORCED", 99.0f));
+    ConversionInfo info{1, 0, static_cast<std::uint8_t>(VarType::Float), "FORCED"};
+    convert_old_parameter(info, 0.5f, kConvertFlagForce, old, neu, /*new_configured=*/true);
+    float out = 0.0f;
+    REQUIRE(new_store_find(neu, "FORCED", out));
+    REQUIRE(out == Approx(5.0f));
+}
+
+TEST_CASE("convert_old_parameter REVERSE maps _REV -1 to _REVERSED 1",
+          "[param][conversion][flags]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    REQUIRE(old_store_put(old, 2, 0, static_cast<std::uint8_t>(VarType::Float), -1.0f));
+    ConversionInfo info{2, 0, static_cast<std::uint8_t>(VarType::Float), "SERVO_REVERSED"};
+    convert_old_parameter(info, 1.0f, kConvertFlagReverse, old, neu);
+    float out = 0.0f;
+    REQUIRE(new_store_find(neu, "SERVO_REVERSED", out));
+    REQUIRE(out == 1.0f);
+}
+
+TEST_CASE("convert_old_parameter REVERSE maps other old values to 0",
+          "[param][conversion][flags]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    REQUIRE(old_store_put(old, 2, 0, static_cast<std::uint8_t>(VarType::Float), 1.0f));
+    ConversionInfo info{2, 0, static_cast<std::uint8_t>(VarType::Float), "SERVO_REVERSED"};
+    convert_old_parameter(info, 1.0f, kConvertFlagReverse, old, neu);
+    float out = 0.0f;
+    REQUIRE(new_store_find(neu, "SERVO_REVERSED", out));
+    REQUIRE(out == 0.0f);
+}
+
+TEST_CASE("convert_old_parameter REVERSE then scaler", "[param][conversion][flags]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    REQUIRE(old_store_put(old, 3, 0, static_cast<std::uint8_t>(VarType::Float), -1.0f));
+    ConversionInfo info{3, 0, static_cast<std::uint8_t>(VarType::Float), "REV_SCALED"};
+    convert_old_parameter(info, 2.0f, kConvertFlagReverse, old, neu);
+    float out = 0.0f;
+    REQUIRE(new_store_find(neu, "REV_SCALED", out));
+    REQUIRE(out == Approx(2.0f)); // (is_equal(-1)?1:0) * 2.0
+}
+
 TEST_CASE("conversion leftover catalog remaining_count", "[param][conversion][leftover]") {
-    REQUIRE(remaining_count() == 6);
-    REQUIRE(this_slice_count() == 6);
+    REQUIRE(remaining_count() == 5);
+    REQUIRE(this_slice_count() == 7);
     REQUIRE(on_main_count() == 0);
     REQUIRE(out_of_scope_count() == 1);
     REQUIRE(completeness_size() ==
@@ -155,7 +219,8 @@ TEST_CASE("conversion leftover catalog remaining_count", "[param][conversion][le
     REQUIRE(completeness_has("ConversionInfo", PortStatus::kThisSlice));
     REQUIRE(completeness_has("convert_old_parameters_scaled", PortStatus::kThisSlice));
     REQUIRE(completeness_has("_convert_parameter_width", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("convert_old_parameter REVERSE/FORCE", PortStatus::kThisSlice));
     REQUIRE(completeness_has("bitmask / centi width helpers", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP_Param singleton / EEPROM", PortStatus::kOutOfScope));
-    REQUIRE_FALSE(completeness_has("_convert_parameter_width", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("convert_old_parameter REVERSE/FORCE", PortStatus::kRemaining));
 }
