@@ -1,15 +1,17 @@
 #pragma once
 
 // Copter::init_ardupilot leftover. Upstream ArduCopter/system.cpp
-// ~16-171 (after beacon.init(); stop BEFORE startup_INS_ground()).
-// No notify / battery / barometer / winch / rssi / GCS / OSD /
-// SurfaceTracking / RC_Channel / motors / SRV_Channels / BoardConfig /
-// AP_Relay / HAL / GPS / compass / airspeed / OA / attitude_control /
-// optflow / camera / precland / landinggear / rangefinder / proximity /
-// beacon / AP_Mission / SmartRTL / AP_Logger objects — record leftover
-// flags only. Do not invoke the allocate_motors() helper body
-// (call-site leftover flag only). Do not dump
-// Log_Write_Vehicle_Startup_Messages body or FUNCTOR_BIND.
+// ~16-184 (after logger.setVehicle_Startup_Writer; stop BEFORE
+// ins.set_log_raw_bit). No notify / battery / barometer / winch /
+// rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
+// SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
+// airspeed / OA / attitude_control / optflow / camera / precland /
+// landinggear / rangefinder / proximity / beacon / AP_Mission /
+// SmartRTL / AP_Logger / custom_control / INS objects — record
+// leftover flags only. Do not invoke the allocate_motors() or
+// startup_INS_ground() helper bodies (call-site leftover flags
+// only). Do not dump Log_Write_Vehicle_Startup_Messages body or
+// FUNCTOR_BIND.
 //
 // Always-on this slice (AP_WINCH_ENABLED / AP_RSSI_ENABLED are not
 // enabled in this port):
@@ -49,6 +51,12 @@
 //     leftover flag + mission_log_bit
 //   g2.smart_rtl.init() leftover flag (MODE_SMARTRTL treated enabled)
 //   logger.setVehicle_Startup_Writer leftover flag only (no functor)
+//   startup_INS_ground() call site — leftover flag only (helper
+//     body already kOnMain; do not invoke)
+//   set_land_complete(true) leftover flag
+//   set_land_complete_maybe(true) leftover flag
+//   failsafe_enable() leftover flag
+// custom_control.init stays false (AC_CUSTOMCONTROL_MULTI remaining).
 //
 // surface_tracking.init stays false (AP_RANGEFINDER remaining).
 // relay.init stays false (AP_RELAY remaining).
@@ -63,9 +71,9 @@
 // init_rangefinder stays false (AP_RANGEFINDER remaining).
 // g2.proximity.init stays false (HAL_PROXIMITY remaining).
 // g2.beacon.init stays false (AP_BEACON remaining).
-// The rest of init_ardupilot (ESC cal body, startup_INS_ground
-// call, custom_control, set_land_complete, failsafe_enable, etc.)
-// is catalog row "Copter::init_ardupilot rest".
+// The rest of init_ardupilot (ESC cal body, ins.set_log_raw_bit,
+// motors->output_min, set_mode initial, pos_variance_filt,
+// ap.initialised, etc.) is catalog row "Copter::init_ardupilot rest".
 
 #include <cstdint>
 
@@ -169,6 +177,11 @@ struct InitArdupilotEffects {
     std::uint32_t mission_log_bit{0};   // MASK_LOG_CMD
     bool smart_rtl_init{false};
     bool logger_set_vehicle_startup_writer{false};  // flag only
+    bool startup_ins_ground_called{false};  // call site only — no helper body
+    bool custom_control_init{false};        // remaining AC_CUSTOMCONTROL_MULTI
+    bool set_land_complete{false};
+    bool set_land_complete_maybe{false};
+    bool failsafe_enable{false};
 };
 
 [[nodiscard]] inline InitArdupilotEffects init_ardupilot(
@@ -242,6 +255,12 @@ struct InitArdupilotEffects {
     fx.mission_log_bit = kMaskLogCmd;
     fx.smart_rtl_init = true;
     fx.logger_set_vehicle_startup_writer = true;
+    // startup_INS_ground call site only — do not invoke helper body.
+    fx.startup_ins_ground_called = true;
+    // custom_control_init stays false (AC_CUSTOMCONTROL_MULTI remaining)
+    fx.set_land_complete = true;
+    fx.set_land_complete_maybe = true;
+    fx.failsafe_enable = true;
     return fx;
 }
 
