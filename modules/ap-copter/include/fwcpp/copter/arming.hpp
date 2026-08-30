@@ -1,12 +1,13 @@
 #pragma once
 
-// Copter AP_Arming_Copter pre_arm leftover (CCP-038 slice 2).
+// Copter AP_Arming_Copter pre_arm leftover (CCP-038 slice 3).
 // Upstream ArduCopter/AP_Arming_Copter.cpp pre_arm_checks ~8-13,
-// run_pre_arm_checks ~17-45 (already-armed, system_initialized,
-// interlock/E-Stop conflict, motor interlock enabled).
+// run_pre_arm_checks ~17-49 (already-armed, system_initialized,
+// interlock/E-Stop conflict, motor interlock enabled,
+// disarm_switch_checks).
 //
 // Explicit PreArmInputs — no motors / scheduler / GCS / rc objects
-// (ADR-0012). disarm_switch, motors->arming_checks, parameter/gps/baro/
+// (ADR-0012). motors->arming_checks, parameter/gps/baro/
 // board_voltage/alt/rc_throttle_failsafe, and arm()/disarm() remain.
 // Catalog: arming_leftover.hpp.
 
@@ -31,6 +32,9 @@ struct PreArmInputs {
     // copter.ap.using_interlock / motor_interlock_switch injects.
     bool using_interlock{false};
     bool motor_interlock_switch{false};
+    // DISARM aux option + AuxSwitchPos::HIGH (inject; no rc find).
+    bool has_disarm_switch_option{false};
+    bool disarm_switch_high{false};
 };
 
 struct PreArmEffects {
@@ -45,6 +49,9 @@ struct PreArmEffects {
     bool motor_interlock_enabled_checked{false};
     bool motor_interlock_enabled_failed{false};
     bool check_failed_motor_interlock{false};
+    bool disarm_switch_checked{false};
+    bool disarm_switch_failed{false};
+    bool check_failed_disarm_switch{false};
     bool passed{false};
     bool set_pre_arm_check_called{false};
     bool set_pre_arm_check_value{false};
@@ -52,7 +59,8 @@ struct PreArmEffects {
 
 // Upstream run_pre_arm_checks: already-armed short-circuit, then
 // system_initialized, then interlock/E-Stop conflict + motor interlock
-// enabled (accumulate failures). Further checks remain (not this slice).
+// enabled + disarm_switch_checks (accumulate failures). Further checks
+// remain (not this slice).
 [[nodiscard]] inline PreArmEffects run_pre_arm_checks(const PreArmInputs& in = {}) {
     PreArmEffects fx{};
     fx.pre_arm_ran = true;
@@ -94,7 +102,17 @@ struct PreArmEffects {
         passed = false;
     }
 
-    // Further checks remaining (disarm_switch / motors / …) — not this slice.
+    // disarm_switch_checks (~47-49 / AP_Arming.cpp ~2078-2088).
+    // Continue on failure (accumulate).
+    fx.disarm_switch_checked = true;
+    if (in.has_disarm_switch_option && in.disarm_switch_high) {
+        fx.disarm_switch_failed = true;
+        fx.check_failed_disarm_switch = true;
+        (void)in.display_failure;
+        passed = false;
+    }
+
+    // Further checks remaining (motors / …) — not this slice.
     fx.passed = passed;
     return fx;
 }

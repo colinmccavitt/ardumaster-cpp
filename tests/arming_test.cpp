@@ -16,8 +16,8 @@ using fwcpp::copter::arming::this_slice_count;
 
 TEST_CASE("arming leftover catalog this_slice and remaining", "[copter][arming][leftover]") {
     REQUIRE(remaining_count() > 0);
-    REQUIRE(this_slice_count() == 6);
-    REQUIRE(remaining_count() == 4);
+    REQUIRE(this_slice_count() == 7);
+    REQUIRE(remaining_count() == 3);
     REQUIRE(out_of_scope_count() == 1);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -27,7 +27,7 @@ TEST_CASE("arming leftover catalog this_slice and remaining", "[copter][arming][
     REQUIRE(completeness_has("system_initialized check", PortStatus::kThisSlice));
     REQUIRE(completeness_has("interlock/estop conflict", PortStatus::kThisSlice));
     REQUIRE(completeness_has("motor interlock enabled", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("disarm_switch_checks", PortStatus::kRemaining));
+    REQUIRE(completeness_has("disarm_switch_checks", PortStatus::kThisSlice));
     REQUIRE(completeness_has("motors->arming_checks", PortStatus::kRemaining));
     REQUIRE(completeness_has(
         "parameter_checks / gps / baro / board_voltage / alt / rc_throttle_failsafe",
@@ -45,6 +45,8 @@ TEST_CASE("already armed short-circuits pre_arm", "[copter][arming]") {
     in.has_motor_estop_option = true;
     in.using_interlock = true;
     in.motor_interlock_switch = true;
+    in.has_disarm_switch_option = true;
+    in.disarm_switch_high = true;
 
     const auto fx = pre_arm_checks(arming, in);
 
@@ -55,6 +57,7 @@ TEST_CASE("already armed short-circuits pre_arm", "[copter][arming]") {
     REQUIRE_FALSE(fx.system_init_failed);
     REQUIRE_FALSE(fx.interlock_estop_conflict_checked);
     REQUIRE_FALSE(fx.motor_interlock_enabled_checked);
+    REQUIRE_FALSE(fx.disarm_switch_checked);
     REQUIRE(fx.set_pre_arm_check_called);
     REQUIRE(fx.set_pre_arm_check_value);
     REQUIRE(arming.pre_arm_check);
@@ -68,6 +71,8 @@ TEST_CASE("system not initialized fails pre_arm", "[copter][arming]") {
     in.display_failure = true;
     in.has_motor_interlock_option = true;
     in.has_motor_estop_option = true;
+    in.has_disarm_switch_option = true;
+    in.disarm_switch_high = true;
 
     const auto fx = pre_arm_checks(arming, in);
 
@@ -78,6 +83,7 @@ TEST_CASE("system not initialized fails pre_arm", "[copter][arming]") {
     REQUIRE(fx.check_failed_system_init);
     REQUIRE_FALSE(fx.interlock_estop_conflict_checked);
     REQUIRE_FALSE(fx.motor_interlock_enabled_checked);
+    REQUIRE_FALSE(fx.disarm_switch_checked);
     REQUIRE_FALSE(fx.passed);
     REQUIRE(fx.set_pre_arm_check_called);
     REQUIRE_FALSE(fx.set_pre_arm_check_value);
@@ -101,6 +107,8 @@ TEST_CASE("system initialized passes scaffold pre_arm", "[copter][arming]") {
     REQUIRE_FALSE(fx.interlock_estop_conflict_failed);
     REQUIRE(fx.motor_interlock_enabled_checked);
     REQUIRE_FALSE(fx.motor_interlock_enabled_failed);
+    REQUIRE(fx.disarm_switch_checked);
+    REQUIRE_FALSE(fx.disarm_switch_failed);
     REQUIRE(fx.passed);
     REQUIRE(fx.set_pre_arm_check_called);
     REQUIRE(fx.set_pre_arm_check_value);
@@ -120,6 +128,8 @@ TEST_CASE("interlock plus estop fails conflict check", "[copter][arming]") {
     REQUIRE(fx.check_failed_interlock_estop);
     REQUIRE(fx.motor_interlock_enabled_checked);
     REQUIRE_FALSE(fx.motor_interlock_enabled_failed);
+    REQUIRE(fx.disarm_switch_checked);
+    REQUIRE_FALSE(fx.disarm_switch_failed);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
 }
@@ -164,6 +174,8 @@ TEST_CASE("motor interlock enabled fails when switch active", "[copter][arming]"
     REQUIRE(fx.motor_interlock_enabled_failed);
     REQUIRE(fx.check_failed_motor_interlock);
     REQUIRE_FALSE(fx.interlock_estop_conflict_failed);
+    REQUIRE(fx.disarm_switch_checked);
+    REQUIRE_FALSE(fx.disarm_switch_failed);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
 }
@@ -184,6 +196,75 @@ TEST_CASE("both interlock conflict and enabled can fail in one call", "[copter][
     REQUIRE(fx.motor_interlock_enabled_checked);
     REQUIRE(fx.motor_interlock_enabled_failed);
     REQUIRE(fx.check_failed_motor_interlock);
+    REQUIRE(fx.disarm_switch_checked);
+    REQUIRE_FALSE(fx.disarm_switch_failed);
+    REQUIRE_FALSE(fx.passed);
+    REQUIRE_FALSE(arming.pre_arm_check);
+}
+
+TEST_CASE("disarm switch HIGH fails pre_arm", "[copter][arming]") {
+    ArmingCopter arming{};
+    PreArmInputs in{};
+    in.has_disarm_switch_option = true;
+    in.disarm_switch_high = true;
+
+    const auto fx = pre_arm_checks(arming, in);
+
+    REQUIRE(fx.disarm_switch_checked);
+    REQUIRE(fx.disarm_switch_failed);
+    REQUIRE(fx.check_failed_disarm_switch);
+    REQUIRE_FALSE(fx.interlock_estop_conflict_failed);
+    REQUIRE_FALSE(fx.motor_interlock_enabled_failed);
+    REQUIRE_FALSE(fx.passed);
+    REQUIRE_FALSE(arming.pre_arm_check);
+}
+
+TEST_CASE("no disarm switch option passes", "[copter][arming]") {
+    ArmingCopter arming{};
+    PreArmInputs in{};
+    in.has_disarm_switch_option = false;
+    in.disarm_switch_high = true;  // ignored without option
+
+    const auto fx = pre_arm_checks(arming, in);
+
+    REQUIRE(fx.disarm_switch_checked);
+    REQUIRE_FALSE(fx.disarm_switch_failed);
+    REQUIRE_FALSE(fx.check_failed_disarm_switch);
+    REQUIRE(fx.passed);
+    REQUIRE(arming.pre_arm_check);
+}
+
+TEST_CASE("disarm switch not HIGH passes", "[copter][arming]") {
+    ArmingCopter arming{};
+    PreArmInputs in{};
+    in.has_disarm_switch_option = true;
+    in.disarm_switch_high = false;
+
+    const auto fx = pre_arm_checks(arming, in);
+
+    REQUIRE(fx.disarm_switch_checked);
+    REQUIRE_FALSE(fx.disarm_switch_failed);
+    REQUIRE_FALSE(fx.check_failed_disarm_switch);
+    REQUIRE(fx.passed);
+    REQUIRE(arming.pre_arm_check);
+}
+
+TEST_CASE("disarm switch fail accumulates with interlock fail", "[copter][arming]") {
+    ArmingCopter arming{};
+    PreArmInputs in{};
+    in.has_motor_interlock_option = true;
+    in.has_motor_estop_option = true;
+    in.has_disarm_switch_option = true;
+    in.disarm_switch_high = true;
+
+    const auto fx = pre_arm_checks(arming, in);
+
+    REQUIRE(fx.interlock_estop_conflict_checked);
+    REQUIRE(fx.interlock_estop_conflict_failed);
+    REQUIRE(fx.check_failed_interlock_estop);
+    REQUIRE(fx.disarm_switch_checked);
+    REQUIRE(fx.disarm_switch_failed);
+    REQUIRE(fx.check_failed_disarm_switch);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
 }
