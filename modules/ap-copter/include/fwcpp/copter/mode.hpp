@@ -36,9 +36,9 @@
 // RETURN_HOME leftover leftover_loiterathome_start + LOITER_AT_HOME leftover
 // leftover leftover_land_start / leftover leftover_descent_start + leftover
 // leftover leftover_climb_return_run + climb_return_run body leftover flags +
-// leftover leftover_loiterathome_run + leftover leftover_descent_run +
-// leftover leftover_rtl_land_run flags) is this slice.
-// leftover leftover_loiterathome_run body remaining.
+// leftover leftover_loiterathome_run + loiterathome_run body leftover flags +
+// leftover leftover_descent_run + leftover leftover_rtl_land_run flags) is
+// this slice. leftover leftover_descent_run body remaining.
 // ModeLand, ModeGuided::run body,
 // land_run_normal_or_precland body, land_run_horizontal_control body, and
 // auto_takeoff.run body stay later.
@@ -46,6 +46,7 @@
 
 #include <fwcpp/copter/mode_reason.hpp>
 #include <fwcpp/copter/pilot_input.hpp>
+#include <fwcpp/math/scalar.hpp>
 
 #include <cmath>
 #include <cstdint>
@@ -584,12 +585,12 @@ public:
 // RETURN_HOME leftover leftover_loiterathome_start + LOITER_AT_HOME leftover
 // leftover leftover_land_start / leftover leftover_descent_start + leftover
 // leftover leftover_climb_return_run (mode_rtl.cpp ~230-253 body leftover
-// flags) + leftover leftover_loiterathome_run + leftover leftover_descent_run +
-// leftover leftover_rtl_land_run flags, mode_rtl.cpp ~167-190). Do not dump
-// land_start / descent_start / loiterathome_run / descent_run / land_run
-// bodies. climb_return_run body leftover flags are this slice;
-// loiterathome_run body remaining. ModeAuto leftover_rtl_run does not call
-// leftover_run.
+// flags) + leftover leftover_loiterathome_run (mode_rtl.cpp ~272-311 body
+// leftover flags) + leftover leftover_descent_run + leftover
+// leftover_rtl_land_run flags, mode_rtl.cpp ~167-190). Do not dump
+// land_start / descent_start / descent_run / land_run bodies.
+// loiterathome_run body leftover flags are this slice; descent_run body
+// remaining. ModeAuto leftover_rtl_run does not call leftover_run.
 class ModeRTL : public Mode {
 public:
     enum class SubMode : std::uint8_t {
@@ -628,8 +629,9 @@ public:
     // (LOITER_AT_HOME; flags only; land_start / descent_start bodies
     // remaining). leftover leftover_climb_return_run (second switch
     // STARTING / INITIAL_CLIMB / RETURN_HOME) plus climb_return_run body
-    // leftover flags (this slice). leftover leftover_loiterathome_run
-    // (second switch LOITER_AT_HOME; body remaining). leftover
+    // leftover flags. leftover leftover_loiterathome_run (second switch
+    // LOITER_AT_HOME) plus loiterathome_run body leftover flags (this
+    // slice; reuses climb_return body flags). leftover
     // leftover_descent_run (FINAL_DESCENT; body remaining). leftover
     // leftover_rtl_land_run (LAND; body remaining).
     bool leftover_return_start{false};
@@ -640,8 +642,9 @@ public:
     bool leftover_descent_start{false};
     bool leftover_descent_run{false};
     bool leftover_rtl_land_run{false};
-    // Injected is_disarmed_or_landed() for climb_return_run. Default false
-    // so the flying path runs without motors / land-complete objects.
+    // Injected is_disarmed_or_landed() for climb_return_run /
+    // loiterathome_run. Default false so the flying path runs without
+    // motors / land-complete objects.
     bool leftover_disarmed_or_landed{false};
     // Leftover make_safe_ground_handling() when disarmed or landed.
     bool leftover_make_safe_ground_handling{false};
@@ -655,9 +658,24 @@ public:
     bool leftover_pos_D_update{false};
     // Leftover attitude_control->input_thrust_vector_heading (no attitude).
     bool leftover_input_thrust_vector_heading{false};
-    // Injected wp_nav->reached_wp_destination(). When true on the flying
-    // path, sets _state_complete = true.
+    // Injected wp_nav->reached_wp_destination(). When true on the
+    // climb_return flying path, sets _state_complete = true. Not used on
+    // loiterathome_run.
     bool leftover_reached_wp_destination{false};
+    // Injected _loiter_start_time / millis() / g.rtl_loiter_time for
+    // loiterathome_run complete check (mode_rtl.cpp ~294-305).
+    std::uint32_t leftover_loiter_start_ms{0};
+    std::uint32_t leftover_now_ms{0};
+    std::uint32_t leftover_rtl_loiter_time_ms{0};
+    // Injected auto_yaw.mode() == RESET_TO_ARMED_YAW.
+    bool leftover_auto_yaw_reset_to_armed{false};
+    // Injected ahrs yaw / initial_armed_bearing for within-2deg check.
+    float leftover_yaw_rad{0};
+    float leftover_initial_armed_bearing_rad{0};
+    // Computed: (now - start) >= rtl_loiter_time on loiterathome flying path.
+    bool leftover_loiter_time_elapsed{false};
+    // Computed when reset_to_armed: fabsf(wrap_PI(yaw - bearing)) <= radians(2).
+    bool leftover_yaw_within_2deg{false};
     // Injected rtl_path.land. Default false so LOITER_AT_HOME leftover
     // leftover leftover_run takes the descent_start arm.
     bool leftover_rtl_path_land{false};
@@ -688,8 +706,8 @@ public:
     // leftover_build_path / leftover leftover_climb_start / leftover
     // leftover_return_start / leftover leftover_loiterathome_start / leftover
     // leftover leftover_land_start / leftover leftover_descent_start / climb_return
-    // body leftover flags at entry so a later !armed tick or other SubMode
-    // does not leave stale true flags. Records leftover
+    // and loiterathome body leftover flags at entry so a later !armed tick or
+    // other SubMode does not leave stale true flags. Records leftover
     // leftover_rtl_run_disarm_on_land. Armed gate then STARTING leftover
     // leftover leftover_build_path / leftover leftover_climb_start, INITIAL_CLIMB
     // leftover leftover leftover_return_start, RETURN_HOME leftover leftover
@@ -699,8 +717,9 @@ public:
     // FINAL_DESCENT / LAND first switch are upstream no-ops. Do not change
     // _state (STARTING fallthrough assign remaining). Second switch sets
     // leftover leftover_climb_return_run (with climb_return_run body leftover
-    // flags), leftover leftover_loiterathome_run, leftover leftover_descent_run,
-    // leftover leftover_rtl_land_run.
+    // flags), leftover leftover_loiterathome_run (with loiterathome_run body
+    // leftover flags), leftover leftover_descent_run, leftover
+    // leftover_rtl_land_run.
     void leftover_run(bool disarm_on_land) {
         leftover_build_path = false;
         leftover_climb_start = false;
@@ -718,6 +737,8 @@ public:
         leftover_terrain_failsafe_status = false;
         leftover_pos_D_update = false;
         leftover_input_thrust_vector_heading = false;
+        leftover_loiter_time_elapsed = false;
+        leftover_yaw_within_2deg = false;
         leftover_rtl_run_disarm_on_land = disarm_on_land;
         if (!motors_armed) {
             return;
@@ -757,6 +778,32 @@ public:
         }
         if (_state == SubMode::LOITER_AT_HOME) {
             leftover_loiterathome_run = true;
+            if (leftover_disarmed_or_landed) {
+                leftover_make_safe_ground_handling = true;
+            } else {
+                leftover_desired_spool_unlimited = true;
+                leftover_update_wpnav = true;
+                leftover_terrain_failsafe_status = true;
+                leftover_pos_D_update = true;
+                leftover_input_thrust_vector_heading = true;
+                leftover_loiter_time_elapsed =
+                    (leftover_now_ms - leftover_loiter_start_ms) >=
+                    leftover_rtl_loiter_time_ms;
+                if (leftover_loiter_time_elapsed) {
+                    if (leftover_auto_yaw_reset_to_armed) {
+                        leftover_yaw_within_2deg =
+                            std::fabs(fwcpp::math::wrap_PI(
+                                leftover_yaw_rad -
+                                leftover_initial_armed_bearing_rad)) <=
+                            fwcpp::math::radians(2.0f);
+                        if (leftover_yaw_within_2deg) {
+                            _state_complete = true;
+                        }
+                    } else {
+                        _state_complete = true;
+                    }
+                }
+            }
         }
         if (_state == SubMode::FINAL_DESCENT) {
             leftover_descent_run = true;

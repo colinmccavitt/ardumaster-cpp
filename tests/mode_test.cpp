@@ -5,6 +5,7 @@
 #include <fwcpp/copter/mode.hpp>
 #include <fwcpp/copter/mode_leftover.hpp>
 #include <fwcpp/copter/mode_reason.hpp>
+#include <fwcpp/math/scalar.hpp>
 
 using Catch::Approx;
 
@@ -1119,6 +1120,8 @@ TEST_CASE("ModeAuto run SubMode RTL leftover rtl_run", "[copter][mode]") {
     REQUIRE_FALSE(f.table.mode_rtl.leftover_terrain_failsafe_status);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_pos_D_update);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_input_thrust_vector_heading);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_loiter_time_elapsed);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_yaw_within_2deg);
 }
 
 TEST_CASE("ModeAuto run SubMode CIRCLE leftover circle_run", "[copter][mode]") {
@@ -1675,6 +1678,8 @@ TEST_CASE("ModeRTL run leftover STARTING leftover leftover_build_path climb_star
     REQUIRE_FALSE(f.table.mode_rtl.leftover_descent_start);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_descent_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_rtl_land_run);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_loiter_time_elapsed);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_yaw_within_2deg);
 }
 
 TEST_CASE("ModeRTL leftover leftover_run STARTING climb_return body when leftover leftover_disarmed_or_landed",
@@ -1872,12 +1877,14 @@ TEST_CASE("ModeRTL leftover leftover_run LOITER_AT_HOME leftover leftover_descen
     REQUIRE_FALSE(f.table.mode_rtl.leftover_loiterathome_start);
     REQUIRE(f.table.mode_rtl.leftover_loiterathome_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_climb_return_run);
-    REQUIRE_FALSE(f.table.mode_rtl.leftover_desired_spool_unlimited);
-    REQUIRE_FALSE(f.table.mode_rtl.leftover_update_wpnav);
-    REQUIRE_FALSE(f.table.mode_rtl.leftover_terrain_failsafe_status);
-    REQUIRE_FALSE(f.table.mode_rtl.leftover_pos_D_update);
-    REQUIRE_FALSE(f.table.mode_rtl.leftover_input_thrust_vector_heading);
+    REQUIRE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE(f.table.mode_rtl.leftover_update_wpnav);
+    REQUIRE(f.table.mode_rtl.leftover_terrain_failsafe_status);
+    REQUIRE(f.table.mode_rtl.leftover_pos_D_update);
+    REQUIRE(f.table.mode_rtl.leftover_input_thrust_vector_heading);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_make_safe_ground_handling);
+    REQUIRE(f.table.mode_rtl.leftover_loiter_time_elapsed);
+    REQUIRE(f.table.mode_rtl.state_complete());
     REQUIRE_FALSE(f.table.mode_rtl.leftover_descent_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_rtl_land_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_return_start);
@@ -2087,6 +2094,120 @@ TEST_CASE("ModeRTL leftover leftover_run motors_armed false skips leftover lefto
     REQUIRE_FALSE(f.table.mode_rtl.leftover_loiterathome_run);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_climb_return_run);
     REQUIRE(f.table.mode_rtl.state() == ModeRTL::SubMode::LAND);
+}
+
+TEST_CASE("ModeRTL leftover leftover_run LOITER_AT_HOME loiterathome body flying default completes",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    f.table.mode_rtl._state = ModeRTL::SubMode::LOITER_AT_HOME;
+    f.table.mode_rtl._state_complete = false;
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_disarmed_or_landed);
+    REQUIRE(f.table.mode_rtl.leftover_rtl_loiter_time_ms == 0);
+    f.table.mode_rtl.leftover_loiter_start_ms = 0;
+    f.table.mode_rtl.leftover_now_ms = 0;
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_auto_yaw_reset_to_armed);
+    f.table.mode_rtl.run();
+    REQUIRE(f.table.mode_rtl.leftover_loiterathome_run);
+    REQUIRE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE(f.table.mode_rtl.leftover_update_wpnav);
+    REQUIRE(f.table.mode_rtl.leftover_terrain_failsafe_status);
+    REQUIRE(f.table.mode_rtl.leftover_pos_D_update);
+    REQUIRE(f.table.mode_rtl.leftover_input_thrust_vector_heading);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_make_safe_ground_handling);
+    REQUIRE(f.table.mode_rtl.leftover_loiter_time_elapsed);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_yaw_within_2deg);
+    REQUIRE(f.table.mode_rtl.state_complete());
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_climb_return_run);
+}
+
+TEST_CASE("ModeRTL leftover leftover_run LOITER_AT_HOME loiterathome body when disarmed",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    f.table.mode_rtl._state = ModeRTL::SubMode::LOITER_AT_HOME;
+    f.table.mode_rtl._state_complete = false;
+    f.table.mode_rtl.leftover_disarmed_or_landed = true;
+    f.table.mode_rtl.run();
+    REQUIRE(f.table.mode_rtl.leftover_loiterathome_run);
+    REQUIRE(f.table.mode_rtl.leftover_make_safe_ground_handling);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_update_wpnav);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_terrain_failsafe_status);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_pos_D_update);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_input_thrust_vector_heading);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_loiter_time_elapsed);
+    REQUIRE_FALSE(f.table.mode_rtl.state_complete());
+}
+
+TEST_CASE("ModeRTL leftover leftover_run LOITER_AT_HOME reset_to_armed yaw within 2deg completes",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    f.table.mode_rtl._state = ModeRTL::SubMode::LOITER_AT_HOME;
+    f.table.mode_rtl._state_complete = false;
+    f.table.mode_rtl.leftover_auto_yaw_reset_to_armed = true;
+    f.table.mode_rtl.leftover_loiter_start_ms = 100;
+    f.table.mode_rtl.leftover_now_ms = 1100;
+    f.table.mode_rtl.leftover_rtl_loiter_time_ms = 1000;
+    f.table.mode_rtl.leftover_yaw_rad = 0.0f;
+    f.table.mode_rtl.leftover_initial_armed_bearing_rad = fwcpp::math::radians(1.0f);
+    f.table.mode_rtl.run();
+    REQUIRE(f.table.mode_rtl.leftover_loiterathome_run);
+    REQUIRE(f.table.mode_rtl.leftover_loiter_time_elapsed);
+    REQUIRE(f.table.mode_rtl.leftover_yaw_within_2deg);
+    REQUIRE(f.table.mode_rtl.state_complete());
+}
+
+TEST_CASE("ModeRTL leftover leftover_run LOITER_AT_HOME reset_to_armed yaw far stays incomplete",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    f.table.mode_rtl._state = ModeRTL::SubMode::LOITER_AT_HOME;
+    f.table.mode_rtl._state_complete = false;
+    f.table.mode_rtl.leftover_auto_yaw_reset_to_armed = true;
+    f.table.mode_rtl.leftover_loiter_start_ms = 0;
+    f.table.mode_rtl.leftover_now_ms = 5000;
+    f.table.mode_rtl.leftover_rtl_loiter_time_ms = 1000;
+    f.table.mode_rtl.leftover_yaw_rad = fwcpp::math::radians(90.0f);
+    f.table.mode_rtl.leftover_initial_armed_bearing_rad = 0.0f;
+    f.table.mode_rtl.run();
+    REQUIRE(f.table.mode_rtl.leftover_loiterathome_run);
+    REQUIRE(f.table.mode_rtl.leftover_loiter_time_elapsed);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_yaw_within_2deg);
+    REQUIRE_FALSE(f.table.mode_rtl.state_complete());
+}
+
+TEST_CASE("ModeRTL leftover leftover_run LOITER_AT_HOME time not elapsed stays incomplete",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    f.table.mode_rtl._state = ModeRTL::SubMode::LOITER_AT_HOME;
+    f.table.mode_rtl._state_complete = false;
+    f.table.mode_rtl.leftover_loiter_start_ms = 1000;
+    f.table.mode_rtl.leftover_now_ms = 1500;
+    f.table.mode_rtl.leftover_rtl_loiter_time_ms = 5000;
+    f.table.mode_rtl.run();
+    REQUIRE(f.table.mode_rtl.leftover_loiterathome_run);
+    REQUIRE(f.table.mode_rtl.leftover_desired_spool_unlimited);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_loiter_time_elapsed);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_yaw_within_2deg);
+    REQUIRE_FALSE(f.table.mode_rtl.state_complete());
 }
 
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
