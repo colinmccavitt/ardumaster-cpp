@@ -1058,3 +1058,8 @@ catch_discover_tests(failsafe_test)
 add_executable(mode_drift_test mode_drift_test.cpp)
 target_link_libraries(mode_drift_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_drift_test)
+
+# CCP-043 slice 1: SitlCopterHarness leftover scaffold + catalog.
+add_executable(sitl_copter_harness_test sitl_copter_harness_test.cpp)
+target_link_libraries(sitl_copter_harness_test PRIVATE ap-hal-sitl ap-copter ap-sim Catch2::Catch2WithMain)
+catch_discover_tests(sitl_copter_harness_test)
