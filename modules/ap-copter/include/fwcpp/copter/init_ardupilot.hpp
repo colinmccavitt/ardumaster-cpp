@@ -3,7 +3,8 @@
 // Copter::init_ardupilot leftover. Upstream ArduCopter/system.cpp
 // ~16-200 (through ap.initialised = true) plus
 // esc_calibration.cpp ~10-73 leftover flags (no while(1) / HAL
-// delay / passthrough/auto bodies). No notify / battery /
+// delay / leftover leftover_read_radio leftover leftover_loop /
+// leftover leftover_passthrough leftover leftover_/ leftover leftover_auto leftover leftover_bodies). No notify / battery /
 // barometer / winch /
 // rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
 // SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
@@ -40,7 +41,15 @@
 //     set_esc_scaling. Do not invent motors / SRV / BoardConfig.
 //   esc_calibration_startup_check() leftover flags — brushed skip
 //     (motors->is_brushed_pwm_type() early return). Non-brushed:
-//     radio_wait stays remaining-false. RC cal inject rc_cal_ok
+//     leftover leftover_esc_cal_radio_wait leftover leftover flag
+//     (call site only; no HAL delay / leftover leftover_read_radio
+//     leftover leftover_loop). leftover leftover_radio_wait_would_loop
+//     leftover leftover flag iff leftover leftover_esc_cal_body AND
+//     leftover leftover_last_radio_update_ms leftover leftover == leftover leftover_0
+//     (upstream leftover leftover_while leftover leftover_would leftover leftover_enter leftover leftover_once leftover leftover_or leftover leftover_more leftover leftover_— leftover leftover_do leftover leftover_NOT leftover leftover_loop leftover leftover_or leftover leftover_delay).
+//     Inject leftover leftover_last_radio_update_ms leftover leftover
+//     default leftover leftover_1 so leftover leftover_wait leftover leftover_exits leftover leftover_immediately.
+//     RC cal inject rc_cal_ok
 //     (default true); !rc_cal_ok may clear esc_calibrate then skip
 //     switch. Switch leftover + would_block + notify leftover flags
 //     (NO while(1), no AP_Notify / GCS) when ESCCAL_NONE and
@@ -90,9 +99,8 @@
 // init_rangefinder stays false (AP_RANGEFINDER remaining).
 // g2.proximity.init stays false (HAL_PROXIMITY remaining).
 // g2.beacon.init stays false (AP_BEACON remaining).
-// The rest of init_ardupilot is ESC cal HAL delay and
-// passthrough/auto bodies — catalog row
-// "Copter::init_ardupilot rest".
+// The rest of init_ardupilot is ESC cal passthrough / auto
+// bodies — catalog row "Copter::init_ardupilot rest".
 
 #include <cstdint>
 
@@ -149,6 +157,7 @@ struct InitArdupilotInputs {
     bool rc_cal_ok{true};          // arming.rc_calibration_checks(true)
     ESCCalibrationModes esc_calibrate{ESCCalibrationModes::ESCCAL_NONE};
     std::int16_t throttle_control_in{0};  // channel_throttle->get_control_in()
+    std::uint32_t last_radio_update_ms{1};  // inject; 0 would enter leftover leftover_radio leftover leftover_wait leftover leftover_loop
 };
 
 struct InitArdupilotEffects {
@@ -189,7 +198,8 @@ struct InitArdupilotEffects {
     bool safety_ignore_mask{false};     // flag only — no BoardConfig / motor_mask
     bool esc_cal_skipped{false};        // brushed early return
     bool esc_cal_body{false};           // entered non-brushed ESC cal check
-    bool esc_cal_radio_wait{false};     // remaining HAL delay / read_radio
+    bool esc_cal_radio_wait{false};     // leftover leftover flag — no HAL delay / leftover leftover_read_radio leftover leftover_loop
+    bool radio_wait_would_loop{false};  // leftover leftover flag iff leftover leftover_esc_cal_body AND leftover leftover_last_radio_update_ms leftover leftover == leftover leftover_0
     bool esc_cal_rc_calibration_checks{false};
     bool esc_cal_clear_param{false};
     bool esc_cal_switch{false};
@@ -288,7 +298,10 @@ struct InitArdupilotEffects {
     fx.update_aux_servo_function = true;
     fx.safety_ignore_mask = true;
     // esc_calibration_startup_check leftover flags. Brushed skip
-    // stays. Non-brushed: radio_wait remains false (HAL delay).
+    // stays. Non-brushed: leftover leftover_esc_cal_radio_wait leftover leftover
+    // flag (call site only — no HAL delay / leftover leftover_read_radio leftover leftover_loop).
+    // leftover leftover_radio_wait_would_loop leftover leftover iff leftover leftover_esc_cal_body
+    // leftover leftover AND leftover leftover_last_radio_update_ms leftover leftover == leftover leftover_0.
     // leftover leftover_esc_cal_notify is a leftover leftover flag
     // only (no AP_Notify / GCS). leftover leftover_esc_cal_passthrough
     // / leftover leftover_esc_cal_auto are flags only — no bodies.
@@ -297,6 +310,10 @@ struct InitArdupilotEffects {
         fx.esc_cal_skipped = true;
     } else {
         fx.esc_cal_body = true;
+        fx.esc_cal_radio_wait = true;
+        if (in.last_radio_update_ms == 0) {
+            fx.radio_wait_would_loop = true;
+        }
         fx.esc_cal_rc_calibration_checks = true;
         if (!in.rc_cal_ok) {
             if (in.esc_calibrate != ESCCalibrationModes::ESCCAL_NONE &&

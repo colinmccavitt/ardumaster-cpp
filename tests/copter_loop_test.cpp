@@ -129,7 +129,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 47", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 48", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 35);
@@ -2693,7 +2693,8 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE_FALSE(fx.esc_cal_skipped);
     REQUIRE(fx.esc_cal_body);
     REQUIRE(fx.esc_cal_switch);
-    REQUIRE_FALSE(fx.esc_cal_radio_wait);
+    REQUIRE(fx.esc_cal_radio_wait);
+    REQUIRE_FALSE(fx.radio_wait_would_loop);
     REQUIRE_FALSE(fx.esc_cal_notify);
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
@@ -2744,7 +2745,8 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE(fx.ap_initialised);
     REQUIRE(fx.esc_cal_body);
     REQUIRE(fx.esc_cal_switch);
-    REQUIRE_FALSE(fx.esc_cal_radio_wait);
+    REQUIRE(fx.esc_cal_radio_wait);
+    REQUIRE_FALSE(fx.radio_wait_would_loop);
     REQUIRE_FALSE(fx.esc_cal_notify);
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
@@ -2784,11 +2786,23 @@ TEST_CASE("init_ardupilot leftover brushed pwm skips esc cal body",
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_notify);
     REQUIRE_FALSE(fx.esc_cal_radio_wait);
+    REQUIRE_FALSE(fx.radio_wait_would_loop);
     REQUIRE_FALSE(fx.esc_cal_clear_after);
     REQUIRE(fx.initialised_params);
     REQUIRE_FALSE(fx.relay_init);
     REQUIRE(fx.register_timer_failsafe);
     REQUIRE(fx.register_timer_failsafe_period == 1000);
+}
+
+TEST_CASE("init_ardupilot leftover last_radio_update_ms zero would_loop flag only",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.last_radio_update_ms = 0;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_body);
+    REQUIRE(fx.esc_cal_radio_wait);
+    REQUIRE(fx.radio_wait_would_loop);
+    REQUIRE_FALSE(fx.esc_cal_skipped);
 }
 
 TEST_CASE("init_ardupilot leftover initial_mode_ok false falls back unavailable",
@@ -2831,7 +2845,8 @@ TEST_CASE("init_ardupilot leftover ESCCAL_NONE high throttle would_block flag",
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE(fx.esc_cal_clear_after);
-    REQUIRE_FALSE(fx.esc_cal_radio_wait);
+    REQUIRE(fx.esc_cal_radio_wait);
+    REQUIRE_FALSE(fx.radio_wait_would_loop);
 }
 
 TEST_CASE("init_ardupilot leftover ESCCAL_PASSTHROUGH_IF_THROTTLE_HIGH high throttle",
@@ -2844,7 +2859,8 @@ TEST_CASE("init_ardupilot leftover ESCCAL_PASSTHROUGH_IF_THROTTLE_HIGH high thro
     REQUIRE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_notify);
-    REQUIRE_FALSE(fx.esc_cal_radio_wait);
+    REQUIRE(fx.esc_cal_radio_wait);
+    REQUIRE_FALSE(fx.radio_wait_would_loop);
     REQUIRE(fx.esc_cal_clear_after);
     REQUIRE_FALSE(fx.esc_cal_would_block);
 }
@@ -2871,7 +2887,8 @@ TEST_CASE("init_ardupilot leftover ESCCAL_PASSTHROUGH_ALWAYS leftover leftover_e
     REQUIRE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_notify);
-    REQUIRE_FALSE(fx.esc_cal_radio_wait);
+    REQUIRE(fx.esc_cal_radio_wait);
+    REQUIRE_FALSE(fx.radio_wait_would_loop);
     REQUIRE(fx.esc_cal_clear_after);
 }
 
@@ -2884,7 +2901,8 @@ TEST_CASE("init_ardupilot leftover ESCCAL_AUTO leftover leftover_esc_cal_auto",
     REQUIRE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_notify);
-    REQUIRE_FALSE(fx.esc_cal_radio_wait);
+    REQUIRE(fx.esc_cal_radio_wait);
+    REQUIRE_FALSE(fx.radio_wait_would_loop);
     REQUIRE(fx.esc_cal_clear_after);
 }
 
