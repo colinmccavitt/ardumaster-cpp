@@ -1,12 +1,12 @@
 #pragma once
 
-// CPP-087 slice 2 completeness catalog.
+// CPP-087 slice 3 completeness catalog.
 //
-// Slice 1 (on main): MAVLink 2 framing, HEARTBEAT pack/unpack, msgid
-// dispatch stub, leftover catalog. This slice: COMMAND_LONG pack/unpack
-// + ARM/DISARM + DO_SET_MODE + COMMAND_ACK. Remaining rows are later
-// CPP-087 work (PARAM, MISSION, vehicle handlers, XML dialect).
-// remaining_count() is 4.
+// On main: MAVLink 2 framing, HEARTBEAT pack/unpack, msgid dispatch stub,
+// leftover catalog, COMMAND_LONG ARM/DISARM + DO_SET_MODE + COMMAND_ACK.
+// This slice: PARAM_REQUEST_LIST / PARAM_SET / PARAM_VALUE.
+// Remaining rows are later CPP-087 work (MISSION, vehicle handlers, XML
+// dialect). remaining_count() is 3.
 
 #include <cstddef>
 #include <cstdint>
@@ -33,9 +33,10 @@ inline constexpr GcsPortItem kGcsCompleteness[] = {
     {"msgid dispatch stub", PortStatus::kOnMain,
      "known HEARTBEAT vs unknown; no GCS singleton"},
     {"leftover catalog", PortStatus::kOnMain, "this table"},
-    {"COMMAND_LONG", PortStatus::kThisSlice,
+    {"COMMAND_LONG", PortStatus::kOnMain,
      "msgid 76 ARM/DISARM DO_SET_MODE + COMMAND_ACK msgid 77"},
-    {"PARAM protocol", PortStatus::kRemaining, "PARAM_REQUEST_LIST / PARAM_SET / PARAM_VALUE"},
+    {"PARAM protocol", PortStatus::kThisSlice,
+     "PARAM_REQUEST_LIST / PARAM_SET / PARAM_VALUE"},
     {"MISSION", PortStatus::kRemaining, "MISSION_ITEM_INT / MISSION_REQUEST_INT"},
     {"Plane/Copter vehicle handlers", PortStatus::kRemaining,
      "GCS_MAVLINK_Plane / Copter vehicle-side handlers"},

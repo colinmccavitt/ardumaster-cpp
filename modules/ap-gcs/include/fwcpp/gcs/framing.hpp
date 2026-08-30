@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <span>
 
 #include <fwcpp/result.hpp>
@@ -18,14 +19,22 @@ inline constexpr std::size_t kHeaderLenV2 = 10;
 inline constexpr std::size_t kCrcLen = 2;
 inline constexpr std::size_t kMaxPayloadLen = 255;
 inline constexpr std::uint32_t kMsgIdHeartbeat = 0;
+inline constexpr std::uint32_t kMsgIdParamRequestList = 21;
+inline constexpr std::uint32_t kMsgIdParamValue = 22;
+inline constexpr std::uint32_t kMsgIdParamSet = 23;
 inline constexpr std::uint32_t kMsgIdCommandLong = 76;
 inline constexpr std::uint32_t kMsgIdCommandAck = 77;
 
-// CRC extras from same-tree lua (libraries/AP_Scripting/modules/MAVLink):
-// HEARTBEAT.crc_extra = 50 msgid 0; COMMAND_LONG.crc_extra = 152 msgid 76;
-// COMMAND_ACK.crc_extra = 143 msgid 77. Also pinned in
-// modules/mavlink/message_definitions/v1.0/{minimal,common}.xml.
+// CRC extras from same-tree lua (libraries/AP_Scripting/modules/MAVLink)
+// where present, else pymavlink message_checksum of pinned
+// modules/mavlink/message_definitions/v1.0/common.xml:
+// HEARTBEAT.crc_extra = 50 msgid 0; PARAM_REQUEST_LIST = 159 msgid 21;
+// PARAM_VALUE = 220 msgid 22; PARAM_SET = 168 msgid 23;
+// COMMAND_LONG.crc_extra = 152 msgid 76; COMMAND_ACK.crc_extra = 143 msgid 77.
 inline constexpr std::uint8_t kHeartbeatCrcExtra = 50;
+inline constexpr std::uint8_t kParamRequestListCrcExtra = 159;
+inline constexpr std::uint8_t kParamValueCrcExtra = 220;
+inline constexpr std::uint8_t kParamSetCrcExtra = 168;
 inline constexpr std::uint8_t kCommandLongCrcExtra = 152;
 inline constexpr std::uint8_t kCommandAckCrcExtra = 143;
 
@@ -101,7 +110,60 @@ enum class DecodeError : std::uint8_t {
         extra = kCommandAckCrcExtra;
         return true;
     }
+    if (msgid == kMsgIdParamRequestList) {
+        extra = kParamRequestListCrcExtra;
+        return true;
+    }
+    if (msgid == kMsgIdParamValue) {
+        extra = kParamValueCrcExtra;
+        return true;
+    }
+    if (msgid == kMsgIdParamSet) {
+        extra = kParamSetCrcExtra;
+        return true;
+    }
     return false;
+}
+
+inline void write_u16_le(std::uint8_t* p, std::uint16_t v) {
+    p[0] = static_cast<std::uint8_t>(v);
+    p[1] = static_cast<std::uint8_t>(v >> 8);
+}
+
+[[nodiscard]] inline std::uint16_t read_u16_le(const std::uint8_t* p) {
+    return static_cast<std::uint16_t>(p[0] | (static_cast<std::uint16_t>(p[1]) << 8));
+}
+
+inline void write_i32_le(std::uint8_t* p, std::int32_t v) {
+    const auto u = static_cast<std::uint32_t>(v);
+    p[0] = static_cast<std::uint8_t>(u);
+    p[1] = static_cast<std::uint8_t>(u >> 8);
+    p[2] = static_cast<std::uint8_t>(u >> 16);
+    p[3] = static_cast<std::uint8_t>(u >> 24);
+}
+
+[[nodiscard]] inline std::int32_t read_i32_le(const std::uint8_t* p) {
+    const std::uint32_t u = static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+                            (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+    return static_cast<std::int32_t>(u);
+}
+
+inline void write_f32_le(std::uint8_t* p, float v) {
+    std::uint32_t bits = 0;
+    static_assert(sizeof(float) == 4);
+    std::memcpy(&bits, &v, sizeof(bits));
+    p[0] = static_cast<std::uint8_t>(bits);
+    p[1] = static_cast<std::uint8_t>(bits >> 8);
+    p[2] = static_cast<std::uint8_t>(bits >> 16);
+    p[3] = static_cast<std::uint8_t>(bits >> 24);
+}
+
+[[nodiscard]] inline float read_f32_le(const std::uint8_t* p) {
+    const std::uint32_t bits = static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+                               (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+    float v = 0;
+    std::memcpy(&v, &bits, sizeof(v));
+    return v;
 }
 
 // Encode STX, incompat/compat flags (0/0), seq, sysid, compid, 24-bit

@@ -1,7 +1,8 @@
-// CPP-087 slice 2: COMMAND_LONG pack/unpack, ARM/DISARM, DO_SET_MODE, ACK.
+// CPP-087 slice 3: COMMAND_LONG + PARAM_REQUEST_LIST / PARAM_SET / PARAM_VALUE.
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <span>
 
 #include <catch2/catch_test_macros.hpp>
@@ -16,9 +17,14 @@ using fwcpp::gcs::Frame;
 using fwcpp::gcs::GcsMavlink;
 using fwcpp::gcs::Heartbeat;
 using fwcpp::gcs::MavResult;
+using fwcpp::gcs::ParamSet;
+using fwcpp::gcs::ParamStore;
+using fwcpp::gcs::ParamValue;
 using fwcpp::gcs::PortStatus;
 using fwcpp::gcs::command_ack_from_frame;
 using fwcpp::gcs::completeness_has;
+using fwcpp::gcs::copy_name_to_param_id;
+using fwcpp::gcs::copy_param_id_to_name;
 using fwcpp::gcs::crc_extra;
 using fwcpp::gcs::decode_v2;
 using fwcpp::gcs::encode_v2;
@@ -35,11 +41,24 @@ using fwcpp::gcs::kMavCmdComponentArmDisarm;
 using fwcpp::gcs::kMavCmdDoSetMode;
 using fwcpp::gcs::kMavModeFlagCustomModeEnabled;
 using fwcpp::gcs::kMavModeFlagDecodePositionSafety;
+using fwcpp::gcs::kMavParamTypeReal32;
 using fwcpp::gcs::kMavTypeFixedWing;
 using fwcpp::gcs::kMavlinkVersion;
 using fwcpp::gcs::kMsgIdCommandAck;
 using fwcpp::gcs::kMsgIdCommandLong;
 using fwcpp::gcs::kMsgIdHeartbeat;
+using fwcpp::gcs::kMsgIdParamRequestList;
+using fwcpp::gcs::kMsgIdParamSet;
+using fwcpp::gcs::kMsgIdParamValue;
+using fwcpp::gcs::kParamIdLen;
+using fwcpp::gcs::kParamIndexSetAck;
+using fwcpp::gcs::kParamNameCapacity;
+using fwcpp::gcs::kParamRequestListCrcExtra;
+using fwcpp::gcs::kParamRequestListLen;
+using fwcpp::gcs::kParamSetCrcExtra;
+using fwcpp::gcs::kParamSetLen;
+using fwcpp::gcs::kParamValueCrcExtra;
+using fwcpp::gcs::kParamValueLen;
 using fwcpp::gcs::kStxV2;
 using fwcpp::gcs::leftover_completeness_size;
 using fwcpp::gcs::make_frame;
@@ -47,12 +66,19 @@ using fwcpp::gcs::on_main_count;
 using fwcpp::gcs::pack_command_ack;
 using fwcpp::gcs::pack_command_long;
 using fwcpp::gcs::pack_heartbeat;
+using fwcpp::gcs::pack_param_request_list;
+using fwcpp::gcs::pack_param_set;
+using fwcpp::gcs::pack_param_value;
+using fwcpp::gcs::param_store_find;
+using fwcpp::gcs::param_store_insert;
+using fwcpp::gcs::param_value_from_frame;
 using fwcpp::gcs::plane_heartbeat;
 using fwcpp::gcs::remaining_count;
 using fwcpp::gcs::this_slice_count;
 using fwcpp::gcs::unpack_command_ack;
 using fwcpp::gcs::unpack_command_long;
 using fwcpp::gcs::unpack_heartbeat;
+using fwcpp::gcs::unpack_param_value;
 
 namespace {
 
@@ -135,6 +161,37 @@ Frame frame_command_long(const CommandLong& cmd, std::uint8_t sysid = 255, std::
     REQUIRE(pack_command_long(cmd, payload) == kCommandLongLen);
     Frame frame{};
     REQUIRE(make_frame(0, sysid, compid, kMsgIdCommandLong, payload, frame));
+    return frame;
+}
+
+bool seed_store(ParamStore& store) {
+    return param_store_insert(store, "SYSID_THISMAV", 1.0f, kMavParamTypeReal32) &&
+           param_store_insert(store, "ARSPD_ENABLE", 0.0f, kMavParamTypeReal32) &&
+           param_store_insert(store, "TRIM_PITCH", 0.0f, kMavParamTypeReal32);
+}
+
+Frame frame_param_request_list(std::uint8_t target_system = 1, std::uint8_t target_component = 1) {
+    fwcpp::gcs::ParamRequestList req{};
+    req.target_system = target_system;
+    req.target_component = target_component;
+    std::array<std::uint8_t, kParamRequestListLen> payload{};
+    REQUIRE(pack_param_request_list(req, payload) == kParamRequestListLen);
+    Frame frame{};
+    REQUIRE(make_frame(0, 255, 190, kMsgIdParamRequestList, payload, frame));
+    return frame;
+}
+
+Frame frame_param_set(const char* name, float value, std::uint8_t target_system = 1) {
+    ParamSet set{};
+    set.param_value = value;
+    set.target_system = target_system;
+    set.target_component = 1;
+    copy_name_to_param_id(set.param_id, name);
+    set.param_type = kMavParamTypeReal32;
+    std::array<std::uint8_t, kParamSetLen> payload{};
+    REQUIRE(pack_param_set(set, payload) == kParamSetLen);
+    Frame frame{};
+    REQUIRE(make_frame(0, 255, 190, kMsgIdParamSet, payload, frame));
     return frame;
 }
 
@@ -222,17 +279,17 @@ TEST_CASE("send_heartbeat dispatches as msgid 0", "[gcs][dispatch]") {
 }
 
 TEST_CASE("leftover catalog this slice vs remaining", "[gcs][leftover]") {
-    REQUIRE(remaining_count() == 4);
+    REQUIRE(remaining_count() == 3);
     REQUIRE(this_slice_count() == 1);
-    REQUIRE(on_main_count() == 4);
+    REQUIRE(on_main_count() == 5);
     REQUIRE(leftover_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count());
     REQUIRE(completeness_has("MAVLink 2 framing", PortStatus::kOnMain));
     REQUIRE(completeness_has("HEARTBEAT pack/unpack", PortStatus::kOnMain));
     REQUIRE(completeness_has("msgid dispatch stub", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kOnMain));
-    REQUIRE(completeness_has("COMMAND_LONG", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("PARAM protocol", PortStatus::kRemaining));
+    REQUIRE(completeness_has("COMMAND_LONG", PortStatus::kOnMain));
+    REQUIRE(completeness_has("PARAM protocol", PortStatus::kThisSlice));
     REQUIRE(completeness_has("MISSION", PortStatus::kRemaining));
     REQUIRE(completeness_has("Plane/Copter vehicle handlers", PortStatus::kRemaining));
     REQUIRE(completeness_has("XML dialect generation", PortStatus::kRemaining));
@@ -285,6 +342,19 @@ TEST_CASE("crc extra for COMMAND_LONG and COMMAND_ACK", "[gcs][framing]") {
     REQUIRE(extra == kCommandAckCrcExtra);
     REQUIRE(extra == 143);
     REQUIRE_FALSE(crc_extra(253, extra));
+}
+
+TEST_CASE("crc extra for PARAM_REQUEST_LIST PARAM_VALUE PARAM_SET", "[gcs][framing][param]") {
+    std::uint8_t extra = 0;
+    REQUIRE(crc_extra(kMsgIdParamRequestList, extra));
+    REQUIRE(extra == kParamRequestListCrcExtra);
+    REQUIRE(extra == 159);
+    REQUIRE(crc_extra(kMsgIdParamValue, extra));
+    REQUIRE(extra == kParamValueCrcExtra);
+    REQUIRE(extra == 220);
+    REQUIRE(crc_extra(kMsgIdParamSet, extra));
+    REQUIRE(extra == kParamSetCrcExtra);
+    REQUIRE(extra == 168);
 }
 
 TEST_CASE("ARM/DISARM and force-magic", "[gcs][arm]") {
@@ -466,4 +536,123 @@ TEST_CASE("COMMAND_ACK is framed after COMMAND_LONG", "[gcs][command_ack]") {
     REQUIRE(ack.result_param2 == 0);
     REQUIRE(ack.target_system == 255);
     REQUIRE(ack.target_component == 190);
+}
+
+TEST_CASE("PARAM_VALUE pack/unpack size-sorted v2", "[gcs][param]") {
+    ParamValue value{};
+    copy_name_to_param_id(value.param_id, "ARSPD_ENABLE");
+    value.param_value = 1.0f;
+    value.param_type = kMavParamTypeReal32;
+    value.param_count = 3;
+    value.param_index = 1;
+    std::array<std::uint8_t, kParamValueLen> payload{};
+    REQUIRE(pack_param_value(value, payload) == kParamValueLen);
+    REQUIRE(payload[4] == 3);
+    REQUIRE(payload[5] == 0);
+    REQUIRE(payload[6] == 1);
+    REQUIRE(payload[7] == 0);
+    REQUIRE(payload[24] == kMavParamTypeReal32);
+
+    ParamValue unpacked{};
+    REQUIRE(unpack_param_value(payload, unpacked));
+    char name[kParamNameCapacity]{};
+    copy_param_id_to_name(name, unpacked.param_id);
+    REQUIRE(std::strcmp(name, "ARSPD_ENABLE") == 0);
+    REQUIRE(unpacked.param_value == 1.0f);
+    REQUIRE(unpacked.param_count == 3);
+    REQUIRE(unpacked.param_index == 1);
+    REQUIRE(unpacked.param_type == kMavParamTypeReal32);
+
+    Frame frame{};
+    REQUIRE(make_frame(0, 1, 1, kMsgIdParamValue, payload, frame));
+    std::array<std::uint8_t, 48> wire{};
+    const std::size_t n = encode_v2(frame, wire);
+    REQUIRE(n == 10 + kParamValueLen + 2);
+    auto decoded = decode_v2(std::span<const std::uint8_t>(wire.data(), n));
+    REQUIRE(decoded.has_value());
+    REQUIRE(decoded.value().msgid == kMsgIdParamValue);
+    ParamValue from_frame{};
+    REQUIRE(param_value_from_frame(decoded.value(), from_frame));
+    REQUIRE(from_frame.param_count == 3);
+    REQUIRE(from_frame.param_index == 1);
+}
+
+TEST_CASE("PARAM_REQUEST_LIST emits N PARAM_VALUE", "[gcs][param]") {
+    ParamStore store;
+    REQUIRE(seed_store(store));
+    GcsMavlink gcs;
+    gcs.set_param_store(store);
+
+    const Frame in = frame_param_request_list();
+    const auto d = gcs.handle_message(in, 0);
+    REQUIRE(d.kind == DispatchKind::kParamRequestList);
+    REQUIRE(d.param_count == 3);
+
+    std::array<ParamValue, 8> values{};
+    const std::size_t n = gcs.handle_param_request_list(in, values);
+    REQUIRE(n == 3);
+    REQUIRE(values[0].param_count == 3);
+    REQUIRE(values[0].param_index == 0);
+    REQUIRE(values[1].param_index == 1);
+    REQUIRE(values[2].param_index == 2);
+    char n0[kParamNameCapacity]{};
+    char n1[kParamNameCapacity]{};
+    char n2[kParamNameCapacity]{};
+    copy_param_id_to_name(n0, values[0].param_id);
+    copy_param_id_to_name(n1, values[1].param_id);
+    copy_param_id_to_name(n2, values[2].param_id);
+    REQUIRE(std::strcmp(n0, "SYSID_THISMAV") == 0);
+    REQUIRE(std::strcmp(n1, "ARSPD_ENABLE") == 0);
+    REQUIRE(std::strcmp(n2, "TRIM_PITCH") == 0);
+    REQUIRE(values[0].param_value == 1.0f);
+    REQUIRE(values[1].param_value == 0.0f);
+    REQUIRE(values[1].param_type == kMavParamTypeReal32);
+}
+
+TEST_CASE("PARAM_SET updates store and acks PARAM_VALUE", "[gcs][param]") {
+    ParamStore store;
+    REQUIRE(seed_store(store));
+    GcsMavlink gcs;
+    gcs.set_param_store(store);
+
+    const auto d = gcs.handle_param_set_frame(frame_param_set("ARSPD_ENABLE", 1.0f));
+    REQUIRE(d.kind == DispatchKind::kParamSet);
+    REQUIRE(d.param_applied);
+    REQUIRE(d.param_value.param_index == kParamIndexSetAck);
+    REQUIRE(d.param_value.param_count == 3);
+    REQUIRE(d.param_value.param_value == 1.0f);
+    const auto* entry = param_store_find(store, "ARSPD_ENABLE");
+    REQUIRE(entry != nullptr);
+    REQUIRE(entry->value == 1.0f);
+
+    std::array<std::uint8_t, 48> wire{};
+    const std::size_t n = gcs.handle_param_set(frame_param_set("ARSPD_ENABLE", 2.0f), wire);
+    REQUIRE(n == 10 + kParamValueLen + 2);
+    auto decoded = decode_v2(std::span<const std::uint8_t>(wire.data(), n));
+    REQUIRE(decoded.has_value());
+    REQUIRE(decoded.value().msgid == kMsgIdParamValue);
+    ParamValue ack{};
+    REQUIRE(param_value_from_frame(decoded.value(), ack));
+    char name[kParamNameCapacity]{};
+    copy_param_id_to_name(name, ack.param_id);
+    REQUIRE(std::strcmp(name, "ARSPD_ENABLE") == 0);
+    REQUIRE(ack.param_value == 2.0f);
+    REQUIRE(ack.param_index == kParamIndexSetAck);
+    REQUIRE(param_store_find(store, "ARSPD_ENABLE")->value == 2.0f);
+}
+
+TEST_CASE("PARAM_SET unknown name does not crash", "[gcs][param]") {
+    ParamStore store;
+    REQUIRE(seed_store(store));
+    GcsMavlink gcs;
+    gcs.set_param_store(store);
+
+    const auto d = gcs.handle_param_set_frame(frame_param_set("NO_SUCH_PARAM", 4.0f));
+    REQUIRE(d.kind == DispatchKind::kParamSet);
+    REQUIRE_FALSE(d.param_applied);
+    REQUIRE(param_store_find(store, "NO_SUCH_PARAM") == nullptr);
+    REQUIRE(param_store_find(store, "ARSPD_ENABLE")->value == 0.0f);
+
+    std::array<std::uint8_t, 48> wire{};
+    REQUIRE(gcs.handle_param_set(frame_param_set("NO_SUCH_PARAM", 4.0f), wire) == 0);
 }

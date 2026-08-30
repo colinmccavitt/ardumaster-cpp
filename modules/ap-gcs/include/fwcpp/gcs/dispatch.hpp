@@ -1,9 +1,9 @@
 #pragma once
 
-// Msgid dispatch: HEARTBEAT and COMMAND_LONG (ARM/DISARM, DO_SET_MODE).
-// One caller-owned channel (ADR-0012: no GCS singleton). Hooks for
-// arming / set_mode / rcout are injected. Later slices add PARAM,
-// MISSION, and vehicle handlers.
+// Msgid dispatch: HEARTBEAT, COMMAND_LONG (ARM/DISARM, DO_SET_MODE),
+// PARAM_REQUEST_LIST / PARAM_SET. One caller-owned channel (ADR-0012: no
+// GCS singleton). Hooks and ParamStore are injected. Later slices add
+// MISSION and vehicle handlers.
 
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +12,7 @@
 #include <fwcpp/gcs/command.hpp>
 #include <fwcpp/gcs/framing.hpp>
 #include <fwcpp/gcs/heartbeat.hpp>
+#include <fwcpp/gcs/param.hpp>
 #include <fwcpp/result.hpp>
 
 namespace fwcpp::gcs {
@@ -24,6 +25,8 @@ enum class DispatchKind : std::uint8_t {
     kHeartbeat = 0,
     kUnknown = 1,
     kCommandLong = 2,
+    kParamRequestList = 3,
+    kParamSet = 4,
 };
 
 struct Dispatch {
@@ -32,6 +35,11 @@ struct Dispatch {
     CommandLong command_long{};
     CommandAck command_ack{};
     MavResult command_result{MavResult::kUnsupported};
+    ParamRequestList param_request_list{};
+    ParamSet param_set{};
+    ParamValue param_value{};
+    std::uint16_t param_count{};
+    bool param_applied{false};
     bool from_gcs{false};
     std::uint32_t msgid{};
 };
@@ -43,6 +51,8 @@ public:
     void set_gcs_sysid(std::uint8_t gcs_sysid) { gcs_sysid_ = gcs_sysid; }
 
     void set_hooks(const CommandHooks& hooks) { hooks_ = hooks; }
+
+    void set_param_store(ParamStore& store) { params_ = &store; }
 
     [[nodiscard]] std::uint32_t last_gcs_heartbeat_ms() const { return last_gcs_heartbeat_ms_; }
 
@@ -77,9 +87,28 @@ public:
         return encode_v2(frame, out);
     }
 
+    [[nodiscard]] std::size_t send_param_value(std::span<std::uint8_t> out, const ParamValue& value) {
+        std::uint8_t payload[kParamValueLen]{};
+        if (pack_param_value(value, payload) == 0) {
+            return 0;
+        }
+        Frame frame{};
+        if (!make_frame(seq_, sysid_, compid_, kMsgIdParamValue, payload, frame)) {
+            return 0;
+        }
+        seq_ = static_cast<std::uint8_t>(seq_ + 1);
+        return encode_v2(frame, out);
+    }
+
     [[nodiscard]] Dispatch handle_message(const Frame& frame, std::uint32_t now_ms) {
         if (frame.msgid == kMsgIdCommandLong) {
             return handle_command_long_frame(frame);
+        }
+        if (frame.msgid == kMsgIdParamRequestList) {
+            return handle_param_request_list_frame(frame);
+        }
+        if (frame.msgid == kMsgIdParamSet) {
+            return handle_param_set_frame(frame);
         }
         if (frame.msgid != kMsgIdHeartbeat) {
             Dispatch d{};
@@ -136,6 +165,69 @@ public:
         return send_command_ack(out, d.command_ack);
     }
 
+    [[nodiscard]] Dispatch handle_param_request_list_frame(const Frame& frame) {
+        ParamRequestList req{};
+        if (!param_request_list_from_frame(frame, req)) {
+            Dispatch d{};
+            d.kind = DispatchKind::kUnknown;
+            d.msgid = kMsgIdParamRequestList;
+            return d;
+        }
+        Dispatch d{};
+        d.kind = DispatchKind::kParamRequestList;
+        d.param_request_list = req;
+        d.param_count = params_ != nullptr ? params_->count : 0;
+        d.msgid = kMsgIdParamRequestList;
+        return d;
+    }
+
+    // handle_param_request_list: emit one PARAM_VALUE per injected entry
+    // into caller-owned out. Returns how many were written.
+    [[nodiscard]] std::size_t handle_param_request_list(const Frame& frame,
+                                                        std::span<ParamValue> out) {
+        if (handle_param_request_list_frame(frame).kind != DispatchKind::kParamRequestList) {
+            return 0;
+        }
+        if (params_ == nullptr) {
+            return 0;
+        }
+        return emit_param_list(*params_, out);
+    }
+
+    [[nodiscard]] Dispatch handle_param_set_frame(const Frame& frame) {
+        ParamSet set{};
+        if (!param_set_from_frame(frame, set)) {
+            Dispatch d{};
+            d.kind = DispatchKind::kUnknown;
+            d.msgid = kMsgIdParamSet;
+            return d;
+        }
+        Dispatch d{};
+        d.kind = DispatchKind::kParamSet;
+        d.param_set = set;
+        d.msgid = kMsgIdParamSet;
+        if (params_ == nullptr) {
+            return d;
+        }
+        ParamValue ack{};
+        const ParamSetStatus status = apply_param_set(*params_, set, ack);
+        d.param_applied = status == ParamSetStatus::kApplied;
+        if (d.param_applied) {
+            d.param_value = ack;
+        }
+        return d;
+    }
+
+    // Handle PARAM_SET and encode PARAM_VALUE ack into out. Returns framed
+    // length, or 0 if unknown / rejected (upstream ignores; no crash).
+    [[nodiscard]] std::size_t handle_param_set(const Frame& frame, std::span<std::uint8_t> out) {
+        const Dispatch d = handle_param_set_frame(frame);
+        if (!d.param_applied) {
+            return 0;
+        }
+        return send_param_value(out, d.param_value);
+    }
+
     [[nodiscard]] Result<Dispatch, DecodeError> handle_bytes(std::span<const std::uint8_t> buf,
                                                             std::uint32_t now_ms) {
         auto decoded = decode_v2(buf);
@@ -152,6 +244,7 @@ private:
     std::uint8_t gcs_sysid_{kDefaultGcsSysid};
     std::uint32_t last_gcs_heartbeat_ms_{0};
     CommandHooks hooks_{};
+    ParamStore* params_{nullptr};
 };
 
 }  // namespace fwcpp::gcs

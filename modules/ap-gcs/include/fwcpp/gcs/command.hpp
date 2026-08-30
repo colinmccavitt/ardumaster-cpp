@@ -14,7 +14,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <span>
 
@@ -103,47 +102,6 @@ struct CommandAck {
 
 [[nodiscard]] inline bool mav_is_equal(float a, float b) {
     return std::fabs(a - b) < std::numeric_limits<float>::epsilon();
-}
-
-inline void write_u16_le(std::uint8_t* p, std::uint16_t v) {
-    p[0] = static_cast<std::uint8_t>(v);
-    p[1] = static_cast<std::uint8_t>(v >> 8);
-}
-
-[[nodiscard]] inline std::uint16_t read_u16_le(const std::uint8_t* p) {
-    return static_cast<std::uint16_t>(p[0] | (static_cast<std::uint16_t>(p[1]) << 8));
-}
-
-inline void write_i32_le(std::uint8_t* p, std::int32_t v) {
-    const auto u = static_cast<std::uint32_t>(v);
-    p[0] = static_cast<std::uint8_t>(u);
-    p[1] = static_cast<std::uint8_t>(u >> 8);
-    p[2] = static_cast<std::uint8_t>(u >> 16);
-    p[3] = static_cast<std::uint8_t>(u >> 24);
-}
-
-[[nodiscard]] inline std::int32_t read_i32_le(const std::uint8_t* p) {
-    const std::uint32_t u = static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
-                            (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
-    return static_cast<std::int32_t>(u);
-}
-
-inline void write_f32_le(std::uint8_t* p, float v) {
-    std::uint32_t bits = 0;
-    static_assert(sizeof(float) == 4);
-    std::memcpy(&bits, &v, sizeof(bits));
-    p[0] = static_cast<std::uint8_t>(bits);
-    p[1] = static_cast<std::uint8_t>(bits >> 8);
-    p[2] = static_cast<std::uint8_t>(bits >> 16);
-    p[3] = static_cast<std::uint8_t>(bits >> 24);
-}
-
-[[nodiscard]] inline float read_f32_le(const std::uint8_t* p) {
-    const std::uint32_t bits = static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
-                               (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
-    float v = 0;
-    std::memcpy(&v, &bits, sizeof(v));
-    return v;
 }
 
 // Lua / size-sorted: param1-7 float, command uint16, target_system,
