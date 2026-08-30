@@ -1,10 +1,10 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 24 lands
-// standby_update as a leftover tick. remaining_count() > 0
+// (Copter.cpp / Copter.h / system.cpp). Slice 25 lands
+// lost_vehicle_check as a leftover tick. remaining_count() > 0
 // is expected after this slice. Next remaining is
-// Copter::lost_vehicle_check.
+// Copter::takeoff_check.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
 // Subsystem objects are injected as inputs on later leftover ticks.
@@ -83,9 +83,10 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
      "update_super_simple_bearing.hpp; SUPER_SIMPLE radius 10m / 5deg"},
     {"Copter::auto_disarm_check", PortStatus::kOnMain,
      "auto_disarm_check.hpp; landed + thr_low delay leftover; no arming object"},
-    {"Copter::standby_update", PortStatus::kThisSlice,
+    {"Copter::standby_update", PortStatus::kOnMain,
      "standby_update.hpp; I-term / yaw / NED reset flags iff standby_active"},
-    {"Copter::lost_vehicle_check", PortStatus::kRemaining, "motors.cpp leftover"},
+    {"Copter::lost_vehicle_check", PortStatus::kThisSlice,
+     "lost_vehicle_check.hpp; Locate Copter alarm leftover; no Notify/GCS"},
     {"Copter::takeoff_check", PortStatus::kRemaining, "takeoff leftover"},
     {"Copter::get_wp_distance_m", PortStatus::kRemaining, "GCS helper leftover"},
     {"Copter::update_auto_armed", PortStatus::kRemaining, "system.cpp leftover"},

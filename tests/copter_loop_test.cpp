@@ -40,6 +40,7 @@ using fwcpp::copter::UpdateSimpleModeInputs;
 using fwcpp::copter::UpdateSuperSimpleBearingInputs;
 using fwcpp::copter::AutoDisarmCheckInputs;
 using fwcpp::copter::StandbyUpdateInputs;
+using fwcpp::copter::LostVehicleCheckInputs;
 using fwcpp::copter::DesiredSpoolState;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
@@ -78,6 +79,9 @@ using fwcpp::copter::update_simple_mode;
 using fwcpp::copter::update_super_simple_bearing;
 using fwcpp::copter::auto_disarm_check;
 using fwcpp::copter::standby_update;
+using fwcpp::copter::lost_vehicle_check;
+using fwcpp::copter::kLostVehicleDelay;
+using fwcpp::copter::kLostVehicleStickThreshold;
 using fwcpp::copter::kSuperSimpleRadiusM;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
@@ -104,10 +108,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 24", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 7);
+TEST_CASE("catalog remaining_count stays open after slice 25", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 6);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 28);
+    REQUIRE(on_main_count() == 29);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -139,8 +143,9 @@ TEST_CASE("catalog remaining_count stays open after slice 24", "[copter][leftove
     REQUIRE(completeness_has("Copter::update_simple_mode", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::auto_disarm_check", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::standby_update", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::lost_vehicle_check", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::standby_update", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::lost_vehicle_check", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::takeoff_check", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -1881,4 +1886,105 @@ TEST_CASE("standby_update active records I-term yaw and NED resets",
     REQUIRE(fx.reset_rate_I);
     REQUIRE(fx.reset_yaw_target_and_rate);
     REQUIRE(fx.ned_standby_reset);
+}
+
+namespace {
+
+[[nodiscard]] LostVehicleCheckInputs hold_lost_vehicle_pose() {
+    LostVehicleCheckInputs in{};
+    in.throttle_zero = true;
+    in.armed = false;
+    in.roll_control_in = static_cast<std::int16_t>(kLostVehicleStickThreshold + 1);
+    in.pitch_control_in = static_cast<std::int16_t>(kLostVehicleStickThreshold + 1);
+    return in;
+}
+
+}  // namespace
+
+TEST_CASE("lost_vehicle_check aux assigned leaves counter and lost unchanged",
+          "[copter][lost_vehicle_check]") {
+    REQUIRE(kLostVehicleDelay == 10);
+    REQUIRE(kLostVehicleStickThreshold == 4000);
+
+    LostVehicleCheckInputs in = hold_lost_vehicle_pose();
+    in.aux_lost_vehicle_sound = true;
+    in.soundalarm_counter = 4;
+    in.vehicle_lost = true;
+
+    const auto fx = lost_vehicle_check(in);
+    REQUIRE(fx.soundalarm_counter == 4);
+    REQUIRE(fx.vehicle_lost);
+    REQUIRE_FALSE(fx.gcs_locate_alarm);
+
+    const auto* row = find_scheduler_task("lost_vehicle_check");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 10.0f);
+    REQUIRE(row->max_time_micros == 50);
+    REQUIRE(row->priority == 99);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("lost_vehicle_check sticks not max / armed / !throttle_zero clears",
+          "[copter][lost_vehicle_check]") {
+    LostVehicleCheckInputs in = hold_lost_vehicle_pose();
+    in.soundalarm_counter = 7;
+    in.vehicle_lost = true;
+
+    in.roll_control_in = kLostVehicleStickThreshold;
+    auto fx = lost_vehicle_check(in);
+    REQUIRE(fx.soundalarm_counter == 0);
+    REQUIRE_FALSE(fx.vehicle_lost);
+    REQUIRE_FALSE(fx.gcs_locate_alarm);
+
+    in = hold_lost_vehicle_pose();
+    in.soundalarm_counter = 7;
+    in.vehicle_lost = true;
+    in.pitch_control_in = kLostVehicleStickThreshold;
+    fx = lost_vehicle_check(in);
+    REQUIRE(fx.soundalarm_counter == 0);
+    REQUIRE_FALSE(fx.vehicle_lost);
+
+    in = hold_lost_vehicle_pose();
+    in.soundalarm_counter = 7;
+    in.vehicle_lost = true;
+    in.armed = true;
+    fx = lost_vehicle_check(in);
+    REQUIRE(fx.soundalarm_counter == 0);
+    REQUIRE_FALSE(fx.vehicle_lost);
+
+    in = hold_lost_vehicle_pose();
+    in.soundalarm_counter = 7;
+    in.vehicle_lost = true;
+    in.throttle_zero = false;
+    fx = lost_vehicle_check(in);
+    REQUIRE(fx.soundalarm_counter == 0);
+    REQUIRE_FALSE(fx.vehicle_lost);
+    REQUIRE_FALSE(fx.gcs_locate_alarm);
+}
+
+TEST_CASE("lost_vehicle_check hold pose increments then sets lost + gcs once",
+          "[copter][lost_vehicle_check]") {
+    LostVehicleCheckInputs in = hold_lost_vehicle_pose();
+
+    for (std::uint8_t i = 0; i < kLostVehicleDelay; ++i) {
+        in.soundalarm_counter = i;
+        const auto fx = lost_vehicle_check(in);
+        REQUIRE(fx.soundalarm_counter == static_cast<std::uint8_t>(i + 1));
+        REQUIRE_FALSE(fx.vehicle_lost);
+        REQUIRE_FALSE(fx.gcs_locate_alarm);
+    }
+
+    in.soundalarm_counter = kLostVehicleDelay;
+    const auto armed_alarm = lost_vehicle_check(in);
+    REQUIRE(armed_alarm.soundalarm_counter == kLostVehicleDelay);
+    REQUIRE(armed_alarm.vehicle_lost);
+    REQUIRE(armed_alarm.gcs_locate_alarm);
+
+    in.soundalarm_counter = kLostVehicleDelay;
+    in.vehicle_lost = true;
+    const auto already = lost_vehicle_check(in);
+    REQUIRE(already.soundalarm_counter == kLostVehicleDelay);
+    REQUIRE(already.vehicle_lost);
+    REQUIRE_FALSE(already.gcs_locate_alarm);
 }

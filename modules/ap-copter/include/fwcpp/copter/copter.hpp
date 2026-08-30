@@ -34,4 +34,5 @@
 #include <fwcpp/copter/update_super_simple_bearing.hpp>
 #include <fwcpp/copter/auto_disarm_check.hpp>
 #include <fwcpp/copter/standby_update.hpp>
+#include <fwcpp/copter/lost_vehicle_check.hpp>
 #include <fwcpp/copter/update_throttle_hover.hpp>
