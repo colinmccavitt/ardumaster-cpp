@@ -23,8 +23,9 @@
 // leftover is on main. ModeAuto::loiter_run leftover is on main.
 // ModeAuto::circle_run leftover is on main. ModeAuto::loiter_to_alt_run
 // leftover (ground-handling / reached_xy leftover_wp_run / loiter_start /
-// alt_error / land_run_horizontal flags) is this slice. sqrt_controller /
-// avoidance / climb, nav_guided_run, ModeRTL/ModeLand,
+// alt_error / land_run_horizontal / climb flags) is on main.
+// leftover_surface_tracking_update stays false (AP_RANGEFINDER remaining).
+// nav_guided_run, nav_attitude_time_run, ModeRTL/ModeLand,
 // land_run_normal_or_precland body, land_run_horizontal_control body,
 // and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
@@ -123,7 +124,7 @@ public:
 // rtl_run leftover (mode_auto.cpp ~1129-1133, on main),
 // loiter_run leftover (mode_auto.cpp ~1162-1180, on main),
 // circle_run leftover (mode_auto.cpp ~1135-1148, on main), and
-// loiter_to_alt_run leftover (mode_auto.cpp ~1184-1223, this slice).
+// loiter_to_alt_run leftover (mode_auto.cpp ~1184-1245, on main).
 // Other *_run bodies and set_submode stay later.
 class ModeAuto : public Mode {
 public:
@@ -267,8 +268,20 @@ public:
     bool leftover_reached_alt{false};
     // Leftover land_run_horizontal_control() call (body remaining).
     bool leftover_land_run_horizontal_control{false};
-    // sqrt_controller / avoidance / D_update remaining this slice.
+    // True when leftover_loiter_to_alt_run entered the climb leftover
+    // (sqrt_controller / constrain / avoidance / D_set / D_update flags).
     bool leftover_loiter_to_alt_climb{false};
+    // leftover leftover_sqrt_controller (flag only; no sqrt_controller body).
+    bool leftover_sqrt_controller{false};
+    // leftover leftover_constrain_climb (constrain_float on climb rate).
+    bool leftover_constrain_climb{false};
+    // leftover leftover_avoidance_climbrate (flag only; no AC_Avoid).
+    bool leftover_avoidance_climbrate{false};
+    // leftover leftover_surface_tracking_update stays false
+    // (AP_RANGEFINDER remaining).
+    bool leftover_surface_tracking_update{false};
+    // leftover leftover_d_set_pos_target_from_climb (no pos_control).
+    bool leftover_d_set_pos_target_from_climb{false};
 
     ModeAuto() = default;
 
@@ -345,13 +358,13 @@ public:
         pos_D_update = true;
         input_thrust_vector_heading = true;
     }
-    // Leftover ModeAuto::loiter_to_alt_run (mode_auto.cpp ~1184-1223).
+    // Leftover ModeAuto::loiter_to_alt_run (mode_auto.cpp ~1184-1245).
     // Ground-handling + reached_xy leftover_wp_run reuse + loiter_start /
-    // alt_error / land_run_horizontal flags. No motors / wp_nav /
+    // alt_error / land_run_horizontal / climb flags. No motors / wp_nav /
     // pos_control. Switch still records loiter_to_alt_run as the
     // "would call loiter_to_alt_run" leftover, then this helper.
-    // sqrt_controller / avoidance / climb remaining. Do not call
-    // leftover_loiter_run.
+    // sqrt_controller / AC_Avoid / surface_tracking / land_run_horizontal
+    // body remaining. Do not call leftover_loiter_run.
     void leftover_loiter_to_alt_run() {
         if (disarmed_or_landed || !motors_interlock) {
             make_safe_ground_handling = true;
@@ -380,6 +393,12 @@ public:
         }
         leftover_prev_alt_error_m = leftover_alt_error_m;
         leftover_land_run_horizontal_control = true;
+        leftover_loiter_to_alt_climb = true;
+        leftover_sqrt_controller = true;
+        leftover_constrain_climb = true;
+        leftover_avoidance_climbrate = true;
+        leftover_d_set_pos_target_from_climb = true;
+        pos_D_update = true;
     }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
@@ -387,7 +406,7 @@ public:
     // (~166-174), takeoff_run leftover (~1075-1083), wp_run leftover
     // (~1087-1107), land_run leftover (~1111-1125), rtl_run leftover
     // (~1129-1133), loiter_run leftover (~1162-1180), circle_run leftover
-    // (~1135-1148), and loiter_to_alt_run leftover (~1184-1223). Switch
+    // (~1135-1148), and loiter_to_alt_run leftover (~1184-1245). Switch
     // always runs, including while still waiting_to_start. No AP_Mission /
     // detector / GCS / logger / ModeRTL / circle_nav / *_run bodies. run
     // has no ctx.
@@ -439,6 +458,11 @@ public:
         leftover_reached_alt = false;
         leftover_land_run_horizontal_control = false;
         leftover_loiter_to_alt_climb = false;
+        leftover_sqrt_controller = false;
+        leftover_constrain_climb = false;
+        leftover_avoidance_climbrate = false;
+        leftover_surface_tracking_update = false;
+        leftover_d_set_pos_target_from_climb = false;
 
         switch (submode) {
         case SubMode::TAKEOFF:
