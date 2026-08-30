@@ -1,7 +1,7 @@
 #pragma once
 
 // Port of libraries/AC_WPNav/AC_WPNav (Copter-4.7.0 / plane-4.7.0) — CCP-028.
-// Rust spec: ports/plane-fw-rust/crates/ap-wpnav/src/wpnav.rs.
+// Rust spec: ports/ardumaster-rust/crates/ap-wpnav/src/wpnav.rs.
 //
 // THIS SLICE (testable):
 //   WpNav construction (GroupInfo defaults without AP_Param)

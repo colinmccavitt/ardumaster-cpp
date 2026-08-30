@@ -42,7 +42,7 @@
 //   - thrust_heading_rotation_angles (needs inv_sqrt_controller below)
 //
 // REUSED INVESTIGATION: copter-rust's own COP-001 ticket ported this exact
-// real "scalar half" first (ports/plane-fw-rust/crates/ap-math/src/
+// real "scalar half" first (ports/ardumaster-rust/crates/ap-math/src/
 // control.rs), with exceptional rigor reused here as this ticket's own
 // bar: "30,586 values 100.00% bit-exact against upstream - including a
 // 1000-step closed loop of shape_pos_vel_accel feeding update_pos_vel_accel

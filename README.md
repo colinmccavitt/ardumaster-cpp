@@ -1,13 +1,14 @@
-# plane-fw-cpp
+# ardumaster-cpp
 
-ArduPlane fixed-wing, ported to modern C++. Pinned to `Plane-4.7.0`, same tag as
-[`plane-fw-rust`](../plane-fw-rust). See the `fw-cpp` effort in the tracker
-(`../../tracker/efforts/fw-cpp.md`) for the charter, and `ADR-0012` for the
-conventions this port follows.
+ArduPilot vehicle firmware ported to modern C++ (Plane, Copter, and QuadPlane/VTOL),
+pinned to `Plane-4.7.0` / matching Copter tag — same baseline as
+[`ardumaster-rust`](../ardumaster-rust). See the `fw-cpp`, `copter-cpp`, and `vtol-cpp`
+efforts in the tracker (`../../tracker/efforts/`) for charters, and `ADR-0012` for
+conventions.
 
-This is a second, independent implementation, not a fork of `plane-fw-rust` and not a
+This is a second, independent implementation, not a fork of `ardumaster-rust` and not a
 translation of it. It reads only from the shared, read-only `upstream/plane-4.7.0`
-worktree and does not depend on anything in `ports/plane-fw-rust`.
+worktree and does not depend on anything in `ports/ardumaster-rust`.
 
 ## Building
 
@@ -20,7 +21,8 @@ ctest --test-dir build
 ## Layout
 
 ```
-modules/    one directory per ported module, mirrors plane-fw-rust's crates/
+modules/    one directory per ported module, mirrors ardumaster-rust's crates/
+sitl/       Plane / Copter / QuadPlane SITL entrypoints
 tests/      parity and unit tests, one target per module under test
 ```
 

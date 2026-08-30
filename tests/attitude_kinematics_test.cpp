@@ -8,7 +8,7 @@
 //
 // Test cases translate essentially line-for-line from copter-rust's own
 // already-merged, already parity-tested COP-007 test file
-// (ports/plane-fw-rust/crates/ap-control/tests/attitude_kinematics.rs) -
+// (ports/ardumaster-rust/crates/ap-control/tests/attitude_kinematics.rs) -
 // its real measured values/tolerances are reused directly here rather
 // than re-derived, per this ticket's own explicit instruction.
 //

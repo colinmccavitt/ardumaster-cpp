@@ -2,7 +2,7 @@
 
 #include <utility>
 // CCP-027 slice 2–4: NE_update_controller, limits, input_*, init/relax/soften/stop.
-// Rust spec: plane-fw-rust pos_control_ne.rs (update_controller, yaw_from_ne_motion).
+// Rust spec: ardumaster-rust pos_control_ne.rs (update_controller, yaw_from_ne_motion).
 
 #include <algorithm>
 #include <cstdint>

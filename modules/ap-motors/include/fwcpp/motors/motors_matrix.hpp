@@ -1165,7 +1165,7 @@
 // REUSED, INDEPENDENTLY RE-VERIFIED INVESTIGATION FROM copter-rust'S
 // COP-004
 //
-// COP-004 (crates/ap-motors/src/spool.rs, plane-fw-rust) already ported
+// COP-004 (crates/ap-motors/src/spool.rs, ardumaster-rust) already ported
 // this exact 294-line function to Rust with an unusually thorough
 // verification methodology (8 scripted flights, 25,200 iterations at
 // 400 Hz, all bit-exact against upstream). Three findings reused here
@@ -3869,7 +3869,7 @@ public:
     // pwm_output_max).
     //
     // copter-rust's own INVESTIGATION, CONFIRMED - `output.rs`
-    // (plane-fw-rust/crates/ap-motors/src/output.rs) has real, merged
+    // (ardumaster-rust/crates/ap-motors/src/output.rs) has real, merged
     // ports of set_actuator_with_slew, actuator_spin_up_to_ground_idle,
     // output_to_pwm, and a real rc_write (lines ~299-320) - but NO
     // output_to_motors function exists anywhere in that file (confirmed by

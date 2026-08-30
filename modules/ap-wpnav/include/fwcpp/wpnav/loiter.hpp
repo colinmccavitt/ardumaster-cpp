@@ -1,7 +1,7 @@
 #pragma once
 
 // Port of libraries/AC_WPNav/AC_Loiter (Copter-4.7.0) — CCP-028 slice 4.
-// Rust spec: ports/plane-fw-rust/crates/ap-wpnav/src/loiter.rs.
+// Rust spec: ports/ardumaster-rust/crates/ap-wpnav/src/loiter.rs.
 //
 // THIS SLICE (testable free functions / injected context):
 //   Loiter construction (GroupInfo defaults without AP_Param)

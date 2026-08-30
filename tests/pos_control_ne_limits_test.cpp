@@ -28,7 +28,7 @@ static float f32_from_bits(const std::string& s) {
 }
 
 static std::vector<std::vector<std::string>> fixture_rows(const char* section) {
-    const std::string path = "/srv/ardumaster/ports/plane-fw-rust/fixtures/pos_control_ne.csv";
+    const std::string path = "/srv/ardumaster/ports/ardumaster-rust/fixtures/pos_control_ne.csv";
     std::ifstream in(path);
     REQUIRE(in.good());
     std::vector<std::vector<std::string>> rows;

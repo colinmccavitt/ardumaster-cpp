@@ -84,7 +84,7 @@ TEST_CASE("AIS position report is AIVDM with checksum") {
 }
 
 TEST_CASE("AIS replay emits file lines at 1 Hz") {
-    AIS_Replay replay("/srv/ardumaster/worktrees/plane-fw-cpp-ccp-051/modules/ap-sim/include/fwcpp/sim/SIM_AIS_data.txt");
+    AIS_Replay replay("/srv/ardumaster/worktrees/ardumaster-cpp-ccp-051/modules/ap-sim/include/fwcpp/sim/SIM_AIS_data.txt");
     REQUIRE(replay.has_file());
     replay.update(0);
     replay.update(1000);

@@ -34,7 +34,7 @@
 // REUSED INVESTIGATION: copter-rust's own COP-007 ticket ported this exact
 // same four-function group, against this exact same upstream file, as its
 // own first sub-ticket. Its real, merged, already parity-tested files
-// (ports/plane-fw-rust/crates/ap-control/src/attitude_kinematics.rs and
+// (ports/ardumaster-rust/crates/ap-control/src/attitude_kinematics.rs and
 // its own tests/attitude_kinematics.rs) were read in full before writing
 // this header, and every real measured floating-point value quoted below
 // (1.570451 vs true pi/2 = 1.5707963, cos_theta ~= 3.45e-4) is reused
@@ -206,7 +206,7 @@
 //
 // REUSED INVESTIGATION, same discipline as CCP-018's own addendum above:
 // copter-rust's own COP-007 ticket ported this exact function first
-// (ports/plane-fw-rust/crates/ap-control/src/attitude_error.rs, tests/
+// (ports/ardumaster-rust/crates/ap-control/src/attitude_error.rs, tests/
 // attitude_error.rs), with unusually rich investigation reused directly
 // below, independently re-verified against the real C++ source rather
 // than trusted on faith.
@@ -288,7 +288,7 @@
 // this port did not already have.
 //
 // REUSED INVESTIGATION: copter-rust's own COP-007 ticket already ported
-// this exact function (ports/plane-fw-rust/crates/ap-control/src/
+// this exact function (ports/ardumaster-rust/crates/ap-control/src/
 // attitude_error.rs - CommandModel, DEFAULT_ACCEL_MAX_DEGSS,
 // DEFAULT_INPUT_TC_CYCLES, attitude_command_model) - read in full before
 // writing anything here, two of its own findings reused directly below,
@@ -503,7 +503,7 @@
 // small and self-contained now that CCP-019/020/021 exist.
 //
 // REUSED INVESTIGATION: copter-rust's own COP-007 ticket already ported
-// this exact real function pair together (ports/plane-fw-rust/crates/
+// this exact real function pair together (ports/ardumaster-rust/crates/
 // ap-control/src/attitude_error.rs - attitude_from_thrust_vector,
 // update_ang_vel_target_from_att_error, ACCEL_RP_MIN_DEGSS/MAX_DEGSS) -
 // read in full before writing anything here, every finding below
@@ -647,9 +647,9 @@
 // `attitude_controller_run_quat` - the Rust port renamed it, since
 // "_quat" only disambiguated it from sibling `_run_*` entry points that
 // port never built either), in
-// ports/plane-fw-rust/crates/ap-control/src/attitude_error.rs (its own
+// ports/ardumaster-rust/crates/ap-control/src/attitude_error.rs (its own
 // merged mainline copy - NOT the stale
-// ports/plane-fw-rust/crates/ap-control/src/attitude_controller.rs file
+// ports/ardumaster-rust/crates/ap-control/src/attitude_controller.rs file
 // of the same crate, which only re-exports/consumes these functions,
 // and NOT the /srv/ardumaster/worktrees/cop-023-params worktree, which
 // turned out to be an unrelated, already-merged COP-023 branch, not
@@ -882,7 +882,7 @@
 // about its name invites a caller to believe it is "the caller's own
 // dt" the way real upstream's misleadingly-named `dt` parameter does.
 // This mirrors copter-rust's own chosen resolution for the identical
-// quirk in its own Rust port (ports/plane-fw-rust/crates/ap-control/src/
+// quirk in its own Rust port (ports/ardumaster-rust/crates/ap-control/src/
 // attitude_controller.rs, `command_model_rate_predictor`, a single `dt:
 // f32` parameter, no second unused one) - independently reached here by
 // the same reasoning, not copied blind. See this file's own test file's
@@ -1677,7 +1677,7 @@ inline void command_model_rate_predictor(const math::Vector2f& error_angle_rad, 
 //
 // THE REAL CONCEPTUAL REASON THIS FUNCTION (AND EVERY OTHER `input_*`
 // ENTRY POINT) EXISTS AT ALL - reused verbatim from copter-rust's own
-// COP-007 investigation (ports/plane-fw-rust/crates/ap-control/src/
+// COP-007 investigation (ports/ardumaster-rust/crates/ap-control/src/
 // attitude_controller.rs's own file banner and its COP-007 ticket
 // notes): "a pilot's stick position is NOT the attitude target. It is
 // the attitude the target is shaped TOWARD, subject to rate and

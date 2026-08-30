@@ -1,7 +1,7 @@
 #pragma once
 
 // Port of libraries/AC_WPNav/AC_Circle (Copter-4.7.0) — CCP-028 slice 5.
-// Rust spec: ports/plane-fw-rust/crates/ap-wpnav/src/circle.rs.
+// Rust spec: ports/ardumaster-rust/crates/ap-wpnav/src/circle.rs.
 //
 // THIS SLICE (injected context, testable in header):
 //   Circle construction (GroupInfo defaults)
