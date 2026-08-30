@@ -39,4 +39,5 @@
 #include <fwcpp/copter/get_wp_distance_m.hpp>
 #include <fwcpp/copter/update_auto_armed.hpp>
 #include <fwcpp/copter/startup_ins_ground.hpp>
+#include <fwcpp/copter/allocate_motors.hpp>
 #include <fwcpp/copter/update_throttle_hover.hpp>

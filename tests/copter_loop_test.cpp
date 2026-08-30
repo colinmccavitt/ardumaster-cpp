@@ -46,6 +46,9 @@ using fwcpp::copter::GetWpDistanceMInputs;
 using fwcpp::copter::UpdateAutoArmedInputs;
 using fwcpp::copter::StartupInsGroundInputs;
 using fwcpp::copter::VehicleClass;
+using fwcpp::copter::AllocateMotorsInputs;
+using fwcpp::copter::MotorFrameClass;
+using fwcpp::copter::MotorsKind;
 using fwcpp::copter::DesiredSpoolState;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
@@ -89,6 +92,7 @@ using fwcpp::copter::takeoff_check;
 using fwcpp::copter::get_wp_distance_m;
 using fwcpp::copter::update_auto_armed;
 using fwcpp::copter::startup_ins_ground;
+using fwcpp::copter::allocate_motors;
 using fwcpp::copter::kLostVehicleDelay;
 using fwcpp::copter::kLostVehicleStickThreshold;
 using fwcpp::copter::kTakeoffCheckAvgLoadMax;
@@ -120,10 +124,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 29", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 2);
+TEST_CASE("catalog remaining_count stays open after slice 30", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 33);
+    REQUIRE(on_main_count() == 34);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -160,8 +164,8 @@ TEST_CASE("catalog remaining_count stays open after slice 29", "[copter][leftove
     REQUIRE(completeness_has("Copter::takeoff_check", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::get_wp_distance_m", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::startup_INS_ground", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::allocate_motors", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::startup_INS_ground", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::allocate_motors", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
 }
@@ -2228,4 +2232,137 @@ TEST_CASE("startup_INS_ground leftover copies injected loop_rate_hz",
     REQUIRE(fx.ins_init);
     REQUIRE(fx.ins_loop_rate_hz == 50);
     REQUIRE(fx.ahrs_reset);
+}
+
+TEST_CASE("allocate_motors leftover default and QUAD select Matrix",
+          "[copter][allocate_motors]") {
+    REQUIRE(static_cast<int>(MotorFrameClass::UNDEFINED) == 0);
+    REQUIRE(static_cast<int>(MotorFrameClass::QUAD) == 1);
+    REQUIRE(static_cast<int>(MotorFrameClass::HEXA) == 2);
+    REQUIRE(static_cast<int>(MotorFrameClass::OCTA) == 3);
+    REQUIRE(static_cast<int>(MotorFrameClass::OCTAQUAD) == 4);
+    REQUIRE(static_cast<int>(MotorFrameClass::Y6) == 5);
+    REQUIRE(static_cast<int>(MotorFrameClass::HELI) == 6);
+    REQUIRE(static_cast<int>(MotorFrameClass::TRI) == 7);
+    REQUIRE(static_cast<int>(MotorFrameClass::SINGLE) == 8);
+    REQUIRE(static_cast<int>(MotorFrameClass::COAX) == 9);
+    REQUIRE(static_cast<int>(MotorFrameClass::TAILSITTER) == 10);
+    REQUIRE(static_cast<int>(MotorFrameClass::HELI_DUAL) == 11);
+    REQUIRE(static_cast<int>(MotorFrameClass::DODECAHEXA) == 12);
+    REQUIRE(static_cast<int>(MotorFrameClass::HELI_QUAD) == 13);
+    REQUIRE(static_cast<int>(MotorFrameClass::DECA) == 14);
+    REQUIRE(static_cast<int>(MotorFrameClass::SCRIPTING_MATRIX) == 15);
+    REQUIRE(static_cast<int>(MotorFrameClass::SIXDOF_SCRIPTING) == 16);
+    REQUIRE(static_cast<int>(MotorFrameClass::DYNAMIC_SCRIPTING_MATRIX) == 17);
+
+    const auto def = allocate_motors();
+    REQUIRE(def.motors_kind == MotorsKind::Matrix);
+    REQUIRE(def.loop_rate_hz == 400);
+    REQUIRE_FALSE(def.allocation_failed);
+    REQUIRE_FALSE(def.frame_type_tricopter);
+
+    const auto quad = allocate_motors({.frame_class = MotorFrameClass::QUAD});
+    REQUIRE(quad.motors_kind == MotorsKind::Matrix);
+    REQUIRE(quad.loop_rate_hz == 400);
+    REQUIRE_FALSE(quad.allocation_failed);
+    REQUIRE_FALSE(quad.frame_type_tricopter);
+
+    AllocateMotorsInputs in{};
+    in.frame_class = MotorFrameClass::QUAD;
+    in.loop_rate_hz = 50;
+    const auto copied = allocate_motors(in);
+    REQUIRE(copied.motors_kind == MotorsKind::Matrix);
+    REQUIRE(copied.loop_rate_hz == 50);
+    REQUIRE_FALSE(copied.allocation_failed);
+    REQUIRE_FALSE(copied.frame_type_tricopter);
+}
+
+TEST_CASE("allocate_motors leftover TRI sets Tri and frame_type_tricopter",
+          "[copter][allocate_motors]") {
+    const auto fx = allocate_motors({.frame_class = MotorFrameClass::TRI});
+    REQUIRE(fx.motors_kind == MotorsKind::Tri);
+    REQUIRE(fx.frame_type_tricopter);
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE(fx.loop_rate_hz == 400);
+}
+
+TEST_CASE("allocate_motors leftover SINGLE COAX TAILSITTER map correctly",
+          "[copter][allocate_motors]") {
+    const auto single = allocate_motors({.frame_class = MotorFrameClass::SINGLE});
+    REQUIRE(single.motors_kind == MotorsKind::Single);
+    REQUIRE_FALSE(single.frame_type_tricopter);
+    REQUIRE_FALSE(single.allocation_failed);
+
+    const auto coax = allocate_motors({.frame_class = MotorFrameClass::COAX});
+    REQUIRE(coax.motors_kind == MotorsKind::Coax);
+    REQUIRE_FALSE(coax.frame_type_tricopter);
+    REQUIRE_FALSE(coax.allocation_failed);
+
+    const auto tailsitter = allocate_motors({.frame_class = MotorFrameClass::TAILSITTER});
+    REQUIRE(tailsitter.motors_kind == MotorsKind::Tailsitter);
+    REQUIRE_FALSE(tailsitter.frame_type_tricopter);
+    REQUIRE_FALSE(tailsitter.allocation_failed);
+}
+
+TEST_CASE("allocate_motors leftover HEXA Y6 OCTA DECA select Matrix",
+          "[copter][allocate_motors]") {
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::HEXA}).motors_kind ==
+            MotorsKind::Matrix);
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::Y6}).motors_kind ==
+            MotorsKind::Matrix);
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::OCTA}).motors_kind ==
+            MotorsKind::Matrix);
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::DECA}).motors_kind ==
+            MotorsKind::Matrix);
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::OCTAQUAD}).motors_kind ==
+            MotorsKind::Matrix);
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::DODECAHEXA}).motors_kind ==
+            MotorsKind::Matrix);
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::SCRIPTING_MATRIX}).motors_kind ==
+            MotorsKind::Matrix);
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::UNDEFINED}).motors_kind ==
+            MotorsKind::Matrix);
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::HELI}).motors_kind ==
+            MotorsKind::Matrix);
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::HELI_DUAL}).motors_kind ==
+            MotorsKind::Matrix);
+    REQUIRE(allocate_motors({.frame_class = MotorFrameClass::HELI_QUAD}).motors_kind ==
+            MotorsKind::Matrix);
+
+    const auto hexa = allocate_motors({.frame_class = MotorFrameClass::HEXA});
+    REQUIRE_FALSE(hexa.allocation_failed);
+    REQUIRE_FALSE(hexa.frame_type_tricopter);
+}
+
+TEST_CASE("allocate_motors leftover 6DOF_SCRIPTING depends on scripting",
+          "[copter][allocate_motors]") {
+    const auto off = allocate_motors({.frame_class = MotorFrameClass::SIXDOF_SCRIPTING});
+    REQUIRE(off.motors_kind == MotorsKind::None);
+    REQUIRE(off.allocation_failed);
+    REQUIRE_FALSE(off.frame_type_tricopter);
+    REQUIRE(off.loop_rate_hz == 400);
+
+    AllocateMotorsInputs on_in{};
+    on_in.frame_class = MotorFrameClass::SIXDOF_SCRIPTING;
+    on_in.scripting_enabled = true;
+    const auto on = allocate_motors(on_in);
+    REQUIRE(on.motors_kind == MotorsKind::Matrix6DoF);
+    REQUIRE_FALSE(on.allocation_failed);
+    REQUIRE_FALSE(on.frame_type_tricopter);
+    REQUIRE(on.loop_rate_hz == 400);
+}
+
+TEST_CASE("allocate_motors leftover DYNAMIC_SCRIPTING_MATRIX depends on scripting",
+          "[copter][allocate_motors]") {
+    const auto off =
+        allocate_motors({.frame_class = MotorFrameClass::DYNAMIC_SCRIPTING_MATRIX});
+    REQUIRE(off.motors_kind == MotorsKind::None);
+    REQUIRE(off.allocation_failed);
+
+    AllocateMotorsInputs on_in{};
+    on_in.frame_class = MotorFrameClass::DYNAMIC_SCRIPTING_MATRIX;
+    on_in.scripting_enabled = true;
+    const auto on = allocate_motors(on_in);
+    REQUIRE(on.motors_kind == MotorsKind::MatrixDynamic);
+    REQUIRE_FALSE(on.allocation_failed);
 }
