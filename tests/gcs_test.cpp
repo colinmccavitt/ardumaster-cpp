@@ -1,4 +1,4 @@
-// CPP-087 slice 4: COMMAND_LONG + PARAM + MISSION_ITEM_INT / REQUEST_INT.
+// CPP-087 slice 5: COMMAND_LONG + PARAM + MISSION + Plane leftover_send_attitude.
 
 #include <array>
 #include <cstdint>
@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/gcs/gcs.hpp>
 
+using fwcpp::gcs::Attitude;
 using fwcpp::gcs::CommandAck;
 using fwcpp::gcs::CommandHooks;
 using fwcpp::gcs::CommandLong;
@@ -24,7 +25,9 @@ using fwcpp::gcs::MissionStore;
 using fwcpp::gcs::ParamSet;
 using fwcpp::gcs::ParamStore;
 using fwcpp::gcs::ParamValue;
+using fwcpp::gcs::PlaneAttitudeInputs;
 using fwcpp::gcs::PortStatus;
+using fwcpp::gcs::attitude_from_frame;
 using fwcpp::gcs::command_ack_from_frame;
 using fwcpp::gcs::completeness_has;
 using fwcpp::gcs::copy_name_to_param_id;
@@ -33,6 +36,8 @@ using fwcpp::gcs::crc_extra;
 using fwcpp::gcs::decode_v2;
 using fwcpp::gcs::encode_v2;
 using fwcpp::gcs::heartbeat_from_frame;
+using fwcpp::gcs::kAttitudeCrcExtra;
+using fwcpp::gcs::kAttitudeLen;
 using fwcpp::gcs::kCommandAckCrcExtra;
 using fwcpp::gcs::kCommandAckLen;
 using fwcpp::gcs::kCommandLongCrcExtra;
@@ -57,6 +62,7 @@ using fwcpp::gcs::kMissionItemIntCrcExtra;
 using fwcpp::gcs::kMissionItemIntLen;
 using fwcpp::gcs::kMissionRequestIntCrcExtra;
 using fwcpp::gcs::kMissionRequestIntLen;
+using fwcpp::gcs::kMsgIdAttitude;
 using fwcpp::gcs::kMsgIdCommandAck;
 using fwcpp::gcs::kMsgIdCommandLong;
 using fwcpp::gcs::kMsgIdHeartbeat;
@@ -77,11 +83,13 @@ using fwcpp::gcs::kParamValueCrcExtra;
 using fwcpp::gcs::kParamValueLen;
 using fwcpp::gcs::kStxV2;
 using fwcpp::gcs::leftover_completeness_size;
+using fwcpp::gcs::leftover_send_attitude;
 using fwcpp::gcs::make_frame;
 using fwcpp::gcs::make_mission_count;
 using fwcpp::gcs::mission_item_int_from_frame;
 using fwcpp::gcs::mission_store_insert;
 using fwcpp::gcs::on_main_count;
+using fwcpp::gcs::pack_attitude;
 using fwcpp::gcs::pack_command_ack;
 using fwcpp::gcs::pack_command_long;
 using fwcpp::gcs::pack_heartbeat;
@@ -97,6 +105,7 @@ using fwcpp::gcs::param_value_from_frame;
 using fwcpp::gcs::plane_heartbeat;
 using fwcpp::gcs::remaining_count;
 using fwcpp::gcs::this_slice_count;
+using fwcpp::gcs::unpack_attitude;
 using fwcpp::gcs::unpack_command_ack;
 using fwcpp::gcs::unpack_command_long;
 using fwcpp::gcs::unpack_heartbeat;
@@ -337,9 +346,9 @@ TEST_CASE("send_heartbeat dispatches as msgid 0", "[gcs][dispatch]") {
 }
 
 TEST_CASE("leftover catalog this slice vs remaining", "[gcs][leftover]") {
-    REQUIRE(remaining_count() == 2);
+    REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 1);
-    REQUIRE(on_main_count() == 6);
+    REQUIRE(on_main_count() == 7);
     REQUIRE(leftover_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count());
     REQUIRE(completeness_has("MAVLink 2 framing", PortStatus::kOnMain));
@@ -348,8 +357,8 @@ TEST_CASE("leftover catalog this slice vs remaining", "[gcs][leftover]") {
     REQUIRE(completeness_has("leftover catalog", PortStatus::kOnMain));
     REQUIRE(completeness_has("COMMAND_LONG", PortStatus::kOnMain));
     REQUIRE(completeness_has("PARAM protocol", PortStatus::kOnMain));
-    REQUIRE(completeness_has("MISSION", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Plane/Copter vehicle handlers", PortStatus::kRemaining));
+    REQUIRE(completeness_has("MISSION", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Plane/Copter vehicle handlers", PortStatus::kThisSlice));
     REQUIRE(completeness_has("XML dialect generation", PortStatus::kRemaining));
 }
 
@@ -849,4 +858,74 @@ TEST_CASE("MISSION_REQUEST_INT unknown seq does not crash", "[gcs][mission]") {
 
     std::array<std::uint8_t, 64> wire{};
     REQUIRE(gcs.handle_mission_request_int(frame_mission_request_int(9), wire) == 0);
+}
+
+TEST_CASE("ATTITUDE pack/unpack round-trip", "[gcs][attitude]") {
+    Attitude a{};
+    a.time_boot_ms = 123456789u;
+    a.roll = 0.1f;
+    a.pitch = -0.2f;
+    a.yaw = 1.5f;
+    a.rollspeed = 0.01f;
+    a.pitchspeed = -0.02f;
+    a.yawspeed = 0.03f;
+
+    std::array<std::uint8_t, kAttitudeLen> payload{};
+    REQUIRE(pack_attitude(a, payload) == kAttitudeLen);
+
+    Attitude unpacked{};
+    REQUIRE(unpack_attitude(payload, unpacked));
+    REQUIRE(unpacked.time_boot_ms == 123456789u);
+    REQUIRE(unpacked.roll == 0.1f);
+    REQUIRE(unpacked.pitch == -0.2f);
+    REQUIRE(unpacked.yaw == 1.5f);
+    REQUIRE(unpacked.rollspeed == 0.01f);
+    REQUIRE(unpacked.pitchspeed == -0.02f);
+    REQUIRE(unpacked.yawspeed == 0.03f);
+}
+
+TEST_CASE("crc extra for ATTITUDE msgid 30", "[gcs][framing][attitude]") {
+    std::uint8_t extra = 0;
+    REQUIRE(crc_extra(kMsgIdAttitude, extra));
+    REQUIRE(extra == kAttitudeCrcExtra);
+    REQUIRE(extra == 39);
+    REQUIRE(kMsgIdAttitude == 30);
+}
+
+TEST_CASE("leftover_send_attitude frames ATTITUDE with valid CRC", "[gcs][attitude]") {
+    PlaneAttitudeInputs in{};
+    in.time_boot_ms = 42;
+    in.roll = 0.25f;
+    in.pitch = -0.125f;
+    in.yaw = 3.0f;
+    in.rollspeed = 0.5f;
+    in.pitchspeed = -0.25f;
+    in.yawspeed = 0.125f;
+
+    std::array<std::uint8_t, 64> wire{};
+    const std::size_t n = leftover_send_attitude(in, wire, /*seq=*/7, /*sysid=*/1, /*compid=*/1);
+    REQUIRE(n == 10 + kAttitudeLen + 2);
+    REQUIRE(wire[0] == kStxV2);
+
+    auto decoded = decode_v2(std::span<const std::uint8_t>(wire.data(), n));
+    REQUIRE(decoded.has_value());
+    REQUIRE(decoded.value().msgid == kMsgIdAttitude);
+    REQUIRE(decoded.value().seq == 7);
+    REQUIRE(decoded.value().payload_len == kAttitudeLen);
+
+    Attitude out{};
+    REQUIRE(attitude_from_frame(decoded.value(), out));
+    REQUIRE(out.time_boot_ms == 42);
+    REQUIRE(out.roll == 0.25f);
+    REQUIRE(out.pitch == -0.125f);
+    REQUIRE(out.yaw == 3.0f);
+    REQUIRE(out.rollspeed == 0.5f);
+    REQUIRE(out.pitchspeed == -0.25f);
+    REQUIRE(out.yawspeed == 0.125f);
+}
+
+TEST_CASE("leftover_send_attitude short buffer returns 0", "[gcs][attitude]") {
+    PlaneAttitudeInputs in{};
+    std::array<std::uint8_t, 8> too_small{};
+    REQUIRE(leftover_send_attitude(in, too_small) == 0);
 }

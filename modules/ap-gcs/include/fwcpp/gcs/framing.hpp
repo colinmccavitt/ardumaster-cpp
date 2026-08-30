@@ -22,6 +22,7 @@ inline constexpr std::uint32_t kMsgIdHeartbeat = 0;
 inline constexpr std::uint32_t kMsgIdParamRequestList = 21;
 inline constexpr std::uint32_t kMsgIdParamValue = 22;
 inline constexpr std::uint32_t kMsgIdParamSet = 23;
+inline constexpr std::uint32_t kMsgIdAttitude = 30;
 inline constexpr std::uint32_t kMsgIdMissionCount = 44;
 inline constexpr std::uint32_t kMsgIdMissionRequestInt = 51;
 inline constexpr std::uint32_t kMsgIdMissionItemInt = 73;
@@ -33,6 +34,7 @@ inline constexpr std::uint32_t kMsgIdCommandAck = 77;
 // pinned modules/mavlink/message_definitions/v1.0/common.xml:
 // HEARTBEAT.crc_extra = 50 msgid 0; PARAM_REQUEST_LIST = 159 msgid 21;
 // PARAM_VALUE = 220 msgid 22; PARAM_SET = 168 msgid 23;
+// ATTITUDE = 39 msgid 30;
 // MISSION_COUNT = 221 msgid 44; MISSION_REQUEST_INT = 196 msgid 51;
 // MISSION_ITEM_INT = 38 msgid 73;
 // COMMAND_LONG.crc_extra = 152 msgid 76; COMMAND_ACK.crc_extra = 143 msgid 77.
@@ -40,6 +42,7 @@ inline constexpr std::uint8_t kHeartbeatCrcExtra = 50;
 inline constexpr std::uint8_t kParamRequestListCrcExtra = 159;
 inline constexpr std::uint8_t kParamValueCrcExtra = 220;
 inline constexpr std::uint8_t kParamSetCrcExtra = 168;
+inline constexpr std::uint8_t kAttitudeCrcExtra = 39;
 inline constexpr std::uint8_t kMissionCountCrcExtra = 221;
 inline constexpr std::uint8_t kMissionRequestIntCrcExtra = 196;
 inline constexpr std::uint8_t kMissionItemIntCrcExtra = 38;
@@ -130,6 +133,10 @@ enum class DecodeError : std::uint8_t {
         extra = kParamSetCrcExtra;
         return true;
     }
+    if (msgid == kMsgIdAttitude) {
+        extra = kAttitudeCrcExtra;
+        return true;
+    }
     if (msgid == kMsgIdMissionCount) {
         extra = kMissionCountCrcExtra;
         return true;
@@ -154,18 +161,24 @@ inline void write_u16_le(std::uint8_t* p, std::uint16_t v) {
     return static_cast<std::uint16_t>(p[0] | (static_cast<std::uint16_t>(p[1]) << 8));
 }
 
+inline void write_u32_le(std::uint8_t* p, std::uint32_t v) {
+    p[0] = static_cast<std::uint8_t>(v);
+    p[1] = static_cast<std::uint8_t>(v >> 8);
+    p[2] = static_cast<std::uint8_t>(v >> 16);
+    p[3] = static_cast<std::uint8_t>(v >> 24);
+}
+
+[[nodiscard]] inline std::uint32_t read_u32_le(const std::uint8_t* p) {
+    return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+           (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+}
+
 inline void write_i32_le(std::uint8_t* p, std::int32_t v) {
-    const auto u = static_cast<std::uint32_t>(v);
-    p[0] = static_cast<std::uint8_t>(u);
-    p[1] = static_cast<std::uint8_t>(u >> 8);
-    p[2] = static_cast<std::uint8_t>(u >> 16);
-    p[3] = static_cast<std::uint8_t>(u >> 24);
+    write_u32_le(p, static_cast<std::uint32_t>(v));
 }
 
 [[nodiscard]] inline std::int32_t read_i32_le(const std::uint8_t* p) {
-    const std::uint32_t u = static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
-                            (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
-    return static_cast<std::int32_t>(u);
+    return static_cast<std::int32_t>(read_u32_le(p));
 }
 
 inline void write_f32_le(std::uint8_t* p, float v) {

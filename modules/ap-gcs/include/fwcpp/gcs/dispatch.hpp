@@ -3,7 +3,8 @@
 // Msgid dispatch: HEARTBEAT, COMMAND_LONG (ARM/DISARM, DO_SET_MODE),
 // PARAM_REQUEST_LIST / PARAM_SET, MISSION_REQUEST_INT → ITEM_INT. One
 // caller-owned channel (ADR-0012: no GCS singleton). Hooks, ParamStore,
-// and MissionStore are injected. Later slices add vehicle handlers.
+// and MissionStore are injected. Plane ATTITUDE send is leftover_send_attitude
+// in vehicle_plane.hpp (not wired into this class yet).
 
 #include <cstddef>
 #include <cstdint>
