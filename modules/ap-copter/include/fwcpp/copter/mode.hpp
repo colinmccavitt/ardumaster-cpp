@@ -147,6 +147,7 @@ struct FlightModeContext {
 // reads these via AP:: / copter / mission members. FLTMODE_GCSBLOCK
 // param lookup is remaining; gcs_mode_enabled is the already-resolved
 // gate (default open). Jump flags default false so `{}` fails AUTO_RTL.
+// is_drift injects MODE_DRIFT_ENABLED user_throttle leftover.
 struct SetModeInputs {
     bool gcs_mode_enabled{true};
     bool armed{false};
@@ -159,6 +160,9 @@ struct SetModeInputs {
     bool rc_failsafe{false};
     bool jump_to_closest_mission_leg{false};
     bool jump_to_landing_sequence{false};
+    // MODE_DRIFT_ENABLED leftover: treat next as user_throttle for the
+    // throttle-too-high gate. Default false; no ModeDrift this slice.
+    bool is_drift{false};
 };
 
 [[nodiscard]] inline Mode* mode_from_mode_num(Mode::Number mode, FlightModeTable& table) {
@@ -192,13 +196,21 @@ inline void record_notify_flight_mode(FlightModeContext& ctx, const Mode& next) 
 
 // Post-lookup checks + exit + switch. Upstream set_mode ~359-472
 // (ignore_checks through Write_Mode + notify_flight_mode leftovers).
-// Skips HELI runup, MODE_DRIFT_ENABLED throttle special, fence recovery,
-// GCS heartbeat, ADSB/camera/rate_tc, AP_Notify sounds.
+// Drift leftover: MODE_DRIFT_ENABLED forces user_throttle true
+// (mode.cpp ~375-380); injected is_drift, no ModeDrift class.
+// Skips HELI runup, fence recovery, GCS heartbeat, ADSB/camera/rate_tc,
+// AP_Notify sounds.
 [[nodiscard]] inline bool enter_mode(FlightModeContext& ctx, Mode& next, ModeReason reason,
                                      const SetModeInputs& in) {
     const bool ignore_checks = !in.armed;
 
-    const bool user_throttle = next.has_manual_throttle();
+    // Upstream: user_throttle = next.has_manual_throttle(); then Drift
+    // pointer-compare forces true. Injected is_drift stands in for
+    // new_flightmode == &mode_drift.
+    bool user_throttle = next.has_manual_throttle();
+    if (in.is_drift) {
+        user_throttle = true;
+    }
     if (!ignore_checks && in.land_complete && user_throttle && ctx.current != nullptr &&
         !ctx.current->has_manual_throttle() &&
         in.pilot_desired_throttle > in.non_takeoff_throttle) {

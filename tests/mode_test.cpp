@@ -234,8 +234,43 @@ TEST_CASE("throttle too high blocks manual-throttle entry", "[copter][mode]") {
     in.land_complete = true;
     in.pilot_desired_throttle = 0.40f;
     in.non_takeoff_throttle = 0.25f;
+    REQUIRE_FALSE(in.is_drift);
     REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::STABILIZE, ModeReason::RC_COMMAND, in));
     REQUIRE(f.ctx.current == &f.table.althold);
+}
+
+TEST_CASE("is_drift forces user_throttle on a non-manual next mode", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, {}));
+
+    TestPosMode pos;
+    REQUIRE_FALSE(pos.has_manual_throttle());
+
+    SetModeInputs in{};
+    in.armed = true;
+    in.land_complete = true;
+    in.pilot_desired_throttle = 0.40f;
+    in.non_takeoff_throttle = 0.25f;
+    in.is_drift = true;
+    REQUIRE_FALSE(set_mode(f.ctx, pos, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.althold);
+}
+
+TEST_CASE("is_drift false does not treat non-manual stub as user_throttle", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, {}));
+
+    TestPosMode pos;
+    REQUIRE_FALSE(pos.has_manual_throttle());
+
+    SetModeInputs in{};
+    in.armed = true;
+    in.land_complete = true;
+    in.pilot_desired_throttle = 0.40f;
+    in.non_takeoff_throttle = 0.25f;
+    REQUIRE_FALSE(in.is_drift);
+    REQUIRE(set_mode(f.ctx, pos, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &pos);
 }
 
 TEST_CASE("throttle at or below non_takeoff_throttle succeeds", "[copter][mode]") {
@@ -393,10 +428,10 @@ TEST_CASE("AUTO_RTL success writes AUTO_RTL after auto_RTL is set", "[copter][mo
 }
 
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
-    REQUIRE(remaining_count() == 5);
+    REQUIRE(remaining_count() == 4);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 10);
+    REQUIRE(mode_on_main_count() == 11);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -414,8 +449,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kRemaining));
-    REQUIRE(mode_completeness_has("Write_Mode/notify", ModePortStatus::kThisSlice));
-    REQUIRE(mode_completeness_has("Drift-as-manual-throttle", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("Write_Mode/notify", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("Drift-as-manual-throttle", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("set_accel_throttle_I", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("HELI runup/flybar", ModePortStatus::kOutOfScope));
     REQUIRE(mode_completeness_has("AP:: singletons", ModePortStatus::kOutOfScope));
