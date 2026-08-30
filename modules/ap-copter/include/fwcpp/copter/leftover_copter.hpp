@@ -6,8 +6,9 @@
 // functions + Mode*). ADR-0012: no AP:: singletons — sensor samples are
 // buffers/flags the harness writes, then leftover_copter_tick() consumes.
 //
-// Full closed-loop arm/spool/attitude-hold and baro/GPS/compass synthesis
-// remain (see sitl_copter_harness.hpp completeness catalog).
+// Slice 2 fills baro altitude, GPS lat/lng, and compass body-field buffers
+// from SitlCopterHarness::step(). Closed-loop arm/spool/hold and multirotor
+// aero remain (see sitl_copter_harness.hpp completeness catalog).
 
 #include <cstdint>
 
@@ -22,12 +23,22 @@ namespace fwcpp::copter {
 struct LeftoverCopter {
     math::Vector3f gyro_buffer{};
     math::Vector3f accel_buffer{};
-    // Prefer flags this slice — values may be zero until synthesis fills them.
+    float baro_altitude_m{0.0f};
+    // GPS lat/lng in Location 1e7-degree units (home + SimPlane NED offset).
+    std::int32_t gps_lat{0};
+    std::int32_t gps_lng{0};
+    math::Vector3f compass_field_bf{};
+
     bool gyro_injected{false};
     bool accel_injected{false};
-    bool baro_injected{false};   // remaining: baro synthesis
-    bool gps_injected{false};    // remaining: GPS synthesis
-    bool compass_injected{false}; // remaining: compass synthesis
+    bool baro_injected{false};
+    bool gps_injected{false};
+    bool compass_injected{false};
+
+    // SITL default home (CMAC) for lat/lng synthesis from NED position —
+    // same coords location / update_home_from_ekf tests use.
+    std::int32_t home_lat{-353632621};
+    std::int32_t home_lng{1491652374};
 
     std::uint32_t tick_count{0};
     Mode* current{nullptr};
