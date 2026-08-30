@@ -30,9 +30,12 @@
 // constrain/avoidance + leftover leftover_nav_att_lean + leftover leftover_d_set +
 // pos_D_update leftover flags) is on main.
 // ModeRTL::init leftover (home_is_set gate + leftover wp_and_spline/STARTING
-// flags) is this slice. leftover leftover_precland_statemachine remaining.
-// ModeRTL::run, ModeLand, ModeGuided::run body, land_run_normal_or_precland body,
-// land_run_horizontal_control body, and auto_takeoff.run body stay later.
+// flags) is on main. leftover leftover_precland_statemachine remaining.
+// ModeRTL::run leftover (armed gate + STARTING leftover leftover_build_path /
+// leftover leftover_climb_start flags) is this slice. leftover leftover_return_start
+// / leftover leftover_climb_return_run remaining. ModeLand, ModeGuided::run body,
+// land_run_normal_or_precland body, land_run_horizontal_control body, and
+// auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
@@ -568,8 +571,12 @@ public:
 
 // Stub: ModeRTL (mode.h ~1495-1570). init leftover is ModeRTL::init
 // (mode_rtl.cpp ~80-105). home_is_set / failsafe.terrain injected.
-// leftover leftover_precland_statemachine remaining. run() empty this
-// slice. Do not dump run(bool) / climb_start / return_start / LAND.
+// leftover leftover_precland_statemachine remaining. leftover leftover_run
+// is ModeRTL::run (mode.h run() { return run(true); } + mode_rtl.cpp
+// ~132-145 armed gate + STARTING leftover leftover_build_path /
+// leftover leftover_climb_start flags). Do not dump climb_start /
+// return_start / climb_return_run / LAND. ModeAuto leftover leftover_rtl_run
+// does not call leftover leftover_run.
 class ModeRTL : public Mode {
 public:
     enum class SubMode : std::uint8_t {
@@ -595,6 +602,20 @@ public:
     bool leftover_prec_land_active{false};
     // leftover leftover_precland_statemachine_init stays false (remaining).
     bool leftover_precland_statemachine_init{false};
+    // Injected motors->armed(). Default true so leftover leftover_run
+    // proceeds without a motors object.
+    bool motors_armed{true};
+    // leftover leftover_build_path / leftover leftover_climb_start (flags
+    // only; do not change _state to INITIAL_CLIMB; climb_start body remaining).
+    bool leftover_build_path{false};
+    bool leftover_climb_start{false};
+    // leftover leftover_return_start / leftover leftover_climb_return_run
+    // stay false this slice.
+    bool leftover_return_start{false};
+    bool leftover_climb_return_run{false};
+    // leftover leftover_rtl_run_disarm_on_land records leftover leftover_run
+    // argument (true from run()).
+    bool leftover_rtl_run_disarm_on_land{false};
     SubMode _state{SubMode::STARTING};
     bool _state_complete{false};
 
@@ -613,8 +634,26 @@ public:
         leftover_prec_land_active = false;
         return true;
     }
-    // Empty leftover this slice. Do not dump run(bool).
-    void run() override {}
+    // Leftover ModeRTL::run(bool) (mode_rtl.cpp ~132-145). Resets leftover
+    // leftover_build_path / leftover leftover_climb_start at entry so a later
+    // !armed tick does not leave stale true flags. Records leftover
+    // leftover_rtl_run_disarm_on_land. Armed gate then STARTING leftover
+    // leftover leftover_build_path / leftover leftover_climb_start only.
+    // Do not handle other SubModes. Do not run the second switch.
+    void leftover_run(bool disarm_on_land) {
+        leftover_build_path = false;
+        leftover_climb_start = false;
+        leftover_rtl_run_disarm_on_land = disarm_on_land;
+        if (!motors_armed) {
+            return;
+        }
+        if (_state_complete && _state == SubMode::STARTING) {
+            leftover_build_path = true;
+            leftover_climb_start = true;
+        }
+    }
+    // upstream mode.h: run() { return run(true); }
+    void run() override { leftover_run(true); }
     [[nodiscard]] bool requires_position() const override { return true; }
     [[nodiscard]] bool has_manual_throttle() const override { return false; }
 

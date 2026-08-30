@@ -48,7 +48,7 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"althold_run", ModePortStatus::kOnMain,
      "mode_althold.hpp; CCP-039 landed run() on main"},
     {"remaining mode bodies", ModePortStatus::kRemaining,
-     "ModeRTL::run; ModeLand init/run; other modes; auto_takeoff.run body; "
+     "ModeRTL::run rest; ModeLand init/run; other modes; auto_takeoff.run body; "
      "land_run_normal_or_precland body; land_run_horizontal_control body; "
      "ModeGuided::run body"},
     {"ModeAuto::init", ModePortStatus::kOnMain,
@@ -97,9 +97,12 @@ inline constexpr ModePortItem kModeCompleteness[] = {
      "no ModeGuided body"},
     {"ModeAuto::nav_attitude_time_run", ModePortStatus::kOnMain,
      "leftover through pos_D_update leftover flags"},
-    {"ModeRTL::init", ModePortStatus::kThisSlice,
+    {"ModeRTL::init", ModePortStatus::kOnMain,
      "home_is_set gate + leftover wp_and_spline/STARTING flags; leftover "
-     "leftover_precland_statemachine remaining; no run body"},
+     "leftover_precland_statemachine remaining"},
+    {"ModeRTL::run", ModePortStatus::kThisSlice,
+     "armed gate + STARTING leftover leftover_build_path/climb_start flags; "
+     "return_start / climb_return_run remaining"},
     {"FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain,
      "Copter::gcs_mode_enabled + AP_Vehicle::block_GCS_mode_change; injected "
      "fltmode_gcsblock; LAND/RTL not in list"},

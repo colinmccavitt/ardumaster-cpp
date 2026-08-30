@@ -1104,6 +1104,8 @@ TEST_CASE("ModeAuto run SubMode RTL leftover rtl_run", "[copter][mode]") {
     REQUIRE_FALSE(f.table.mode_auto.leftover_circle_nav_update);
     REQUIRE_FALSE(f.table.mode_rtl.leftover_wp_and_spline_init);
     REQUIRE_FALSE(f.table.mode_rtl.state_complete());
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_build_path);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_climb_start);
 }
 
 TEST_CASE("ModeAuto run SubMode CIRCLE leftover circle_run", "[copter][mode]") {
@@ -1631,11 +1633,50 @@ TEST_CASE("ModeRTL init leftover_terrain_following_allowed false when failsafe_t
     REQUIRE_FALSE(f.table.mode_rtl.leftover_precland_statemachine_init);
 }
 
+TEST_CASE("ModeRTL run leftover STARTING leftover leftover_build_path climb_start",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.table.mode_rtl.state() == ModeRTL::SubMode::STARTING);
+    REQUIRE(f.table.mode_rtl.state_complete());
+    REQUIRE(f.table.mode_rtl.motors_armed);
+    f.table.mode_rtl.run();
+    REQUIRE(f.table.mode_rtl.leftover_build_path);
+    REQUIRE(f.table.mode_rtl.leftover_climb_start);
+    REQUIRE(f.table.mode_rtl.leftover_rtl_run_disarm_on_land);
+    REQUIRE(f.table.mode_rtl.state() == ModeRTL::SubMode::STARTING);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_return_start);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_climb_return_run);
+}
+
+TEST_CASE("ModeRTL leftover leftover_run motors_armed false skips leftover leftover_build_path",
+          "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::RTL, ModeReason::RC_COMMAND, in));
+    f.table.mode_rtl.run();
+    REQUIRE(f.table.mode_rtl.leftover_build_path);
+    REQUIRE(f.table.mode_rtl.leftover_climb_start);
+    f.table.mode_rtl.motors_armed = false;
+    f.table.mode_rtl.leftover_run(true);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_build_path);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_climb_start);
+    REQUIRE(f.table.mode_rtl.leftover_rtl_run_disarm_on_land);
+    REQUIRE(f.table.mode_rtl.state() == ModeRTL::SubMode::STARTING);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_return_start);
+    REQUIRE_FALSE(f.table.mode_rtl.leftover_climb_return_run);
+}
+
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 30);
+    REQUIRE(mode_on_main_count() == 31);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -1665,7 +1706,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeAuto::loiter_to_alt_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::nav_guided_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::nav_attitude_time_run", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("ModeRTL::init", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeRTL::init", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeRTL::run", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));
