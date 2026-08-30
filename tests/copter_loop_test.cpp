@@ -27,6 +27,7 @@ using fwcpp::copter::UpdateAltitudeInputs;
 using fwcpp::copter::UpdateBattCompassInputs;
 using fwcpp::copter::UpdateLandAndCrashDetectorsInputs;
 using fwcpp::copter::UpdateRangefinderTerrainOffsetInputs;
+using fwcpp::copter::UpdateThrottleHoverInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -61,6 +62,7 @@ using fwcpp::copter::update_altitude;
 using fwcpp::copter::update_batt_compass;
 using fwcpp::copter::update_land_and_crash_detectors;
 using fwcpp::copter::update_rangefinder_terrain_offset;
+using fwcpp::copter::update_throttle_hover;
 
 namespace {
 
@@ -76,10 +78,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 12", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 19);
+TEST_CASE("catalog remaining_count stays open after slice 13", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 18);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 16);
+    REQUIRE(on_main_count() == 17);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -98,9 +100,11 @@ TEST_CASE("catalog remaining_count stays open after slice 12", "[copter][leftove
     REQUIRE(completeness_has("Copter::update_rangefinder_terrain_offset", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_batt_compass", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_altitude", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::run_nav_updates", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::run_nav_updates", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::update_throttle_hover", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::three_hz_loop", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -986,4 +990,129 @@ TEST_CASE("run_nav_updates records update_super_simple_bearing(false)",
     REQUIRE(row->max_time_micros == 100);
     REQUIRE(row->priority == 45);
     REQUIRE(row->gate == nullptr);
+}
+
+namespace {
+
+[[nodiscard]] UpdateThrottleHoverInputs level_hover_inputs() {
+    UpdateThrottleHoverInputs in{};
+    in.armed = true;
+    in.velocity_D_ok = true;
+    in.throttle = 0.45f;
+    return in;
+}
+
+void require_early_return(const UpdateThrottleHoverInputs& in) {
+    const auto fx = update_throttle_hover(in);
+    REQUIRE(fx.early_return);
+    REQUIRE_FALSE(fx.motors_update_throttle_hover);
+    REQUIRE(fx.hover_dt == 0.0f);
+    REQUIRE_FALSE(fx.gyro_fft_update_freq_hover);
+}
+
+}  // namespace
+
+TEST_CASE("update_throttle_hover early-returns when not armed",
+          "[copter][update_throttle_hover]") {
+    auto in = level_hover_inputs();
+    in.armed = false;
+    require_early_return(in);
+}
+
+TEST_CASE("update_throttle_hover early-returns when land_complete",
+          "[copter][update_throttle_hover]") {
+    auto in = level_hover_inputs();
+    in.land_complete = true;
+    require_early_return(in);
+}
+
+TEST_CASE("update_throttle_hover early-returns when standby_active",
+          "[copter][update_throttle_hover]") {
+    auto in = level_hover_inputs();
+    in.standby_active = true;
+    require_early_return(in);
+}
+
+TEST_CASE("update_throttle_hover early-returns with manual throttle",
+          "[copter][update_throttle_hover]") {
+    auto in = level_hover_inputs();
+    in.has_manual_throttle = true;
+    require_early_return(in);
+}
+
+TEST_CASE("update_throttle_hover early-returns in Drift",
+          "[copter][update_throttle_hover]") {
+    REQUIRE(Mode::Number::DRIFT == static_cast<Mode::Number>(11));
+    auto in = level_hover_inputs();
+    in.mode_is_drift = true;
+    require_early_return(in);
+}
+
+TEST_CASE("update_throttle_hover early-returns when climbing or descending",
+          "[copter][update_throttle_hover]") {
+    auto in = level_hover_inputs();
+    in.vel_desired_U_ms = 0.2f;
+    require_early_return(in);
+}
+
+TEST_CASE("update_throttle_hover early-returns without velocity_D",
+          "[copter][update_throttle_hover]") {
+    auto in = level_hover_inputs();
+    in.velocity_D_ok = false;
+    require_early_return(in);
+}
+
+TEST_CASE("update_throttle_hover records motors update in level hover",
+          "[copter][update_throttle_hover]") {
+    const auto fx = update_throttle_hover(level_hover_inputs());
+    REQUIRE_FALSE(fx.early_return);
+    REQUIRE(fx.motors_update_throttle_hover);
+    REQUIRE(fx.hover_dt == 0.01f);
+    REQUIRE_FALSE(fx.gyro_fft_update_freq_hover);
+
+    auto trimmed = level_hover_inputs();
+    trimmed.roll_rad = fwcpp::math::radians(4.0f);
+    trimmed.roll_trim_rad = fwcpp::math::radians(4.0f);
+    trimmed.pitch_rad = fwcpp::math::radians(4.0f);
+    const auto trim_fx = update_throttle_hover(trimmed);
+    REQUIRE_FALSE(trim_fx.early_return);
+    REQUIRE(trim_fx.motors_update_throttle_hover);
+    REQUIRE(trim_fx.hover_dt == 0.01f);
+
+    const auto* row = find_scheduler_task("update_throttle_hover");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 100.0f);
+    REQUIRE(row->max_time_micros == 90);
+    REQUIRE(row->priority == 48);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("update_throttle_hover skips motors update when not level hover",
+          "[copter][update_throttle_hover]") {
+    auto zero_thr = level_hover_inputs();
+    zero_thr.throttle = 0.0f;
+    const auto zero_fx = update_throttle_hover(zero_thr);
+    REQUIRE_FALSE(zero_fx.early_return);
+    REQUIRE_FALSE(zero_fx.motors_update_throttle_hover);
+    REQUIRE(zero_fx.hover_dt == 0.0f);
+    REQUIRE_FALSE(zero_fx.gyro_fft_update_freq_hover);
+
+    auto fast_d = level_hover_inputs();
+    fast_d.vel_d_ms = 0.6f;
+    const auto d_fx = update_throttle_hover(fast_d);
+    REQUIRE_FALSE(d_fx.early_return);
+    REQUIRE_FALSE(d_fx.motors_update_throttle_hover);
+
+    auto rolled = level_hover_inputs();
+    rolled.roll_rad = fwcpp::math::radians(5.0f);
+    const auto roll_fx = update_throttle_hover(rolled);
+    REQUIRE_FALSE(roll_fx.early_return);
+    REQUIRE_FALSE(roll_fx.motors_update_throttle_hover);
+
+    auto pitched = level_hover_inputs();
+    pitched.pitch_rad = fwcpp::math::radians(5.0f);
+    const auto pitch_fx = update_throttle_hover(pitched);
+    REQUIRE_FALSE(pitch_fx.early_return);
+    REQUIRE_FALSE(pitch_fx.motors_update_throttle_hover);
 }

@@ -23,3 +23,4 @@
 #include <fwcpp/copter/update_altitude.hpp>
 #include <fwcpp/copter/update_batt_compass.hpp>
 #include <fwcpp/copter/update_rangefinder_terrain_offset.hpp>
+#include <fwcpp/copter/update_throttle_hover.hpp>
