@@ -202,6 +202,7 @@ TEST_CASE("Takeoff !running sets takeoff_start avoidance do_pilot_takeoff", "[co
     REQUIRE(out.state == AltHoldModeState::Takeoff);
     REQUIRE(out.takeoff_start);
     REQUIRE(out.avoidance);
+    REQUIRE_FALSE(out.adjust_roll_pitch_avoidance);
     REQUIRE(out.do_pilot_takeoff);
     REQUIRE_FALSE(out.D_set_pos_target_from_climb_rate);
     REQUIRE_FALSE(out.surface_tracking);
@@ -224,10 +225,11 @@ TEST_CASE("Takeoff already running skips takeoff_start", "[copter][althold]") {
     REQUIRE(out.state == AltHoldModeState::Takeoff);
     REQUIRE_FALSE(out.takeoff_start);
     REQUIRE(out.avoidance);
+    REQUIRE_FALSE(out.adjust_roll_pitch_avoidance);
     REQUIRE(out.do_pilot_takeoff);
 }
 
-TEST_CASE("flying path records D_set_pos_target_from_climb_rate", "[copter][althold]") {
+TEST_CASE("Flying sets adjust_roll_pitch_avoidance surface_tracking avoidance", "[copter][althold]") {
     auto in = base_in();
     in.armed = true;
     in.takeoff_running = false;
@@ -245,6 +247,7 @@ TEST_CASE("flying path records D_set_pos_target_from_climb_rate", "[copter][alth
     REQUIRE(out.D_set_pos_target_from_climb_rate);
     REQUIRE(out.pos_target_climb_rate_ms == Approx(out.target_climb_rate_ms));
     REQUIRE(out.pos_target_climb_rate_ms != Approx(0.0f));
+    REQUIRE(out.adjust_roll_pitch_avoidance);
     REQUIRE(out.avoidance);
     REQUIRE(out.surface_tracking);
     REQUIRE_FALSE(out.D_relax_controller);
@@ -254,8 +257,8 @@ TEST_CASE("flying path records D_set_pos_target_from_climb_rate", "[copter][alth
 }
 
 TEST_CASE("leftover remaining_count is not zero", "[copter][althold][leftover]") {
-    REQUIRE(remaining_count() == 3);
-    REQUIRE(this_slice_count() == 7);
+    REQUIRE(remaining_count() == 1);
+    REQUIRE(this_slice_count() == 9);
     REQUIRE(on_main_count() == 2);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(completeness_size() ==
@@ -264,11 +267,13 @@ TEST_CASE("leftover remaining_count is not zero", "[copter][althold][leftover]")
     REQUIRE(completeness_has("get_alt_hold_state_D_ms", PortStatus::kThisSlice));
     REQUIRE(completeness_has("update_simple_mode", PortStatus::kThisSlice));
     REQUIRE(completeness_has("takeoff", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("avoidance", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("surface_tracking", PortStatus::kThisSlice));
     REQUIRE(completeness_has("stabilize_run", PortStatus::kOnMain));
     REQUIRE(completeness_has("acro_run", PortStatus::kOnMain));
-    REQUIRE(completeness_has("avoidance", PortStatus::kRemaining));
-    REQUIRE(completeness_has("surface_tracking", PortStatus::kRemaining));
     REQUIRE(completeness_has("D_update_controller", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("avoidance", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("surface_tracking", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("takeoff", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("update_simple_mode", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("AUTO_RTL", PortStatus::kRemaining));
