@@ -3,10 +3,11 @@
 // Copter Mode base + Stabilize/AltHold/ModeAuto stubs + set_mode checks.
 // Upstream ArduCopter/mode.h Number ~77-109, Mode virtuals ~119-143,
 // ModeStabilize ~1723, ModeAltHold ~498, ModeAuto ~531-545; mode.cpp
-// mode_from_mode_num ~32, set_mode ~313-430 (AUTO_RTL ~345-350),
+// mode_from_mode_num ~32, set_mode ~313-474 (AUTO_RTL ~345-350,
+// Write_Mode ~438-439, notify_flight_mode ~472 / ~549-554),
 // exit_mode ~511-524 (non-heli: I transfer then takeoff_stop + exit);
 // mode_auto.cpp return_path_or_jump_to_landing_sequence_auto_RTL ~286-301,
-// enter_auto_rtl ~303-329.
+// enter_auto_rtl ~303-329 (second Write_Mode after auto_RTL).
 //
 // Mode is not a heap singleton. The caller owns FlightModeTable;
 // FlightModeContext holds a non-owning Mode* into that table.
@@ -128,6 +129,18 @@ struct FlightModeContext {
     // exit_mode ~515-518: recorded when manual-to-auto I transfer runs.
     bool accel_throttle_I_set{false};
     float accel_throttle_I{0.0f};
+    // set_mode ~438-439 logger.Write_Mode leftover (no AP_Logger object).
+    bool write_mode{false};
+    Mode::Number written_mode_number{Mode::Number::STABILIZE};
+    ModeReason written_reason{ModeReason::UNKNOWN};
+    // notify_flight_mode ~549-554 leftover (no AP_Notify object).
+    bool notify_flight_mode{false};
+    Mode::Number notify_flight_mode_number{Mode::Number::STABILIZE};
+    // Upstream AP_Notify::flags.autopilot_mode = flightmode->is_autopilot().
+    // Mode has no is_autopilot this slice; true only for ModeAuto.
+    bool notify_autopilot_mode{false};
+    // gcs().send_message(MSG_HEARTBEAT) remaining; no GCS this slice.
+    bool gcs_heartbeat{false};
 };
 
 // Injected Copter / motors / EKF / RC / mission-jump state. Upstream
@@ -161,10 +174,26 @@ struct SetModeInputs {
     }
 }
 
-// Post-lookup checks + exit + switch. Upstream set_mode ~359-437
-// (ignore_checks through flightmode = new / control_mode_reason = reason).
+// Leftover logger.Write_Mode((uint8_t)mode_number, reason). No AP_Logger.
+inline void record_write_mode(FlightModeContext& ctx, Mode::Number mode, ModeReason reason) {
+    ctx.write_mode = true;
+    ctx.written_mode_number = mode;
+    ctx.written_reason = reason;
+}
+
+// Leftover notify_flight_mode. No AP_Notify / name4 virtual this slice.
+// autopilot_mode is true only for ModeAuto (AUTO or AUTO_RTL).
+inline void record_notify_flight_mode(FlightModeContext& ctx, const Mode& next) {
+    ctx.notify_flight_mode = true;
+    ctx.notify_flight_mode_number = next.mode_number();
+    const Mode::Number n = next.mode_number();
+    ctx.notify_autopilot_mode = (n == Mode::Number::AUTO || n == Mode::Number::AUTO_RTL);
+}
+
+// Post-lookup checks + exit + switch. Upstream set_mode ~359-472
+// (ignore_checks through Write_Mode + notify_flight_mode leftovers).
 // Skips HELI runup, MODE_DRIFT_ENABLED throttle special, fence recovery,
-// logger.Write_Mode, notify.
+// GCS heartbeat, ADSB/camera/rate_tc, AP_Notify sounds.
 [[nodiscard]] inline bool enter_mode(FlightModeContext& ctx, Mode& next, ModeReason reason,
                                      const SetModeInputs& in) {
     const bool ignore_checks = !in.armed;
@@ -211,6 +240,8 @@ struct SetModeInputs {
 
     ctx.current = &next;
     ctx.reason = reason;
+    record_write_mode(ctx, next.mode_number(), reason);
+    record_notify_flight_mode(ctx, next);
     return true;
 }
 
@@ -234,13 +265,15 @@ struct SetModeInputs {
                                    ModeReason reason, const SetModeInputs& in);
 
 // Upstream ModeAuto::enter_auto_rtl ~303-329. Skips LOGGER_WRITE_ERROR,
-// GCS send_text, AP_Notify, Write_Mode. force_resume leftover on ctx.
+// GCS send_text, AP_Notify sounds. Write_Mode leftover after auto_RTL
+// so the logged number is AUTO_RTL, not AUTO.
 [[nodiscard]] inline bool enter_auto_rtl(FlightModeContext& ctx, FlightModeTable& table,
                                          ModeReason reason, const SetModeInputs& in) {
     ctx.force_resume = true;
     if (ctx.current == &table.mode_auto ||
         set_mode(ctx, table, Mode::Number::AUTO, reason, in)) {
         table.mode_auto.auto_RTL = true;
+        record_write_mode(ctx, table.mode_auto.mode_number(), reason);
         return true;
     }
     ctx.force_resume = false;

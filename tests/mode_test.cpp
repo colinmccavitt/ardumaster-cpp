@@ -350,11 +350,53 @@ TEST_CASE("accel throttle I skipped when already auto", "[copter][mode]") {
     REQUIRE_FALSE(f.ctx.accel_throttle_I_set);
 }
 
+TEST_CASE("Stabilize to AltHold records Write_Mode and notify", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, {}));
+    REQUIRE(f.ctx.current == &f.table.althold);
+    REQUIRE(f.ctx.write_mode);
+    REQUIRE(f.ctx.written_mode_number == Mode::Number::ALT_HOLD);
+    REQUIRE(f.ctx.written_reason == ModeReason::RC_COMMAND);
+    REQUIRE(f.ctx.notify_flight_mode);
+    REQUIRE(f.ctx.notify_flight_mode_number == Mode::Number::ALT_HOLD);
+    REQUIRE_FALSE(f.ctx.notify_autopilot_mode);
+    REQUIRE_FALSE(f.ctx.gcs_heartbeat);
+}
+
+TEST_CASE("failed set_mode does not Write_Mode", "[copter][mode]") {
+    Fixture f;
+    REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::ACRO, ModeReason::RC_COMMAND, {}));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE_FALSE(f.ctx.write_mode);
+    REQUIRE_FALSE(f.ctx.notify_flight_mode);
+}
+
+TEST_CASE("already-in-mode does not Write_Mode", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::STABILIZE, ModeReason::GCS_COMMAND, {}));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE(f.ctx.reason == ModeReason::GCS_COMMAND);
+    REQUIRE_FALSE(f.ctx.write_mode);
+    REQUIRE_FALSE(f.ctx.notify_flight_mode);
+}
+
+TEST_CASE("AUTO_RTL success writes AUTO_RTL after auto_RTL is set", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.jump_to_closest_mission_leg = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.table.mode_auto.auto_RTL);
+    REQUIRE(f.ctx.current->mode_number() == Mode::Number::AUTO_RTL);
+    REQUIRE(f.ctx.write_mode);
+    REQUIRE(f.ctx.written_mode_number == Mode::Number::AUTO_RTL);
+    REQUIRE(f.ctx.written_reason == ModeReason::GCS_COMMAND);
+}
+
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
-    REQUIRE(remaining_count() == 6);
+    REQUIRE(remaining_count() == 5);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 9);
+    REQUIRE(mode_on_main_count() == 10);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -372,9 +414,9 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kRemaining));
-    REQUIRE(mode_completeness_has("Write_Mode/notify", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("Write_Mode/notify", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("Drift-as-manual-throttle", ModePortStatus::kRemaining));
-    REQUIRE(mode_completeness_has("set_accel_throttle_I", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("set_accel_throttle_I", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("HELI runup/flybar", ModePortStatus::kOutOfScope));
     REQUIRE(mode_completeness_has("AP:: singletons", ModePortStatus::kOutOfScope));
     REQUIRE(mode_completeness_has("AP_Notify sounds", ModePortStatus::kOutOfScope));
