@@ -72,6 +72,11 @@
 //     leftover leftover_safety_would_loop iff leftover leftover_safety_disarmed
 //     (no leftover leftover_while leftover leftover_safety leftover leftover / leftover leftover_delay
 //     / leftover leftover_notify leftover leftover.update / leftover leftover_GCS).
+//     leftover leftover_esc_cal_setup leftover leftover_notify leftover leftover flag
+//     iff leftover leftover_esc_cal_setup AND leftover leftover_safety_disarmed
+//     (upstream leftover leftover_esc_calibration_setup leftover leftover
+//     leftover leftover_safety leftover leftover while leftover leftover calls leftover leftover_esc_calibration_notify leftover leftover
+//     then leftover leftover_delay(3) — leftover leftover_do leftover leftover_NOT leftover leftover leftover leftover_notify leftover leftover.update leftover leftover / leftover leftover leftover leftover_GCS leftover leftover send_text leftover leftover / leftover leftover leftover leftover_delay leftover leftover; leftover leftover_do leftover leftover_NOT leftover leftover reuse leftover leftover leftover leftover_esc_cal leftover leftover_notify leftover leftover would_block leftover leftover field).
 //     leftover leftover_motors_armed / leftover leftover_srv_enable /
 //     leftover leftover_soft_armed IFF leftover leftover_esc_cal_setup AND
 //     NOT leftover leftover_safety_disarmed. Inject leftover leftover_is_normal_pwm
@@ -121,7 +126,7 @@
 // init_rangefinder stays false (AP_RANGEFINDER remaining).
 // g2.proximity.init stays false (HAL_PROXIMITY remaining).
 // g2.beacon.init stays false (AP_BEACON remaining).
-// The rest of init_ardupilot is ESC cal HAL/motors/notify objects —
+// The rest of init_ardupilot is ESC cal GCS / HAL / motors objects —
 // catalog row "Copter::init_ardupilot rest".
 
 #include <cstdint>
@@ -245,6 +250,7 @@ struct InitArdupilotEffects {
     bool esc_cal_setup_init_safety{false};  // leftover leftover_BoardConfig.init_safety leftover leftover flag
     bool esc_cal_setup_safety_wait{false};  // leftover leftover flag iff leftover leftover_safety_disarmed
     bool esc_cal_setup_safety_would_loop{false};  // leftover leftover flag iff leftover leftover_safety_disarmed — no while
+    bool esc_cal_setup_notify{false};  // leftover leftover flag iff leftover leftover_esc_cal_setup AND leftover leftover_safety_disarmed — no leftover leftover_notify leftover leftover.update
     bool esc_cal_setup_motors_armed{false};  // leftover leftover flag IFF leftover leftover_setup AND NOT leftover leftover_safety_disarmed
     bool esc_cal_setup_srv_enable{false};    // leftover leftover flag IFF leftover leftover_setup AND NOT leftover leftover_safety_disarmed
     bool esc_cal_setup_soft_armed{false};    // leftover leftover flag IFF leftover leftover_setup AND NOT leftover leftover_safety_disarmed
@@ -350,7 +356,8 @@ struct InitArdupilotEffects {
     // / leftover leftover_esc_cal_auto are flags only — no bodies.
     // leftover leftover_esc_cal_setup leftover leftover flag iff leftover leftover_esc_cal_passthrough OR leftover
     // leftover_esc_cal_auto — leftover leftover_esc_calibration_setup leftover leftover_body leftover leftover flags
-    // (no leftover leftover_HAL leftover leftover / leftover leftover_motors leftover leftover objects leftover leftover / leftover leftover_while leftover leftover_safety). leftover leftover_esc_cal_passthrough_would_loop
+    // + leftover leftover_esc_cal_setup leftover leftover_notify leftover leftover flag iff leftover leftover_safety_disarmed
+    // (no leftover leftover_HAL leftover leftover / leftover leftover_motors leftover leftover objects leftover leftover / leftover leftover_while leftover leftover_safety leftover leftover / leftover leftover_notify leftover leftover.update leftover leftover / leftover leftover_GCS). leftover leftover_esc_cal_passthrough_would_loop
     // leftover leftover flag iff leftover leftover_esc_cal_passthrough
     // (no while(1) / leftover leftover_notify / leftover leftover_read_radio /
     // leftover leftover_delay / leftover leftover_motors). leftover leftover_esc_cal_auto_high
@@ -399,6 +406,7 @@ struct InitArdupilotEffects {
                 if (in.safety_disarmed) {
                     fx.esc_cal_setup_safety_wait = true;
                     fx.esc_cal_setup_safety_would_loop = true;
+                    fx.esc_cal_setup_notify = true;
                 } else {
                     fx.esc_cal_setup_motors_armed = true;
                     fx.esc_cal_setup_srv_enable = true;
