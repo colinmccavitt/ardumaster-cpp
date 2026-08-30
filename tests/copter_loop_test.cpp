@@ -23,6 +23,7 @@ using fwcpp::copter::TaskKind;
 using fwcpp::copter::SpoolState;
 using fwcpp::copter::UpdateFlightModeInputs;
 using fwcpp::copter::UpdateHomeFromEkfInputs;
+using fwcpp::copter::UpdateBattCompassInputs;
 using fwcpp::copter::UpdateLandAndCrashDetectorsInputs;
 using fwcpp::copter::UpdateRangefinderTerrainOffsetInputs;
 using fwcpp::copter::completeness_has;
@@ -54,6 +55,7 @@ using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
 using fwcpp::copter::update_home_from_ekf;
+using fwcpp::copter::update_batt_compass;
 using fwcpp::copter::update_land_and_crash_detectors;
 using fwcpp::copter::update_rangefinder_terrain_offset;
 
@@ -71,10 +73,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 9", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 22);
+TEST_CASE("catalog remaining_count stays open after slice 10", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 21);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 13);
+    REQUIRE(on_main_count() == 14);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -90,8 +92,10 @@ TEST_CASE("catalog remaining_count stays open after slice 9", "[copter][leftover
     REQUIRE(completeness_has("Copter::update_flight_mode", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_home_from_EKF", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_land_and_crash_detectors", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::update_rangefinder_terrain_offset", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_rangefinder_terrain_offset", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::update_batt_compass", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::update_altitude", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -864,4 +868,58 @@ TEST_CASE("update_rangefinder_terrain_offset healthy or stale calls wp_nav",
     REQUIRE_FALSE(stale.wp_nav_alt_healthy);
     REQUIRE(stale.wp_nav_terrain_u_m == 6.0f);
     REQUIRE_FALSE(stale.circle_nav_set_rangefinder_terrain);
+}
+
+TEST_CASE("update_batt_compass always battery_read", "[copter][update_batt_compass]") {
+    UpdateBattCompassInputs available{};
+    available.compass_available = true;
+    available.throttle = 0.4f;
+    available.voltage = 12.6f;
+    REQUIRE(update_batt_compass(available).battery_read);
+
+    UpdateBattCompassInputs unavailable{};
+    unavailable.compass_available = false;
+    unavailable.throttle = 0.4f;
+    unavailable.voltage = 12.6f;
+    REQUIRE(update_batt_compass(unavailable).battery_read);
+
+    const auto* row = find_scheduler_task("update_batt_compass");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 10.0f);
+    REQUIRE(row->max_time_micros == 120);
+    REQUIRE(row->priority == 15);
+    REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("update_batt_compass compass available forwards throttle voltage and reads",
+          "[copter][update_batt_compass]") {
+    UpdateBattCompassInputs in{};
+    in.compass_available = true;
+    in.throttle = 0.55f;
+    in.voltage = 16.8f;
+
+    const auto fx = update_batt_compass(in);
+    REQUIRE(fx.battery_read);
+    REQUIRE(fx.set_throttle);
+    REQUIRE(fx.throttle == 0.55f);
+    REQUIRE(fx.set_voltage);
+    REQUIRE(fx.voltage == 16.8f);
+    REQUIRE(fx.compass_read);
+}
+
+TEST_CASE("update_batt_compass compass unavailable skips compass path",
+          "[copter][update_batt_compass]") {
+    UpdateBattCompassInputs in{};
+    in.compass_available = false;
+    in.throttle = 0.55f;
+    in.voltage = 16.8f;
+
+    const auto fx = update_batt_compass(in);
+    REQUIRE(fx.battery_read);
+    REQUIRE_FALSE(fx.set_throttle);
+    REQUIRE(fx.throttle == 0.0f);
+    REQUIRE_FALSE(fx.set_voltage);
+    REQUIRE(fx.voltage == 0.0f);
+    REQUIRE_FALSE(fx.compass_read);
 }
