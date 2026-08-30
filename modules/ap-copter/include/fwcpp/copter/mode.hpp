@@ -34,8 +34,9 @@
 // ModeRTL::run leftover (armed gate + STARTING leftover leftover_build_path /
 // leftover leftover_climb_start + INITIAL_CLIMB leftover leftover_return_start +
 // RETURN_HOME leftover leftover_loiterathome_start + LOITER_AT_HOME leftover
-// leftover leftover_land_start / leftover leftover_descent_start flags) is
-// this slice. leftover leftover_climb_return_run remaining.
+// leftover leftover_land_start / leftover leftover_descent_start + leftover
+// leftover leftover_climb_return_run flags) is this slice. leftover leftover
+// leftover leftover_loiterathome_run remaining.
 // ModeLand, ModeGuided::run body,
 // land_run_normal_or_precland body, land_run_horizontal_control body, and
 // auto_takeoff.run body stay later.
@@ -579,10 +580,11 @@ public:
 // ~132-157 armed gate + STARTING leftover leftover_build_path /
 // leftover leftover_climb_start + INITIAL_CLIMB leftover leftover_return_start +
 // RETURN_HOME leftover leftover_loiterathome_start + LOITER_AT_HOME leftover
-// leftover leftover_land_start / leftover leftover_descent_start flags). Do
+// leftover leftover_land_start / leftover leftover_descent_start + leftover
+// leftover leftover_climb_return_run flags, mode_rtl.cpp ~167-178). Do
 // not dump land_start / descent_start / climb_return_run / loiterathome_run /
-// land_run / LAND. ModeAuto leftover leftover_rtl_run does not call leftover
-// leftover leftover_run.
+// land_run / LAND. leftover leftover_loiterathome_run remaining. ModeAuto
+// leftover leftover_rtl_run does not call leftover leftover_run.
 class ModeRTL : public Mode {
 public:
     enum class SubMode : std::uint8_t {
@@ -619,14 +621,18 @@ public:
     // leftover leftover_loiterathome_start (RETURN_HOME; flag only). leftover
     // leftover leftover_land_start / leftover leftover_descent_start
     // (LOITER_AT_HOME, this slice; flags only; land_start / descent_start
-    // bodies remaining). leftover leftover_climb_return_run /
-    // leftover leftover_loiterathome_run stay false.
+    // bodies remaining). leftover leftover_climb_return_run is this slice
+    // (second switch STARTING / INITIAL_CLIMB / RETURN_HOME).
+    // leftover leftover_loiterathome_run / leftover leftover_descent_run /
+    // leftover leftover_rtl_land_run stay false.
     bool leftover_return_start{false};
     bool leftover_climb_return_run{false};
     bool leftover_loiterathome_start{false};
     bool leftover_loiterathome_run{false};
     bool leftover_land_start{false};
     bool leftover_descent_start{false};
+    bool leftover_descent_run{false};
+    bool leftover_rtl_land_run{false};
     // Injected rtl_path.land. Default false so LOITER_AT_HOME leftover
     // leftover leftover_run takes the descent_start arm.
     bool leftover_rtl_path_land{false};
@@ -665,7 +671,7 @@ public:
     // leftover leftover_land_start or leftover leftover leftover_descent_start
     // (injected leftover leftover_rtl_path_land / leftover leftover_failsafe_radio).
     // FINAL_DESCENT / LAND are upstream no-ops (no leftover leftover_land_start).
-    // Do not change _state. Do not run the second switch.
+    // Do not change _state. Second switch sets leftover_climb_return_run.
     void leftover_run(bool disarm_on_land) {
         leftover_build_path = false;
         leftover_climb_start = false;
@@ -673,6 +679,10 @@ public:
         leftover_loiterathome_start = false;
         leftover_land_start = false;
         leftover_descent_start = false;
+        leftover_climb_return_run = false;
+        leftover_loiterathome_run = false;
+        leftover_descent_run = false;
+        leftover_rtl_land_run = false;
         leftover_rtl_run_disarm_on_land = disarm_on_land;
         if (!motors_armed) {
             return;
@@ -693,6 +703,10 @@ public:
             } else {
                 leftover_descent_start = true;
             }
+        }
+        if (_state == SubMode::STARTING || _state == SubMode::INITIAL_CLIMB ||
+            _state == SubMode::RETURN_HOME) {
+            leftover_climb_return_run = true;
         }
     }
     // upstream mode.h: run() { return run(true); }
