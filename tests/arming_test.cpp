@@ -16,8 +16,8 @@ using fwcpp::copter::arming::this_slice_count;
 
 TEST_CASE("arming leftover catalog this_slice and remaining", "[copter][arming][leftover]") {
     REQUIRE(remaining_count() > 0);
-    REQUIRE(this_slice_count() == 8);
-    REQUIRE(remaining_count() == 2);
+    REQUIRE(this_slice_count() == 9);
+    REQUIRE(remaining_count() == 1);
     REQUIRE(out_of_scope_count() == 1);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -31,7 +31,7 @@ TEST_CASE("arming leftover catalog this_slice and remaining", "[copter][arming][
     REQUIRE(completeness_has("motors->arming_checks", PortStatus::kThisSlice));
     REQUIRE(completeness_has(
         "parameter_checks / gps / baro / board_voltage / alt / rc_throttle_failsafe",
-        PortStatus::kRemaining));
+        PortStatus::kThisSlice));
     REQUIRE(completeness_has("arm() / disarm()", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
 }
@@ -62,6 +62,8 @@ TEST_CASE("already armed short-circuits pre_arm", "[copter][arming]") {
     REQUIRE_FALSE(fx.motors_arming_checked);
     REQUIRE_FALSE(fx.motors_arming_failed);
     REQUIRE_FALSE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE(fx.set_pre_arm_check_called);
     REQUIRE(fx.set_pre_arm_check_value);
     REQUIRE(arming.pre_arm_check);
@@ -91,6 +93,8 @@ TEST_CASE("system not initialized fails pre_arm", "[copter][arming]") {
     REQUIRE_FALSE(fx.disarm_switch_checked);
     REQUIRE_FALSE(fx.motors_arming_checked);
     REQUIRE_FALSE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE_FALSE(fx.passed);
     REQUIRE(fx.set_pre_arm_check_called);
     REQUIRE_FALSE(fx.set_pre_arm_check_value);
@@ -119,6 +123,9 @@ TEST_CASE("system initialized passes scaffold pre_arm", "[copter][arming]") {
     REQUIRE(fx.motors_arming_checked);
     REQUIRE_FALSE(fx.motors_arming_failed);
     REQUIRE_FALSE(fx.early_return_after_gate_checks);
+    REQUIRE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.mandatory_checks_ran);
+    REQUIRE(fx.parameter_chain_ran);
     REQUIRE(fx.passed);
     REQUIRE(fx.set_pre_arm_check_called);
     REQUIRE(fx.set_pre_arm_check_value);
@@ -143,6 +150,8 @@ TEST_CASE("interlock plus estop fails conflict check", "[copter][arming]") {
     REQUIRE(fx.motors_arming_checked);
     REQUIRE_FALSE(fx.motors_arming_failed);
     REQUIRE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
 }
@@ -159,6 +168,8 @@ TEST_CASE("interlock plus arm_emergency_stop fails conflict check", "[copter][ar
     REQUIRE(fx.interlock_estop_conflict_failed);
     REQUIRE(fx.check_failed_interlock_estop);
     REQUIRE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE_FALSE(fx.passed);
 }
 
@@ -174,6 +185,8 @@ TEST_CASE("interlock alone does not fail conflict check", "[copter][arming]") {
     REQUIRE_FALSE(fx.check_failed_interlock_estop);
     REQUIRE(fx.motors_arming_checked);
     REQUIRE_FALSE(fx.early_return_after_gate_checks);
+    REQUIRE(fx.skip_all_checked);
+    REQUIRE(fx.parameter_chain_ran);
     REQUIRE(fx.passed);
     REQUIRE(arming.pre_arm_check);
 }
@@ -195,6 +208,8 @@ TEST_CASE("motor interlock enabled fails when switch active", "[copter][arming]"
     REQUIRE(fx.motors_arming_checked);
     REQUIRE_FALSE(fx.motors_arming_failed);
     REQUIRE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
 }
@@ -219,6 +234,8 @@ TEST_CASE("both interlock conflict and enabled can fail in one call", "[copter][
     REQUIRE_FALSE(fx.disarm_switch_failed);
     REQUIRE(fx.motors_arming_checked);
     REQUIRE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
 }
@@ -239,6 +256,8 @@ TEST_CASE("disarm switch HIGH fails pre_arm", "[copter][arming]") {
     REQUIRE(fx.motors_arming_checked);
     REQUIRE_FALSE(fx.motors_arming_failed);
     REQUIRE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
 }
@@ -256,6 +275,8 @@ TEST_CASE("no disarm switch option passes", "[copter][arming]") {
     REQUIRE_FALSE(fx.check_failed_disarm_switch);
     REQUIRE(fx.motors_arming_checked);
     REQUIRE_FALSE(fx.early_return_after_gate_checks);
+    REQUIRE(fx.skip_all_checked);
+    REQUIRE(fx.parameter_chain_ran);
     REQUIRE(fx.passed);
     REQUIRE(arming.pre_arm_check);
 }
@@ -273,6 +294,8 @@ TEST_CASE("disarm switch not HIGH passes", "[copter][arming]") {
     REQUIRE_FALSE(fx.check_failed_disarm_switch);
     REQUIRE(fx.motors_arming_checked);
     REQUIRE_FALSE(fx.early_return_after_gate_checks);
+    REQUIRE(fx.skip_all_checked);
+    REQUIRE(fx.parameter_chain_ran);
     REQUIRE(fx.passed);
     REQUIRE(arming.pre_arm_check);
 }
@@ -295,6 +318,8 @@ TEST_CASE("disarm switch fail accumulates with interlock fail", "[copter][arming
     REQUIRE(fx.check_failed_disarm_switch);
     REQUIRE(fx.motors_arming_checked);
     REQUIRE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
 }
@@ -312,6 +337,9 @@ TEST_CASE("motors arming_checks fail alone", "[copter][arming]") {
     REQUIRE(fx.motors_arming_failed);
     REQUIRE(fx.check_failed_motors);
     REQUIRE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.mandatory_checks_ran);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
 }
@@ -332,6 +360,8 @@ TEST_CASE("motors fail plus interlock both set then early return", "[copter][arm
     REQUIRE(fx.motors_arming_failed);
     REQUIRE(fx.check_failed_motors);
     REQUIRE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
 }
@@ -347,6 +377,98 @@ TEST_CASE("motors ok continues with passed true", "[copter][arming]") {
     REQUIRE_FALSE(fx.motors_arming_failed);
     REQUIRE_FALSE(fx.check_failed_motors);
     REQUIRE_FALSE(fx.early_return_after_gate_checks);
+    REQUIRE(fx.skip_all_checked);
+    REQUIRE(fx.parameter_chain_ran);
     REQUIRE(fx.passed);
     REQUIRE(arming.pre_arm_check);
+}
+
+TEST_CASE("skip_all runs mandatory only", "[copter][arming]") {
+    ArmingCopter arming{};
+    PreArmInputs in{};
+    in.skip_all_checks = true;
+    in.mandatory_checks_ok = true;
+    in.parameter_checks_ok = false;  // must not be consulted
+
+    const auto fx = pre_arm_checks(arming, in);
+
+    REQUIRE_FALSE(fx.early_return_after_gate_checks);
+    REQUIRE(fx.skip_all_checked);
+    REQUIRE(fx.mandatory_checks_ran);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
+    REQUIRE_FALSE(fx.check_failed_mandatory);
+    REQUIRE(fx.passed);
+    REQUIRE(arming.pre_arm_check);
+}
+
+TEST_CASE("skip_all mandatory fail", "[copter][arming]") {
+    ArmingCopter arming{};
+    PreArmInputs in{};
+    in.skip_all_checks = true;
+    in.mandatory_checks_ok = false;
+    in.parameter_checks_ok = true;
+
+    const auto fx = pre_arm_checks(arming, in);
+
+    REQUIRE(fx.skip_all_checked);
+    REQUIRE(fx.mandatory_checks_ran);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
+    REQUIRE(fx.check_failed_mandatory);
+    REQUIRE_FALSE(fx.passed);
+    REQUIRE_FALSE(arming.pre_arm_check);
+}
+
+TEST_CASE("parameter chain all ok passes", "[copter][arming]") {
+    ArmingCopter arming{};
+    PreArmInputs in{};
+    in.skip_all_checks = false;
+
+    const auto fx = pre_arm_checks(arming, in);
+
+    REQUIRE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.mandatory_checks_ran);
+    REQUIRE(fx.parameter_chain_ran);
+    REQUIRE_FALSE(fx.check_failed_parameter);
+    REQUIRE_FALSE(fx.check_failed_oa);
+    REQUIRE_FALSE(fx.check_failed_gcs_failsafe);
+    REQUIRE_FALSE(fx.check_failed_winch);
+    REQUIRE_FALSE(fx.check_failed_rc_throttle_failsafe);
+    REQUIRE_FALSE(fx.check_failed_alt);
+    REQUIRE_FALSE(fx.check_failed_ap_arming_pre_arm);
+    REQUIRE(fx.passed);
+    REQUIRE(arming.pre_arm_check);
+}
+
+TEST_CASE("parameter chain one false fails", "[copter][arming]") {
+    ArmingCopter arming{};
+    PreArmInputs in{};
+    in.oa_checks_ok = false;
+
+    const auto fx = pre_arm_checks(arming, in);
+
+    REQUIRE(fx.skip_all_checked);
+    REQUIRE(fx.parameter_chain_ran);
+    REQUIRE_FALSE(fx.mandatory_checks_ran);
+    REQUIRE(fx.check_failed_oa);
+    REQUIRE_FALSE(fx.check_failed_parameter);
+    REQUIRE_FALSE(fx.passed);
+    REQUIRE_FALSE(arming.pre_arm_check);
+}
+
+TEST_CASE("early motors fail never reaches parameter chain", "[copter][arming]") {
+    ArmingCopter arming{};
+    PreArmInputs in{};
+    in.motors_arming_checks_ok = false;
+    in.skip_all_checks = true;  // would take skip path if reached
+    in.parameter_checks_ok = false;
+
+    const auto fx = pre_arm_checks(arming, in);
+
+    REQUIRE(fx.motors_arming_failed);
+    REQUIRE(fx.early_return_after_gate_checks);
+    REQUIRE_FALSE(fx.skip_all_checked);
+    REQUIRE_FALSE(fx.mandatory_checks_ran);
+    REQUIRE_FALSE(fx.parameter_chain_ran);
+    REQUIRE_FALSE(fx.passed);
+    REQUIRE_FALSE(arming.pre_arm_check);
 }

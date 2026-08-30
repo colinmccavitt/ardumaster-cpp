@@ -1,15 +1,17 @@
 #pragma once
 
-// Copter AP_Arming_Copter pre_arm leftover (CCP-038 slice 4).
+// Copter AP_Arming_Copter pre_arm leftover (CCP-038 slice 5).
 // Upstream ArduCopter/AP_Arming_Copter.cpp pre_arm_checks ~8-13,
-// run_pre_arm_checks ~17-69 (already-armed, system_initialized,
+// run_pre_arm_checks ~17-86: already-armed, system_initialized,
 // interlock/E-Stop conflict, motor interlock enabled,
 // disarm_switch_checks, motors->arming_checks, early return when
-// !passed). HELI AROT out of scope.
+// !passed, then should_skip_all_checks → mandatory_checks else
+// parameter/oa/gcs/winch/rc_throttle/alt & AP_Arming::pre_arm_checks
+// (thin inject AND-chain; real check bodies not this slice).
+// HELI AROT out of scope. arm()/disarm() remain.
 //
 // Explicit PreArmInputs — no motors / scheduler / GCS / rc objects
-// (ADR-0012). parameter/gps/baro/board_voltage/alt/rc_throttle_failsafe,
-// and arm()/disarm() remain. Catalog: arming_leftover.hpp.
+// (ADR-0012). Catalog: arming_leftover.hpp.
 
 #include <fwcpp/copter/arming_leftover.hpp>
 
@@ -37,6 +39,18 @@ struct PreArmInputs {
     bool disarm_switch_high{false};
     // inject result of motors->arming_checks (default ok).
     bool motors_arming_checks_ok{true};
+    // Upstream ~71-86: should_skip_all_checks → mandatory only, else
+    // parameter & oa & gcs & winch & rc_throttle & alt & AP_Arming::pre_arm.
+    // Bodies are injects (scaffold); real helpers remain for later.
+    bool skip_all_checks{false};
+    bool mandatory_checks_ok{true};
+    bool parameter_checks_ok{true};
+    bool oa_checks_ok{true};
+    bool gcs_failsafe_ok{true};
+    bool winch_checks_ok{true};
+    bool rc_throttle_failsafe_ok{true};
+    bool alt_checks_ok{true};
+    bool ap_arming_pre_arm_ok{true};  // base AP_Arming::pre_arm_checks
 };
 
 struct PreArmEffects {
@@ -59,6 +73,18 @@ struct PreArmEffects {
     bool check_failed_motors{false};
     // true when !passed after motors block (upstream ~67-69).
     bool early_return_after_gate_checks{false};
+    // Upstream ~71-86 skip_all / parameter chain.
+    bool skip_all_checked{false};
+    bool mandatory_checks_ran{false};
+    bool parameter_chain_ran{false};
+    bool check_failed_mandatory{false};
+    bool check_failed_parameter{false};
+    bool check_failed_oa{false};
+    bool check_failed_gcs_failsafe{false};
+    bool check_failed_winch{false};
+    bool check_failed_rc_throttle_failsafe{false};
+    bool check_failed_alt{false};
+    bool check_failed_ap_arming_pre_arm{false};
     bool passed{false};
     bool set_pre_arm_check_called{false};
     bool set_pre_arm_check_value{false};
@@ -67,7 +93,8 @@ struct PreArmEffects {
 // Upstream run_pre_arm_checks: already-armed short-circuit, then
 // system_initialized, then interlock/E-Stop conflict + motor interlock
 // enabled + disarm_switch_checks + motors->arming_checks; early return
-// when !passed (~67-69). Parameter checks remain (not this slice).
+// when !passed (~67-69); then skip_all → mandatory else parameter AND-chain
+// (~71-86). Real parameter/gps/baro helper bodies not this slice.
 [[nodiscard]] inline PreArmEffects run_pre_arm_checks(const PreArmInputs& in = {}) {
     PreArmEffects fx{};
     fx.pre_arm_ran = true;
@@ -133,8 +160,47 @@ struct PreArmEffects {
         return fx;
     }
 
-    // Further checks remaining (parameter / gps / baro / …) — not this slice.
-    fx.passed = true;
+    // Upstream ~71-86: should_skip_all_checks → mandatory only, else
+    // parameter_checks & oa & gcs_failsafe & winch & rc_throttle_failsafe
+    // & alt & AP_Arming::pre_arm_checks (inject AND-chain scaffold).
+    fx.skip_all_checked = true;
+    if (in.skip_all_checks) {
+        fx.mandatory_checks_ran = true;
+        if (!in.mandatory_checks_ok) {
+            fx.check_failed_mandatory = true;
+            (void)in.display_failure;
+            fx.passed = false;
+        } else {
+            fx.passed = true;
+        }
+        return fx;
+    }
+
+    fx.parameter_chain_ran = true;
+    if (!in.parameter_checks_ok) {
+        fx.check_failed_parameter = true;
+    }
+    if (!in.oa_checks_ok) {
+        fx.check_failed_oa = true;
+    }
+    if (!in.gcs_failsafe_ok) {
+        fx.check_failed_gcs_failsafe = true;
+    }
+    if (!in.winch_checks_ok) {
+        fx.check_failed_winch = true;
+    }
+    if (!in.rc_throttle_failsafe_ok) {
+        fx.check_failed_rc_throttle_failsafe = true;
+    }
+    if (!in.alt_checks_ok) {
+        fx.check_failed_alt = true;
+    }
+    if (!in.ap_arming_pre_arm_ok) {
+        fx.check_failed_ap_arming_pre_arm = true;
+    }
+    fx.passed = in.parameter_checks_ok && in.oa_checks_ok && in.gcs_failsafe_ok &&
+                in.winch_checks_ok && in.rc_throttle_failsafe_ok && in.alt_checks_ok &&
+                in.ap_arming_pre_arm_ok;
     return fx;
 }
 
