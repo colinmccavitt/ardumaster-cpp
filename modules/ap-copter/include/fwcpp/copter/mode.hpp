@@ -16,8 +16,9 @@
 // ModeStabilize/Acro/AltHold run bodies are CCP-039. ModeAuto::init leftover
 // is auto_init (on main). ModeAuto::exit leftover is on main. ModeAuto::run
 // waiting_to_start leftover is on main. Else-path leftover (change detector
-// restart + mission.update) is this slice. SubMode switch and RTL/LAND stay
-// later. update_flight_mode is CCP-035.
+// restart + mission.update) is on main. SubMode switch leftover (dispatch
+// flags only) is this slice. ModeAuto *_run bodies, ModeRTL/ModeLand, and
+// auto_RTL landing-sequence leftover stay later. update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
 #include <fwcpp/copter/pilot_input.hpp>
@@ -102,14 +103,32 @@ public:
 // true this slice (upstream NAV_ATTITUDE_TIME exception is leftover).
 // init leftover is auto_init (mode_auto.cpp ~23-68). exit leftover is
 // ModeAuto::exit (mode_auto.cpp ~71-81). run leftover is waiting_to_start
-// + origin (mode_auto.cpp ~85-98, on main) and else-path change detector
-// + mission.update (mode_auto.cpp ~99-113, this slice). SubMode switch
-// and the separate jump_to_landing / return_path_start AUTO_RTL APIs stay later.
+// + origin (mode_auto.cpp ~85-98, on main), else-path change detector
+// + mission.update (mode_auto.cpp ~99-113, on main), and SubMode switch
+// dispatch flags (mode_auto.cpp ~116-164, this slice). *_run bodies,
+// set_submode, and auto_RTL landing-sequence leftover stay later.
 class ModeAuto : public Mode {
 public:
+    // Copter-4.7.0 mode.h ~563-578. NAV_PAYLOAD_PLACE omitted this slice.
+    enum class SubMode : std::uint8_t {
+        TAKEOFF,
+        WP,
+        LAND,
+        RTL,
+        CIRCLE_MOVE_TO_EDGE,
+        CIRCLE,
+        NAVGUIDED,
+        LOITER,
+        LOITER_TO_ALT,
+        NAV_SCRIPT_TIME,
+        NAV_ATTITUDE_TIME,
+    };
+
     bool auto_RTL{false};
     bool waiting_to_start{false};
     bool submode_loiter{false};
+    // Injected _mode. Default LOITER (auto_init records submode_loiter).
+    SubMode submode{SubMode::LOITER};
     bool auto_yaw_roi_to_hold{false};
     bool wp_spline_init{false};
     bool speed_override_cleared{false};
@@ -129,7 +148,8 @@ public:
     bool mis_change_check_init{false};
     // Injected mis_change_detector.check_for_mission_change() (else-path).
     bool mission_changed{false};
-    // Injected _mode == SubMode::WP (no SubMode enum this slice).
+    // Injected _mode == SubMode::WP for the else-path WP check. Kept this
+    // slice; do not replace with `submode == SubMode::WP`.
     bool submode_is_wp{false};
     // Injected mission.restart_current_nav_cmd() result.
     bool restart_nav_ok{false};
@@ -141,6 +161,18 @@ public:
     bool gcs_mission_changed_failed{false};
     // Leftover mission.update() on the else path (always, even if no change).
     bool mission_update{false};
+    // AC_NAV_GUIDED / AP_SCRIPTING_ENABLED stand-in. Default closed.
+    bool nav_guided_or_scripting{false};
+    // SubMode switch leftover flags (no controller objects / *_run bodies).
+    bool takeoff_run{false};
+    bool wp_run{false};
+    bool land_run{false};
+    bool rtl_run{false};
+    bool circle_run{false};
+    bool nav_guided_run{false};
+    bool loiter_run{false};
+    bool loiter_to_alt_run{false};
+    bool nav_attitude_time_run{false};
 
     ModeAuto() = default;
 
@@ -154,9 +186,10 @@ public:
         mission_stop = mission_running;
         auto_RTL = false;
     }
-    // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98)
-    // and else-path change detector + mission.update (~99-113). SubMode
-    // switch stays later. No AP_Mission / detector / GCS.
+    // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
+    // else-path change detector + mission.update (~99-113), and SubMode
+    // switch leftover flags (~116-164). Switch always runs, including while
+    // still waiting_to_start. No AP_Mission / detector / GCS / *_run bodies.
     void run() override {
         if (waiting_to_start) {
             if (has_origin) {
@@ -174,6 +207,50 @@ public:
                 }
             }
             mission_update = true;
+        }
+
+        takeoff_run = false;
+        wp_run = false;
+        land_run = false;
+        rtl_run = false;
+        circle_run = false;
+        nav_guided_run = false;
+        loiter_run = false;
+        loiter_to_alt_run = false;
+        nav_attitude_time_run = false;
+
+        switch (submode) {
+        case SubMode::TAKEOFF:
+            takeoff_run = true;
+            break;
+        case SubMode::WP:
+        case SubMode::CIRCLE_MOVE_TO_EDGE:
+            wp_run = true;
+            break;
+        case SubMode::LAND:
+            land_run = true;
+            break;
+        case SubMode::RTL:
+            rtl_run = true;
+            break;
+        case SubMode::CIRCLE:
+            circle_run = true;
+            break;
+        case SubMode::NAVGUIDED:
+        case SubMode::NAV_SCRIPT_TIME:
+            if (nav_guided_or_scripting) {
+                nav_guided_run = true;
+            }
+            break;
+        case SubMode::LOITER:
+            loiter_run = true;
+            break;
+        case SubMode::LOITER_TO_ALT:
+            loiter_to_alt_run = true;
+            break;
+        case SubMode::NAV_ATTITUDE_TIME:
+            nav_attitude_time_run = true;
+            break;
         }
     }
     [[nodiscard]] bool requires_position() const override { return true; }

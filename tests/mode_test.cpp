@@ -11,6 +11,7 @@ using Catch::Approx;
 using fwcpp::copter::FlightModeContext;
 using fwcpp::copter::FlightModeTable;
 using fwcpp::copter::Mode;
+using fwcpp::copter::ModeAuto;
 using fwcpp::copter::ModePortStatus;
 using fwcpp::copter::ModeReason;
 using fwcpp::copter::SetModeInputs;
@@ -53,6 +54,19 @@ struct Fixture {
         ctx.reason = ModeReason::INITIALISED;
     }
 };
+
+void require_submode_runs(const ModeAuto& m, bool takeoff, bool wp, bool land, bool rtl, bool circle,
+                          bool nav_guided, bool loiter, bool loiter_to_alt, bool nav_att) {
+    REQUIRE(m.takeoff_run == takeoff);
+    REQUIRE(m.wp_run == wp);
+    REQUIRE(m.land_run == land);
+    REQUIRE(m.rtl_run == rtl);
+    REQUIRE(m.circle_run == circle);
+    REQUIRE(m.nav_guided_run == nav_guided);
+    REQUIRE(m.loiter_run == loiter);
+    REQUIRE(m.loiter_to_alt_run == loiter_to_alt);
+    REQUIRE(m.nav_attitude_time_run == nav_att);
+}
 
 }  // namespace
 
@@ -724,6 +738,7 @@ TEST_CASE("ModeAuto run with origin starts mission leftover", "[copter][mode]") 
     REQUIRE_FALSE(f.table.mode_auto.restart_nav_cmd);
     REQUIRE_FALSE(f.table.mode_auto.gcs_mission_changed_restarted);
     REQUIRE_FALSE(f.table.mode_auto.gcs_mission_changed_failed);
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, true, false, false);
 }
 
 TEST_CASE("ModeAuto run without origin stays waiting", "[copter][mode]") {
@@ -737,6 +752,7 @@ TEST_CASE("ModeAuto run without origin stays waiting", "[copter][mode]") {
     REQUIRE_FALSE(f.table.mode_auto.mis_change_check_init);
     REQUIRE_FALSE(f.table.mode_auto.mission_update);
     REQUIRE_FALSE(f.table.mode_auto.restart_nav_cmd);
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, true, false, false);
 }
 
 TEST_CASE("ModeAuto run when not waiting records mission_update", "[copter][mode]") {
@@ -753,6 +769,7 @@ TEST_CASE("ModeAuto run when not waiting records mission_update", "[copter][mode
     REQUIRE_FALSE(f.table.mode_auto.restart_nav_cmd);
     REQUIRE_FALSE(f.table.mode_auto.gcs_mission_changed_restarted);
     REQUIRE_FALSE(f.table.mode_auto.gcs_mission_changed_failed);
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, true, false, false);
 }
 
 TEST_CASE("ModeAuto run else-path restart leftover when changed running wp ok", "[copter][mode]") {
@@ -768,6 +785,7 @@ TEST_CASE("ModeAuto run else-path restart leftover when changed running wp ok", 
     REQUIRE(f.table.mode_auto.gcs_mission_changed_restarted);
     REQUIRE_FALSE(f.table.mode_auto.gcs_mission_changed_failed);
     REQUIRE(f.table.mode_auto.mission_update);
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, true, false, false);
 }
 
 TEST_CASE("ModeAuto run else-path restart leftover when changed running wp fail", "[copter][mode]") {
@@ -783,6 +801,7 @@ TEST_CASE("ModeAuto run else-path restart leftover when changed running wp fail"
     REQUIRE_FALSE(f.table.mode_auto.gcs_mission_changed_restarted);
     REQUIRE(f.table.mode_auto.gcs_mission_changed_failed);
     REQUIRE(f.table.mode_auto.mission_update);
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, true, false, false);
 }
 
 TEST_CASE("ModeAuto run else-path no restart when not running", "[copter][mode]") {
@@ -798,6 +817,7 @@ TEST_CASE("ModeAuto run else-path no restart when not running", "[copter][mode]"
     REQUIRE_FALSE(f.table.mode_auto.gcs_mission_changed_restarted);
     REQUIRE_FALSE(f.table.mode_auto.gcs_mission_changed_failed);
     REQUIRE(f.table.mode_auto.mission_update);
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, true, false, false);
 }
 
 TEST_CASE("ModeAuto run else-path no restart when not wp", "[copter][mode]") {
@@ -813,13 +833,167 @@ TEST_CASE("ModeAuto run else-path no restart when not wp", "[copter][mode]") {
     REQUIRE_FALSE(f.table.mode_auto.gcs_mission_changed_restarted);
     REQUIRE_FALSE(f.table.mode_auto.gcs_mission_changed_failed);
     REQUIRE(f.table.mode_auto.mission_update);
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, true, false, false);
+}
+
+TEST_CASE("ModeAuto SubMode values match Copter-4.7.0 declaration order", "[copter][mode]") {
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::TAKEOFF) == 0);
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::WP) == 1);
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::LAND) == 2);
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::RTL) == 3);
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::CIRCLE_MOVE_TO_EDGE) == 4);
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::CIRCLE) == 5);
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::NAVGUIDED) == 6);
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::LOITER) == 7);
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::LOITER_TO_ALT) == 8);
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::NAV_SCRIPT_TIME) == 9);
+    REQUIRE(static_cast<std::uint8_t>(ModeAuto::SubMode::NAV_ATTITUDE_TIME) == 10);
+}
+
+TEST_CASE("ModeAuto run SubMode TAKEOFF leftover takeoff_run only", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::TAKEOFF;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.mission_update);
+    require_submode_runs(f.table.mode_auto, true, false, false, false, false, false, false, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode WP leftover wp_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::WP;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.mission_update);
+    require_submode_runs(f.table.mode_auto, false, true, false, false, false, false, false, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode CIRCLE_MOVE_TO_EDGE leftover wp_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::CIRCLE_MOVE_TO_EDGE;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.mission_update);
+    require_submode_runs(f.table.mode_auto, false, true, false, false, false, false, false, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode LAND leftover land_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::LAND;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, true, false, false, false, false, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode RTL leftover rtl_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::RTL;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, false, true, false, false, false, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode CIRCLE leftover circle_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::CIRCLE;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, false, false, true, false, false, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode LOITER leftover loiter_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::LOITER;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, true, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover loiter_to_alt_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::LOITER_TO_ALT;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, false, true, false);
+}
+
+TEST_CASE("ModeAuto run SubMode NAV_ATTITUDE_TIME leftover nav_attitude_time_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::NAV_ATTITUDE_TIME;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, false, false, true);
+}
+
+TEST_CASE("ModeAuto run SubMode NAVGUIDED closed does not set nav_guided_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::NAVGUIDED;
+    REQUIRE_FALSE(f.table.mode_auto.nav_guided_or_scripting);
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, false, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode NAVGUIDED open leftover nav_guided_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::NAVGUIDED;
+    f.table.mode_auto.nav_guided_or_scripting = true;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, true, false, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode NAV_SCRIPT_TIME open leftover nav_guided_run", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::NAV_SCRIPT_TIME;
+    f.table.mode_auto.nav_guided_or_scripting = true;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, true, false, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode switch fires while waiting_to_start", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    REQUIRE(f.table.mode_auto.waiting_to_start);
+    REQUIRE_FALSE(f.table.mode_auto.has_origin);
+    f.table.mode_auto.submode = ModeAuto::SubMode::TAKEOFF;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.waiting_to_start);
+    REQUIRE_FALSE(f.table.mode_auto.start_or_resume);
+    REQUIRE_FALSE(f.table.mode_auto.mission_update);
+    require_submode_runs(f.table.mode_auto, true, false, false, false, false, false, false, false, false);
+}
+
+TEST_CASE("ModeAuto run SubMode switch clears previous leftover flags", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::TAKEOFF;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.takeoff_run);
+    f.table.mode_auto.submode = ModeAuto::SubMode::WP;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, true, false, false, false, false, false, false, false);
 }
 
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 18);
+    REQUIRE(mode_on_main_count() == 19);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -837,7 +1011,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeAuto::init", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::exit", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::run", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("ModeAuto::run else-path", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeAuto::run else-path", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeAuto::run SubMode switch", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));

@@ -47,7 +47,7 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"althold_run", ModePortStatus::kOnMain,
      "mode_althold.hpp; CCP-039 landed run() on main"},
     {"remaining mode bodies", ModePortStatus::kRemaining,
-     "ModeAuto::run SubMode switch; RTL/LAND run/init; other modes"},
+     "ModeAuto *_run bodies; RTL/LAND run/init; other modes; auto_RTL landing-sequence leftover"},
     {"ModeAuto::init", ModePortStatus::kOnMain,
      "mode_auto.cpp auto_init leftover; mission_present / landed takeoff gate; "
      "no wp_nav/mission objects; precland remaining"},
@@ -57,9 +57,12 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"ModeAuto::run", ModePortStatus::kOnMain,
      "mode_auto.cpp ~85-98; waiting_to_start + origin leftover; "
      "injected has_origin; start_or_resume / mis_change_check_init leftovers"},
-    {"ModeAuto::run else-path", ModePortStatus::kThisSlice,
+    {"ModeAuto::run else-path", ModePortStatus::kOnMain,
      "mode_auto.cpp ~99-113; change detector restart + mission.update leftover; "
-     "injected mission_changed / submode_is_wp / restart_nav_ok; no SubMode / GCS"},
+     "injected mission_changed / submode_is_wp / restart_nav_ok"},
+    {"ModeAuto::run SubMode switch", ModePortStatus::kThisSlice,
+     "mode_auto.cpp ~116-164; leftover dispatch flags only; no *_run bodies; "
+     "NAV_PAYLOAD_PLACE omitted; nav_guided gated by nav_guided_or_scripting"},
     {"FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain,
      "Copter::gcs_mode_enabled + AP_Vehicle::block_GCS_mode_change; injected "
      "fltmode_gcsblock; LAND/RTL not in list"},
