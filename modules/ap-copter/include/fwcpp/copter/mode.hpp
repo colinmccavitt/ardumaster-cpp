@@ -1,16 +1,18 @@
 #pragma once
 
-// Copter Mode base + Stabilize/AltHold stubs + set_mode checks.
+// Copter Mode base + Stabilize/AltHold/ModeAuto stubs + set_mode checks.
 // Upstream ArduCopter/mode.h Number ~77-109, Mode virtuals ~119-143,
-// ModeStabilize ~1723, ModeAltHold ~498; mode.cpp mode_from_mode_num ~32,
-// set_mode ~313-430, exit_mode ~511-524 (non-heli takeoff_stop + exit).
+// ModeStabilize ~1723, ModeAltHold ~498, ModeAuto ~531-545; mode.cpp
+// mode_from_mode_num ~32, set_mode ~313-430 (AUTO_RTL ~345-350),
+// exit_mode ~511-524 (non-heli takeoff_stop + exit); mode_auto.cpp
+// return_path_or_jump_to_landing_sequence_auto_RTL ~286-301,
+// enter_auto_rtl ~303-329.
 //
 // Mode is not a heap singleton. The caller owns FlightModeTable;
 // FlightModeContext holds a non-owning Mode* into that table.
 // ADR-0012: header-only, C++20, no exceptions, no AP::, no flight-path alloc.
-// ModeStabilize::run body is stabilize_run in mode_stabilize.hpp (CCP-039
-// slice 1). ACRO/ALTHOLD run() and AUTO/RTL bodies stay later CCP-039
-// slices. update_flight_mode is CCP-035 leftover.
+// ModeStabilize/Acro/AltHold run bodies are CCP-039. AUTO/RTL/LAND run/init
+// bodies stay later. update_flight_mode is CCP-035 leftover.
 
 #include <fwcpp/copter/mode_reason.hpp>
 
@@ -90,21 +92,44 @@ public:
     [[nodiscard]] bool has_manual_throttle() const override { return false; }
 };
 
-// Caller-owned table. Stabilize and AltHold only this slice; other
-// Number values stay unknown (nullptr from mode_from_mode_num).
+// Stub: mode_number AUTO_RTL if auto_RTL else AUTO. requires_position is
+// true this slice (upstream NAV_ATTITUDE_TIME exception is leftover).
+// init/exit/run bodies, SubMode, and the separate jump_to_landing /
+// return_path_start AUTO_RTL APIs stay later.
+class ModeAuto : public Mode {
+public:
+    bool auto_RTL{false};
+
+    ModeAuto() = default;
+
+    [[nodiscard]] Number mode_number() const override {
+        return auto_RTL ? Number::AUTO_RTL : Number::AUTO;
+    }
+    [[nodiscard]] bool init(bool /*ignore_checks*/) override { return true; }
+    void run() override {}
+    [[nodiscard]] bool requires_position() const override { return true; }
+    [[nodiscard]] bool has_manual_throttle() const override { return false; }
+};
+
+// Caller-owned table. AUTO_RTL is not a true mode (nullptr from
+// mode_from_mode_num); set_mode(AUTO_RTL) uses table.mode_auto.
 struct FlightModeTable {
     ModeStabilize stabilize;
     ModeAltHold althold;
+    ModeAuto mode_auto;
 };
 
 struct FlightModeContext {
     Mode* current{nullptr};
     ModeReason reason{ModeReason::UNKNOWN};
+    // Leftover mission.set_force_resume; no AP_Mission this slice.
+    bool force_resume{false};
 };
 
-// Injected Copter / motors / EKF / RC state. Upstream reads these via
-// AP:: / copter members. FLTMODE_GCSBLOCK param lookup is remaining;
-// gcs_mode_enabled is the already-resolved gate (default open).
+// Injected Copter / motors / EKF / RC / mission-jump state. Upstream
+// reads these via AP:: / copter / mission members. FLTMODE_GCSBLOCK
+// param lookup is remaining; gcs_mode_enabled is the already-resolved
+// gate (default open). Jump flags default false so `{}` fails AUTO_RTL.
 struct SetModeInputs {
     bool gcs_mode_enabled{true};
     bool armed{false};
@@ -114,6 +139,8 @@ struct SetModeInputs {
     bool position_ok{true};
     bool ekf_alt_ok{true};
     bool rc_failsafe{false};
+    bool jump_to_closest_mission_leg{false};
+    bool jump_to_landing_sequence{false};
 };
 
 [[nodiscard]] inline Mode* mode_from_mode_num(Mode::Number mode, FlightModeTable& table) {
@@ -122,6 +149,8 @@ struct SetModeInputs {
             return &table.stabilize;
         case Mode::Number::ALT_HOLD:
             return &table.althold;
+        case Mode::Number::AUTO:
+            return &table.mode_auto;
         default:
             return nullptr;
     }
@@ -186,7 +215,36 @@ struct SetModeInputs {
     return enter_mode(ctx, next, reason, in);
 }
 
+[[nodiscard]] inline bool set_mode(FlightModeContext& ctx, FlightModeTable& table, Mode::Number mode,
+                                   ModeReason reason, const SetModeInputs& in);
+
+// Upstream ModeAuto::enter_auto_rtl ~303-329. Skips LOGGER_WRITE_ERROR,
+// GCS send_text, AP_Notify, Write_Mode. force_resume leftover on ctx.
+[[nodiscard]] inline bool enter_auto_rtl(FlightModeContext& ctx, FlightModeTable& table,
+                                         ModeReason reason, const SetModeInputs& in) {
+    ctx.force_resume = true;
+    if (ctx.current == &table.mode_auto ||
+        set_mode(ctx, table, Mode::Number::AUTO, reason, in)) {
+        table.mode_auto.auto_RTL = true;
+        return true;
+    }
+    ctx.force_resume = false;
+    table.mode_auto.auto_RTL = false;
+    return false;
+}
+
+// Upstream ModeAuto::return_path_or_jump_to_landing_sequence_auto_RTL
+// ~286-301. Injected jumps; first success short-circuits the second.
+[[nodiscard]] inline bool return_path_or_jump_to_landing_sequence_auto_RTL(
+    FlightModeContext& ctx, FlightModeTable& table, ModeReason reason, const SetModeInputs& in) {
+    if (!in.jump_to_closest_mission_leg && !in.jump_to_landing_sequence) {
+        return false;
+    }
+    return enter_auto_rtl(ctx, table, reason, in);
+}
+
 // Copter::set_mode(Mode::Number, ModeReason). Upstream ~313-430.
+// GCS_COMMAND gate runs before the AUTO_RTL special case.
 [[nodiscard]] inline bool set_mode(FlightModeContext& ctx, FlightModeTable& table, Mode::Number mode,
                                    ModeReason reason, const SetModeInputs& in) {
     if (ctx.current != nullptr && ctx.current->mode_number() == mode) {
@@ -197,7 +255,7 @@ struct SetModeInputs {
         return false;
     }
     if (mode == Mode::Number::AUTO_RTL) {
-        return false;
+        return return_path_or_jump_to_landing_sequence_auto_RTL(ctx, table, reason, in);
     }
     Mode* next = mode_from_mode_num(mode, table);
     if (next == nullptr) {

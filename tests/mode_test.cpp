@@ -67,10 +67,11 @@ TEST_CASE("ModeReason values match ModeReason.h", "[copter][mode]") {
     REQUIRE(static_cast<std::uint8_t>(ModeReason::FENCE_REENABLE) == 55);
 }
 
-TEST_CASE("mode_from_mode_num returns Stabilize and AltHold only", "[copter][mode]") {
+TEST_CASE("mode_from_mode_num returns Stabilize AltHold and AUTO", "[copter][mode]") {
     FlightModeTable table;
     REQUIRE(mode_from_mode_num(Mode::Number::STABILIZE, table) == &table.stabilize);
     REQUIRE(mode_from_mode_num(Mode::Number::ALT_HOLD, table) == &table.althold);
+    REQUIRE(mode_from_mode_num(Mode::Number::AUTO, table) == &table.mode_auto);
     REQUIRE(mode_from_mode_num(Mode::Number::ACRO, table) == nullptr);
     REQUIRE(mode_from_mode_num(Mode::Number::LAND, table) == nullptr);
     REQUIRE(mode_from_mode_num(Mode::Number::AUTO_RTL, table) == nullptr);
@@ -80,6 +81,12 @@ TEST_CASE("mode_from_mode_num returns Stabilize and AltHold only", "[copter][mod
     REQUIRE(table.althold.requires_position() == false);
     REQUIRE(table.althold.has_manual_throttle() == false);
     REQUIRE(table.althold.allows_entry_in_rc_failsafe() == true);
+    REQUIRE(table.mode_auto.auto_RTL == false);
+    REQUIRE(table.mode_auto.mode_number() == Mode::Number::AUTO);
+    REQUIRE(table.mode_auto.requires_position() == true);
+    REQUIRE(table.mode_auto.has_manual_throttle() == false);
+    table.mode_auto.auto_RTL = true;
+    REQUIRE(table.mode_auto.mode_number() == Mode::Number::AUTO_RTL);
 }
 
 TEST_CASE("already-in-mode returns true and updates reason", "[copter][mode]") {
@@ -98,10 +105,82 @@ TEST_CASE("unknown mode returns false", "[copter][mode]") {
     REQUIRE(f.ctx.reason == ModeReason::INITIALISED);
 }
 
-TEST_CASE("AUTO_RTL is unsupported this slice", "[copter][mode]") {
+TEST_CASE("AUTO_RTL fails when both mission jumps are false", "[copter][mode]") {
     Fixture f;
     REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::GCS_COMMAND, {}));
     REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE(f.table.mode_auto.auto_RTL == false);
+    REQUIRE(f.ctx.force_resume == false);
+}
+
+TEST_CASE("AUTO_RTL succeeds when closest mission jump only", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.jump_to_closest_mission_leg = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.mode_auto);
+    REQUIRE(f.table.mode_auto.auto_RTL == true);
+    REQUIRE(f.ctx.current->mode_number() == Mode::Number::AUTO_RTL);
+    REQUIRE(f.ctx.force_resume == true);
+}
+
+TEST_CASE("AUTO_RTL succeeds when landing sequence jump only", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.jump_to_landing_sequence = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.mode_auto);
+    REQUIRE(f.table.mode_auto.auto_RTL == true);
+    REQUIRE(f.ctx.current->mode_number() == Mode::Number::AUTO_RTL);
+    REQUIRE(f.ctx.force_resume == true);
+}
+
+TEST_CASE("AUTO_RTL succeeds when both mission jumps are true", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.jump_to_closest_mission_leg = true;
+    in.jump_to_landing_sequence = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.mode_auto);
+    REQUIRE(f.table.mode_auto.auto_RTL == true);
+    REQUIRE(f.ctx.reason == ModeReason::GCS_COMMAND);
+}
+
+TEST_CASE("GCS_COMMAND blocked before AUTO_RTL special case", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.gcs_mode_enabled = false;
+    in.jump_to_closest_mission_leg = true;
+    REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE(f.table.mode_auto.auto_RTL == false);
+}
+
+TEST_CASE("AUTO_RTL when already in AUTO sets auto_RTL", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    REQUIRE(f.ctx.current == &f.table.mode_auto);
+    REQUIRE(f.table.mode_auto.mode_number() == Mode::Number::AUTO);
+
+    SetModeInputs in{};
+    in.jump_to_landing_sequence = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.mode_auto);
+    REQUIRE(f.table.mode_auto.auto_RTL == true);
+    REQUIRE(f.ctx.current->mode_number() == Mode::Number::AUTO_RTL);
+    REQUIRE(f.ctx.force_resume == true);
+}
+
+TEST_CASE("AUTO_RTL fails when set_mode AUTO fails", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.position_ok = false;
+    in.jump_to_closest_mission_leg = true;
+    REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE(f.table.mode_auto.auto_RTL == false);
+    REQUIRE(f.ctx.force_resume == false);
 }
 
 TEST_CASE("GCS_COMMAND blocked when gcs_mode_enabled is false", "[copter][mode]") {
@@ -197,22 +276,23 @@ TEST_CASE("rc_failsafe allows AltHold (default allows_entry true)", "[copter][mo
 }
 
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
-    REQUIRE(remaining_count() == 10);
+    REQUIRE(remaining_count() == 7);
     REQUIRE(remaining_count() > 0);
-    REQUIRE(mode_this_slice_count() == 7);
-    REQUIRE(mode_on_main_count() == 0);
+    REQUIRE(mode_this_slice_count() == 2);
+    REQUIRE(mode_on_main_count() == 8);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
-    REQUIRE(mode_completeness_has("Mode::Number", ModePortStatus::kThisSlice));
-    REQUIRE(mode_completeness_has("ModeReason", ModePortStatus::kThisSlice));
-    REQUIRE(mode_completeness_has("Mode base virtuals", ModePortStatus::kThisSlice));
-    REQUIRE(mode_completeness_has("mode_from_mode_num stabilize+althold", ModePortStatus::kThisSlice));
-    REQUIRE(mode_completeness_has("set_mode checks", ModePortStatus::kThisSlice));
-    REQUIRE(mode_completeness_has("stabilize_run", ModePortStatus::kThisSlice));
-    REQUIRE(mode_completeness_has("AUTO_RTL", ModePortStatus::kRemaining));
-    REQUIRE(mode_completeness_has("acro_run", ModePortStatus::kRemaining));
-    REQUIRE(mode_completeness_has("althold_run", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("leftover catalog", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("Mode::Number", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeReason", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("Mode base virtuals", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("mode_from_mode_num stabilize+althold", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("set_mode checks", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("stabilize_run", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("AUTO_RTL", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("acro_run", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("althold_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("remaining mode bodies", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kRemaining));
