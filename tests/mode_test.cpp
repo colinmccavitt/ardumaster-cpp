@@ -77,6 +77,7 @@ void require_wp_run_flying(const ModeAuto& m) {
     REQUIRE(m.input_thrust_vector_heading);
     REQUIRE_FALSE(m.make_safe_ground_handling);
     REQUIRE_FALSE(m.land_run_normal_or_precland);
+    REQUIRE_FALSE(m.leftover_mode_rtl_run);
 }
 
 void require_no_wp_run_leftovers(const ModeAuto& m) {
@@ -87,6 +88,7 @@ void require_no_wp_run_leftovers(const ModeAuto& m) {
     REQUIRE_FALSE(m.pos_D_update);
     REQUIRE_FALSE(m.input_thrust_vector_heading);
     REQUIRE_FALSE(m.land_run_normal_or_precland);
+    REQUIRE_FALSE(m.leftover_mode_rtl_run);
 }
 
 void require_land_run_flying(const ModeAuto& m) {
@@ -94,6 +96,7 @@ void require_land_run_flying(const ModeAuto& m) {
     REQUIRE(m.desired_spool_unlimited);
     REQUIRE(m.land_run_normal_or_precland);
     REQUIRE_FALSE(m.make_safe_ground_handling);
+    REQUIRE_FALSE(m.leftover_mode_rtl_run);
 }
 
 }  // namespace
@@ -933,6 +936,7 @@ TEST_CASE("ModeAuto run SubMode WP leftover wp_run when disarmed_or_landed", "[c
     REQUIRE_FALSE(f.table.mode_auto.pos_D_update);
     REQUIRE_FALSE(f.table.mode_auto.input_thrust_vector_heading);
     REQUIRE_FALSE(f.table.mode_auto.land_run_normal_or_precland);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
 }
 
 TEST_CASE("ModeAuto run SubMode CIRCLE_MOVE_TO_EDGE leftover wp_run flying", "[copter][mode]") {
@@ -970,6 +974,7 @@ TEST_CASE("ModeAuto run SubMode LAND leftover land_run when disarmed_or_landed",
     REQUIRE(f.table.mode_auto.make_safe_ground_handling);
     REQUIRE_FALSE(f.table.mode_auto.desired_spool_unlimited);
     REQUIRE_FALSE(f.table.mode_auto.land_run_normal_or_precland);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
 }
 
 TEST_CASE("ModeAuto run SubMode RTL leftover rtl_run", "[copter][mode]") {
@@ -978,7 +983,13 @@ TEST_CASE("ModeAuto run SubMode RTL leftover rtl_run", "[copter][mode]") {
     f.table.mode_auto.waiting_to_start = false;
     f.table.mode_auto.submode = ModeAuto::SubMode::RTL;
     f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.mission_update);
     require_submode_runs(f.table.mode_auto, false, false, false, true, false, false, false, false, false);
+    REQUIRE(f.table.mode_auto.rtl_run);
+    REQUIRE(f.table.mode_auto.leftover_mode_rtl_run);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_disarm_on_land);
+    REQUIRE_FALSE(f.table.mode_auto.land_run);
+    REQUIRE_FALSE(f.table.mode_auto.land_run_normal_or_precland);
 }
 
 TEST_CASE("ModeAuto run SubMode CIRCLE leftover circle_run", "[copter][mode]") {
@@ -1062,6 +1073,7 @@ TEST_CASE("ModeAuto run SubMode switch fires while waiting_to_start", "[copter][
     REQUIRE_FALSE(f.table.mode_auto.start_or_resume);
     REQUIRE_FALSE(f.table.mode_auto.mission_update);
     require_submode_runs(f.table.mode_auto, true, false, false, false, false, false, false, false, false);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
 }
 
 TEST_CASE("ModeAuto run SubMode switch clears previous leftover flags", "[copter][mode]") {
@@ -1087,6 +1099,18 @@ TEST_CASE("ModeAuto run SubMode switch clears previous leftover flags", "[copter
     REQUIRE_FALSE(f.table.mode_auto.terrain_failsafe_status);
     REQUIRE_FALSE(f.table.mode_auto.pos_D_update);
     REQUIRE_FALSE(f.table.mode_auto.input_thrust_vector_heading);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
+    f.table.mode_auto.submode = ModeAuto::SubMode::RTL;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, false, true, false, false, false, false, false);
+    REQUIRE(f.table.mode_auto.leftover_mode_rtl_run);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_disarm_on_land);
+    REQUIRE_FALSE(f.table.mode_auto.land_run);
+    REQUIRE_FALSE(f.table.mode_auto.land_run_normal_or_precland);
+    f.table.mode_auto.submode = ModeAuto::SubMode::LAND;
+    f.table.mode_auto.run();
+    require_land_run_flying(f.table.mode_auto);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
 }
 
 TEST_CASE("ModeAuto run auto_RTL with no landing flags clears and writes AUTO_RTL_EXIT", "[copter][mode]") {
@@ -1165,7 +1189,7 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 23);
+    REQUIRE(mode_on_main_count() == 24);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -1188,7 +1212,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeAuto::run auto_RTL landing-sequence", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::takeoff_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::wp_run", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("ModeAuto::land_run", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeAuto::land_run", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeAuto::rtl_run", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));

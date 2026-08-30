@@ -216,6 +216,11 @@ public:
     bool input_thrust_vector_heading{false};
     // Leftover land_run_normal_or_precland() (body stays later).
     bool land_run_normal_or_precland{false};
+    // Leftover copter.mode_rtl.run(false) from ModeAuto::rtl_run. No
+    // ModeRTL object / run body this slice. disarm_on_land is the
+    // argument (always false), not a ModeRTL state machine.
+    bool leftover_mode_rtl_run{false};
+    bool leftover_mode_rtl_disarm_on_land{false};
 
     ModeAuto() = default;
 
@@ -264,13 +269,22 @@ public:
         desired_spool_unlimited = true;
         land_run_normal_or_precland = true;
     }
+    // Leftover ModeAuto::rtl_run (mode_auto.cpp ~1129-1133). Records
+    // ModeRTL::run(false) as flags only. No ModeRTL object / run body.
+    // Switch still records rtl_run as the "would call rtl_run" leftover,
+    // then this helper.
+    void leftover_rtl_run() {
+        leftover_mode_rtl_run = true;
+        leftover_mode_rtl_disarm_on_land = false;
+    }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
     // leftover flags (~116-164), auto_RTL landing-sequence leftover
     // (~166-174), takeoff_run leftover (~1075-1083), wp_run leftover
-    // (~1087-1107), and land_run leftover (~1111-1125). Switch always
-    // runs, including while still waiting_to_start. No AP_Mission /
-    // detector / GCS / logger / *_run bodies. run has no ctx.
+    // (~1087-1107), land_run leftover (~1111-1125), and rtl_run leftover
+    // (~1129-1133). Switch always runs, including while still
+    // waiting_to_start. No AP_Mission / detector / GCS / logger /
+    // ModeRTL / *_run bodies. run has no ctx.
     void run() override {
         if (waiting_to_start) {
             if (has_origin) {
@@ -308,6 +322,8 @@ public:
         pos_D_update = false;
         input_thrust_vector_heading = false;
         land_run_normal_or_precland = false;
+        leftover_mode_rtl_run = false;
+        leftover_mode_rtl_disarm_on_land = false;
 
         switch (submode) {
         case SubMode::TAKEOFF:
@@ -325,6 +341,7 @@ public:
             break;
         case SubMode::RTL:
             rtl_run = true;
+            leftover_rtl_run();
             break;
         case SubMode::CIRCLE:
             circle_run = true;
