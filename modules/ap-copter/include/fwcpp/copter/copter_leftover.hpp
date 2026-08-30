@@ -1,9 +1,9 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 31 lands
-// allocate_motors leftover (class selection + ahrs_view/attitude/
-// pos/wp leftover; PID defaults remaining).
+// (Copter.cpp / Copter.h / system.cpp). Slice 32 lands
+// allocate_motors leftover (class selection + controllers +
+// Y6/TRI PID/brushed leftover; convert_pid remaining).
 // remaining_count() > 0 is expected after this slice. Next
 // remaining is Copter::init_ardupilot.
 //
@@ -97,7 +97,7 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::startup_INS_ground", PortStatus::kOnMain,
      "startup_ins_ground.hpp; ahrs.init + COPTER + ins.init + ahrs.reset"},
     {"Copter::allocate_motors", PortStatus::kThisSlice,
-     "allocate_motors.hpp; class selection + ahrs_view/attitude/pos/wp leftover; PID defaults remaining"},
+     "allocate_motors.hpp; class selection + controllers + Y6/TRI PID/brushed leftover; convert_pid remaining"},
     {"AP:: singletons", PortStatus::kOutOfScope, "ADR-0012 explicit Copter context"},
     {"AP_Param var_info", PortStatus::kOutOfScope, "inject params via setters"},
     {"scripting / external control", PortStatus::kOutOfScope,

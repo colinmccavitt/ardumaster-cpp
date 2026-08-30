@@ -1,29 +1,32 @@
 #pragma once
 
 // Copter::allocate_motors leftover — motors class selection plus
-// ahrs_view / attitude / pos / wp / loiter / circle leftover flags.
-// Upstream ArduCopter/system.cpp ~363-488. Stop before
-// reload_defaults_file / Y6 PID defaults (~490).
+// ahrs_view / attitude / pos / wp / loiter / circle leftover flags,
+// then reload_defaults_file + Y6/TRI PID set_default leftovers +
+// brushed rc_speed. Upstream ArduCopter/system.cpp ~363-513. Stop
+// before convert_pid_parameters (~516).
 // This port is not heli (FRAME_CONFIG != HELI_FRAME path).
 //
 // No objects: do not NEW_NOTHROW / heap-allocate motors,
 // attitude_control, pos_control, wp_nav, loiter_nav, or circle_nav.
-// Record leftover MotorsKind + controller flags only. Do not invent
-// AP_BoardConfig or AP_Param.
+// Record leftover MotorsKind + controller flags + PID defaults
+// only. Do not invent AP_BoardConfig or AP_Param.
 //
 // allocation_failed is true only when motors would be nullptr
 // (scripting-off 6DoF / dynamic). scripting is kOutOfScope; inject
 // scripting_enabled (default false). Upstream
 // AP_BoardConfig::allocation_error does not return — skip leftover
-// controllers when allocation_failed.
+// controllers and PID defaults when allocation_failed.
 //
 // Inject ahrs_view_ok (default true) and attitude_ok (default true)
 // for the create_view / NEW_NOTHROW nullptr checks. Inject
 // oapathplanner_enabled (default false) and circle_enabled (default
-// true / MODE_CIRCLE_ENABLED).
+// true / MODE_CIRCLE_ENABLED). Inject is_brushed_pwm_type (default
+// false).
 //
-// Do not port Y6/TRI PID set_default, brushed rc_speed,
-// convert_pid_parameters, heli_motors_param_conversions, or
+// Do not port convert_pid_parameters, convert_prx_parameters,
+// attitude/pos/wp/loiter/circle convert_parameters,
+// AP_Param::invalidate_count, heli_motors_param_conversions, or
 // Copter::init_ardupilot.
 
 #include <cstdint>
@@ -81,6 +84,7 @@ struct AllocateMotorsInputs {
     bool attitude_ok{true};
     bool oapathplanner_enabled{false};
     bool circle_enabled{true};
+    bool is_brushed_pwm_type{false};
 };
 
 struct AllocateMotorsEffects {
@@ -103,6 +107,16 @@ struct AllocateMotorsEffects {
     bool load_loiter_eeprom{false};
     bool circle_nav{false};
     bool load_circle_eeprom{false};
+    bool reload_defaults_file{false};
+    bool y6_pid_defaults{false};
+    float rate_roll_kp{0};
+    float rate_roll_kd{0};
+    float rate_pitch_kp{0};
+    float rate_pitch_kd{0};
+    float rate_yaw_kp{0};
+    float rate_yaw_ki{0};
+    float tri_yaw_filt_d_hz{0};
+    std::uint16_t rc_speed_default{0};
 };
 
 [[nodiscard]] inline AllocateMotorsEffects allocate_motors(
@@ -199,6 +213,32 @@ struct AllocateMotorsEffects {
     if (in.circle_enabled) {
         fx.circle_nav = true;
         fx.load_circle_eeprom = true;
+    }
+
+    // reload_defaults + Y6/TRI PID + brushed rc_speed. Reached only
+    // when !allocation_failed && !ahrs_view_failed &&
+    // !attitude_failed (early returns above).
+    fx.reload_defaults_file = true;
+
+    switch (in.frame_class) {
+        case MotorFrameClass::Y6:
+            fx.y6_pid_defaults = true;
+            fx.rate_roll_kp = 0.1f;
+            fx.rate_roll_kd = 0.006f;
+            fx.rate_pitch_kp = 0.1f;
+            fx.rate_pitch_kd = 0.006f;
+            fx.rate_yaw_kp = 0.15f;
+            fx.rate_yaw_ki = 0.015f;
+            break;
+        case MotorFrameClass::TRI:
+            fx.tri_yaw_filt_d_hz = 100;
+            break;
+        default:
+            break;
+    }
+
+    if (in.is_brushed_pwm_type) {
+        fx.rc_speed_default = 16000;
     }
 
     return fx;

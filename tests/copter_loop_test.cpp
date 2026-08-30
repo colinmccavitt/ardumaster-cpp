@@ -125,7 +125,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 31", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 32", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 34);
@@ -2452,6 +2452,8 @@ TEST_CASE("allocate_motors leftover ahrs_view_ok false skips attitude and pos",
     REQUIRE_FALSE(fx.wp_nav_oa);
     REQUIRE_FALSE(fx.loiter_nav);
     REQUIRE_FALSE(fx.circle_nav);
+    REQUIRE_FALSE(fx.reload_defaults_file);
+    REQUIRE_FALSE(fx.y6_pid_defaults);
 }
 
 TEST_CASE("allocate_motors leftover oapathplanner_enabled records wp_nav_oa",
@@ -2480,4 +2482,67 @@ TEST_CASE("allocate_motors leftover circle_enabled false skips circle_nav",
     REQUIRE_FALSE(fx.load_circle_eeprom);
     REQUIRE(fx.wp_nav);
     REQUIRE_FALSE(fx.wp_nav_oa);
+}
+
+TEST_CASE("allocate_motors leftover QUAD reloads defaults without Y6/TRI/brushed",
+          "[copter][allocate_motors]") {
+    const auto fx = allocate_motors({.frame_class = MotorFrameClass::QUAD});
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE_FALSE(fx.ahrs_view_failed);
+    REQUIRE_FALSE(fx.attitude_failed);
+    REQUIRE(fx.reload_defaults_file);
+    REQUIRE_FALSE(fx.y6_pid_defaults);
+    REQUIRE(fx.tri_yaw_filt_d_hz == 0);
+    REQUIRE(fx.rc_speed_default == 0);
+}
+
+TEST_CASE("allocate_motors leftover Y6 records PID set_default values",
+          "[copter][allocate_motors]") {
+    const auto fx = allocate_motors({.frame_class = MotorFrameClass::Y6});
+    REQUIRE(fx.motors_kind == MotorsKind::Matrix);
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE(fx.reload_defaults_file);
+    REQUIRE(fx.y6_pid_defaults);
+    REQUIRE(fx.rate_roll_kp == 0.1f);
+    REQUIRE(fx.rate_roll_kd == 0.006f);
+    REQUIRE(fx.rate_pitch_kp == 0.1f);
+    REQUIRE(fx.rate_pitch_kd == 0.006f);
+    REQUIRE(fx.rate_yaw_kp == 0.15f);
+    REQUIRE(fx.rate_yaw_ki == 0.015f);
+    REQUIRE(fx.tri_yaw_filt_d_hz == 0);
+    REQUIRE(fx.rc_speed_default == 0);
+}
+
+TEST_CASE("allocate_motors leftover TRI records yaw filt_D_hz default",
+          "[copter][allocate_motors]") {
+    const auto fx = allocate_motors({.frame_class = MotorFrameClass::TRI});
+    REQUIRE(fx.motors_kind == MotorsKind::Tri);
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE(fx.reload_defaults_file);
+    REQUIRE_FALSE(fx.y6_pid_defaults);
+    REQUIRE(fx.tri_yaw_filt_d_hz == 100);
+    REQUIRE(fx.rc_speed_default == 0);
+}
+
+TEST_CASE("allocate_motors leftover brushed records rc_speed 16000",
+          "[copter][allocate_motors]") {
+    AllocateMotorsInputs in{};
+    in.frame_class = MotorFrameClass::QUAD;
+    in.is_brushed_pwm_type = true;
+    const auto fx = allocate_motors(in);
+    REQUIRE_FALSE(fx.allocation_failed);
+    REQUIRE(fx.reload_defaults_file);
+    REQUIRE_FALSE(fx.y6_pid_defaults);
+    REQUIRE(fx.tri_yaw_filt_d_hz == 0);
+    REQUIRE(fx.rc_speed_default == 16000);
+}
+
+TEST_CASE("allocate_motors leftover 6DoF scripting off skips reload_defaults",
+          "[copter][allocate_motors]") {
+    const auto fx = allocate_motors({.frame_class = MotorFrameClass::SIXDOF_SCRIPTING});
+    REQUIRE(fx.allocation_failed);
+    REQUIRE_FALSE(fx.reload_defaults_file);
+    REQUIRE_FALSE(fx.y6_pid_defaults);
+    REQUIRE(fx.tri_yaw_filt_d_hz == 0);
+    REQUIRE(fx.rc_speed_default == 0);
 }
