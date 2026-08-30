@@ -1,15 +1,15 @@
 #pragma once
 
-// Copter AP_Arming_Copter pre_arm leftover (CCP-038 slice 3).
+// Copter AP_Arming_Copter pre_arm leftover (CCP-038 slice 4).
 // Upstream ArduCopter/AP_Arming_Copter.cpp pre_arm_checks ~8-13,
-// run_pre_arm_checks ~17-49 (already-armed, system_initialized,
+// run_pre_arm_checks ~17-69 (already-armed, system_initialized,
 // interlock/E-Stop conflict, motor interlock enabled,
-// disarm_switch_checks).
+// disarm_switch_checks, motors->arming_checks, early return when
+// !passed). HELI AROT out of scope.
 //
 // Explicit PreArmInputs — no motors / scheduler / GCS / rc objects
-// (ADR-0012). motors->arming_checks, parameter/gps/baro/
-// board_voltage/alt/rc_throttle_failsafe, and arm()/disarm() remain.
-// Catalog: arming_leftover.hpp.
+// (ADR-0012). parameter/gps/baro/board_voltage/alt/rc_throttle_failsafe,
+// and arm()/disarm() remain. Catalog: arming_leftover.hpp.
 
 #include <fwcpp/copter/arming_leftover.hpp>
 
@@ -35,6 +35,8 @@ struct PreArmInputs {
     // DISARM aux option + AuxSwitchPos::HIGH (inject; no rc find).
     bool has_disarm_switch_option{false};
     bool disarm_switch_high{false};
+    // inject result of motors->arming_checks (default ok).
+    bool motors_arming_checks_ok{true};
 };
 
 struct PreArmEffects {
@@ -52,6 +54,11 @@ struct PreArmEffects {
     bool disarm_switch_checked{false};
     bool disarm_switch_failed{false};
     bool check_failed_disarm_switch{false};
+    bool motors_arming_checked{false};
+    bool motors_arming_failed{false};
+    bool check_failed_motors{false};
+    // true when !passed after motors block (upstream ~67-69).
+    bool early_return_after_gate_checks{false};
     bool passed{false};
     bool set_pre_arm_check_called{false};
     bool set_pre_arm_check_value{false};
@@ -59,8 +66,8 @@ struct PreArmEffects {
 
 // Upstream run_pre_arm_checks: already-armed short-circuit, then
 // system_initialized, then interlock/E-Stop conflict + motor interlock
-// enabled + disarm_switch_checks (accumulate failures). Further checks
-// remain (not this slice).
+// enabled + disarm_switch_checks + motors->arming_checks; early return
+// when !passed (~67-69). Parameter checks remain (not this slice).
 [[nodiscard]] inline PreArmEffects run_pre_arm_checks(const PreArmInputs& in = {}) {
     PreArmEffects fx{};
     fx.pre_arm_ran = true;
@@ -112,8 +119,22 @@ struct PreArmEffects {
         passed = false;
     }
 
-    // Further checks remaining (motors / …) — not this slice.
-    fx.passed = passed;
+    // motors->arming_checks (~51-56). Then early return if !passed (~67-69).
+    fx.motors_arming_checked = true;
+    if (!in.motors_arming_checks_ok) {
+        fx.motors_arming_failed = true;
+        fx.check_failed_motors = true;
+        (void)in.display_failure;
+        passed = false;
+    }
+    if (!passed) {
+        fx.early_return_after_gate_checks = true;
+        fx.passed = false;
+        return fx;
+    }
+
+    // Further checks remaining (parameter / gps / baro / …) — not this slice.
+    fx.passed = true;
     return fx;
 }
 
