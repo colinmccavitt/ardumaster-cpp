@@ -4,6 +4,7 @@
 // Upstream ArduCopter/mode.h Number ~77-109, Mode virtuals ~119-143,
 // ModeStabilize ~1723, ModeAltHold ~498, ModeAuto ~531-545; mode.cpp
 // mode_from_mode_num ~32, set_mode ~313-474 (AUTO_RTL ~345-350,
+// gcs_mode_enabled ~184-215 / AP_Vehicle::block_GCS_mode_change ~1210-1225),
 // Write_Mode ~438-439, notify_flight_mode ~472 / ~549-554),
 // exit_mode ~511-524 (non-heli: I transfer then takeoff_stop + exit);
 // mode_auto.cpp return_path_or_jump_to_landing_sequence_auto_RTL ~286-301,
@@ -144,12 +145,15 @@ struct FlightModeContext {
 };
 
 // Injected Copter / motors / EKF / RC / mission-jump state. Upstream
-// reads these via AP:: / copter / mission members. FLTMODE_GCSBLOCK
-// param lookup is remaining; gcs_mode_enabled is the already-resolved
-// gate (default open). Jump flags default false so `{}` fails AUTO_RTL.
+// reads these via AP:: / copter / mission members. FLTMODE_GCSBLOCK is
+// injected as fltmode_gcsblock (default 0 = nothing blocked). The
+// gcs_mode_enabled bool remains the already-resolved gate (default open).
+// Jump flags default false so `{}` fails AUTO_RTL.
 // is_drift injects MODE_DRIFT_ENABLED user_throttle leftover.
 struct SetModeInputs {
     bool gcs_mode_enabled{true};
+    // FLTMODE_GCSBLOCK leftover: bit i blocks mode_list[i] from GCS.
+    std::uint32_t fltmode_gcsblock{0};
     bool armed{false};
     bool land_complete{true};
     float pilot_desired_throttle{0.0f};
@@ -164,6 +168,49 @@ struct SetModeInputs {
     // throttle-too-high gate. Default false; no ModeDrift this slice.
     bool is_drift{false};
 };
+
+// Copter::gcs_mode_enabled ~184-215 + AP_Vehicle::block_GCS_mode_change ~1210-1225.
+// mode_list index is the FLTMODE_GCSBLOCK bit. Default mask 0 allows all.
+// Modes not in the list (LAND=9, RTL=6) are never blocked.
+[[nodiscard]] inline constexpr bool gcs_mode_enabled(Mode::Number mode,
+                                                     std::uint32_t fltmode_gcsblock) {
+    constexpr Mode::Number kModeList[] = {
+        Mode::Number::STABILIZE,
+        Mode::Number::ACRO,
+        Mode::Number::ALT_HOLD,
+        Mode::Number::AUTO,
+        Mode::Number::GUIDED,
+        Mode::Number::LOITER,
+        Mode::Number::CIRCLE,
+        Mode::Number::DRIFT,
+        Mode::Number::SPORT,
+        Mode::Number::FLIP,
+        Mode::Number::AUTOTUNE,
+        Mode::Number::POSHOLD,
+        Mode::Number::BRAKE,
+        Mode::Number::THROW,
+        Mode::Number::AVOID_ADSB,
+        Mode::Number::GUIDED_NOGPS,
+        Mode::Number::SMART_RTL,
+        Mode::Number::FLOWHOLD,
+        Mode::Number::FOLLOW,
+        Mode::Number::ZIGZAG,
+        Mode::Number::SYSTEMID,
+        Mode::Number::AUTOROTATE,
+        Mode::Number::AUTO_RTL,
+        Mode::Number::TURTLE,
+    };
+    constexpr auto kCount =
+        static_cast<std::uint8_t>(sizeof(kModeList) / sizeof(kModeList[0]));
+    static_assert(kCount == 24);
+    const auto mode_num = static_cast<std::uint8_t>(mode);
+    for (std::uint8_t i = 0; i < kCount; ++i) {
+        if (static_cast<std::uint8_t>(kModeList[i]) == mode_num) {
+            return (fltmode_gcsblock & (1U << i)) == 0U;
+        }
+    }
+    return true;
+}
 
 [[nodiscard]] inline Mode* mode_from_mode_num(Mode::Number mode, FlightModeTable& table) {
     switch (mode) {
@@ -264,7 +311,8 @@ inline void record_notify_flight_mode(FlightModeContext& ctx, const Mode& next) 
         ctx.reason = reason;
         return true;
     }
-    if (reason == ModeReason::GCS_COMMAND && !in.gcs_mode_enabled) {
+    if (reason == ModeReason::GCS_COMMAND &&
+        (!in.gcs_mode_enabled || !gcs_mode_enabled(next.mode_number(), in.fltmode_gcsblock))) {
         return false;
     }
     if (next.mode_number() == Mode::Number::AUTO_RTL) {
@@ -311,7 +359,8 @@ inline void record_notify_flight_mode(FlightModeContext& ctx, const Mode& next) 
         ctx.reason = reason;
         return true;
     }
-    if (reason == ModeReason::GCS_COMMAND && !in.gcs_mode_enabled) {
+    if (reason == ModeReason::GCS_COMMAND &&
+        (!in.gcs_mode_enabled || !gcs_mode_enabled(mode, in.fltmode_gcsblock))) {
         return false;
     }
     if (mode == Mode::Number::AUTO_RTL) {

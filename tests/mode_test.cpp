@@ -21,6 +21,7 @@ using fwcpp::copter::mode_on_main_count;
 using fwcpp::copter::mode_out_of_scope_count;
 using fwcpp::copter::mode_this_slice_count;
 using fwcpp::copter::remaining_count;
+using fwcpp::copter::gcs_mode_enabled;
 using fwcpp::copter::set_mode;
 
 namespace {
@@ -202,6 +203,56 @@ TEST_CASE("GCS_COMMAND blocked when gcs_mode_enabled is false", "[copter][mode]"
     REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::GCS_COMMAND, in));
     REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
     REQUIRE(f.ctx.current == &f.table.althold);
+}
+
+TEST_CASE("FLTMODE_GCSBLOCK mask 0 allows GCS ALT_HOLD and STABILIZE", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    REQUIRE(in.fltmode_gcsblock == 0);
+    REQUIRE(in.gcs_mode_enabled);
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.althold);
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::STABILIZE, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+}
+
+TEST_CASE("FLTMODE_GCSBLOCK bit 2 blocks GCS ALT_HOLD; RC_COMMAND succeeds", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.fltmode_gcsblock = 1U << 2;
+    REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE_FALSE(set_mode(f.ctx, f.table.althold, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.althold);
+}
+
+TEST_CASE("FLTMODE_GCSBLOCK bit 0 blocks GCS STABILIZE", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, {}));
+    SetModeInputs in{};
+    in.fltmode_gcsblock = 1U << 0;
+    REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::STABILIZE, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.althold);
+}
+
+TEST_CASE("FLTMODE_GCSBLOCK AUTO_RTL bit blocks GCS even with jump flags", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.jump_to_closest_mission_leg = true;
+    in.jump_to_landing_sequence = true;
+    // Upstream mode_list: AUTO_RTL is index 22 (AUTOROTATE is 21).
+    in.fltmode_gcsblock = 1U << 22;
+    REQUIRE_FALSE(gcs_mode_enabled(Mode::Number::AUTO_RTL, in.fltmode_gcsblock));
+    REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE(f.table.mode_auto.auto_RTL == false);
+}
+
+TEST_CASE("LAND and RTL are never blocked by FLTMODE_GCSBLOCK", "[copter][mode]") {
+    REQUIRE(gcs_mode_enabled(Mode::Number::LAND, 0xFFFFFFFFu));
+    REQUIRE(gcs_mode_enabled(Mode::Number::RTL, 0xFFFFFFFFu));
 }
 
 TEST_CASE("disarmed ignore_checks allows requires_position when !position_ok", "[copter][mode]") {
@@ -428,10 +479,10 @@ TEST_CASE("AUTO_RTL success writes AUTO_RTL after auto_RTL is set", "[copter][mo
 }
 
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
-    REQUIRE(remaining_count() == 4);
+    REQUIRE(remaining_count() == 3);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 11);
+    REQUIRE(mode_on_main_count() == 12);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -446,11 +497,11 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("acro_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("althold_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("remaining mode bodies", ModePortStatus::kRemaining));
-    REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("Write_Mode/notify", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("Drift-as-manual-throttle", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("Drift-as-manual-throttle", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("set_accel_throttle_I", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("HELI runup/flybar", ModePortStatus::kOutOfScope));
     REQUIRE(mode_completeness_has("AP:: singletons", ModePortStatus::kOutOfScope));
