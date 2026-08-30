@@ -2966,25 +2966,30 @@ TEST_CASE("ModeLand leftover leftover_run resets stale gps effect flags", "[copt
     REQUIRE_FALSE(land.leftover_disarm_landed);
 }
 
-TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
-    REQUIRE(remaining_count() == 1);
-    REQUIRE(remaining_count() > 0);
+TEST_CASE("leftover remaining_count is zero", "[copter][mode][leftover]") {
+    REQUIRE(remaining_count() == 0);
     REQUIRE(mode_this_slice_count() == 1);
-    REQUIRE(mode_on_main_count() == 34);
-    REQUIRE(mode_out_of_scope_count() == 3);
+    REQUIRE(mode_on_main_count() == 35);
+    REQUIRE(mode_out_of_scope_count() == 6);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
     REQUIRE(mode_completeness_has("leftover catalog", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("Mode::Number", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeReason", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("Mode base virtuals", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("FlightModeTable", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("mode_from_mode_num stabilize+althold", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("set_mode checks", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("stabilize_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("AUTO_RTL", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("acro_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("althold_run", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("remaining mode bodies", ModePortStatus::kRemaining));
+    REQUIRE_FALSE(mode_completeness_has("remaining mode bodies", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("land_run_normal_or_precland / land_run_horizontal_control",
+                                  ModePortStatus::kOutOfScope));
+    REQUIRE(mode_completeness_has("ModeGuided / ModeLoiter / other mode bodies",
+                                  ModePortStatus::kOutOfScope));
+    REQUIRE(mode_completeness_has("auto_takeoff.run body", ModePortStatus::kOutOfScope));
     REQUIRE(mode_completeness_has("ModeAuto::init", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::exit", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::run", ModePortStatus::kOnMain));

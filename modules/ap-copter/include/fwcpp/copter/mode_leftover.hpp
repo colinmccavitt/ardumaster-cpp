@@ -1,8 +1,10 @@
 #pragma once
 
 // CCP-036 leftover completeness catalog — ArduCopter Mode base and set_mode.
-// Separate from copter_leftover.hpp (CCP-035 vehicle loop). remaining_count()
-// is the kRemaining count and is intentionally > 0 after this slice.
+// Separate from copter_leftover.hpp (CCP-035 vehicle loop). Slice 45 catalog
+// close: ModeRTL/ModeLand bodies on_main; shared land helpers / takeoff /
+// Guided+Loiter+other mode bodies out_of_scope (CCP-040/041/042).
+// remaining_count() == 0 after this slice.
 //
 // ADR-0012: no AP:: singletons, no exceptions, no flight-path alloc.
 
@@ -33,9 +35,11 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"Mode base virtuals", ModePortStatus::kOnMain,
      "mode_number, init, exit, run, requires_position, has_manual_throttle, "
      "allows_entry_in_rc_failsafe; takeoff_stop no-op"},
+    {"FlightModeTable", ModePortStatus::kOnMain,
+     "mode.hpp; owns ModeStabilize/AltHold/Acro/Auto/RTL/Land; mode_from_mode_num"},
     {"mode_from_mode_num stabilize+althold", ModePortStatus::kOnMain,
      "STABILIZE, ALT_HOLD, AUTO, RTL; AUTO_RTL stays nullptr (not a true mode); "
-     "LAND stays nullptr"},
+     "LAND stays nullptr (table.mode_land exists)"},
     {"set_mode checks", ModePortStatus::kOnMain,
      "already-in, GCS gate, unknown, ignore_checks, throttle-too-high, "
      "position, alt, rc_failsafe, init, exit+switch"},
@@ -47,9 +51,11 @@ inline constexpr ModePortItem kModeCompleteness[] = {
      "mode_acro.hpp; CCP-039 landed run() on main"},
     {"althold_run", ModePortStatus::kOnMain,
      "mode_althold.hpp; CCP-039 landed run() on main"},
-    {"remaining mode bodies", ModePortStatus::kRemaining,
-     "other modes; auto_takeoff.run body; land_run_normal_or_precland body; "
-     "land_run_horizontal_control body; ModeGuided::run body"},
+    {"land_run_normal_or_precland / land_run_horizontal_control",
+     ModePortStatus::kOutOfScope, "CCP-041 / shared land helpers"},
+    {"ModeGuided / ModeLoiter / other mode bodies", ModePortStatus::kOutOfScope,
+     "CCP-040/042"},
+    {"auto_takeoff.run body", ModePortStatus::kOutOfScope, "CCP-041 takeoff"},
     {"ModeAuto::init", ModePortStatus::kOnMain,
      "mode_auto.cpp auto_init leftover; mission_present / landed takeoff gate; "
      "no wp_nav/mission objects; precland remaining"},
