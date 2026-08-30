@@ -5,7 +5,8 @@
 // (mode_loiter.cpp ~80-188). Slice 1 leftover_init (~10-38) unchanged.
 // No loiter_nav / pos_control / attitude_control objects (ADR-0012).
 // Reuses AltHoldModeState + get_alt_hold_state_D_ms from mode_althold.hpp.
-// precision_loiter OOS (AC_PRECLAND). POSHOLD / DRIFT catalog remaining.
+// Slice 5: POSHOLD / DRIFT catalog closed (brake blend OOS).
+// precision_loiter OOS (AC_PRECLAND).
 //
 // mode_from_mode_num still returns nullptr for LOITER this slice.
 

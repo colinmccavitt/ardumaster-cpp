@@ -106,19 +106,21 @@ TEST_CASE("ModeDrift run override calls leftover_run", "[copter][drift]") {
 }
 
 TEST_CASE("drift leftover catalog remaining_count", "[copter][drift][leftover]") {
-    REQUIRE(remaining_count() == 1);
-    REQUIRE(this_slice_count() == 4);
-    REQUIRE(on_main_count() == 2);
-    REQUIRE(out_of_scope_count() == 3);
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(this_slice_count() == 3);
+    REQUIRE(on_main_count() == 4);
+    REQUIRE(out_of_scope_count() == 4);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
     REQUIRE(completeness_has("ModeLoiter::init", PortStatus::kOnMain));
     REQUIRE(completeness_has("ModeLoiter::run", PortStatus::kOnMain));
     REQUIRE(completeness_has("ModePosHold::init", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("ModePosHold::run", PortStatus::kRemaining));
-    REQUIRE(completeness_has("ModeDrift::init", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("ModeDrift::run", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("ModePosHold::run", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("ModeDrift::init", PortStatus::kOnMain));
+    REQUIRE(completeness_has("ModeDrift::run", PortStatus::kOnMain));
+    REQUIRE(completeness_has("PosHold brake / wind_comp blend", PortStatus::kOutOfScope));
     REQUIRE(completeness_has("precision_loiter", PortStatus::kOutOfScope));
+    REQUIRE_FALSE(completeness_has("ModePosHold::run", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("ModeDrift", PortStatus::kRemaining));
 }

@@ -4,10 +4,11 @@
 // ModeDrift. Nested under fwcpp::copter::loiter so remaining_count() does not
 // collide with mode_leftover.hpp / althold / arming leftovers.
 //
-// Slice 4: ModeDrift::init + ModeDrift::run leftover flags on this slice
-// (spool/attitude call-sites; no real vel/braker math). ModePosHold::run
-// remaining. ModeLoiter init+run on main. Fence/avoidance ticket-OOS.
-// precision_loiter OOS (AC_PRECLAND). ADR-0012: no AP:: singletons.
+// Slice 5 (close): ModePosHold::run leftover thin flags on this slice
+// (alt-hold switch / attitude / D_update; no brake blend bodies). ModeDrift
+// init+run on main. ModeLoiter init+run on main. PosHold brake / wind_comp
+// blend ticket-OOS ("detailed PosHold brake blend later"). Fence/avoidance
+// ticket-OOS. precision_loiter OOS (AC_PRECLAND). ADR-0012: no AP:: singletons.
 
 #include <cstddef>
 #include <cstdint>
@@ -36,13 +37,17 @@ inline constexpr PortItem kCompleteness[] = {
      "loiter_nav / pos / attitude objects"},
     {"ModePosHold::init", PortStatus::kThisSlice,
      "mode_poshold.cpp ~71-107; leftover_init flags; no loiter_nav / pos_control"},
-    {"ModePosHold::run", PortStatus::kRemaining,
-     "mode_poshold.cpp ~111+; leftover_run_called only; RP/alt-hold/loiter remaining"},
-    {"ModeDrift::init", PortStatus::kThisSlice,
+    {"ModePosHold::run", PortStatus::kThisSlice,
+     "mode_poshold.cpp ~111-215 / ~530-534; leftover_run flags through "
+     "alt-hold switch + attitude / D_update; brake blend OOS"},
+    {"ModeDrift::init", PortStatus::kOnMain,
      "mode_drift.cpp ~49-52; leftover_init returns true"},
-    {"ModeDrift::run", PortStatus::kThisSlice,
+    {"ModeDrift::run", PortStatus::kOnMain,
      "mode_drift.cpp ~56-145; leftover_run flags through spool/attitude; no "
      "real vel/braker math"},
+    {"PosHold brake / wind_comp blend", PortStatus::kOutOfScope,
+     "mode_poshold.cpp ~217-528 RP brake/loiter blend; detailed PosHold brake "
+     "blend later"},
     {"precision_loiter", PortStatus::kOutOfScope,
      "mode_loiter.cpp do_precision_loiter / precision_loiter_xy; AC_PRECLAND"},
     {"fence / avoidance", PortStatus::kOutOfScope, "ticket OOS; no AC_Fence / AC_Avoid"},

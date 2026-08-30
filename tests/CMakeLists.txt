@@ -1044,7 +1044,7 @@ add_executable(param_conversion_test param_conversion_test.cpp)
 target_link_libraries(param_conversion_test PRIVATE ap-param Catch2::Catch2WithMain)
 catch_discover_tests(param_conversion_test)
 
-# CCP-040 slice 3: ModePosHold leftover_init scaffold + catalog.
+# CCP-040 slice 5: ModePosHold leftover_run thin flags + catalog close.
 add_executable(mode_poshold_test mode_poshold_test.cpp)
 target_link_libraries(mode_poshold_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_poshold_test)

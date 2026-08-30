@@ -3,8 +3,10 @@
 #include <fwcpp/copter/mode_loiter_leftover.hpp>
 #include <fwcpp/copter/mode_poshold.hpp>
 
+using fwcpp::copter::AltHoldModeState;
 using fwcpp::copter::ModePosHold;
 using fwcpp::copter::PosHoldRpMode;
+using fwcpp::copter::SpoolState;
 using fwcpp::copter::loiter::PortStatus;
 using fwcpp::copter::loiter::completeness_has;
 using fwcpp::copter::loiter::completeness_size;
@@ -68,34 +70,180 @@ TEST_CASE("ModePosHold init override calls leftover_init", "[copter][poshold]") 
     REQUIRE(mode.leftover_roll_mode == PosHoldRpMode::PilotOverride);
 }
 
-TEST_CASE("ModePosHold leftover_run sets call-site flag only", "[copter][poshold]") {
+TEST_CASE("ModePosHold leftover_run common path and MotorStopped flags",
+          "[copter][poshold]") {
     ModePosHold mode;
+    // Default injects: !armed + SHUT_DOWN spool → MotorStopped.
     REQUIRE_FALSE(mode.leftover_run_called);
     mode.leftover_run();
     REQUIRE(mode.leftover_run_called);
+    REQUIRE(mode.leftover_d_set_max);
+    REQUIRE(mode.leftover_update_simple_mode);
+    REQUIRE(mode.leftover_pilot_lean);
+    REQUIRE(mode.leftover_loiter_clear_pilot_accel);
+    REQUIRE(mode.leftover_pilot_yaw);
+    REQUIRE(mode.leftover_pilot_climb);
+    REQUIRE_FALSE(mode.leftover_soften_for_landing);
+    REQUIRE(mode.leftover_get_alt_hold_state);
+    REQUIRE(mode.leftover_poshold_state == AltHoldModeState::MotorStopped);
+    REQUIRE(mode.leftover_reset_I);
+    REQUIRE(mode.leftover_reset_yaw_target_and_rate);
+    REQUIRE(mode.leftover_d_relax);
+    REQUIRE(mode.leftover_loiter_init_target);
+    REQUIRE(mode.leftover_init_wind_comp);
+    REQUIRE(mode.leftover_roll_mode == PosHoldRpMode::PilotOverride);
+    REQUIRE(mode.leftover_pitch_mode == PosHoldRpMode::PilotOverride);
+    REQUIRE_FALSE(mode.leftover_reset_I_smoothly);
+    REQUIRE_FALSE(mode.leftover_takeoff_start);
+    REQUIRE_FALSE(mode.leftover_d_set_pos_from_climb);
+    REQUIRE(mode.leftover_attitude);
+    REQUIRE(mode.leftover_d_update_controller);
+}
+
+TEST_CASE("ModePosHold leftover_run soften_for_landing when land_complete_maybe",
+          "[copter][poshold]") {
+    ModePosHold mode;
+    mode.leftover_land_complete_maybe = true;
+    mode.leftover_run();
+    REQUIRE(mode.leftover_soften_for_landing);
+    REQUIRE(mode.leftover_d_set_max);
+    REQUIRE(mode.leftover_get_alt_hold_state);
+}
+
+TEST_CASE("ModePosHold leftover_run Landed_Ground_Idle flags", "[copter][poshold]") {
+    ModePosHold mode;
+    mode.leftover_armed = false;
+    mode.leftover_spool_state = SpoolState::GROUND_IDLE;
+    mode.leftover_run();
+    REQUIRE(mode.leftover_poshold_state == AltHoldModeState::Landed_Ground_Idle);
+    REQUIRE(mode.leftover_loiter_clear_pilot_accel);
+    REQUIRE(mode.leftover_loiter_init_target);
+    REQUIRE(mode.leftover_reset_yaw_target_and_rate);
+    REQUIRE(mode.leftover_init_wind_comp);
+    REQUIRE(mode.leftover_reset_I_smoothly);
+    REQUIRE(mode.leftover_d_relax);
+    REQUIRE(mode.leftover_roll_mode == PosHoldRpMode::PilotOverride);
+    REQUIRE(mode.leftover_pitch_mode == PosHoldRpMode::PilotOverride);
+    REQUIRE_FALSE(mode.leftover_reset_I);
+    REQUIRE(mode.leftover_attitude);
+    REQUIRE(mode.leftover_d_update_controller);
+}
+
+TEST_CASE("ModePosHold leftover_run Landed_Pre_Takeoff flags", "[copter][poshold]") {
+    ModePosHold mode;
+    mode.leftover_armed = false;
+    mode.leftover_spool_state = SpoolState::THROTTLE_UNLIMITED;
+    mode.leftover_run();
+    REQUIRE(mode.leftover_poshold_state == AltHoldModeState::Landed_Pre_Takeoff);
+    REQUIRE_FALSE(mode.leftover_reset_yaw_target_and_rate);
+    REQUIRE_FALSE(mode.leftover_init_wind_comp);
+    REQUIRE_FALSE(mode.leftover_loiter_init_target);
+    REQUIRE(mode.leftover_reset_I_smoothly);
+    REQUIRE(mode.leftover_d_relax);
+    REQUIRE(mode.leftover_roll_mode == PosHoldRpMode::PilotOverride);
+    REQUIRE(mode.leftover_pitch_mode == PosHoldRpMode::PilotOverride);
+    REQUIRE_FALSE(mode.leftover_reset_I);
+}
+
+TEST_CASE("ModePosHold leftover_run Takeoff flags start when not running",
+          "[copter][poshold]") {
+    ModePosHold mode;
+    mode.leftover_armed = true;
+    mode.leftover_takeoff_triggered = true;
+    mode.leftover_takeoff_running = false;
+    mode.leftover_run();
+    REQUIRE(mode.leftover_poshold_state == AltHoldModeState::Takeoff);
+    REQUIRE(mode.leftover_takeoff_start);
+    REQUIRE(mode.leftover_avoidance);
+    REQUIRE(mode.leftover_do_pilot_takeoff);
+    REQUIRE(mode.leftover_loiter_clear_pilot_accel);
+    REQUIRE(mode.leftover_loiter_init_target);
+    REQUIRE(mode.leftover_roll_mode == PosHoldRpMode::PilotOverride);
+    REQUIRE(mode.leftover_pitch_mode == PosHoldRpMode::PilotOverride);
+    REQUIRE_FALSE(mode.leftover_d_set_pos_from_climb);
+    REQUIRE_FALSE(mode.leftover_surface_tracking);
+    REQUIRE(mode.leftover_attitude);
+}
+
+TEST_CASE("ModePosHold leftover_run Takeoff skips start when already running",
+          "[copter][poshold]") {
+    ModePosHold mode;
+    mode.leftover_armed = true;
+    mode.leftover_takeoff_running = true;
+    mode.leftover_run();
+    REQUIRE(mode.leftover_poshold_state == AltHoldModeState::Takeoff);
+    REQUIRE_FALSE(mode.leftover_takeoff_start);
+    REQUIRE(mode.leftover_avoidance);
+    REQUIRE(mode.leftover_do_pilot_takeoff);
+    REQUIRE(mode.leftover_loiter_init_target);
+}
+
+TEST_CASE("ModePosHold leftover_run Flying flags", "[copter][poshold]") {
+    ModePosHold mode;
+    mode.leftover_armed = true;
+    mode.leftover_auto_armed = true;
+    mode.leftover_land_complete = false;
+    mode.leftover_spool_state = SpoolState::THROTTLE_UNLIMITED;
+    mode.leftover_run();
+    REQUIRE(mode.leftover_poshold_state == AltHoldModeState::Flying);
+    REQUIRE(mode.leftover_avoidance);
+    REQUIRE(mode.leftover_surface_tracking);
+    REQUIRE(mode.leftover_d_set_pos_from_climb);
+    REQUIRE_FALSE(mode.leftover_takeoff_start);
+    REQUIRE_FALSE(mode.leftover_loiter_init_target);
+    REQUIRE_FALSE(mode.leftover_reset_I);
+    REQUIRE(mode.leftover_attitude);
+    REQUIRE(mode.leftover_d_update_controller);
+}
+
+TEST_CASE("ModePosHold leftover_run clears stale state flags on re-entry",
+          "[copter][poshold]") {
+    ModePosHold mode;
+    mode.leftover_armed = true;
+    mode.leftover_auto_armed = true;
+    mode.leftover_land_complete = false;
+    mode.leftover_spool_state = SpoolState::THROTTLE_UNLIMITED;
+    mode.leftover_land_complete_maybe = true;
+    mode.leftover_run();
+    REQUIRE(mode.leftover_soften_for_landing);
+    REQUIRE(mode.leftover_d_set_pos_from_climb);
+
+    mode.leftover_land_complete_maybe = false;
+    mode.leftover_armed = false;
+    mode.leftover_spool_state = SpoolState::SHUT_DOWN;
+    mode.leftover_run();
+    REQUIRE_FALSE(mode.leftover_soften_for_landing);
+    REQUIRE_FALSE(mode.leftover_d_set_pos_from_climb);
+    REQUIRE(mode.leftover_poshold_state == AltHoldModeState::MotorStopped);
+    REQUIRE(mode.leftover_reset_I);
+    REQUIRE(mode.leftover_init_wind_comp);
 }
 
 TEST_CASE("ModePosHold run override calls leftover_run", "[copter][poshold]") {
     ModePosHold mode;
     mode.run();
     REQUIRE(mode.leftover_run_called);
+    REQUIRE(mode.leftover_d_set_max);
+    REQUIRE(mode.leftover_get_alt_hold_state);
+    REQUIRE(mode.leftover_attitude);
 }
 
 TEST_CASE("poshold leftover catalog remaining_count", "[copter][poshold][leftover]") {
-    REQUIRE(remaining_count() == 1);
-    REQUIRE(this_slice_count() == 4);
-    REQUIRE(on_main_count() == 2);
-    REQUIRE(out_of_scope_count() == 3);
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(this_slice_count() == 3);
+    REQUIRE(on_main_count() == 4);
+    REQUIRE(out_of_scope_count() == 4);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
     REQUIRE(completeness_has("ModeLoiter::init", PortStatus::kOnMain));
     REQUIRE(completeness_has("ModeLoiter::run", PortStatus::kOnMain));
     REQUIRE(completeness_has("ModePosHold::init", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("ModePosHold::run", PortStatus::kRemaining));
-    REQUIRE(completeness_has("ModeDrift::init", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("ModeDrift::run", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("ModePosHold::run", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("ModeDrift::init", PortStatus::kOnMain));
+    REQUIRE(completeness_has("ModeDrift::run", PortStatus::kOnMain));
+    REQUIRE(completeness_has("PosHold brake / wind_comp blend", PortStatus::kOutOfScope));
     REQUIRE(completeness_has("precision_loiter", PortStatus::kOutOfScope));
-    REQUIRE_FALSE(completeness_has("ModePosHold", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("ModePosHold::run", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("ModeDrift", PortStatus::kRemaining));
 }

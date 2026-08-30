@@ -5,7 +5,7 @@
 // flags through pilot lean / vel_ned / spool / attitude / throttle_assist
 // call-sites (~56-145). No real vel-rotate / braker / yaw-schedule math
 // (ADR-0012: no motors / pos_control / attitude_control objects).
-// ModePosHold::run remains catalog remaining.
+// Slice 5: catalog on main (ModePosHold::run closed).
 //
 // mode_from_mode_num still returns nullptr for DRIFT this slice.
 
