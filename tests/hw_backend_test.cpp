@@ -1,5 +1,5 @@
 // CPP-089: BoardKind + Watchdog stub (slice 1); LinuxHalContext (slice 2);
-// ChibiOSHalContext (slice 3).
+// ChibiOSHalContext (slice 3); ESP32HalContext (slice 4).
 
 #include <array>
 #include <cstdint>
@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/hal/board.hpp>
 #include <fwcpp/hal/chibios_hal.hpp>
+#include <fwcpp/hal/esp32_hal.hpp>
 #include <fwcpp/hal/hw_leftover.hpp>
 #include <fwcpp/hal/leftover.hpp>
 #include <fwcpp/hal/linux_hal.hpp>
@@ -15,6 +16,7 @@
 
 using fwcpp::hal::BoardKind;
 using fwcpp::hal::ChibiOSHalContext;
+using fwcpp::hal::ESP32HalContext;
 using fwcpp::hal::LinuxHalContext;
 using fwcpp::hal::PinMode;
 using fwcpp::hal::Watchdog;
@@ -189,10 +191,64 @@ TEST_CASE("ChibiOSHalContext GPIO/RC/storage/watchdog members exist and compile"
     REQUIRE(chibios.watchdog.is_initialized());
 }
 
+TEST_CASE("ESP32HalContext board_kind is kEsp32", "[hal][hw][esp32]") {
+    REQUIRE(ESP32HalContext::board_kind() == BoardKind::kEsp32);
+    ESP32HalContext esp32;
+    REQUIRE(esp32.board_kind() == BoardKind::kEsp32);
+    REQUIRE(kDefaultBoardKind == BoardKind::kSitl);
+}
+
+TEST_CASE("ESP32HalContext UART write/read round-trips via in-memory UartDriver",
+          "[hal][hw][esp32][uart]") {
+    ESP32HalContext esp32;
+    const std::uint8_t payload[4] = {0x10, 0x20, 0x30, 0x40};
+    REQUIRE(esp32.uart.write(payload, 4) == 4);
+
+    std::uint8_t drained[4] = {};
+    REQUIRE(esp32.uart.drain_tx(drained, 4) == 4);
+    REQUIRE(esp32.uart.inject_rx(drained, 4) == 4);
+
+    std::uint8_t out[4] = {};
+    REQUIRE(esp32.uart.read(out, 4) == 4);
+    REQUIRE(out[0] == 0x10);
+    REQUIRE(out[1] == 0x20);
+    REQUIRE(out[2] == 0x30);
+    REQUIRE(out[3] == 0x40);
+}
+
+TEST_CASE("ESP32HalContext GPIO/RC/storage/watchdog members exist and compile",
+          "[hal][hw][esp32]") {
+    ESP32HalContext esp32(250);
+    REQUIRE(esp32.now_ms() == 250);
+    esp32.set_now_ms(1000);
+    REQUIRE(esp32.now_ms() == 1000);
+
+    esp32.gpio.set_pin_mode(3, PinMode::kOutput);
+    esp32.gpio.write(3, 1);
+    REQUIRE(esp32.gpio.read(3) == 1);
+
+    esp32.rc_input.set_channel(0, 1500);
+    REQUIRE(esp32.rc_input.read(0) == 1500);
+
+    esp32.rc_output.force_safety_off();
+    esp32.rc_output.write(0, 1600);
+    REQUIRE(esp32.rc_output.read(0) == 1600);
+
+    const std::uint8_t bytes[3] = {1, 2, 3};
+    REQUIRE(esp32.storage.write_block(0, bytes, 3));
+    std::uint8_t readback[3] = {};
+    REQUIRE(esp32.storage.read_block(readback, 0, 3));
+    REQUIRE(readback[0] == 1);
+    REQUIRE(readback[2] == 3);
+
+    esp32.watchdog.init();
+    REQUIRE(esp32.watchdog.is_initialized());
+}
+
 TEST_CASE("hw leftover remaining_count matches catalog", "[hal][hw][leftover]") {
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 9);
-    REQUIRE(remaining_count() == 1);
+    REQUIRE(on_main_count() == 10);
+    REQUIRE(remaining_count() == 0);
     REQUIRE(out_of_scope_count() == 4);
     REQUIRE(hw_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -206,8 +262,8 @@ TEST_CASE("hw leftover remaining_count matches catalog", "[hal][hw][leftover]") 
     REQUIRE(completeness_has("SITL storage", PortStatus::kOnMain));
     REQUIRE(completeness_has("SITL Util", PortStatus::kOnMain));
     REQUIRE(completeness_has("Linux backend", PortStatus::kOnMain));
-    REQUIRE(completeness_has("ChibiOS peripherals", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("ESP32 backend", PortStatus::kRemaining));
+    REQUIRE(completeness_has("ChibiOS peripherals", PortStatus::kOnMain));
+    REQUIRE(completeness_has("ESP32 backend", PortStatus::kThisSlice));
     REQUIRE(completeness_has("ChibiOS peripheral drivers", PortStatus::kOutOfScope));
     REQUIRE(completeness_has("hwdef.dat", PortStatus::kOutOfScope));
     REQUIRE(completeness_has("DMA", PortStatus::kOutOfScope));

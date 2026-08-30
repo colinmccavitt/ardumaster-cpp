@@ -4,7 +4,8 @@
 // CPP-089: enum + SITL default (slice 1). LinuxHalContext (linux_hal.hpp)
 // is the compile-only Linux bundle (slice 2). ChibiOSHalContext
 // (chibios_hal.hpp) is the compile-only ChibiOS bundle (slice 3).
-// ESP32 remains (see hw_leftover.hpp).
+// ESP32HalContext (esp32_hal.hpp) is the compile-only ESP32 bundle
+// (slice 4).
 //
 // Upstream CONFIG_HAL_BOARD (AP_HAL_Boards.h) numeric IDs are SITL=3,
 // LINUX=7, CHIBIOS=10, ESP32=12. This port is not a preprocessor board
