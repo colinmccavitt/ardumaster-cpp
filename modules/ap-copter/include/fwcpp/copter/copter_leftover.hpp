@@ -1,13 +1,14 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 48 lands
-// init_ardupilot leftover through leftover leftover_esc_cal_radio_wait
+// (Copter.cpp / Copter.h / system.cpp). Slice 49 lands
+// init_ardupilot leftover through leftover leftover_esc_cal_setup
 // leftover leftover flag (notify/battery/baro + interlock +
 // init_rc_in + allocate_motors call + rc convert/init + init_rc_out
 // leftover + esc_cal brushed skip + ESC cal leftover flags +
 // leftover leftover_esc_cal_radio_wait leftover leftover flag +
 // leftover leftover_radio_wait_would_loop leftover leftover flag +
+// leftover leftover_esc_cal_setup leftover leftover flag +
 // initialised_params + failsafe register leftover + GPS/compass
 // leftover flags + attitude_sanity leftover + barometer.calibrate
 // leftover + mission/SmartRTL/logger leftover flags +
@@ -54,7 +55,7 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::throttle_loop", PortStatus::kOnMain,
      "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
     {"Copter::init_ardupilot", PortStatus::kThisSlice,
-     "init_ardupilot.hpp; leftover leftover through leftover leftover_esc_cal_radio_wait leftover leftover flag; leftover leftover_passthrough leftover leftover_/ leftover leftover_auto leftover leftover_bodies leftover leftover_remaining"},
+     "init_ardupilot.hpp; leftover leftover through leftover leftover_esc_cal_setup leftover leftover flag; leftover leftover_passthrough leftover leftover_/ leftover leftover_auto leftover leftover_bodies leftover leftover_remaining"},
     {"Copter::init_ardupilot rest", PortStatus::kRemaining,
      "ESC cal passthrough / auto bodies remaining"},
     {"Copter::run_rate_controller_main", PortStatus::kOnMain,

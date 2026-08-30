@@ -56,9 +56,12 @@
 //     throttle_control_in >= 950. After would_block: leftover
 //     leftover_esc_cal_passthrough flag (IF_THROTTLE_HIGH &&
 //     throttle >= 950, or ALWAYS); leftover leftover_esc_cal_auto
-//     flag iff ESCCAL_AUTO; leftover leftover_esc_cal_clear_after
+//     flag iff ESCCAL_AUTO; leftover leftover_esc_cal_setup leftover
+//     leftover flag (call site only) iff leftover leftover_esc_cal_passthrough
+//     OR leftover leftover_esc_cal_auto. leftover leftover_esc_cal_clear_after
 //     iff != DISABLED. Do not leftover leftover_esc_cal_passthrough
-//     / leftover leftover_esc_cal_auto bodies.
+//     / leftover leftover_esc_cal_auto leftover leftover_bodies.
+//     Do not leftover leftover_esc_calibration_setup leftover leftover_body.
 //   ap.initialised_params = true
 //   register_timer_failsafe(failsafe_check_static, 1000) — flag only
 //   gps.set_log_gps_bit(MASK_LOG_GPS) + gps.init() leftover flags
@@ -208,6 +211,7 @@ struct InitArdupilotEffects {
     bool esc_cal_notify{false};         // leftover leftover_AP_Notify + leftover leftover_gcs send_text
     bool esc_cal_passthrough{false};    // leftover flag only — no passthrough body
     bool esc_cal_auto{false};           // leftover flag only — no auto body
+    bool esc_cal_setup{false};          // leftover leftover flag — call site only, no setup body
     bool esc_cal_clear_after{false};    // leftover leftover_esc_calibrate.set_and_save(NONE)
     bool initialised_params{false};
     bool relay_init{false};             // remaining AP_RELAY
@@ -305,7 +309,10 @@ struct InitArdupilotEffects {
     // leftover leftover_esc_cal_notify is a leftover leftover flag
     // only (no AP_Notify / GCS). leftover leftover_esc_cal_passthrough
     // / leftover leftover_esc_cal_auto are flags only — no bodies.
-    // would_block is a flag only — do not while(1).
+    // leftover leftover_esc_cal_setup leftover leftover flag (call
+    // site only) iff leftover leftover_esc_cal_passthrough OR leftover
+    // leftover_esc_cal_auto — no leftover leftover_esc_calibration_setup
+    // leftover leftover_body. would_block is a flag only — do not while(1).
     if (in.is_brushed_pwm) {
         fx.esc_cal_skipped = true;
     } else {
@@ -336,6 +343,9 @@ struct InitArdupilotEffects {
             }
             if (in.esc_calibrate == ESCCalibrationModes::ESCCAL_AUTO) {
                 fx.esc_cal_auto = true;
+            }
+            if (fx.esc_cal_passthrough || fx.esc_cal_auto) {
+                fx.esc_cal_setup = true;
             }
             if (in.esc_calibrate != ESCCalibrationModes::ESCCAL_DISABLED) {
                 fx.esc_cal_clear_after = true;
