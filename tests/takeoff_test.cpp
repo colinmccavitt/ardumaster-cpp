@@ -1,11 +1,14 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <fwcpp/copter/land_detector.hpp>
 #include <fwcpp/copter/takeoff.hpp>
 
+using fwcpp::copter::TakeOffState;
 using fwcpp::copter::UserTakeoffEffects;
 using fwcpp::copter::UserTakeoffInputs;
 using fwcpp::copter::leftover_do_user_takeoff_U_m;
+using fwcpp::copter::leftover_takeoff_start_m;
 using fwcpp::copter::land_detector::PortStatus;
 using fwcpp::copter::land_detector::completeness_has;
 using fwcpp::copter::land_detector::remaining_count;
@@ -27,6 +30,15 @@ UserTakeoffInputs ok_inputs() {
 
 }  // namespace
 
+TEST_CASE("leftover_takeoff_start_m sets running start and complete alt",
+          "[copter][takeoff]") {
+    TakeOffState st{};
+    leftover_takeoff_start_m(st, 5.0f, 12.0f);
+    REQUIRE(st._running);
+    REQUIRE(st.start_alt == Catch::Approx(12.0f));
+    REQUIRE(st.complete_alt == Catch::Approx(17.0f));
+}
+
 TEST_CASE("leftover_do_user_takeoff_U_m success sets start_m and auto_armed",
           "[copter][takeoff]") {
     auto in = ok_inputs();
@@ -36,13 +48,41 @@ TEST_CASE("leftover_do_user_takeoff_U_m success sets start_m and auto_armed",
     REQUIRE(fx.set_auto_armed);
 }
 
+TEST_CASE("leftover_do_user_takeoff_U_m success wires start_m when state given",
+          "[copter][takeoff]") {
+    auto in = ok_inputs();
+    in.takeoff_alt_m = 8.0f;
+    UserTakeoffEffects fx{};
+    TakeOffState st{};
+    REQUIRE(leftover_do_user_takeoff_U_m(in, fx, &st, 3.5f));
+    REQUIRE(fx.leftover_takeoff_start_m);
+    REQUIRE(fx.set_auto_armed);
+    REQUIRE(st._running);
+    REQUIRE(st.start_alt == Catch::Approx(3.5f));
+    REQUIRE(st.complete_alt == Catch::Approx(11.5f));
+}
+
+TEST_CASE("leftover_do_user_takeoff_U_m success without state leaves TakeOffState",
+          "[copter][takeoff]") {
+    auto in = ok_inputs();
+    UserTakeoffEffects fx{};
+    TakeOffState st{};
+    REQUIRE(leftover_do_user_takeoff_U_m(in, fx));
+    REQUIRE(fx.leftover_takeoff_start_m);
+    REQUIRE_FALSE(st._running);
+    REQUIRE(st.start_alt == Catch::Approx(0.0f));
+    REQUIRE(st.complete_alt == Catch::Approx(0.0f));
+}
+
 TEST_CASE("leftover_do_user_takeoff_U_m rejects !armed", "[copter][takeoff]") {
     auto in = ok_inputs();
     in.motors_armed = false;
     UserTakeoffEffects fx{};
-    REQUIRE_FALSE(leftover_do_user_takeoff_U_m(in, fx));
+    TakeOffState st{};
+    REQUIRE_FALSE(leftover_do_user_takeoff_U_m(in, fx, &st, 1.0f));
     REQUIRE_FALSE(fx.leftover_takeoff_start_m);
     REQUIRE_FALSE(fx.set_auto_armed);
+    REQUIRE_FALSE(st._running);
 }
 
 TEST_CASE("leftover_do_user_takeoff_U_m rejects !land_complete", "[copter][takeoff]") {
@@ -90,14 +130,20 @@ TEST_CASE("leftover_do_user_takeoff_U_m allows interlock enabled when using",
     in.using_interlock = true;
     in.interlock = true;
     UserTakeoffEffects fx{};
-    REQUIRE(leftover_do_user_takeoff_U_m(in, fx));
+    TakeOffState st{};
+    REQUIRE(leftover_do_user_takeoff_U_m(in, fx, &st, 2.0f));
     REQUIRE(fx.leftover_takeoff_start_m);
     REQUIRE(fx.set_auto_armed);
+    REQUIRE(st._running);
+    REQUIRE(st.start_alt == Catch::Approx(2.0f));
+    REQUIRE(st.complete_alt == Catch::Approx(12.0f));
 }
 
-TEST_CASE("takeoff helpers catalog moved to this slice", "[copter][takeoff][leftover]") {
-    REQUIRE(remaining_count() == 4);
-    REQUIRE(this_slice_count() == 4);
+TEST_CASE("takeoff start_m catalog moved to this slice", "[copter][takeoff][leftover]") {
+    REQUIRE(remaining_count() == 5);
+    REQUIRE(this_slice_count() == 5);
     REQUIRE(completeness_has("takeoff helpers", PortStatus::kThisSlice));
-    REQUIRE_FALSE(completeness_has("takeoff helpers", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Mode::_TakeOff::start_m", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("do_pilot_takeoff_ms body", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("Mode::_TakeOff::start_m", PortStatus::kRemaining));
 }

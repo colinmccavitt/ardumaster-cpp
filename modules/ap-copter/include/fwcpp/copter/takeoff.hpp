@@ -1,15 +1,16 @@
 #pragma once
 
 // CCP-041 takeoff helper leftover — ArduCopter/takeoff.cpp (Plane-4.7.0).
-// Thin leftover for Mode::do_user_takeoff_U_m (~18-47) gate chain.
-// No motors / flightmode / current_loc / Mode::_TakeOff objects (ADR-0012):
-// inject armed, land_complete, has_user_takeoff, altitudes, interlock.
+// Thin leftover for Mode::do_user_takeoff_U_m (~18-47) gate chain and
+// Mode::_TakeOff::start_m (~51-57). No motors / flightmode / current_loc /
+// pos_control objects (ADR-0012): inject armed, land_complete,
+// has_user_takeoff, altitudes, interlock, pos_estimate_U_m.
 //
-// do_user_takeoff_start_m → leftover_takeoff_start_m flag only; body of
-// Mode::_TakeOff::start_m (~51-57) remains. set_auto_armed is an effect flag.
+// do_user_takeoff_start_m → leftover_takeoff_start_m (body this slice).
+// set_auto_armed is an effect flag. do_pilot_takeoff_ms body remains.
 //
-// Catalog row "takeoff helpers" lives in land_detector.hpp (CCP-041 shared
-// catalog); this header is the leftover body for that row.
+// Catalog rows live in land_detector.hpp (CCP-041 shared catalog); this
+// header is the leftover body for takeoff helpers / start_m.
 
 namespace fwcpp::copter {
 
@@ -31,10 +32,29 @@ struct UserTakeoffEffects {
     bool set_auto_armed{false};
 };
 
+// Mode::_TakeOff state fields used by start_m / do_pilot_takeoff_ms.
+struct TakeOffState {
+    bool _running{false};
+    float start_alt{0.0f};
+    float complete_alt{0.0f};
+};
+
+// Leftover Mode::_TakeOff::start_m (takeoff.cpp ~51-57).
+// _running = true; start_alt = pos_estimate_U; complete_alt = start + alt_m.
+inline void leftover_takeoff_start_m(TakeOffState& state, float alt_m,
+                                     float pos_estimate_U_m) {
+    state._running = true;
+    state.start_alt = pos_estimate_U_m;
+    state.complete_alt = pos_estimate_U_m + alt_m;
+}
+
 // Leftover Mode::do_user_takeoff_U_m (takeoff.cpp ~18-47). Gate chain then
-// flag start_m + set_auto_armed. Returns false on any gate failure.
-[[nodiscard]] inline bool leftover_do_user_takeoff_U_m(const UserTakeoffInputs& in,
-                                                       UserTakeoffEffects& fx) {
+// flag start_m + set_auto_armed. When state != nullptr, also runs
+// leftover_takeoff_start_m(state, takeoff_alt_m, pos_estimate_U_m).
+// Returns false on any gate failure.
+[[nodiscard]] inline bool leftover_do_user_takeoff_U_m(
+    const UserTakeoffInputs& in, UserTakeoffEffects& fx,
+    TakeOffState* state = nullptr, float pos_estimate_U_m = 0.0f) {
     fx.leftover_takeoff_start_m = false;
     fx.set_auto_armed = false;
 
@@ -58,8 +78,11 @@ struct UserTakeoffEffects {
         return false;
     }
 
-    // do_user_takeoff_start_m: flag only; Mode::_TakeOff::start_m body remains.
+    // do_user_takeoff_start_m → leftover_takeoff_start_m body.
     fx.leftover_takeoff_start_m = true;
+    if (state != nullptr) {
+        leftover_takeoff_start_m(*state, in.takeoff_alt_m, pos_estimate_U_m);
+    }
     fx.set_auto_armed = true;
     return true;
 }
