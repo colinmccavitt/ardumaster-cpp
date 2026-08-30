@@ -4,9 +4,12 @@
 #include <fwcpp/copter/land_detector.hpp>
 #include <fwcpp/copter/takeoff.hpp>
 
+using fwcpp::copter::PilotTakeoffEffects;
+using fwcpp::copter::PilotTakeoffInputs;
 using fwcpp::copter::TakeOffState;
 using fwcpp::copter::UserTakeoffEffects;
 using fwcpp::copter::UserTakeoffInputs;
+using fwcpp::copter::leftover_do_pilot_takeoff_ms;
 using fwcpp::copter::leftover_do_user_takeoff_U_m;
 using fwcpp::copter::leftover_takeoff_start_m;
 using fwcpp::copter::land_detector::PortStatus;
@@ -139,11 +142,107 @@ TEST_CASE("leftover_do_user_takeoff_U_m allows interlock enabled when using",
     REQUIRE(st.complete_alt == Catch::Approx(12.0f));
 }
 
-TEST_CASE("takeoff start_m catalog moved to this slice", "[copter][takeoff][leftover]") {
-    REQUIRE(remaining_count() == 5);
-    REQUIRE(this_slice_count() == 5);
+TEST_CASE("leftover_do_pilot_takeoff_ms returns when not running",
+          "[copter][takeoff]") {
+    TakeOffState st{};
+    PilotTakeoffInputs in{};
+    in.land_complete = true;
+    in.clear_land_complete = true;
+    PilotTakeoffEffects fx{};
+    leftover_do_pilot_takeoff_ms(st, in, fx);
+    REQUIRE_FALSE(fx.set_throttle_out);
+    REQUIRE_FALSE(fx.D_init_controller);
+    REQUIRE_FALSE(fx.set_land_complete_false);
+    REQUIRE_FALSE(fx.input_pos_vel_accel_D);
+    REQUIRE_FALSE(fx.takeoff_stopped);
+    REQUIRE_FALSE(st._running);
+}
+
+TEST_CASE("leftover_do_pilot_takeoff_ms land_complete sets throttle and D_init",
+          "[copter][takeoff]") {
+    TakeOffState st{};
+    leftover_takeoff_start_m(st, 10.0f, 0.0f);
+    PilotTakeoffInputs in{};
+    in.land_complete = true;
+    in.clear_land_complete = false;
+    PilotTakeoffEffects fx{};
+    leftover_do_pilot_takeoff_ms(st, in, fx);
+    REQUIRE(fx.set_throttle_out);
+    REQUIRE(fx.D_init_controller);
+    REQUIRE_FALSE(fx.set_land_complete_false);
+    REQUIRE_FALSE(fx.input_pos_vel_accel_D);
+    REQUIRE(st._running);
+}
+
+TEST_CASE("leftover_do_pilot_takeoff_ms land_complete clear inject clears land",
+          "[copter][takeoff]") {
+    TakeOffState st{};
+    leftover_takeoff_start_m(st, 10.0f, 1.0f);
+    PilotTakeoffInputs in{};
+    in.land_complete = true;
+    in.clear_land_complete = true;
+    PilotTakeoffEffects fx{};
+    leftover_do_pilot_takeoff_ms(st, in, fx);
+    REQUIRE(fx.set_throttle_out);
+    REQUIRE(fx.D_init_controller);
+    REQUIRE(fx.set_land_complete_false);
+    REQUIRE(st._running);
+}
+
+TEST_CASE("leftover_do_pilot_takeoff_ms climb path commands pos_vel",
+          "[copter][takeoff]") {
+    TakeOffState st{};
+    leftover_takeoff_start_m(st, 10.0f, 0.0f);
+    PilotTakeoffInputs in{};
+    in.land_complete = false;
+    in.pilot_climb_rate_ms = 2.0f;
+    in.pos_desired_U_m = 1.0f;  // far below complete_alt
+    PilotTakeoffEffects fx{};
+    leftover_do_pilot_takeoff_ms(st, in, fx);
+    REQUIRE(fx.input_pos_vel_accel_D);
+    REQUIRE_FALSE(fx.set_throttle_out);
+    REQUIRE_FALSE(fx.D_init_controller);
+    REQUIRE_FALSE(fx.takeoff_stopped);
+    REQUIRE(st._running);
+}
+
+TEST_CASE("leftover_do_pilot_takeoff_ms stops on negative climb rate",
+          "[copter][takeoff]") {
+    TakeOffState st{};
+    leftover_takeoff_start_m(st, 10.0f, 0.0f);
+    PilotTakeoffInputs in{};
+    in.land_complete = false;
+    in.pilot_climb_rate_ms = -0.1f;
+    in.pos_desired_U_m = 1.0f;
+    PilotTakeoffEffects fx{};
+    leftover_do_pilot_takeoff_ms(st, in, fx);
+    REQUIRE(fx.input_pos_vel_accel_D);
+    REQUIRE(fx.takeoff_stopped);
+    REQUIRE_FALSE(st._running);
+}
+
+TEST_CASE("leftover_do_pilot_takeoff_ms stops when near complete alt",
+          "[copter][takeoff]") {
+    TakeOffState st{};
+    leftover_takeoff_start_m(st, 10.0f, 0.0f);  // complete_alt = 10
+    PilotTakeoffInputs in{};
+    in.land_complete = false;
+    in.pilot_climb_rate_ms = 1.0f;
+    // (complete - start) * 0.999 = 9.99; pos_desired - start = 9.995 → stop
+    in.pos_desired_U_m = 9.995f;
+    PilotTakeoffEffects fx{};
+    leftover_do_pilot_takeoff_ms(st, in, fx);
+    REQUIRE(fx.input_pos_vel_accel_D);
+    REQUIRE(fx.takeoff_stopped);
+    REQUIRE_FALSE(st._running);
+}
+
+TEST_CASE("do_pilot_takeoff_ms catalog moved to this slice",
+          "[copter][takeoff][leftover]") {
+    REQUIRE(remaining_count() == 4);
+    REQUIRE(this_slice_count() == 6);
     REQUIRE(completeness_has("takeoff helpers", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Mode::_TakeOff::start_m", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("do_pilot_takeoff_ms body", PortStatus::kRemaining));
-    REQUIRE_FALSE(completeness_has("Mode::_TakeOff::start_m", PortStatus::kRemaining));
+    REQUIRE(completeness_has("do_pilot_takeoff_ms body", PortStatus::kThisSlice));
+    REQUIRE_FALSE(completeness_has("do_pilot_takeoff_ms body", PortStatus::kRemaining));
 }
