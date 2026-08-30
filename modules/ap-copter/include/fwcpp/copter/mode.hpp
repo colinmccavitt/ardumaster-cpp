@@ -32,9 +32,10 @@
 // ModeRTL::init leftover (home_is_set gate + leftover wp_and_spline/STARTING
 // flags) is on main. leftover leftover_precland_statemachine remaining.
 // ModeRTL::run leftover (armed gate + STARTING leftover leftover_build_path /
-// leftover leftover_climb_start + INITIAL_CLIMB leftover leftover_return_start
-// flags) is this slice. leftover leftover_loiterathome_start /
-// leftover leftover_climb_return_run remaining. ModeLand, ModeGuided::run body,
+// leftover leftover_climb_start + INITIAL_CLIMB leftover leftover_return_start +
+// RETURN_HOME leftover leftover_loiterathome_start flags) is this slice.
+// leftover leftover_land_start / leftover leftover_climb_return_run remaining.
+// ModeLand, ModeGuided::run body,
 // land_run_normal_or_precland body, land_run_horizontal_control body, and
 // auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
@@ -574,10 +575,11 @@ public:
 // (mode_rtl.cpp ~80-105). home_is_set / failsafe.terrain injected.
 // leftover leftover_precland_statemachine remaining. leftover leftover_run
 // is ModeRTL::run (mode.h run() { return run(true); } + mode_rtl.cpp
-// ~132-147 armed gate + STARTING leftover leftover_build_path /
-// leftover leftover_climb_start + INITIAL_CLIMB leftover leftover_return_start
-// flags). Do not dump return_start / climb_return_run / loiterathome_start /
-// LAND. ModeAuto leftover leftover_rtl_run does not call leftover leftover_run.
+// ~132-150 armed gate + STARTING leftover leftover_build_path /
+// leftover leftover_climb_start + INITIAL_CLIMB leftover leftover_return_start +
+// RETURN_HOME leftover leftover_loiterathome_start flags). Do not dump
+// loiterathome_start / climb_return_run / land_start / descent_start / LAND.
+// ModeAuto leftover leftover_rtl_run does not call leftover leftover_run.
 class ModeRTL : public Mode {
 public:
     enum class SubMode : std::uint8_t {
@@ -610,12 +612,15 @@ public:
     // only; do not change _state to INITIAL_CLIMB; climb_start body remaining).
     bool leftover_build_path{false};
     bool leftover_climb_start{false};
-    // leftover leftover_return_start (INITIAL_CLIMB, this slice; flag only;
-    // return_start body remaining). leftover leftover_climb_return_run /
-    // leftover leftover_loiterathome_start stay false (remaining).
+    // leftover leftover_return_start (INITIAL_CLIMB; flag only). leftover
+    // leftover leftover_loiterathome_start (RETURN_HOME, this slice; flag
+    // only; loiterathome_start body remaining). leftover leftover_climb_return_run /
+    // leftover leftover_land_start / leftover leftover_descent_start stay false.
     bool leftover_return_start{false};
     bool leftover_climb_return_run{false};
     bool leftover_loiterathome_start{false};
+    bool leftover_land_start{false};
+    bool leftover_descent_start{false};
     // leftover leftover_rtl_run_disarm_on_land records leftover leftover_run
     // argument (true from run()).
     bool leftover_rtl_run_disarm_on_land{false};
@@ -637,18 +642,21 @@ public:
         leftover_prec_land_active = false;
         return true;
     }
-    // Leftover ModeRTL::run(bool) (mode_rtl.cpp ~132-147). Resets leftover
+    // Leftover ModeRTL::run(bool) (mode_rtl.cpp ~132-150). Resets leftover
     // leftover_build_path / leftover leftover_climb_start / leftover
-    // leftover_return_start at entry so a later !armed tick or other SubMode
-    // does not leave stale true flags. Records leftover
-    // leftover_rtl_run_disarm_on_land. Armed gate then STARTING leftover
-    // leftover leftover_build_path / leftover leftover_climb_start and
-    // INITIAL_CLIMB leftover leftover leftover_return_start. Do not handle
-    // RETURN_HOME / loiterathome_start. Do not run the second switch.
+    // leftover_return_start / leftover leftover_loiterathome_start at entry so
+    // a later !armed tick or other SubMode does not leave stale true flags.
+    // Records leftover leftover_rtl_run_disarm_on_land. Armed gate then
+    // STARTING leftover leftover leftover_build_path / leftover leftover_climb_start,
+    // INITIAL_CLIMB leftover leftover leftover_return_start, and RETURN_HOME
+    // leftover leftover leftover_loiterathome_start. Do not handle
+    // LOITER_AT_HOME / land_start / descent_start. Do not change _state.
+    // Do not run the second switch.
     void leftover_run(bool disarm_on_land) {
         leftover_build_path = false;
         leftover_climb_start = false;
         leftover_return_start = false;
+        leftover_loiterathome_start = false;
         leftover_rtl_run_disarm_on_land = disarm_on_land;
         if (!motors_armed) {
             return;
@@ -659,6 +667,9 @@ public:
         }
         if (_state_complete && _state == SubMode::INITIAL_CLIMB) {
             leftover_return_start = true;
+        }
+        if (_state_complete && _state == SubMode::RETURN_HOME) {
+            leftover_loiterathome_start = true;
         }
     }
     // upstream mode.h: run() { return run(true); }
