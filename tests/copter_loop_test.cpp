@@ -38,6 +38,8 @@ using fwcpp::copter::InitSimpleBearingInputs;
 using fwcpp::copter::SimpleMode;
 using fwcpp::copter::UpdateSimpleModeInputs;
 using fwcpp::copter::UpdateSuperSimpleBearingInputs;
+using fwcpp::copter::AutoDisarmCheckInputs;
+using fwcpp::copter::DesiredSpoolState;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -73,6 +75,7 @@ using fwcpp::copter::ap_value;
 using fwcpp::copter::init_simple_bearing;
 using fwcpp::copter::update_simple_mode;
 using fwcpp::copter::update_super_simple_bearing;
+using fwcpp::copter::auto_disarm_check;
 using fwcpp::copter::kSuperSimpleRadiusM;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
@@ -99,10 +102,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 22", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 9);
+TEST_CASE("catalog remaining_count stays open after slice 23", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 8);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 26);
+    REQUIRE(on_main_count() == 27);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -132,8 +135,9 @@ TEST_CASE("catalog remaining_count stays open after slice 22", "[copter][leftove
     REQUIRE(completeness_has("Copter::ap_value", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::init_simple_bearing", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_simple_mode", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::auto_disarm_check", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::auto_disarm_check", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::standby_update", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -1728,4 +1732,117 @@ TEST_CASE("update_super_simple_bearing writes last_bearing and reverse-home trig
     const float angle_rad = fx.super_simple_last_bearing_rad + fwcpp::math::radians(180.0f);
     REQUIRE(fx.super_simple_cos_yaw == std::cos(angle_rad));
     REQUIRE(fx.super_simple_sin_yaw == std::sin(angle_rad));
+}
+
+namespace {
+
+AutoDisarmCheckInputs armed_landed_idle() {
+    AutoDisarmCheckInputs in{};
+    in.tnow_ms = 5000;
+    in.armed = true;
+    in.disarm_delay_s = 1;
+    in.mode_is_throw = false;
+    in.desired_spool = DesiredSpoolState::GROUND_IDLE;
+    in.spool_state = SpoolState::GROUND_IDLE;
+    in.using_interlock = false;
+    in.interlock = true;
+    in.emergency_stop = false;
+    in.has_manual_throttle = true;
+    in.sprung_throttle_stick = false;
+    in.throttle_zero = true;
+    in.land_complete = true;
+    in.auto_disarm_begin = 4000;
+    return in;
+}
+
+}  // namespace
+
+TEST_CASE("auto_disarm_check disarmed / delay 0 / THROW reset begin",
+          "[copter][auto_disarm_check]") {
+    AutoDisarmCheckInputs in = armed_landed_idle();
+    in.armed = false;
+    auto fx = auto_disarm_check(in);
+    REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
+    REQUIRE_FALSE(fx.disarm);
+
+    in = armed_landed_idle();
+    in.disarm_delay_s = 0;
+    fx = auto_disarm_check(in);
+    REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
+    REQUIRE_FALSE(fx.disarm);
+
+    in = armed_landed_idle();
+    in.disarm_delay_s = -3;
+    fx = auto_disarm_check(in);
+    REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
+    REQUIRE_FALSE(fx.disarm);
+
+    in = armed_landed_idle();
+    in.mode_is_throw = true;
+    fx = auto_disarm_check(in);
+    REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
+    REQUIRE_FALSE(fx.disarm);
+}
+
+TEST_CASE("auto_disarm_check spool above GROUND_IDLE resets begin",
+          "[copter][auto_disarm_check]") {
+    AutoDisarmCheckInputs in = armed_landed_idle();
+    in.desired_spool = DesiredSpoolState::THROTTLE_UNLIMITED;
+    auto fx = auto_disarm_check(in);
+    REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
+    REQUIRE_FALSE(fx.disarm);
+
+    in = armed_landed_idle();
+    in.spool_state = SpoolState::SPOOLING_UP;
+    fx = auto_disarm_check(in);
+    REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
+    REQUIRE_FALSE(fx.disarm);
+}
+
+TEST_CASE("auto_disarm_check interlock path halves delay",
+          "[copter][auto_disarm_check]") {
+    AutoDisarmCheckInputs in = armed_landed_idle();
+    in.using_interlock = true;
+    in.interlock = false;
+    in.auto_disarm_begin = 4000;
+    in.tnow_ms = 4499;
+    auto fx = auto_disarm_check(in);
+    REQUIRE_FALSE(fx.disarm);
+    REQUIRE(fx.auto_disarm_begin == 4000);
+
+    in.tnow_ms = 4500;
+    fx = auto_disarm_check(in);
+    REQUIRE(fx.disarm);
+    REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
+
+    in = armed_landed_idle();
+    in.emergency_stop = true;
+    in.auto_disarm_begin = 4000;
+    in.tnow_ms = 4500;
+    fx = auto_disarm_check(in);
+    REQUIRE(fx.disarm);
+    REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
+}
+
+TEST_CASE("auto_disarm_check landed thr_low elapsed disarms leftover",
+          "[copter][auto_disarm_check]") {
+    AutoDisarmCheckInputs in = armed_landed_idle();
+    in.tnow_ms = 4999;
+    auto fx = auto_disarm_check(in);
+    REQUIRE_FALSE(fx.disarm);
+    REQUIRE(fx.auto_disarm_begin == 4000);
+
+    in.tnow_ms = 5000;
+    fx = auto_disarm_check(in);
+    REQUIRE(fx.disarm);
+    REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
+}
+
+TEST_CASE("auto_disarm_check !land_complete resets begin",
+          "[copter][auto_disarm_check]") {
+    AutoDisarmCheckInputs in = armed_landed_idle();
+    in.land_complete = false;
+    const auto fx = auto_disarm_check(in);
+    REQUIRE_FALSE(fx.disarm);
+    REQUIRE(fx.auto_disarm_begin == in.tnow_ms);
 }
