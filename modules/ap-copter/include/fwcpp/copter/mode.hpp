@@ -14,8 +14,8 @@
 // FlightModeContext holds a non-owning Mode* into that table.
 // ADR-0012: header-only, C++20, no exceptions, no AP::, no flight-path alloc.
 // ModeStabilize/Acro/AltHold run bodies are CCP-039. ModeAuto::init leftover
-// is auto_init (this slice). ModeAuto::run/exit and RTL/LAND stay later.
-// update_flight_mode is CCP-035 leftover.
+// is auto_init (on main). ModeAuto::exit leftover is this slice. ModeAuto::run
+// and RTL/LAND stay later. update_flight_mode is CCP-035 leftover.
 
 #include <fwcpp/copter/mode_reason.hpp>
 #include <fwcpp/copter/pilot_input.hpp>
@@ -98,8 +98,9 @@ public:
 
 // Stub: mode_number AUTO_RTL if auto_RTL else AUTO. requires_position is
 // true this slice (upstream NAV_ATTITUDE_TIME exception is leftover).
-// init leftover is auto_init (mode_auto.cpp ~23-68). run/exit, SubMode,
-// and the separate jump_to_landing / return_path_start AUTO_RTL APIs stay later.
+// init leftover is auto_init (mode_auto.cpp ~23-68). exit leftover is
+// ModeAuto::exit (mode_auto.cpp ~71-81). run, SubMode, and the separate
+// jump_to_landing / return_path_start AUTO_RTL APIs stay later.
 class ModeAuto : public Mode {
 public:
     bool auto_RTL{false};
@@ -110,6 +111,12 @@ public:
     bool speed_override_cleared{false};
     bool guided_limit_clear{false};
     bool land_repo_active_cleared{false};
+    // Injected mission.state() == MISSION_RUNNING (no AP_Mission).
+    bool mission_running{false};
+    // Leftover mission.stop() when leaving AUTO while running.
+    bool mission_stop{false};
+    // HAL_MOUNT_ENABLED camera_mount.set_mode_to_default remaining.
+    bool camera_mount_default{false};
 
     ModeAuto() = default;
 
@@ -118,6 +125,11 @@ public:
     }
     // enter_mode calls auto_init for AUTO / AUTO_RTL; this stub stays unused.
     [[nodiscard]] bool init(bool /*ignore_checks*/) override { return true; }
+    // enter_mode already calls current->exit() after takeoff_stop.
+    void exit() override {
+        mission_stop = mission_running;
+        auto_RTL = false;
+    }
     void run() override {}
     [[nodiscard]] bool requires_position() const override { return true; }
     [[nodiscard]] bool has_manual_throttle() const override { return false; }

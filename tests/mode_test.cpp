@@ -648,6 +648,55 @@ TEST_CASE("AUTO init ROI leftover sets HOLD", "[copter][mode]") {
     REQUIRE(f.table.mode_auto.waiting_to_start);
 }
 
+TEST_CASE("leave AUTO with mission running records mission_stop", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.mission_running = true;
+    f.table.mode_auto.auto_RTL = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::STABILIZE, ModeReason::RC_COMMAND, {}));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE(f.table.mode_auto.mission_stop);
+    REQUIRE_FALSE(f.table.mode_auto.auto_RTL);
+    REQUIRE_FALSE(f.table.mode_auto.camera_mount_default);
+}
+
+TEST_CASE("leave AUTO without mission running clears auto_RTL", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.mission_running = false;
+    f.table.mode_auto.auto_RTL = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::STABILIZE, ModeReason::RC_COMMAND, {}));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE_FALSE(f.table.mode_auto.mission_stop);
+    REQUIRE_FALSE(f.table.mode_auto.auto_RTL);
+    REQUIRE_FALSE(f.table.mode_auto.camera_mount_default);
+}
+
+TEST_CASE("AUTO_RTL then leave clears auto_RTL", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.jump_to_closest_mission_leg = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.table.mode_auto.auto_RTL);
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::STABILIZE, ModeReason::RC_COMMAND, {}));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE_FALSE(f.table.mode_auto.auto_RTL);
+    REQUIRE_FALSE(f.table.mode_auto.mission_stop);
+}
+
+TEST_CASE("Stabilize and AltHold exit are no-ops", "[copter][mode]") {
+    Fixture f;
+    REQUIRE_FALSE(f.table.mode_auto.mission_stop);
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, {}));
+    REQUIRE(f.ctx.current == &f.table.althold);
+    REQUIRE_FALSE(f.table.mode_auto.mission_stop);
+    REQUIRE_FALSE(f.table.mode_auto.auto_RTL);
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::STABILIZE, ModeReason::RC_COMMAND, {}));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE_FALSE(f.table.mode_auto.mission_stop);
+    REQUIRE_FALSE(f.table.mode_auto.auto_RTL);
+}
+
 TEST_CASE("AUTO_RTL jump path still calls AUTO init", "[copter][mode]") {
     Fixture f;
     SetModeInputs in{};
@@ -663,7 +712,7 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 15);
+    REQUIRE(mode_on_main_count() == 16);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -678,7 +727,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("acro_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("althold_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("remaining mode bodies", ModePortStatus::kRemaining));
-    REQUIRE(mode_completeness_has("ModeAuto::init", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeAuto::init", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeAuto::exit", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));
