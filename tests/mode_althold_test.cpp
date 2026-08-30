@@ -96,6 +96,7 @@ TEST_CASE("invalid RC zeros climb and lean; input_euler_angle still invoked", "[
     AttitudeTargetState state = fresh_state();
     const auto out = althold_run(in, state);
 
+    REQUIRE(out.update_simple_mode);
     REQUIRE(out.lean.roll_rad == 0.0f);
     REQUIRE(out.lean.pitch_rad == 0.0f);
     REQUIRE(out.target_yaw_rate_rads == 0.0f);
@@ -173,6 +174,7 @@ TEST_CASE("!armed SHUT_DOWN spool -> MotorStopped", "[copter][althold]") {
     AttitudeTargetState state = fresh_state();
     const auto out = althold_run(in, state);
 
+    REQUIRE(out.update_simple_mode);
     REQUIRE(out.state == AltHoldModeState::MotorStopped);
     REQUIRE(out.desired_spool == DesiredSpoolState::SHUT_DOWN);
     REQUIRE(out.desired_spool_set);
@@ -183,6 +185,46 @@ TEST_CASE("!armed SHUT_DOWN spool -> MotorStopped", "[copter][althold]") {
     REQUIRE(out.D_relax_throttle == 0.0f);
     REQUIRE_FALSE(out.D_set_pos_target_from_climb_rate);
     REQUIRE(out.input_euler_angle_invoked);
+}
+
+TEST_CASE("Takeoff !running sets takeoff_start avoidance do_pilot_takeoff", "[copter][althold]") {
+    auto in = base_in();
+    in.armed = true;
+    in.takeoff_running = false;
+    in.takeoff_triggered = true;
+    in.auto_armed = true;
+    in.land_complete = false;
+    in.spool_state = SpoolState::THROTTLE_UNLIMITED;
+    AttitudeTargetState state = fresh_state();
+    const auto out = althold_run(in, state);
+
+    REQUIRE(out.update_simple_mode);
+    REQUIRE(out.state == AltHoldModeState::Takeoff);
+    REQUIRE(out.takeoff_start);
+    REQUIRE(out.avoidance);
+    REQUIRE(out.do_pilot_takeoff);
+    REQUIRE_FALSE(out.D_set_pos_target_from_climb_rate);
+    REQUIRE_FALSE(out.surface_tracking);
+    REQUIRE(out.D_update_controller);
+    REQUIRE(out.input_euler_angle_invoked);
+}
+
+TEST_CASE("Takeoff already running skips takeoff_start", "[copter][althold]") {
+    auto in = base_in();
+    in.armed = true;
+    in.takeoff_running = true;
+    in.takeoff_triggered = false;
+    in.auto_armed = true;
+    in.land_complete = false;
+    in.spool_state = SpoolState::THROTTLE_UNLIMITED;
+    AttitudeTargetState state = fresh_state();
+    const auto out = althold_run(in, state);
+
+    REQUIRE(out.update_simple_mode);
+    REQUIRE(out.state == AltHoldModeState::Takeoff);
+    REQUIRE_FALSE(out.takeoff_start);
+    REQUIRE(out.avoidance);
+    REQUIRE(out.do_pilot_takeoff);
 }
 
 TEST_CASE("flying path records D_set_pos_target_from_climb_rate", "[copter][althold]") {
@@ -197,6 +239,7 @@ TEST_CASE("flying path records D_set_pos_target_from_climb_rate", "[copter][alth
     AttitudeTargetState state = fresh_state();
     const auto out = althold_run(in, state);
 
+    REQUIRE(out.update_simple_mode);
     REQUIRE(out.state == AltHoldModeState::Flying);
     REQUIRE(out.desired_spool == DesiredSpoolState::THROTTLE_UNLIMITED);
     REQUIRE(out.D_set_pos_target_from_climb_rate);
@@ -211,20 +254,23 @@ TEST_CASE("flying path records D_set_pos_target_from_climb_rate", "[copter][alth
 }
 
 TEST_CASE("leftover remaining_count is not zero", "[copter][althold][leftover]") {
-    REQUIRE(remaining_count() > 0);
-    REQUIRE(this_slice_count() == 5);
+    REQUIRE(remaining_count() == 3);
+    REQUIRE(this_slice_count() == 7);
     REQUIRE(on_main_count() == 2);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("althold_run", PortStatus::kThisSlice));
     REQUIRE(completeness_has("get_alt_hold_state_D_ms", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("update_simple_mode", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("takeoff", PortStatus::kThisSlice));
     REQUIRE(completeness_has("stabilize_run", PortStatus::kOnMain));
     REQUIRE(completeness_has("acro_run", PortStatus::kOnMain));
-    REQUIRE(completeness_has("takeoff", PortStatus::kRemaining));
     REQUIRE(completeness_has("avoidance", PortStatus::kRemaining));
     REQUIRE(completeness_has("surface_tracking", PortStatus::kRemaining));
     REQUIRE(completeness_has("D_update_controller", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("takeoff", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("update_simple_mode", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("AUTO_RTL", PortStatus::kRemaining));
 }
 

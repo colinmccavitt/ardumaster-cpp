@@ -6,13 +6,15 @@
 // (ADR-0012). Tests inject sticks, spool, land/takeoff flags, and
 // kinematics state.
 //
-// This slice: inject speed_dn/speed_up and record D_set_max_speed_accel
-// (accel leftover). Skip update_simple_mode. Real CCP-037 lean / yaw /
-// climb_rate, then constrain climb to [-get_pilot_speed_dn_ms, +speed_up]
-// with raw PILOT_SPD_DN injected. get_alt_hold_state_D_ms matches
-// upstream desired_spool side effects. State-machine leftovers are
-// flags only (takeoff / avoidance / surface_tracking / D_relax /
-// D_update_controller). Flying records D_set_pos_target_from_climb_rate
+// This slice: call-site-complete update_simple_mode + takeoff leftovers
+// (ADR-0012 flags). Always records update_simple_mode. Takeoff records
+// takeoff_start (!running) / avoidance climbrate / do_pilot_takeoff —
+// no real takeoff.start_m body. Real CCP-037 lean / yaw / climb_rate,
+// then constrain climb to [-get_pilot_speed_dn_ms, +speed_up] with raw
+// PILOT_SPD_DN injected. get_alt_hold_state_D_ms matches upstream
+// desired_spool side effects. Remaining: Flying avoidance
+// (AP_AVOIDANCE_ALTHOLD adjust_roll_pitch) / surface_tracking /
+// D_update_controller. Flying records D_set_pos_target_from_climb_rate
 // (flag + stored climb). ALWAYS calls the real
 // input_euler_angle_roll_pitch_euler_rate_yaw_rad (CCP-029).
 //
@@ -141,6 +143,7 @@ struct AltHoldRunResult {
     AltHoldModeState state{AltHoldModeState::MotorStopped};
     DesiredSpoolState desired_spool{DesiredSpoolState::SHUT_DOWN};
     bool desired_spool_set{false};
+    bool update_simple_mode{false};
     bool reset_yaw_target_and_rate{false};
     bool reset_I{false};
     bool reset_I_smoothly{false};
@@ -177,8 +180,9 @@ struct AltHoldRunResult {
     out.speed_up_ms = in.speed_up_ms;
     out.accel_leftover = in.accel_leftover;
 
-    // update_simple_mode() (Copter.cpp ~857) is remaining. Sticks are
-    // injected already-transformed.
+    // Upstream ModeAltHold::run ~31-32: always call update_simple_mode().
+    // Sticks are injected already-transformed; call-site flag only.
+    out.update_simple_mode = true;
 
     out.lean = get_pilot_desired_lean_angles_rad(in.has_valid_input, in.roll_norm_dz, in.pitch_norm_dz,
                                                  in.lean_angle_max_rad, in.althold_lean_angle_max_rad);
@@ -225,6 +229,8 @@ struct AltHoldRunResult {
             break;
 
         case AltHoldModeState::Takeoff:
+            // Upstream ~66-77: takeoff.start_m if !running; avoidance
+            // climbrate; do_pilot_takeoff_ms. Bodies remaining; flags only.
             if (!in.takeoff_running) {
                 out.takeoff_start = true;
             }
@@ -281,12 +287,12 @@ inline constexpr PortItem kCompleteness[] = {
      "constrain to [-get_pilot_speed_dn_ms(raw PILOT_SPD_DN), +speed_up]"},
     {"stabilize_run", PortStatus::kOnMain, "mode_stabilize.hpp; CCP-039 slice 1; notes only"},
     {"acro_run", PortStatus::kOnMain, "mode_acro.hpp; CCP-039 slice 2; notes only"},
-    {"update_simple_mode", PortStatus::kRemaining,
-     "mode.cpp ~1095 / Copter.cpp ~857; sticks injected already-transformed"},
-    {"takeoff", PortStatus::kRemaining,
-     "takeoff.start_m / do_pilot_takeoff_ms; flags only this slice"},
+    {"update_simple_mode", PortStatus::kThisSlice,
+     "mode_althold.cpp ~31-32; call-site flag; sticks injected already-transformed"},
+    {"takeoff", PortStatus::kThisSlice,
+     "mode_althold.cpp ~66-77; takeoff_start/do_pilot_takeoff flags-complete ADR-0012; no start_m body"},
     {"avoidance", PortStatus::kRemaining,
-     "AP_AVOIDANCE_ALTHOLD + get_avoidance_adjusted_climbrate_ms; flags only"},
+     "Flying AP_AVOIDANCE_ALTHOLD adjust_roll_pitch; Takeoff climbrate flagged"},
     {"surface_tracking", PortStatus::kRemaining,
      "AP_RANGEFINDER surface_tracking.update_surface_offset; not this slice"},
     {"D_update_controller", PortStatus::kRemaining,
