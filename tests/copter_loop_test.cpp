@@ -30,6 +30,7 @@ using fwcpp::copter::UpdateRangefinderTerrainOffsetInputs;
 using fwcpp::copter::UpdateThrottleHoverInputs;
 using fwcpp::copter::LoopRateLoggingInputs;
 using fwcpp::copter::TenHzLoggingLoopInputs;
+using fwcpp::copter::TwentyfiveHzLoggingInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -59,6 +60,7 @@ using fwcpp::copter::this_slice_count;
 using fwcpp::copter::three_hz_loop;
 using fwcpp::copter::loop_rate_logging;
 using fwcpp::copter::ten_hz_logging_loop;
+using fwcpp::copter::twentyfive_hz_logging;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
@@ -84,10 +86,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 16", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 15);
+TEST_CASE("catalog remaining_count stays open after slice 17", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 14);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 20);
+    REQUIRE(on_main_count() == 21);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -110,9 +112,10 @@ TEST_CASE("catalog remaining_count stays open after slice 16", "[copter][leftove
     REQUIRE(completeness_has("Copter::update_throttle_hover", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::three_hz_loop", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::loop_rate_logging", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::ten_hz_logging_loop", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::ten_hz_logging_loop", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::twentyfive_hz_logging", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::twentyfive_hz_logging", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::one_hz_loop", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
@@ -1330,6 +1333,56 @@ TEST_CASE("ten_hz_logging_loop leftover always Write_Attitude; other flags gated
     REQUIRE(row->rate_hz == 10.0f);
     REQUIRE(row->max_time_micros == 350);
     REQUIRE(row->priority == 114);
+    REQUIRE(row->gate != nullptr);
+    REQUIRE(std::string_view(row->gate) == "HAL_LOGGING_ENABLED");
+}
+
+TEST_CASE("twentyfive_hz_logging leftover records EKF_POS/IMU gated; gyro_fft remaining",
+          "[copter][twentyfive_hz_logging]") {
+    const auto empty = twentyfive_hz_logging();
+    REQUIRE_FALSE(empty.log_write_ekf_pos);
+    REQUIRE_FALSE(empty.write_imu);
+    REQUIRE_FALSE(empty.should_log_ftn_fast);
+    REQUIRE_FALSE(empty.gyro_fft_write_log_messages);
+
+    TwentyfiveHzLoggingInputs att{};
+    att.should_log_attitude_fast = true;
+    const auto att_fx = twentyfive_hz_logging(att);
+    REQUIRE(att_fx.log_write_ekf_pos);
+    REQUIRE_FALSE(att_fx.write_imu);
+    REQUIRE_FALSE(att_fx.gyro_fft_write_log_messages);
+
+    TwentyfiveHzLoggingInputs imu{};
+    imu.should_log_imu = true;
+    const auto imu_fx = twentyfive_hz_logging(imu);
+    REQUIRE(imu_fx.write_imu);
+    REQUIRE_FALSE(imu_fx.log_write_ekf_pos);
+    REQUIRE_FALSE(imu_fx.gyro_fft_write_log_messages);
+
+    TwentyfiveHzLoggingInputs imu_fast = imu;
+    imu_fast.should_log_imu_fast = true;
+    const auto imu_fast_fx = twentyfive_hz_logging(imu_fast);
+    REQUIRE_FALSE(imu_fast_fx.write_imu);
+    REQUIRE_FALSE(imu_fast_fx.log_write_ekf_pos);
+
+    TwentyfiveHzLoggingInputs imu_fast_only{};
+    imu_fast_only.should_log_imu_fast = true;
+    REQUIRE_FALSE(twentyfive_hz_logging(imu_fast_only).write_imu);
+
+    TwentyfiveHzLoggingInputs ftn{};
+    ftn.should_log_ftn_fast = true;
+    const auto ftn_fx = twentyfive_hz_logging(ftn);
+    REQUIRE(ftn_fx.should_log_ftn_fast);
+    REQUIRE_FALSE(ftn_fx.gyro_fft_write_log_messages);
+    REQUIRE_FALSE(ftn_fx.log_write_ekf_pos);
+    REQUIRE_FALSE(ftn_fx.write_imu);
+
+    const auto* row = find_scheduler_task("twentyfive_hz_logging");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 25.0f);
+    REQUIRE(row->max_time_micros == 110);
+    REQUIRE(row->priority == 117);
     REQUIRE(row->gate != nullptr);
     REQUIRE(std::string_view(row->gate) == "HAL_LOGGING_ENABLED");
 }

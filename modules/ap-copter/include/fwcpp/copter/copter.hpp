@@ -26,4 +26,5 @@
 #include <fwcpp/copter/three_hz_loop.hpp>
 #include <fwcpp/copter/loop_rate_logging.hpp>
 #include <fwcpp/copter/ten_hz_logging_loop.hpp>
+#include <fwcpp/copter/twentyfive_hz_logging.hpp>
 #include <fwcpp/copter/update_throttle_hover.hpp>
