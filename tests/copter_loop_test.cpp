@@ -128,7 +128,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 43", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 44", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 35);
@@ -2726,6 +2726,16 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE(fx.set_land_complete);
     REQUIRE(fx.set_land_complete_maybe);
     REQUIRE(fx.failsafe_enable);
+    REQUIRE(fx.ins_set_log_raw_bit);
+    REQUIRE(fx.ins_log_raw_bit == 524288);
+    REQUIRE(fx.motors_output_min);
+    REQUIRE(fx.set_mode_initial);
+    REQUIRE(fx.leftover_set_mode_reason == 26);
+    REQUIRE_FALSE(fx.set_mode_stabilize_unavailable);
+    REQUIRE(fx.pos_variance_filt_set_cutoff);
+    REQUIRE(fx.vel_variance_filt_set_cutoff);
+    REQUIRE(fx.ap_initialised);
+    REQUIRE_FALSE(fx.esc_cal_body);
 }
 
 TEST_CASE("init_ardupilot leftover throttle_configured injects radio min max",
@@ -2761,4 +2771,17 @@ TEST_CASE("init_ardupilot leftover brushed pwm skips esc cal body",
     REQUIRE_FALSE(fx.relay_init);
     REQUIRE(fx.register_timer_failsafe);
     REQUIRE(fx.register_timer_failsafe_period == 1000);
+}
+
+TEST_CASE("init_ardupilot leftover initial_mode_ok false falls back unavailable",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.initial_mode_ok = false;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.set_mode_initial);
+    REQUIRE(fx.leftover_set_mode_reason == 26);
+    REQUIRE(fx.set_mode_stabilize_unavailable);
+    REQUIRE(fx.leftover_set_mode_unavailable_reason == 33);
+    REQUIRE_FALSE(fx.esc_cal_body);
+    REQUIRE(fx.ap_initialised);
 }

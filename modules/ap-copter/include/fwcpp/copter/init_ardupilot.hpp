@@ -1,8 +1,9 @@
 #pragma once
 
 // Copter::init_ardupilot leftover. Upstream ArduCopter/system.cpp
-// ~16-184 (after logger.setVehicle_Startup_Writer; stop BEFORE
-// ins.set_log_raw_bit). No notify / battery / barometer / winch /
+// ~16-200 (through ap.initialised = true). ESC cal body remaining
+// (delay/read_radio/arming/while(1)). No notify / battery /
+// barometer / winch /
 // rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
 // SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
 // airspeed / OA / attitude_control / optflow / camera / precland /
@@ -56,6 +57,14 @@
 //   set_land_complete(true) leftover flag
 //   set_land_complete_maybe(true) leftover flag
 //   failsafe_enable() leftover flag
+//   ins.set_log_raw_bit(MASK_LOG_IMU_RAW) leftover flag + bit
+//   motors->output_min() leftover flag only (no motors object)
+//   set_mode leftover flags only — uint8 reasons, no real set_mode
+//     / mode.hpp. INITIALISED=26; UNAVAILABLE=33 fallback iff
+//     !initial_mode_ok. Inject initial_mode (default 0 STABILIZE).
+//   pos_variance_filt.set_cutoff_frequency leftover flag
+//   vel_variance_filt.set_cutoff_frequency leftover flag
+//   ap.initialised leftover flag
 // custom_control.init stays false (AC_CUSTOMCONTROL_MULTI remaining).
 //
 // surface_tracking.init stays false (AP_RANGEFINDER remaining).
@@ -71,9 +80,9 @@
 // init_rangefinder stays false (AP_RANGEFINDER remaining).
 // g2.proximity.init stays false (HAL_PROXIMITY remaining).
 // g2.beacon.init stays false (AP_BEACON remaining).
-// The rest of init_ardupilot (ESC cal body, ins.set_log_raw_bit,
-// motors->output_min, set_mode initial, pos_variance_filt,
-// ap.initialised, etc.) is catalog row "Copter::init_ardupilot rest".
+// The rest of init_ardupilot is ESC cal body only
+// (delay/read_radio/arming/while(1)) — catalog row
+// "Copter::init_ardupilot rest".
 
 #include <cstdint>
 
@@ -94,11 +103,18 @@ inline constexpr std::int16_t kDefaultPwmMax = 2000;
 inline constexpr std::uint16_t kFailsafeCheckPeriodUs = 1000;
 
 // ArduCopter/defines.h MASK_LOG_GPS = (1<<2); MASK_LOG_COMPASS = (1<<13);
-// MASK_LOG_IMU = (1<<7); MASK_LOG_CMD = (1<<8)
+// MASK_LOG_IMU = (1<<7); MASK_LOG_CMD = (1<<8);
+// MASK_LOG_IMU_RAW = (1UL<<19)
 inline constexpr std::uint32_t kMaskLogGps = 1u << 2;
 inline constexpr std::uint32_t kMaskLogCompass = 1u << 13;
 inline constexpr std::uint32_t kMaskLogImu = 1u << 7;
 inline constexpr std::uint32_t kMaskLogCmd = 1u << 8;
+inline constexpr std::uint32_t kMaskLogImuRaw = 1u << 19;
+
+// ModeReason leftover uint8 values only — do not include mode.hpp.
+// libraries/AP_Vehicle/ModeReason.h INITIALISED=26, UNAVAILABLE=33.
+inline constexpr std::uint8_t kModeReasonInitialised = 26;
+inline constexpr std::uint8_t kModeReasonUnavailable = 33;
 
 struct InitArdupilotInputs {
     bool motor_interlock_aux{false};
@@ -107,6 +123,8 @@ struct InitArdupilotInputs {
     std::int16_t radio_max{0};
     std::uint16_t rc_speed{0};
     bool is_brushed_pwm{false};  // motors->is_brushed_pwm_type()
+    std::uint8_t initial_mode{0};  // g.initial_mode; Mode::Number::STABILIZE=0
+    bool initial_mode_ok{true};    // set_mode(initial_mode, INITIALISED) result
 };
 
 struct InitArdupilotEffects {
@@ -182,6 +200,16 @@ struct InitArdupilotEffects {
     bool set_land_complete{false};
     bool set_land_complete_maybe{false};
     bool failsafe_enable{false};
+    bool ins_set_log_raw_bit{false};
+    std::uint32_t ins_log_raw_bit{0};  // MASK_LOG_IMU_RAW
+    bool motors_output_min{false};     // flag only — no motors object
+    bool set_mode_initial{false};      // leftover only — no real set_mode
+    std::uint8_t leftover_set_mode_reason{0};  // ModeReason::INITIALISED=26
+    bool set_mode_stabilize_unavailable{false};
+    std::uint8_t leftover_set_mode_unavailable_reason{0};  // UNAVAILABLE=33
+    bool pos_variance_filt_set_cutoff{false};
+    bool vel_variance_filt_set_cutoff{false};
+    bool ap_initialised{false};
 };
 
 [[nodiscard]] inline InitArdupilotEffects init_ardupilot(
@@ -261,6 +289,21 @@ struct InitArdupilotEffects {
     fx.set_land_complete = true;
     fx.set_land_complete_maybe = true;
     fx.failsafe_enable = true;
+    // Tail after failsafe_enable — leftover flags only. No INS /
+    // motors objects, no real set_mode (CCP-036), no ESC cal body.
+    fx.ins_set_log_raw_bit = true;
+    fx.ins_log_raw_bit = kMaskLogImuRaw;
+    fx.motors_output_min = true;
+    fx.set_mode_initial = true;
+    fx.leftover_set_mode_reason = kModeReasonInitialised;
+    if (!in.initial_mode_ok) {
+        fx.set_mode_stabilize_unavailable = true;
+        fx.leftover_set_mode_unavailable_reason = kModeReasonUnavailable;
+    }
+    (void)in.initial_mode;
+    fx.pos_variance_filt_set_cutoff = true;
+    fx.vel_variance_filt_set_cutoff = true;
+    fx.ap_initialised = true;
     return fx;
 }
 

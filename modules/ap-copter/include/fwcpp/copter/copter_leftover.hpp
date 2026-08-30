@@ -1,17 +1,18 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 43 lands
-// init_ardupilot leftover (notify/battery/baro + interlock +
-// init_rc_in + allocate_motors call + rc convert/init + init_rc_out
-// leftover + esc_cal brushed skip + initialised_params + failsafe
-// register leftover + GPS/compass leftover flags + attitude_sanity
-// leftover + barometer.calibrate leftover + mission/SmartRTL/logger
-// leftover flags + startup_INS_ground call + land flags +
-// failsafe_enable leftover; gated rangefinder/proximity/beacon
-// remaining false). Rest of init_ardupilot (ESC cal body,
-// ins.set_log_raw_bit, motors->output_min, set_mode initial,
-// pos_variance_filt, ap.initialised, etc.) stays remaining.
+// (Copter.cpp / Copter.h / system.cpp). Slice 44 lands
+// init_ardupilot leftover through ap.initialised (notify/battery/baro
+// + interlock + init_rc_in + allocate_motors call + rc convert/init
+// + init_rc_out leftover + esc_cal brushed skip + initialised_params
+// + failsafe register leftover + GPS/compass leftover flags +
+// attitude_sanity leftover + barometer.calibrate leftover +
+// mission/SmartRTL/logger leftover flags + startup_INS_ground call
+// + land flags + failsafe_enable leftover + ins.set_log_raw_bit +
+// motors->output_min + set_mode leftover flags + variance filt
+// cutoffs + ap.initialised; gated rangefinder/proximity/beacon
+// remaining false). ESC cal body
+// (delay/read_radio/arming/while(1)) stays remaining.
 // remaining_count() > 0 is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
@@ -50,9 +51,9 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::throttle_loop", PortStatus::kOnMain,
      "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
     {"Copter::init_ardupilot", PortStatus::kThisSlice,
-     "init_ardupilot.hpp; notify/battery/baro + interlock + init_rc_in + allocate_motors call + rc convert/init + init_rc_out + esc_cal brushed skip + initialised_params + failsafe register leftover + GPS/compass + attitude_sanity + barometer.calibrate leftover + mission/logger + startup_INS_ground call + land flags + failsafe_enable leftover"},
+     "init_ardupilot.hpp; leftover through ap.initialised; ESC cal body remaining"},
     {"Copter::init_ardupilot rest", PortStatus::kRemaining,
-     "ESC cal body, ins.set_log_raw_bit, motors->output_min, set_mode initial, pos_variance_filt, ap.initialised, etc."},
+     "ESC cal body only — delay/read_radio/arming/while(1)"},
     {"Copter::run_rate_controller_main", PortStatus::kOnMain,
      "run_rate_controller.hpp; set_dt_s + rate_controller_run iff !rate thread"},
     {"Copter::read_inertia", PortStatus::kOnMain,
