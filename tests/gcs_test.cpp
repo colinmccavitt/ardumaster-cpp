@@ -1,4 +1,4 @@
-// CPP-087 slice 5: COMMAND_LONG + PARAM + MISSION + Plane leftover_send_attitude.
+// CPP-087 slice 6: GCS leftover catalog close (remaining_count 0).
 
 #include <array>
 #include <cstdint>
@@ -89,6 +89,7 @@ using fwcpp::gcs::make_mission_count;
 using fwcpp::gcs::mission_item_int_from_frame;
 using fwcpp::gcs::mission_store_insert;
 using fwcpp::gcs::on_main_count;
+using fwcpp::gcs::out_of_scope_count;
 using fwcpp::gcs::pack_attitude;
 using fwcpp::gcs::pack_command_ack;
 using fwcpp::gcs::pack_command_long;
@@ -346,20 +347,21 @@ TEST_CASE("send_heartbeat dispatches as msgid 0", "[gcs][dispatch]") {
 }
 
 TEST_CASE("leftover catalog this slice vs remaining", "[gcs][leftover]") {
-    REQUIRE(remaining_count() == 1);
+    REQUIRE(remaining_count() == 0);
     REQUIRE(this_slice_count() == 1);
     REQUIRE(on_main_count() == 7);
+    REQUIRE(out_of_scope_count() == 1);
     REQUIRE(leftover_completeness_size() ==
-            on_main_count() + this_slice_count() + remaining_count());
+            on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("MAVLink 2 framing", PortStatus::kOnMain));
     REQUIRE(completeness_has("HEARTBEAT pack/unpack", PortStatus::kOnMain));
     REQUIRE(completeness_has("msgid dispatch stub", PortStatus::kOnMain));
-    REQUIRE(completeness_has("leftover catalog", PortStatus::kOnMain));
+    REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
     REQUIRE(completeness_has("COMMAND_LONG", PortStatus::kOnMain));
     REQUIRE(completeness_has("PARAM protocol", PortStatus::kOnMain));
     REQUIRE(completeness_has("MISSION", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Plane/Copter vehicle handlers", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("XML dialect generation", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Plane/Copter vehicle handlers", PortStatus::kOnMain));
+    REQUIRE(completeness_has("XML dialect generation", PortStatus::kOutOfScope));
 }
 
 TEST_CASE("COMMAND_LONG pack/unpack round-trip", "[gcs][command_long]") {

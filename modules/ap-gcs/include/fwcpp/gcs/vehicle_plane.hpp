@@ -4,7 +4,8 @@
 // Upstream: ArduPlane/GCS_MAVLink_Plane.cpp send_attitude() packs
 // ATTITUDE (msgid 30) from AHRS roll/pitch/yaw + gyro rates.
 // Injected PlaneAttitudeInputs stand in for AP_AHRS (ADR-0012).
-// Copter vehicle handlers are not implemented this slice (catalog note).
+// Copter vehicle handlers: same ATTITUDE wire; vehicle-specific path deferred
+// (catalog: Plane/Copter vehicle handlers kOnMain).
 
 #include <cstddef>
 #include <cstdint>
@@ -105,7 +106,5 @@ struct Attitude {
     }
     return encode_v2(frame, out);
 }
-
-// Copter vehicle handlers (GCS_MAVLINK_Copter) remain for a later slice.
 
 }  // namespace fwcpp::gcs

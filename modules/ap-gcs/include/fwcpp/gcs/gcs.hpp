@@ -1,9 +1,10 @@
 #pragma once
 
-// CPP-087 slice 5: GCS_MAVLink surface. MAVLink 2 framing, HEARTBEAT,
+// CPP-087 slice 6: GCS_MAVLink surface. MAVLink 2 framing, HEARTBEAT,
 // COMMAND_LONG ARM/DISARM + DO_SET_MODE + COMMAND_ACK, PARAM_REQUEST_LIST /
 // PARAM_SET / PARAM_VALUE, MISSION_REQUEST_INT / MISSION_ITEM_INT, Plane
-// leftover_send_attitude (ATTITUDE). No singleton. See leftover.hpp.
+// leftover_send_attitude (ATTITUDE). Catalog remaining_count 0. No singleton.
+// See leftover.hpp.
 
 #include <fwcpp/gcs/command.hpp>
 #include <fwcpp/gcs/dispatch.hpp>

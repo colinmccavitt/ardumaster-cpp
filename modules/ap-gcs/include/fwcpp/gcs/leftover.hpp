@@ -1,15 +1,15 @@
 #pragma once
 
-// CPP-087 slice 5 completeness catalog.
+// CPP-087 slice 6 completeness catalog close.
 //
 // On main: MAVLink 2 framing, HEARTBEAT pack/unpack, msgid dispatch stub,
-// leftover catalog, COMMAND_LONG ARM/DISARM + DO_SET_MODE + COMMAND_ACK,
-// PARAM_REQUEST_LIST / PARAM_SET / PARAM_VALUE, MISSION_ITEM_INT /
-// MISSION_REQUEST_INT.
-// This slice: Plane vehicle handler leftover_send_attitude (ATTITUDE 30).
-// Remaining: XML dialect generation. Copter vehicle handlers noted on the
-// vehicle row (not a separate remaining row this slice).
-// remaining_count() is 1.
+// COMMAND_LONG ARM/DISARM + DO_SET_MODE + COMMAND_ACK, PARAM_REQUEST_LIST /
+// PARAM_SET / PARAM_VALUE, MISSION_ITEM_INT / MISSION_REQUEST_INT, Plane
+// leftover_send_attitude (ATTITUDE 30).
+// This slice: leftover catalog close — remaining_count()==0.
+// Out of scope: XML dialect generation (pinned modules/mavlink; no in-tree
+// codegen). Copter vehicle handlers share the same ATTITUDE wire; vehicle-
+// specific Copter send path deferred (noted on the vehicle handlers row).
 
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +20,7 @@ enum class PortStatus : std::uint8_t {
     kOnMain = 0,
     kThisSlice = 1,
     kRemaining = 2,
+    kOutOfScope = 3,
 };
 
 struct GcsPortItem {
@@ -35,16 +36,17 @@ inline constexpr GcsPortItem kGcsCompleteness[] = {
      "msgid 0: type, autopilot, base_mode, custom_mode, system_status, mavlink_version=3"},
     {"msgid dispatch stub", PortStatus::kOnMain,
      "known HEARTBEAT vs unknown; no GCS singleton"},
-    {"leftover catalog", PortStatus::kOnMain, "this table"},
+    {"leftover catalog", PortStatus::kThisSlice, "CPP-087 close; remaining_count 0"},
     {"COMMAND_LONG", PortStatus::kOnMain,
      "msgid 76 ARM/DISARM DO_SET_MODE + COMMAND_ACK msgid 77"},
     {"PARAM protocol", PortStatus::kOnMain,
      "PARAM_REQUEST_LIST / PARAM_SET / PARAM_VALUE"},
     {"MISSION", PortStatus::kOnMain, "MISSION_ITEM_INT / MISSION_REQUEST_INT"},
-    {"Plane/Copter vehicle handlers", PortStatus::kThisSlice,
-     "Plane leftover_send_attitude ATTITUDE msgid 30; Copter handlers remaining"},
-    {"XML dialect generation", PortStatus::kRemaining,
-     "generate from modules/mavlink; do not hand-roll the dialect here"},
+    {"Plane/Copter vehicle handlers", PortStatus::kOnMain,
+     "Plane leftover_send_attitude ATTITUDE msgid 30; Copter same ATTITUDE wire; "
+     "vehicle-specific later"},
+    {"XML dialect generation", PortStatus::kOutOfScope,
+     "pinned modules/mavlink generated headers; no in-tree codegen this port"},
 };
 
 [[nodiscard]] inline constexpr std::size_t leftover_completeness_size() {
@@ -85,6 +87,10 @@ inline constexpr GcsPortItem kGcsCompleteness[] = {
 
 [[nodiscard]] inline constexpr std::size_t remaining_count() {
     return count_status(PortStatus::kRemaining);
+}
+
+[[nodiscard]] inline constexpr std::size_t out_of_scope_count() {
+    return count_status(PortStatus::kOutOfScope);
 }
 
 [[nodiscard]] inline constexpr std::size_t on_main_count() {
