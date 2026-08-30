@@ -48,9 +48,9 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"althold_run", ModePortStatus::kOnMain,
      "mode_althold.hpp; CCP-039 landed run() on main"},
     {"remaining mode bodies", ModePortStatus::kRemaining,
-     "ModeLand init/run; other modes; attitude/_state_complete descent; "
-     "auto_takeoff.run body; land_run_normal_or_precland body; "
-     "land_run_horizontal_control body; ModeGuided::run body"},
+     "ModeLand init/run; other modes; auto_takeoff.run body; "
+     "land_run_normal_or_precland body; land_run_horizontal_control body; "
+     "ModeGuided::run body"},
     {"ModeAuto::init", ModePortStatus::kOnMain,
      "mode_auto.cpp auto_init leftover; mission_present / landed takeoff gate; "
      "no wp_nav/mission objects; precland remaining"},
@@ -102,7 +102,7 @@ inline constexpr ModePortItem kModeCompleteness[] = {
      "leftover_precland_statemachine remaining"},
     {"ModeRTL::run", ModePortStatus::kThisSlice,
      "armed gate + STARTING leftover leftover leftover leftover_build_path/climb_start + "
-     "INITIAL_CLIMB leftover leftover leftover leftover_return_start + RETURN_HOME leftover leftover leftover leftover_loiterathome_start + LOITER_AT_HOME leftover leftover leftover leftover_land_start/descent_start + leftover leftover leftover leftover_climb_return_run + climb_return_run body leftover flags + leftover leftover leftover leftover_loiterathome_run + loiterathome_run body leftover flags + leftover leftover leftover leftover_descent_run + descent_run body leftover flags (disarmed/spool/NE/D + pilot cancel/reposition leftover flags) + leftover leftover leftover leftover_rtl_land_run + land_run body leftover flags (state_complete/disarm/spool/land_run_normal flag); ModeLand init/run + other mode bodies + attitude/_state_complete descent + land_run_normal body remaining"},
+     "INITIAL_CLIMB leftover leftover leftover leftover_return_start + RETURN_HOME leftover leftover leftover leftover_loiterathome_start + LOITER_AT_HOME leftover leftover leftover leftover_land_start/descent_start + leftover leftover leftover leftover_climb_return_run + climb_return_run body leftover flags + leftover leftover leftover leftover_loiterathome_run + loiterathome_run body leftover flags + leftover leftover leftover leftover_descent_run + descent_run body leftover flags (disarmed/spool/NE/D + pilot cancel/reposition + attitude/_state_complete leftover flags) + leftover leftover leftover leftover_rtl_land_run + land_run body leftover flags (state_complete/disarm/spool/land_run_normal flag); ModeLand init/run + other mode bodies + land_run_normal body remaining"},
     {"FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain,
      "Copter::gcs_mode_enabled + AP_Vehicle::block_GCS_mode_change; injected "
      "fltmode_gcsblock; LAND/RTL not in list"},

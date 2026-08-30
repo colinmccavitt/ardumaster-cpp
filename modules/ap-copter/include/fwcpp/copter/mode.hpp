@@ -38,11 +38,11 @@
 // leftover leftover_climb_return_run + climb_return_run body leftover flags +
 // leftover leftover_loiterathome_run + loiterathome_run body leftover flags +
 // leftover leftover_descent_run + descent_run body leftover flags
-// (disarmed/spool/NE/D + pilot cancel/reposition leftover flags) + leftover
-// leftover leftover_rtl_land_run + land_run body leftover flags
-// (state_complete/disarm/spool/land_run_normal flag)) is this slice.
-// ModeLand init/run, ModeGuided::run body, land_run_normal_or_precland body,
-// land_run_horizontal_control body, attitude/_state_complete descent, and
+// (disarmed/spool/NE/D + pilot cancel/reposition + attitude /
+// _state_complete leftover flags) + leftover leftover leftover_rtl_land_run +
+// land_run body leftover flags (state_complete/disarm/spool/land_run_normal
+// flag)) is this slice. ModeLand init/run, ModeGuided::run body,
+// land_run_normal_or_precland body, land_run_horizontal_control body, and
 // auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
 
@@ -588,9 +588,9 @@ public:
 // leftover leftover_land_start / leftover leftover_descent_start + leftover
 // leftover leftover_climb_return_run (mode_rtl.cpp ~230-253 body leftover
 // flags) + leftover leftover_loiterathome_run (mode_rtl.cpp ~272-311 body
-// leftover flags) + leftover leftover_descent_run (mode_rtl.cpp ~328-375
+// leftover flags) + leftover leftover_descent_run (mode_rtl.cpp ~328-381
 // body leftover flags: disarmed/spool/NE/D + pilot cancel / land_reposition
-// leftover flags; attitude / _state_complete remaining) + leftover
+// + attitude / _state_complete leftover flags) + leftover
 // leftover_rtl_land_run + land_run body leftover flags (mode_rtl.cpp
 // ~418-441: state_complete / disarm / spool / land_run_normal flag;
 // land_run_normal_or_precland body remaining). Do not dump land_start /
@@ -636,10 +636,12 @@ public:
     // leftover flags. leftover leftover_loiterathome_run (second switch
     // LOITER_AT_HOME) plus loiterathome_run body leftover flags. leftover
     // leftover_descent_run (FINAL_DESCENT) plus descent_run body leftover
-    // flags (reuses shared disarmed/spool/pos_D; NE/D slew; pilot cancel /
-    // land_reposition leftover flags). leftover leftover_rtl_land_run (LAND)
-    // plus land_run body leftover flags (state_complete/disarm/spool/
-    // land_run_normal flag; land_run_normal_or_precland body remaining).
+    // flags (reuses shared disarmed/spool/pos_D/input_thrust_vector_heading;
+    // NE/D slew; pilot cancel / land_reposition leftover flags;
+    // leftover_descent_alt_within_20cm → _state_complete). leftover
+    // leftover_rtl_land_run (LAND) plus land_run body leftover flags
+    // (state_complete/disarm/spool/land_run_normal flag;
+    // land_run_normal_or_precland body remaining).
     bool leftover_return_start{false};
     bool leftover_climb_return_run{false};
     bool leftover_loiterathome_start{false};
@@ -700,6 +702,11 @@ public:
     // climb_return flying path, sets _state_complete = true. Not used on
     // loiterathome_run.
     bool leftover_reached_wp_destination{false};
+    // Injected descent alt-within-20cm check (mode_rtl.cpp ~381). When true
+    // on the FINAL_DESCENT flying path, sets _state_complete = true. Do not
+    // compute fabs from real pos. Not used on LAND / climb_return /
+    // loiterathome.
+    bool leftover_descent_alt_within_20cm{false};
     // Injected _loiter_start_time / millis() / g.rtl_loiter_time for
     // loiterathome_run complete check (mode_rtl.cpp ~294-305).
     std::uint32_t leftover_loiter_start_ms{0};
@@ -747,8 +754,9 @@ public:
     // and loiterathome and descent and land body leftover flags (including
     // descent pilot/reposition effects) at entry so a later !armed tick or
     // other SubMode does not leave stale true flags. Inject inputs
-    // leftover_land_complete / leftover_spool_ground_idle / pilot injects are
-    // not cleared. Records leftover leftover_rtl_run_disarm_on_land. Armed
+    // leftover_land_complete / leftover_spool_ground_idle /
+    // leftover_descent_alt_within_20cm / pilot injects are not cleared.
+    // Records leftover leftover_rtl_run_disarm_on_land. Armed
     // gate then STARTING leftover leftover leftover_build_path / leftover
     // leftover_climb_start, INITIAL_CLIMB leftover leftover leftover_return_start,
     // RETURN_HOME leftover leftover leftover_loiterathome_start, and
@@ -760,7 +768,8 @@ public:
     // climb_return_run body leftover flags), leftover leftover_loiterathome_run
     // (with loiterathome_run body leftover flags), leftover leftover_descent_run
     // (with descent_run body leftover flags including pilot cancel /
-    // reposition before spool/NE/D), leftover leftover_rtl_land_run (with
+    // reposition before spool/NE/D, then attitude + _state_complete from
+    // leftover_descent_alt_within_20cm), leftover leftover_rtl_land_run (with
     // land_run body leftover flags: _state_complete from leftover_land_complete;
     // leftover_disarm_landed; make_safe or spool + leftover_land_run_normal_or_precland).
     void leftover_run(bool disarm_on_land) {
@@ -894,6 +903,11 @@ public:
                 leftover_ne_update = true;
                 leftover_d_set_alt_slew = true;
                 leftover_pos_D_update = true;
+                // mode_rtl.cpp ~377-381 after D_update.
+                leftover_input_thrust_vector_heading = true;
+                if (leftover_descent_alt_within_20cm) {
+                    _state_complete = true;
+                }
             }
         }
         if (_state == SubMode::LAND) {
