@@ -5,12 +5,13 @@
 // (ADR-0012: no AP:: / motors / attitude_control objects). Tests call
 // this function with injected sticks, spool, and kinematics state.
 //
-// Calls the real fwcpp::control::input_euler_angle_roll_pitch_euler_rate_yaw_rad
-// (CCP-029). Pilot lean / yaw / throttle via CCP-037. update_simple_mode
-// is remaining (catalogued). set_throttle_out returns the throttle value
-// plus angle_boost=true; boost math is not ported this slice.
-//
-// ACRO run is mode_acro.hpp (CCP-039 slice 2). ALTHOLD run() stays empty.
+// Catalog remaining_count 0 (CCP-039 slice 9 close). Calls the real
+// fwcpp::control::input_euler_angle_roll_pitch_euler_rate_yaw_rad
+// (CCP-029). Pilot lean / yaw / throttle via CCP-037.
+// update_simple_mode is a call-site flag (sticks injected already-
+// transformed). set_throttle_out returns throttle + angle_boost=true;
+// boost math is kOutOfScope. ACRO/ALTHOLD/trainer live in mode_acro /
+// mode_althold (on main).
 
 #include <cstddef>
 #include <cstdint>
@@ -64,6 +65,7 @@ struct StabilizeRunResult {
     LeanAnglesRad lean{};
     float target_yaw_rate_rads{0.0f};
     DesiredSpoolState desired_spool{DesiredSpoolState::SHUT_DOWN};
+    bool update_simple_mode{false};
     bool reset_yaw_target_and_rate{false};
     bool reset_I{false};
     bool reset_I_smoothly{false};
@@ -85,8 +87,9 @@ struct StabilizeRunResult {
     StabilizeRunResult out{};
     out.land_complete = in.land_complete;
 
-    // update_simple_mode() (Copter.cpp ~857) is remaining. Sticks are
-    // injected already-transformed.
+    // Upstream ~11-12: update_simple_mode(). Sticks are injected
+    // already-transformed; call-site flag only (ADR-0012).
+    out.update_simple_mode = true;
 
     const float angle_max = in.lean_angle_max_rad;
     out.lean = get_pilot_desired_lean_angles_rad(in.has_valid_input, in.roll_norm_dz, in.pitch_norm_dz,
@@ -155,31 +158,31 @@ struct PortItem {
 
 inline constexpr PortItem kCompleteness[] = {
     {"leftover catalog", PortStatus::kThisSlice, "this table"},
-    {"stabilize_run", PortStatus::kThisSlice,
+    {"stabilize_run", PortStatus::kOnMain,
      "mode_stabilize.cpp ~9-64; pilot lean/yaw/throttle + spool switch + "
      "real input_euler_angle_roll_pitch_euler_rate_yaw_rad"},
-    {"desired spool from throttle_zero", PortStatus::kThisSlice,
-     "GROUND_IDLE vs THROTTLE_UNLIMITED; no motors object"},
-    {"spool_state switch", PortStatus::kThisSlice,
+    {"desired spool from throttle_zero", PortStatus::kOnMain,
+     "GROUND_IDLE vs THROTTLE_UNLIMITED; DesiredSpoolState enum; no motors object"},
+    {"spool_state switch", PortStatus::kOnMain,
      "SHUT_DOWN reset_yaw+reset_I throttle=0; GROUND_IDLE reset_yaw+"
      "reset_I_smoothly throttle=0; THROTTLE_UNLIMITED clears land_complete; "
      "spooling no extra"},
-    {"set_throttle_out flag", PortStatus::kThisSlice,
-     "returns throttle_out + angle_boost=true; boost math not this slice"},
-    {"update_simple_mode", PortStatus::kRemaining,
-     "mode.cpp ~1095 / Copter.cpp ~857; sticks injected already-transformed"},
-    {"set_throttle_out angle-boost math", PortStatus::kRemaining,
-     "AC_AttitudeControl_Multi::set_throttle_out; flag only this slice"},
-    {"motors set_desired_spool_state object", PortStatus::kRemaining,
-     "AP_Motors::set_desired_spool_state; enumerator returned only"},
-    {"reset_yaw_target_and_rate / reset_I bodies", PortStatus::kRemaining,
-     "attitude_kinematics leftover; flags only this slice"},
-    {"acro_run", PortStatus::kRemaining,
-     "mode_acro.cpp; rates this slice live in mode_acro leftover"},
-    {"althold_run", PortStatus::kRemaining,
-     "mode_althold.cpp; needs get_pilot_desired_climb_rate leftover"},
-    {"trainer LEVEL/LIMITED", PortStatus::kRemaining,
-     "mode_acro.cpp ~133-193; earth-frame level mix; catalogued in acro leftover"},
+    {"set_throttle_out flag", PortStatus::kOnMain,
+     "returns throttle_out + angle_boost=true; boost math kOutOfScope"},
+    {"update_simple_mode", PortStatus::kOnMain,
+     "mode_stabilize.cpp ~11-12; call-site flag; sticks injected already-transformed"},
+    {"set_throttle_out angle-boost math", PortStatus::kOutOfScope,
+     "AC_AttitudeControl_Multi::set_throttle_out boost body; angle_boost flag only"},
+    {"motors set_desired_spool_state object", PortStatus::kOutOfScope,
+     "AP_Motors::set_desired_spool_state; ADR-0012 DesiredSpoolState enum returned"},
+    {"reset_yaw_target_and_rate / reset_I bodies", PortStatus::kOnMain,
+     "flags-complete in spool switch; attitude_kinematics bodies elsewhere"},
+    {"acro_run", PortStatus::kOnMain,
+     "mode_acro.hpp; CCP-039 slice 2 on main"},
+    {"althold_run", PortStatus::kOnMain,
+     "mode_althold.hpp; CCP-039 slice 3+ on main"},
+    {"trainer LEVEL/LIMITED", PortStatus::kOnMain,
+     "mode_acro.hpp; CCP-039 trainer leftover on main"},
 };
 
 [[nodiscard]] inline constexpr std::size_t completeness_size() {

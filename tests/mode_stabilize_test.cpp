@@ -88,6 +88,7 @@ TEST_CASE("invalid RC zeros lean; input_euler_angle still invoked", "[copter][st
     AttitudeTargetState state = fresh_state();
     const auto out = stabilize_run(in, state);
 
+    REQUIRE(out.update_simple_mode);
     REQUIRE(out.lean.roll_rad == 0.0f);
     REQUIRE(out.lean.pitch_rad == 0.0f);
     REQUIRE(out.target_yaw_rate_rads == 0.0f);
@@ -188,16 +189,23 @@ TEST_CASE("ModeStabilize::run stays a no-op wrapper", "[copter][stabilize]") {
     REQUIRE(mode.mode_number() == fwcpp::copter::Mode::Number::STABILIZE);
 }
 
-TEST_CASE("leftover remaining_count is not zero", "[copter][stabilize][leftover]") {
-    REQUIRE(remaining_count() > 0);
-    REQUIRE(this_slice_count() == 5);
-    REQUIRE(on_main_count() == 0);
-    REQUIRE(out_of_scope_count() == 0);
+TEST_CASE("leftover remaining_count is zero", "[copter][stabilize][leftover]") {
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(this_slice_count() == 1);
+    REQUIRE(on_main_count() == 9);
+    REQUIRE(out_of_scope_count() == 2);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
-    REQUIRE(completeness_has("stabilize_run", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("update_simple_mode", PortStatus::kRemaining));
-    REQUIRE(completeness_has("acro_run", PortStatus::kRemaining));
-    REQUIRE(completeness_has("althold_run", PortStatus::kRemaining));
+    REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("stabilize_run", PortStatus::kOnMain));
+    REQUIRE(completeness_has("update_simple_mode", PortStatus::kOnMain));
+    REQUIRE(completeness_has("acro_run", PortStatus::kOnMain));
+    REQUIRE(completeness_has("althold_run", PortStatus::kOnMain));
+    REQUIRE(completeness_has("trainer LEVEL/LIMITED", PortStatus::kOnMain));
+    REQUIRE(completeness_has("reset_yaw_target_and_rate / reset_I bodies", PortStatus::kOnMain));
+    REQUIRE(completeness_has("set_throttle_out angle-boost math", PortStatus::kOutOfScope));
+    REQUIRE(completeness_has("motors set_desired_spool_state object", PortStatus::kOutOfScope));
+    REQUIRE_FALSE(completeness_has("update_simple_mode", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("acro_run", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("AUTO_RTL", PortStatus::kRemaining));
 }
