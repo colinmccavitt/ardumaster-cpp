@@ -1009,3 +1009,8 @@ catch_discover_tests(autoyaw_test)
 add_executable(mode_althold_test mode_althold_test.cpp)
 target_link_libraries(mode_althold_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_althold_test)
+
+# CCP-038 slice 1: AP_Arming_Copter pre_arm leftover scaffold.
+add_executable(arming_test arming_test.cpp)
+target_link_libraries(arming_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(arming_test)
