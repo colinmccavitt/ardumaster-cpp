@@ -142,6 +142,8 @@ struct FlightModeContext {
     bool notify_autopilot_mode{false};
     // gcs().send_message(MSG_HEARTBEAT) remaining; no GCS this slice.
     bool gcs_heartbeat{false};
+    // fence.manual_recovery_start leftover (no AC_Fence this slice).
+    bool fence_manual_recovery_start{false};
 };
 
 // Injected Copter / motors / EKF / RC / mission-jump state. Upstream
@@ -167,6 +169,14 @@ struct SetModeInputs {
     // MODE_DRIFT_ENABLED leftover: treat next as user_throttle for the
     // throttle-too-high gate. Default false; no ModeDrift this slice.
     bool is_drift{false};
+    // Fence leftovers (no AC_Fence). Defaults keep existing tests open
+    // and do not record manual_recovery_start.
+    bool fence_enabled{false};
+    bool fence_disable_mode_change{false};
+    bool fence_breaches{false};
+    // AP_FENCE_ENABLED stand-in for the post-switch leftover.
+    bool fence_present{false};
+    bool fence_action_report_only{true};
 };
 
 // Copter::gcs_mode_enabled ~184-215 + AP_Vehicle::block_GCS_mode_change ~1210-1225.
@@ -245,8 +255,9 @@ inline void record_notify_flight_mode(FlightModeContext& ctx, const Mode& next) 
 // (ignore_checks through Write_Mode + notify_flight_mode leftovers).
 // Drift leftover: MODE_DRIFT_ENABLED forces user_throttle true
 // (mode.cpp ~375-380); injected is_drift, no ModeDrift class.
-// Skips HELI runup, fence recovery, GCS heartbeat, ADSB/camera/rate_tc,
-// AP_Notify sounds.
+// Fence leftovers: DISABLE_MODE_CHANGE gate (~408-419) +
+// manual_recovery_start (~447-453); no AC_Fence.
+// Skips HELI runup, GCS heartbeat, ADSB/camera/rate_tc, AP_Notify sounds.
 [[nodiscard]] inline bool enter_mode(FlightModeContext& ctx, Mode& next, ModeReason reason,
                                      const SetModeInputs& in) {
     const bool ignore_checks = !in.armed;
@@ -270,6 +281,13 @@ inline void record_notify_flight_mode(FlightModeContext& ctx, const Mode& next) 
 
     if (!ignore_checks && !in.ekf_alt_ok && ctx.current != nullptr &&
         ctx.current->has_manual_throttle() && !next.has_manual_throttle()) {
+        return false;
+    }
+
+    // Upstream get_control_mode_reason() is the current reason, not incoming.
+    if (!ignore_checks && in.fence_enabled && in.fence_disable_mode_change &&
+        in.fence_breaches && in.armed && ctx.reason == ModeReason::FENCE_BREACHED &&
+        !in.land_complete) {
         return false;
     }
 
@@ -301,6 +319,9 @@ inline void record_notify_flight_mode(FlightModeContext& ctx, const Mode& next) 
     ctx.reason = reason;
     record_write_mode(ctx, next.mode_number(), reason);
     record_notify_flight_mode(ctx, next);
+    if (in.fence_present && !in.fence_action_report_only) {
+        ctx.fence_manual_recovery_start = true;
+    }
     return true;
 }
 

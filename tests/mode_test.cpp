@@ -478,11 +478,119 @@ TEST_CASE("AUTO_RTL success writes AUTO_RTL after auto_RTL is set", "[copter][mo
     REQUIRE(f.ctx.written_reason == ModeReason::GCS_COMMAND);
 }
 
+TEST_CASE("fence recovery blocks set_mode when all gate conditions hold", "[copter][mode]") {
+    Fixture f;
+    f.ctx.reason = ModeReason::FENCE_BREACHED;
+    SetModeInputs in{};
+    in.armed = true;
+    in.land_complete = false;
+    in.fence_enabled = true;
+    in.fence_disable_mode_change = true;
+    in.fence_breaches = true;
+    in.fence_present = true;
+    in.fence_action_report_only = false;
+    REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE(f.ctx.reason == ModeReason::FENCE_BREACHED);
+    REQUIRE_FALSE(f.ctx.fence_manual_recovery_start);
+    REQUIRE_FALSE(f.ctx.write_mode);
+}
+
+TEST_CASE("fence recovery allows when any gate condition is false", "[copter][mode]") {
+    auto blocking = []() {
+        SetModeInputs in{};
+        in.armed = true;
+        in.land_complete = false;
+        in.fence_enabled = true;
+        in.fence_disable_mode_change = true;
+        in.fence_breaches = true;
+        return in;
+    };
+
+    {
+        Fixture f;
+        f.ctx.reason = ModeReason::FENCE_BREACHED;
+        SetModeInputs in = blocking();
+        in.land_complete = true;
+        REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+        REQUIRE(f.ctx.current == &f.table.althold);
+    }
+    {
+        Fixture f;
+        SetModeInputs in = blocking();
+        REQUIRE(f.ctx.reason != ModeReason::FENCE_BREACHED);
+        REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::FENCE_BREACHED, in));
+        REQUIRE(f.ctx.current == &f.table.althold);
+    }
+    {
+        Fixture f;
+        f.ctx.reason = ModeReason::FENCE_BREACHED;
+        SetModeInputs in = blocking();
+        in.armed = false;
+        REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+        REQUIRE(f.ctx.current == &f.table.althold);
+    }
+    {
+        Fixture f;
+        f.ctx.reason = ModeReason::FENCE_BREACHED;
+        SetModeInputs in = blocking();
+        in.fence_enabled = false;
+        REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+        REQUIRE(f.ctx.current == &f.table.althold);
+    }
+    {
+        Fixture f;
+        f.ctx.reason = ModeReason::FENCE_BREACHED;
+        SetModeInputs in = blocking();
+        in.fence_disable_mode_change = false;
+        REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+        REQUIRE(f.ctx.current == &f.table.althold);
+    }
+    {
+        Fixture f;
+        f.ctx.reason = ModeReason::FENCE_BREACHED;
+        SetModeInputs in = blocking();
+        in.fence_breaches = false;
+        REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+        REQUIRE(f.ctx.current == &f.table.althold);
+    }
+}
+
+TEST_CASE("successful enter records fence_manual_recovery_start", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.fence_present = true;
+    in.fence_action_report_only = false;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.althold);
+    REQUIRE(f.ctx.fence_manual_recovery_start);
+}
+
+TEST_CASE("fence_present false does not record fence_manual_recovery_start", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.fence_present = false;
+    in.fence_action_report_only = false;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.althold);
+    REQUIRE_FALSE(f.ctx.fence_manual_recovery_start);
+}
+
+TEST_CASE("fence_action_report_only does not record fence_manual_recovery_start", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.fence_present = true;
+    in.fence_action_report_only = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.althold);
+    REQUIRE_FALSE(f.ctx.fence_manual_recovery_start);
+}
+
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
-    REQUIRE(remaining_count() == 3);
+    REQUIRE(remaining_count() == 2);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 12);
+    REQUIRE(mode_on_main_count() == 13);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -497,8 +605,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("acro_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("althold_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("remaining mode bodies", ModePortStatus::kRemaining));
-    REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kThisSlice));
-    REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("Write_Mode/notify", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("Drift-as-manual-throttle", ModePortStatus::kOnMain));
