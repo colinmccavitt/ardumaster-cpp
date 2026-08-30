@@ -18,6 +18,8 @@ using fwcpp::control::input_rate_bf_roll_pitch_yaw_2_rads;
 using fwcpp::control::input_rate_bf_roll_pitch_yaw_rads;
 using fwcpp::copter::AcroOptions;
 using fwcpp::copter::AcroRunInputs;
+using fwcpp::copter::AcroTrainer;
+using fwcpp::copter::AcroTrainerInputs;
 using fwcpp::copter::DesiredSpoolState;
 using fwcpp::copter::SpoolState;
 using fwcpp::copter::acro_run;
@@ -203,17 +205,73 @@ TEST_CASE("SHUT_DOWN zeros throttle", "[copter][acro]") {
     REQUIRE(out.desired_spool == DesiredSpoolState::THROTTLE_UNLIMITED);
 }
 
+TEST_CASE("trainer OFF matches circular-limit expo path", "[copter][acro]") {
+    const float roll = 0.8f;
+    const float pitch = 0.8f;
+    const float yaw = 0.2f;
+    const float rp_rate = 360.0f;
+    const float rp_expo = 0.3f;
+    const float y_rate = 202.5f;
+    const float y_expo = 0.25f;
+
+    const auto six_arg = get_pilot_desired_rates_rads(roll, pitch, yaw, rp_rate, rp_expo, y_rate, y_expo);
+
+    AcroTrainerInputs trainer;
+    trainer.trainer = AcroTrainer::OFF;
+    trainer.att_target_euler_rad = Vector3f{0.4f, -0.2f, 0.0f};
+    trainer.balance_roll = 1.0f;
+    trainer.balance_pitch = 1.0f;
+    const auto off = get_pilot_desired_rates_rads(roll, pitch, yaw, rp_rate, rp_expo, y_rate, y_expo, trainer);
+
+    REQUIRE(off.roll_rads == Approx(six_arg.roll_rads));
+    REQUIRE(off.pitch_rads == Approx(six_arg.pitch_rads));
+    REQUIRE(off.yaw_rads == Approx(six_arg.yaw_rads));
+
+    const float ratio = 1.0f / std::hypot(pitch, roll);
+    const float expect_roll = fwcpp::math::radians(rp_rate) * input_expo(roll * ratio, rp_expo);
+    REQUIRE(off.roll_rads == Approx(expect_roll));
+}
+
+TEST_CASE("LEVELING nonzero roll attitude pulls rate toward level", "[copter][acro]") {
+    const float rp_rate = 360.0f;
+    const float rp_expo = 0.0f;
+    const float y_rate = 202.5f;
+    const float y_expo = 0.0f;
+
+    const auto off = get_pilot_desired_rates_rads(0.0f, 0.0f, 0.0f, rp_rate, rp_expo, y_rate, y_expo);
+
+    AcroTrainerInputs trainer;
+    trainer.trainer = AcroTrainer::LEVELING;
+    trainer.att_target_euler_rad = Vector3f{0.25f, 0.0f, 0.0f};
+    trainer.balance_roll = 1.0f;
+    trainer.balance_pitch = 1.0f;
+    trainer.cos_pitch = 1.0f;
+    trainer.att_target_quat.from_euler(0.0f, 0.0f, 0.0f);
+
+    const auto leveling =
+        get_pilot_desired_rates_rads(0.0f, 0.0f, 0.0f, rp_rate, rp_expo, y_rate, y_expo, trainer);
+
+    REQUIRE(off.roll_rads == Approx(0.0f).margin(1e-6f));
+    REQUIRE(leveling.roll_rads < 0.0f);
+    REQUIRE(std::signbit(leveling.roll_rads) != std::signbit(trainer.att_target_euler_rad.x));
+
+    trainer.att_target_euler_rad.x = -0.25f;
+    const auto leveling_neg =
+        get_pilot_desired_rates_rads(0.0f, 0.0f, 0.0f, rp_rate, rp_expo, y_rate, y_expo, trainer);
+    REQUIRE(leveling_neg.roll_rads > 0.0f);
+}
+
 TEST_CASE("leftover remaining_count is not zero", "[copter][acro][leftover]") {
     REQUIRE(remaining_count() > 0);
-    REQUIRE(this_slice_count() == 6);
-    REQUIRE(on_main_count() == 1);
+    REQUIRE(this_slice_count() == 7);
+    REQUIRE(on_main_count() == 2);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("acro_run", PortStatus::kThisSlice));
     REQUIRE(completeness_has("stabilize_run", PortStatus::kOnMain));
-    REQUIRE(completeness_has("althold_run", PortStatus::kRemaining));
-    REQUIRE(completeness_has("trainer LEVEL/LIMITED", PortStatus::kRemaining));
+    REQUIRE(completeness_has("althold_run", PortStatus::kOnMain));
+    REQUIRE(completeness_has("trainer LEVEL/LIMITED", PortStatus::kThisSlice));
     REQUIRE(completeness_has("scale_I_to_angle_P", PortStatus::kRemaining));
     REQUIRE(completeness_has("AIR_MODE init", PortStatus::kRemaining));
     REQUIRE_FALSE(completeness_has("AUTO_RTL", PortStatus::kRemaining));
