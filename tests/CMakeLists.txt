@@ -1058,3 +1058,7 @@ catch_discover_tests(failsafe_test)
 add_executable(mode_drift_test mode_drift_test.cpp)
 target_link_libraries(mode_drift_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_drift_test)
+# CCP-042: failsafe radio leftover scaffold + FS_THR on_event leftover.
+add_executable(failsafe_test failsafe_test.cpp)
+target_link_libraries(failsafe_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(failsafe_test)

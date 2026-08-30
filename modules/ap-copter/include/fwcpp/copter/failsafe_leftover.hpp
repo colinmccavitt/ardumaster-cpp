@@ -4,10 +4,10 @@
 // crash_check (Plane-4.7.0). Nested under fwcpp::copter::failsafe so
 // remaining_count() does not collide with copter_leftover / land_detector.
 //
-// Slice 1: leftover catalog + leftover_failsafe_radio_check thin gate
-// (armed && radio_failsafe inject → leftover_set_mode_rtl_or_land flags).
-// GCS announce as flags (ADR-0012). events override ladder, GCS failsafe,
-// crash_check, and failsafe.cpp CPU watchdog remain.
+// Slice 1: leftover catalog + leftover_failsafe_radio_check thin gate.
+// Slice 2: leftover_failsafe_radio_on_event FS_THR → FailsafeAction map
+// + leftover_do_failsafe_action flag (do_failsafe_action body remains).
+// Override ladder, GCS failsafe, crash_check, CPU watchdog remain.
 
 #include <cstddef>
 #include <cstdint>
@@ -33,12 +33,14 @@ inline constexpr PortItem kCompleteness[] = {
      "armed && radio_failsafe inject → leftover_set_mode_rtl_or_land + GCS flags"},
     {"leftover_set_mode_rtl_or_land", PortStatus::kThisSlice,
      "events.cpp ~389 thin flags; no set_mode / land-with-pause body"},
+    {"leftover_failsafe_radio_on_event", PortStatus::kThisSlice,
+     "events.cpp ~17-44; FsThrEnable → FailsafeAction; leftover_do_failsafe_action flag"},
     {"failsafe_enable call site", PortStatus::kOnMain,
      "CCP-035 init_ardupilot leftover failsafe_enable flag"},
     {"ModeRTL / ModeLand", PortStatus::kOnMain,
      "CCP-036 mode leftovers; land_detector CCP-041 scaffold"},
     {"failsafe_radio_on_event override ladder", PortStatus::kRemaining,
-     "events.cpp ~13-79; FS_THR_ENABLE + continue-landing/auto/guided"},
+     "events.cpp ~46-75; should_disarm + continue-landing/auto/guided"},
     {"failsafe_gcs_check / failsafe_gcs_on_event", PortStatus::kRemaining,
      "events.cpp ~125+; heartbeat age edge + FS_GCS_ENABLE table"},
     {"do_failsafe_action / battery / terrain / deadreckon", PortStatus::kRemaining,
