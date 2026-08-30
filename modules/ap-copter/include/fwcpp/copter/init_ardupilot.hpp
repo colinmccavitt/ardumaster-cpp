@@ -4,7 +4,7 @@
 // ~16-200 (through ap.initialised = true) plus
 // esc_calibration.cpp ~10-73 leftover flags (no while(1) / HAL
 // delay / leftover leftover_read_radio leftover leftover_loop /
-// leftover leftover_passthrough leftover leftover_would leftover leftover_loop leftover leftover_flag leftover leftover_/ leftover leftover_auto leftover leftover_body leftover leftover_remaining). No notify / battery /
+// leftover leftover_passthrough leftover leftover_would leftover leftover_loop leftover leftover_flag leftover leftover_/ leftover leftover_esc_cal_auto_high leftover leftover / leftover leftover_esc_cal_auto_would_block leftover leftover flags leftover leftover_/ leftover leftover_esc_calibration_setup leftover leftover_body leftover leftover remaining). No notify / battery /
 // barometer / winch /
 // rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
 // SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
@@ -62,6 +62,8 @@
 //     leftover leftover flag iff leftover leftover_esc_cal_passthrough
 //     (upstream leftover leftover_while leftover leftover_1 leftover leftover_after
 //     leftover leftover_esc_calibration_setup leftover leftover_— leftover leftover_do leftover leftover_NOT leftover leftover_loop leftover leftover_or leftover leftover_notify leftover leftover_/ leftover leftover_read_radio leftover leftover_/ leftover leftover_delay leftover leftover_/ leftover leftover_motors).
+//     leftover leftover_esc_cal_auto_high leftover leftover flag + leftover leftover_esc_cal_auto_would_block leftover leftover flag iff leftover leftover_esc_cal_auto
+//     (upstream leftover leftover_esc_calibration_auto leftover leftover after leftover leftover_esc_calibration_setup leftover leftover_— leftover leftover_raise leftover leftover_throttle leftover leftover_1.0f leftover leftover_then leftover leftover_5s leftover leftover_loop leftover leftover then leftover leftover_while leftover leftover_1 leftover leftover_output leftover leftover_0.0f leftover leftover_— leftover leftover_do leftover leftover_NOT leftover leftover_loop leftover leftover_or leftover leftover_delay leftover leftover_/ leftover leftover_motors leftover leftover_/ leftover leftover_SRV leftover leftover_/ leftover leftover_notify).
 //     leftover leftover_esc_cal_clear_after
 //     iff != DISABLED. Do not leftover leftover_esc_cal_passthrough
 //     / leftover leftover_esc_cal_auto leftover leftover_bodies.
@@ -106,7 +108,7 @@
 // init_rangefinder stays false (AP_RANGEFINDER remaining).
 // g2.proximity.init stays false (HAL_PROXIMITY remaining).
 // g2.beacon.init stays false (AP_BEACON remaining).
-// The rest of init_ardupilot is ESC cal auto body —
+// The rest of init_ardupilot is ESC cal setup body —
 // catalog row "Copter::init_ardupilot rest".
 
 #include <cstdint>
@@ -217,6 +219,8 @@ struct InitArdupilotEffects {
     bool esc_cal_auto{false};           // leftover flag only — no auto body
     bool esc_cal_setup{false};          // leftover leftover flag — call site only, no setup body
     bool esc_cal_passthrough_would_loop{false};  // leftover leftover flag iff leftover leftover_esc_cal_passthrough — no while(1)
+    bool esc_cal_auto_high{false};      // leftover leftover flag iff leftover leftover_esc_cal_auto — raise 1.0f / 5s; no delay / motors
+    bool esc_cal_auto_would_block{false};  // leftover leftover flag iff leftover leftover_esc_cal_auto — while(1) 0.0f; no while(1)
     bool esc_cal_clear_after{false};    // leftover leftover_esc_calibrate.set_and_save(NONE)
     bool initialised_params{false};
     bool relay_init{false};             // remaining AP_RELAY
@@ -320,7 +324,10 @@ struct InitArdupilotEffects {
     // leftover leftover_body. leftover leftover_esc_cal_passthrough_would_loop
     // leftover leftover flag iff leftover leftover_esc_cal_passthrough
     // (no while(1) / leftover leftover_notify / leftover leftover_read_radio /
-    // leftover leftover_delay / leftover leftover_motors). would_block is a
+    // leftover leftover_delay / leftover leftover_motors). leftover leftover_esc_cal_auto_high
+    // leftover leftover / leftover leftover_esc_cal_auto_would_block leftover leftover
+    // flags iff leftover leftover_esc_cal_auto (no while(1) / leftover leftover_delay /
+    // leftover leftover_motors / leftover leftover_SRV). would_block is a
     // flag only — do not while(1).
     if (in.is_brushed_pwm) {
         fx.esc_cal_skipped = true;
@@ -358,6 +365,10 @@ struct InitArdupilotEffects {
             }
             if (fx.esc_cal_passthrough) {
                 fx.esc_cal_passthrough_would_loop = true;
+            }
+            if (fx.esc_cal_auto) {
+                fx.esc_cal_auto_high = true;
+                fx.esc_cal_auto_would_block = true;
             }
             if (in.esc_calibrate != ESCCalibrationModes::ESCCAL_DISABLED) {
                 fx.esc_cal_clear_after = true;
