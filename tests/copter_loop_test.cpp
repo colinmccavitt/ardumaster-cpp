@@ -94,7 +94,9 @@ using fwcpp::copter::get_wp_distance_m;
 using fwcpp::copter::update_auto_armed;
 using fwcpp::copter::startup_ins_ground;
 using fwcpp::copter::allocate_motors;
+using fwcpp::copter::InitArdupilotInputs;
 using fwcpp::copter::init_ardupilot;
+using fwcpp::copter::kRollPitchYawInputMax;
 using fwcpp::copter::kLostVehicleDelay;
 using fwcpp::copter::kLostVehicleStickThreshold;
 using fwcpp::copter::kTakeoffCheckAvgLoadMax;
@@ -126,7 +128,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 34", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 35", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 35);
@@ -2650,7 +2652,7 @@ TEST_CASE("allocate_motors leftover attitude_ok false skips convert flags",
     REQUIRE_FALSE(fx.invalidate_count);
 }
 
-TEST_CASE("init_ardupilot leftover default notify battery baro",
+TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
           "[copter][init_ardupilot]") {
     const auto fx = init_ardupilot();
     REQUIRE(fx.notify_init);
@@ -2659,4 +2661,27 @@ TEST_CASE("init_ardupilot leftover default notify battery baro",
     REQUIRE(fx.barometer_init);
     REQUIRE_FALSE(fx.winch_init);
     REQUIRE_FALSE(fx.rssi_init);
+    REQUIRE_FALSE(fx.gcs_setup_uarts);
+    REQUIRE_FALSE(fx.osd_init);
+    REQUIRE_FALSE(fx.using_interlock);
+    REQUIRE(fx.roll_bind);
+    REQUIRE(fx.pitch_bind);
+    REQUIRE(fx.yaw_bind);
+    REQUIRE(fx.throttle_bind);
+    REQUIRE(fx.roll_angle == kRollPitchYawInputMax);
+    REQUIRE(fx.pitch_angle == kRollPitchYawInputMax);
+    REQUIRE(fx.yaw_angle == kRollPitchYawInputMax);
+    REQUIRE(fx.throttle_range == 1000);
+    REQUIRE_FALSE(fx.rc_tuning);
+    REQUIRE_FALSE(fx.rc_tuning2);
+    REQUIRE(fx.default_dead_zones);
+    REQUIRE(fx.throttle_zero);
+}
+
+TEST_CASE("init_ardupilot leftover motor_interlock_aux sets using_interlock",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.motor_interlock_aux = true;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.using_interlock);
 }

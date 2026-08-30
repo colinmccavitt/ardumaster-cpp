@@ -1,11 +1,12 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 34 lands
-// init_ardupilot leftover (notify.init + notify_flight_mode,
-// battery.init, barometer.init flags only). Rest of
-// init_ardupilot (RC, GPS, compass, allocate_motors call, …)
-// stays remaining.
+// (Copter.cpp / Copter.h / system.cpp). Slice 35 lands
+// init_ardupilot leftover (notify/battery/baro + interlock +
+// init_rc_in leftover; gcs/osd remaining false). Rest of
+// init_ardupilot (surface_tracking, allocate_motors call,
+// rc convert/init, init_rc_out, ESC cal, GPS/compass,
+// startup_INS_ground call, …) stays remaining.
 // remaining_count() > 0 is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
@@ -44,9 +45,9 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::throttle_loop", PortStatus::kOnMain,
      "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
     {"Copter::init_ardupilot", PortStatus::kThisSlice,
-     "init_ardupilot.hpp; notify/battery/baro leftover; RC/GPS/compass/rest remaining"},
+     "init_ardupilot.hpp; notify/battery/baro + interlock + init_rc_in leftover; gcs/osd remaining false"},
     {"Copter::init_ardupilot rest", PortStatus::kRemaining,
-     "RC in/out, interlock, allocate_motors call, GPS/compass, startup_INS_ground call, etc."},
+     "surface_tracking, allocate_motors call, rc convert/init, init_rc_out, ESC cal, GPS/compass, startup_INS_ground call, etc."},
     {"Copter::run_rate_controller_main", PortStatus::kOnMain,
      "run_rate_controller.hpp; set_dt_s + rate_controller_run iff !rate thread"},
     {"Copter::read_inertia", PortStatus::kOnMain,
