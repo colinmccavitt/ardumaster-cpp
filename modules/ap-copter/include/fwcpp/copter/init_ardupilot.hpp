@@ -4,7 +4,7 @@
 // ~16-200 (through ap.initialised = true) plus
 // esc_calibration.cpp ~10-73 leftover flags (no while(1) / HAL
 // delay / leftover leftover_read_radio leftover leftover_loop /
-// leftover leftover_passthrough leftover leftover_/ leftover leftover_auto leftover leftover_bodies). No notify / battery /
+// leftover leftover_passthrough leftover leftover_would leftover leftover_loop leftover leftover_flag leftover leftover_/ leftover leftover_auto leftover leftover_body leftover leftover_remaining). No notify / battery /
 // barometer / winch /
 // rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
 // SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
@@ -58,7 +58,11 @@
 //     throttle >= 950, or ALWAYS); leftover leftover_esc_cal_auto
 //     flag iff ESCCAL_AUTO; leftover leftover_esc_cal_setup leftover
 //     leftover flag (call site only) iff leftover leftover_esc_cal_passthrough
-//     OR leftover leftover_esc_cal_auto. leftover leftover_esc_cal_clear_after
+//     OR leftover leftover_esc_cal_auto. leftover leftover_esc_cal_passthrough_would_loop
+//     leftover leftover flag iff leftover leftover_esc_cal_passthrough
+//     (upstream leftover leftover_while leftover leftover_1 leftover leftover_after
+//     leftover leftover_esc_calibration_setup leftover leftover_— leftover leftover_do leftover leftover_NOT leftover leftover_loop leftover leftover_or leftover leftover_notify leftover leftover_/ leftover leftover_read_radio leftover leftover_/ leftover leftover_delay leftover leftover_/ leftover leftover_motors).
+//     leftover leftover_esc_cal_clear_after
 //     iff != DISABLED. Do not leftover leftover_esc_cal_passthrough
 //     / leftover leftover_esc_cal_auto leftover leftover_bodies.
 //     Do not leftover leftover_esc_calibration_setup leftover leftover_body.
@@ -102,8 +106,8 @@
 // init_rangefinder stays false (AP_RANGEFINDER remaining).
 // g2.proximity.init stays false (HAL_PROXIMITY remaining).
 // g2.beacon.init stays false (AP_BEACON remaining).
-// The rest of init_ardupilot is ESC cal passthrough / auto
-// bodies — catalog row "Copter::init_ardupilot rest".
+// The rest of init_ardupilot is ESC cal auto body —
+// catalog row "Copter::init_ardupilot rest".
 
 #include <cstdint>
 
@@ -212,6 +216,7 @@ struct InitArdupilotEffects {
     bool esc_cal_passthrough{false};    // leftover flag only — no passthrough body
     bool esc_cal_auto{false};           // leftover flag only — no auto body
     bool esc_cal_setup{false};          // leftover leftover flag — call site only, no setup body
+    bool esc_cal_passthrough_would_loop{false};  // leftover leftover flag iff leftover leftover_esc_cal_passthrough — no while(1)
     bool esc_cal_clear_after{false};    // leftover leftover_esc_calibrate.set_and_save(NONE)
     bool initialised_params{false};
     bool relay_init{false};             // remaining AP_RELAY
@@ -312,7 +317,11 @@ struct InitArdupilotEffects {
     // leftover leftover_esc_cal_setup leftover leftover flag (call
     // site only) iff leftover leftover_esc_cal_passthrough OR leftover
     // leftover_esc_cal_auto — no leftover leftover_esc_calibration_setup
-    // leftover leftover_body. would_block is a flag only — do not while(1).
+    // leftover leftover_body. leftover leftover_esc_cal_passthrough_would_loop
+    // leftover leftover flag iff leftover leftover_esc_cal_passthrough
+    // (no while(1) / leftover leftover_notify / leftover leftover_read_radio /
+    // leftover leftover_delay / leftover leftover_motors). would_block is a
+    // flag only — do not while(1).
     if (in.is_brushed_pwm) {
         fx.esc_cal_skipped = true;
     } else {
@@ -346,6 +355,9 @@ struct InitArdupilotEffects {
             }
             if (fx.esc_cal_passthrough || fx.esc_cal_auto) {
                 fx.esc_cal_setup = true;
+            }
+            if (fx.esc_cal_passthrough) {
+                fx.esc_cal_passthrough_would_loop = true;
             }
             if (in.esc_calibrate != ESCCalibrationModes::ESCCAL_DISABLED) {
                 fx.esc_cal_clear_after = true;
