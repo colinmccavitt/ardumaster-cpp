@@ -6,8 +6,9 @@
 // collide with other param helpers.
 //
 // Slice 1: ConversionInfo + convert_old_parameters_scaled leftover scaffold
-// (inject OldParamStore / NewParamStore; no EEPROM). Remaining rows are
-// later CPP-023 work.
+// (inject OldParamStore / NewParamStore; no EEPROM).
+// Slice 2: leftover_convert_parameter_width inject (no EEPROM / find_var_info).
+// Remaining rows are later CPP-023 work.
 
 #include <cstddef>
 #include <cstdint>
@@ -44,10 +45,10 @@ inline constexpr PortItem kCompleteness[] = {
     {"convert_class", PortStatus::kRemaining, "AP_Param.cpp ~2143-2193"},
     {"convert_g2 / convert_toplevel objects", PortStatus::kRemaining,
      "AP_Param.cpp ~2197-2218"},
-    {"_convert_parameter_width", PortStatus::kRemaining,
-     "AP_Param.cpp ~2222+; needs find_var_info or faithful equivalent"},
+    {"_convert_parameter_width", PortStatus::kThisSlice,
+     "AP_Param.cpp ~2222+; leftover_convert_parameter_width inject; no EEPROM"},
     {"bitmask / centi width helpers", PortStatus::kRemaining,
-     "convert_bitmask_parameter_width / convert_centi_parameter"},
+     "convert_bitmask_parameter_width / convert_centi_parameter; typed mask widen"},
     {"flush after convert", PortStatus::kRemaining,
      "AP_Param.cpp ~2137-2139 / ~2190-2192 StorageManager flush"},
     {"AP_Param singleton / EEPROM", PortStatus::kOutOfScope,

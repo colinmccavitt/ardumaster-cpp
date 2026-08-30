@@ -10,10 +10,13 @@ using fwcpp::param::ConversionInfo;
 using fwcpp::param::NewParamStore;
 using fwcpp::param::OldParamStore;
 using fwcpp::param::VarType;
+using fwcpp::param::WidthConvertEffects;
+using fwcpp::param::WidthConvertInputs;
 using fwcpp::param::convert_old_parameter;
 using fwcpp::param::convert_old_parameters;
 using fwcpp::param::convert_old_parameters_scaled;
 using fwcpp::param::find_old_parameter;
+using fwcpp::param::leftover_convert_parameter_width;
 using fwcpp::param::new_store_find;
 using fwcpp::param::old_store_put;
 using fwcpp::param::conversion::PortStatus;
@@ -90,17 +93,69 @@ TEST_CASE("convert_old_parameters uses scaler 1.0f", "[param][conversion]") {
     REQUIRE(out == 3.0f);
 }
 
+TEST_CASE("leftover_convert_parameter_width skips configured_in_storage",
+          "[param][conversion][width]") {
+    WidthConvertInputs in{};
+    in.configured_in_storage = true;
+    in.old_value_found = true;
+    in.old_value = 5.0f;
+    WidthConvertEffects fx{};
+    REQUIRE_FALSE(leftover_convert_parameter_width(in, fx));
+    REQUIRE(fx.skipped_configured);
+    REQUIRE_FALSE(fx.converted);
+    REQUIRE_FALSE(fx.skipped_missing);
+}
+
+TEST_CASE("leftover_convert_parameter_width skips missing old value",
+          "[param][conversion][width]") {
+    WidthConvertInputs in{};
+    in.old_value_found = false;
+    WidthConvertEffects fx{};
+    REQUIRE_FALSE(leftover_convert_parameter_width(in, fx));
+    REQUIRE(fx.skipped_missing);
+    REQUIRE_FALSE(fx.converted);
+    REQUIRE_FALSE(fx.skipped_configured);
+}
+
+TEST_CASE("leftover_convert_parameter_width scales non-bitmask",
+          "[param][conversion][width]") {
+    WidthConvertInputs in{};
+    in.old_value_found = true;
+    in.old_value = 100.0f;
+    in.scale_factor = 0.01f;
+    WidthConvertEffects fx{};
+    REQUIRE(leftover_convert_parameter_width(in, fx));
+    REQUIRE(fx.converted);
+    REQUIRE(fx.new_value == Approx(1.0f));
+    REQUIRE_FALSE(fx.skipped_configured);
+    REQUIRE_FALSE(fx.skipped_missing);
+}
+
+TEST_CASE("leftover_convert_parameter_width bitmask uses simple uint32 cast",
+          "[param][conversion][width]") {
+    // Inject already holds a non-negative float; truncating cast through
+    // uint32 is the documented stub (typed int8 -1 → 255 remain catalogued).
+    WidthConvertInputs in{};
+    in.old_value_found = true;
+    in.old_value = 42.7f;
+    in.bitmask = true;
+    WidthConvertEffects fx{};
+    REQUIRE(leftover_convert_parameter_width(in, fx));
+    REQUIRE(fx.converted);
+    REQUIRE(fx.new_value == 42.0f);
+}
+
 TEST_CASE("conversion leftover catalog remaining_count", "[param][conversion][leftover]") {
-    REQUIRE(remaining_count() == 7);
-    REQUIRE(this_slice_count() == 5);
+    REQUIRE(remaining_count() == 6);
+    REQUIRE(this_slice_count() == 6);
     REQUIRE(on_main_count() == 0);
     REQUIRE(out_of_scope_count() == 1);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("ConversionInfo", PortStatus::kThisSlice));
     REQUIRE(completeness_has("convert_old_parameters_scaled", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("_convert_parameter_width", PortStatus::kRemaining));
+    REQUIRE(completeness_has("_convert_parameter_width", PortStatus::kThisSlice));
     REQUIRE(completeness_has("bitmask / centi width helpers", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP_Param singleton / EEPROM", PortStatus::kOutOfScope));
-    REQUIRE_FALSE(completeness_has("_convert_parameter_width", PortStatus::kThisSlice));
+    REQUIRE_FALSE(completeness_has("_convert_parameter_width", PortStatus::kRemaining));
 }

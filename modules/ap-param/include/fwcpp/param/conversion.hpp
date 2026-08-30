@@ -1,14 +1,15 @@
 #pragma once
 
-// CPP-023 slice 1: AP_Param ConversionInfo + convert_old_parameters_scaled
+// CPP-023 slice 1–2: AP_Param ConversionInfo + convert_old_parameters_scaled
 // leftover scaffold (Plane-4.7.0 AP_Param.cpp ~2125-2160, convert_old_parameter
-// ~2068-2121). ADR-0012: no EEPROM / no AP_Param singleton — injected
-// OldParamStore / NewParamStore maps stand in for find_old_parameter's
-// storage scan and find()+save of the new name.
+// ~2068-2121) and _convert_parameter_width leftover (~2222+). ADR-0012: no
+// EEPROM / no AP_Param singleton — injected OldParamStore / NewParamStore and
+// WidthConvertInputs stand in for storage scan, find_var_info, and save.
 //
-// THIS SLICE: table loop, inject lookup, scaler apply into NewParamStore
-// by new_name. Remaining (_convert_parameter_width, bitmasks, convert_class,
-// CONVERT_FLAG_REVERSE/FORCE, EEPROM find_old_parameter) in
+// Slice 1: table loop, inject lookup, scaler apply into NewParamStore by
+// new_name. Slice 2: leftover_convert_parameter_width (configured skip, inject
+// old value, scale or bitmask stub). Remaining (bitmasks/centi helpers,
+// convert_class, CONVERT_FLAG_REVERSE/FORCE, EEPROM find_old_parameter) in
 // conversion_leftover.hpp.
 
 #include <cstddef>
@@ -177,6 +178,55 @@ inline void convert_old_parameters_scaled(const ConversionInfo* table, std::uint
 inline void convert_old_parameters(const ConversionInfo* table, std::uint8_t table_size,
                                   std::uint8_t flags, const OldParamStore& old, NewParamStore& neu) {
     convert_old_parameters_scaled(table, table_size, 1.0f, flags, old, neu);
+}
+
+// Injected inputs for leftover_convert_parameter_width (no find_var_info /
+// EEPROM scan). Caller supplies configured_in_storage and any already-found
+// old float value (stand-in for cast_to_float(old_ptype) after scan).
+struct WidthConvertInputs {
+    bool configured_in_storage{false};
+    bool old_value_found{false};
+    float old_value{};
+    float scale_factor{1.f};
+    bool bitmask{false};
+};
+
+struct WidthConvertEffects {
+    bool skipped_configured{false};
+    bool skipped_missing{false};
+    bool converted{false};
+    float new_value{};
+};
+
+// Leftover AP_Param::_convert_parameter_width (AP_Param.cpp ~2222+).
+// Upstream: if configured_in_storage return false; find old type in store;
+// scale (or bitmask via uint32); set_value + save(true). This inject path
+// returns the computed new float only — no EEPROM write.
+//
+// Non-bitmask: new_value = old_value * scale_factor.
+// Bitmask: simple truncating cast through uint32 (float→u32→float). Full
+// typed AP_Int8/16/32 unsigned widen (int8 -1 → 255) remains under
+// "bitmask / centi width helpers" in the leftover catalog.
+[[nodiscard]] inline bool leftover_convert_parameter_width(const WidthConvertInputs& in,
+                                                           WidthConvertEffects& fx) {
+    fx = WidthConvertEffects{};
+    if (in.configured_in_storage) {
+        fx.skipped_configured = true;
+        return false;
+    }
+    if (!in.old_value_found) {
+        fx.skipped_missing = true;
+        return false;
+    }
+    if (!in.bitmask) {
+        fx.new_value = in.old_value * in.scale_factor;
+    } else {
+        // Simple cast stub — not the full unsigned mask widen path.
+        const auto mask = static_cast<std::uint32_t>(in.old_value);
+        fx.new_value = static_cast<float>(mask);
+    }
+    fx.converted = true;
+    return true;
 }
 
 } // namespace fwcpp::param
