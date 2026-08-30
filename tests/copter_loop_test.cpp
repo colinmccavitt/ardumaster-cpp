@@ -32,6 +32,7 @@ using fwcpp::copter::LoopRateLoggingInputs;
 using fwcpp::copter::TenHzLoggingLoopInputs;
 using fwcpp::copter::TwentyfiveHzLoggingInputs;
 using fwcpp::copter::OneHzLoopInputs;
+using fwcpp::copter::ApValueInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -63,6 +64,7 @@ using fwcpp::copter::loop_rate_logging;
 using fwcpp::copter::ten_hz_logging_loop;
 using fwcpp::copter::twentyfive_hz_logging;
 using fwcpp::copter::one_hz_loop;
+using fwcpp::copter::ap_value;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
@@ -88,10 +90,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 18", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 13);
+TEST_CASE("catalog remaining_count stays open after slice 19", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 12);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 22);
+    REQUIRE(on_main_count() == 23);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -117,8 +119,9 @@ TEST_CASE("catalog remaining_count stays open after slice 18", "[copter][leftove
     REQUIRE(completeness_has("Copter::ten_hz_logging_loop", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::twentyfive_hz_logging", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::one_hz_loop", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::ap_value", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::one_hz_loop", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::ap_value", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::init_simple_bearing", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
@@ -1427,7 +1430,6 @@ TEST_CASE("one_hz_loop leftover always aux+notify_flying; !armed motors; ap_stat
     log_any.should_log_any = true;
     const auto log_fx = one_hz_loop(log_any);
     REQUIRE(log_fx.log_write_ap_state);
-    REQUIRE(completeness_has("Copter::ap_value", PortStatus::kRemaining));
     REQUIRE_FALSE(log_fx.terrain_logging);
 
     OneHzLoopInputs rate_thr{};
@@ -1445,4 +1447,23 @@ TEST_CASE("one_hz_loop leftover always aux+notify_flying; !armed motors; ap_stat
     REQUIRE(row->max_time_micros == 100);
     REQUIRE(row->priority == 81);
     REQUIRE(row->gate == nullptr);
+}
+
+TEST_CASE("ap_value leftover packs injected bools in PACKED ap field order",
+          "[copter][ap_value]") {
+    REQUIRE(ap_value() == 0);
+    REQUIRE(ap_value({}) == 0);
+
+    ApValueInputs land{};
+    land.land_complete = true;
+    REQUIRE(ap_value(land) == (1U << 7));
+
+    ApValueInputs arm{};
+    arm.pre_arm_check = true;
+    arm.auto_armed = true;
+    REQUIRE(ap_value(arm) == ((1U << 4) | (1U << 5)));
+
+    ApValueInputs prec{};
+    prec.prec_land_active = true;
+    REQUIRE(ap_value(prec) == (1U << 26));
 }
