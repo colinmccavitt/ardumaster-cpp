@@ -1,9 +1,10 @@
 #pragma once
 
 // Copter::init_ardupilot leftover. Upstream ArduCopter/system.cpp
-// ~16-68 (after init_rc_in(); stop BEFORE init_rc_out()). No notify /
-// battery / barometer / winch / rssi / GCS / OSD / SurfaceTracking /
-// RC_Channel objects — record leftover flags only. Do not invoke the
+// ~16-71 (after init_rc_out(); stop BEFORE esc_calibration_startup_check).
+// No notify / battery / barometer / winch / rssi / GCS / OSD /
+// SurfaceTracking / RC_Channel / motors / SRV_Channels / BoardConfig
+// objects — record leftover flags only. Do not invoke the
 // allocate_motors() helper body (call-site leftover flag only).
 //
 // Always-on this slice (AP_WINCH_ENABLED / AP_RSSI_ENABLED are not
@@ -25,9 +26,13 @@
 //   allocate_motors() call site — leftover flag only
 //   rc().convert_options(ARMDISARM_UNUSED=41, ARMDISARM_AIRMODE=154)
 //   rc().init()
+//   init_rc_out() leftover flags — motors->init, enable_aux_servos,
+//     set_update_rate, convert_pwm_min_max, update_throttle_range,
+//     update_aux_servo_function, safety_ignore_mask. Skip heli
+//     set_esc_scaling. Do not invent motors / SRV / BoardConfig.
 //
 // surface_tracking.init stays false (AP_RANGEFINDER remaining).
-// The rest of init_ardupilot (init_rc_out, ESC cal, GPS/compass,
+// The rest of init_ardupilot (ESC cal, GPS/compass,
 // startup_INS_ground call, relay, failsafe register, etc.) is
 // catalog row "Copter::init_ardupilot rest".
 
@@ -42,8 +47,16 @@ inline constexpr std::int16_t kRollPitchYawInputMax = 4500;
 inline constexpr std::uint16_t kAuxArmdisarmUnused = 41;
 inline constexpr std::uint16_t kAuxArmdisarmAirmode = 154;
 
+// Default motor PWM when throttle is not configured — radio.cpp init_rc_out
+inline constexpr std::int16_t kDefaultPwmMin = 1000;
+inline constexpr std::int16_t kDefaultPwmMax = 2000;
+
 struct InitArdupilotInputs {
     bool motor_interlock_aux{false};
+    bool throttle_configured{false};
+    std::int16_t radio_min{0};
+    std::int16_t radio_max{0};
+    std::uint16_t rc_speed{0};
 };
 
 struct InitArdupilotEffects {
@@ -72,6 +85,16 @@ struct InitArdupilotEffects {
     bool allocate_motors_called{false}; // call site only — no helper body
     bool rc_convert_options{false};     // 41 → 154 leftover flag
     bool rc_init{false};
+    bool motors_init{false};
+    bool enable_aux_servos{false};
+    bool set_update_rate{false};
+    std::uint16_t rc_speed{0};
+    bool convert_pwm_min_max{false};
+    std::int16_t convert_pwm_min{0};
+    std::int16_t convert_pwm_max{0};
+    bool update_throttle_range{false};
+    bool update_aux_servo_function{false};
+    bool safety_ignore_mask{false};     // flag only — no BoardConfig / motor_mask
 };
 
 [[nodiscard]] inline InitArdupilotEffects init_ardupilot(
@@ -99,6 +122,22 @@ struct InitArdupilotEffects {
     fx.allocate_motors_called = true;
     fx.rc_convert_options = true;
     fx.rc_init = true;
+    // init_rc_out leftover (non-heli). No motors / SRV / BoardConfig objects.
+    fx.motors_init = true;
+    fx.enable_aux_servos = true;
+    fx.set_update_rate = true;
+    fx.rc_speed = in.rc_speed;
+    fx.convert_pwm_min_max = true;
+    if (in.throttle_configured) {
+        fx.convert_pwm_min = in.radio_min;
+        fx.convert_pwm_max = in.radio_max;
+    } else {
+        fx.convert_pwm_min = kDefaultPwmMin;
+        fx.convert_pwm_max = kDefaultPwmMax;
+    }
+    fx.update_throttle_range = true;
+    fx.update_aux_servo_function = true;
+    fx.safety_ignore_mask = true;
     return fx;
 }
 

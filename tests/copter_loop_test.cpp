@@ -128,7 +128,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 36", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 37", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 35);
@@ -2680,6 +2680,29 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE(fx.allocate_motors_called);
     REQUIRE(fx.rc_convert_options);
     REQUIRE(fx.rc_init);
+    REQUIRE(fx.motors_init);
+    REQUIRE(fx.enable_aux_servos);
+    REQUIRE(fx.set_update_rate);
+    REQUIRE(fx.convert_pwm_min_max);
+    REQUIRE(fx.convert_pwm_min == 1000);
+    REQUIRE(fx.convert_pwm_max == 2000);
+    REQUIRE(fx.update_throttle_range);
+    REQUIRE(fx.update_aux_servo_function);
+    REQUIRE(fx.safety_ignore_mask);
+}
+
+TEST_CASE("init_ardupilot leftover throttle_configured injects radio min max",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.throttle_configured = true;
+    in.radio_min = 1100;
+    in.radio_max = 1900;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.convert_pwm_min_max);
+    REQUIRE(fx.convert_pwm_min == 1100);
+    REQUIRE(fx.convert_pwm_max == 1900);
+    REQUIRE(fx.motors_init);
+    REQUIRE_FALSE(fx.using_interlock);
 }
 
 TEST_CASE("init_ardupilot leftover motor_interlock_aux sets using_interlock",
