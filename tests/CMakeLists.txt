@@ -1020,7 +1020,7 @@ add_executable(arming_test arming_test.cpp)
 target_link_libraries(arming_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(arming_test)
 
-# CCP-040 slice 1: ModeLoiter leftover_init scaffold + catalog.
+# CCP-040 slice 2: ModeLoiter leftover_run flags + catalog.
 add_executable(mode_loiter_test mode_loiter_test.cpp)
 target_link_libraries(mode_loiter_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_loiter_test)
