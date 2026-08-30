@@ -17,6 +17,8 @@
 #include <fwcpp/copter/leftover_copter.hpp>
 #include <fwcpp/copter/mode_stabilize.hpp>
 #include <fwcpp/location.hpp>
+#include <fwcpp/sim/sim_baro.hpp>
+#include <fwcpp/sim/sim_gps.hpp>
 #include <fwcpp/sim/sim_motor.hpp>
 #include <fwcpp/sim/sim_multicopter.hpp>
 
@@ -38,16 +40,18 @@ public:
         copter_.gyro_injected = true;
         copter_.accel_injected = true;
 
-        copter_.baro_altitude_m = -sim_.position.z;
+        sim_.update_position();
+        sim_.update_mag_field_bf();
+        const auto baro = sim::sitl_baro_from_aircraft(sim_);
+        copter_.baro_altitude_m = baro.altitude_amsl_m - sim_.home.alt * 0.01f;
         copter_.baro_injected = true;
 
-        Location gps_loc(copter_.home_lat, copter_.home_lng, 0, Location::AltFrame::ABSOLUTE);
-        gps_loc.offset(sim_.position.x, sim_.position.y);
-        copter_.gps_lat = gps_loc.lat;
-        copter_.gps_lng = gps_loc.lng;
+        const auto gps = sim::sitl_gps_from_aircraft(sim_);
+        copter_.gps_lat = gps.lat;
+        copter_.gps_lng = gps.lng;
         copter_.gps_injected = true;
 
-        copter_.compass_field_bf = compass_.rotate_earth_field_to_body(sim_.dcm);
+        copter_.compass_field_bf = sim_.get_mag_field_bf();
         copter_.compass_injected = true;
 
         copter_.motors_armed_injected = true;

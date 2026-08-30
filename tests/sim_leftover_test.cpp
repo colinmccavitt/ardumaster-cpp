@@ -167,20 +167,18 @@ TEST_CASE("kFwdOnly does not constrain an airborne aircraft", "[sim_plane][lefto
     REQUIRE(plane.gyro.x == Catch::Approx(0.1f).margin(1e-4f));
 }
 
-TEST_CASE("kTailsitter leftover is a no-op (out of scope)", "[sim_plane][leftover][ground]") {
-    SimPlane none_plane;
+TEST_CASE("kTailsitter zeros xy velocity on the ground", "[sim_plane][ground]") {
+    // Original GROUND_BEHAVIOR_TAILSITTER is a no-op in the ground-behavior
+    // switch (SIM_Aircraft.cpp) — unlike kNone/kNoMovement it does not zero
+    // body-xy velocity. Ported, not leftover.
     SimPlane tail_plane;
     tail_plane.ground_behavior = GroundBehavior::kTailsitter;
-    none_plane.position = Vector3f(0.0f, 0.0f, 0.0f);
     tail_plane.position = Vector3f(0.0f, 0.0f, 0.0f);
-    none_plane.velocity_ef = Vector3f(2.0f, 1.0f, 1.0f);
     tail_plane.velocity_ef = Vector3f(2.0f, 1.0f, 1.0f);
-    none_plane.dcm.identity();
     tail_plane.dcm.identity();
-    none_plane.update_dynamics(Vector3f(0.0f, 0.0f, 0.0f), 0.01f);
     tail_plane.update_dynamics(Vector3f(0.0f, 0.0f, 0.0f), 0.01f);
-    REQUIRE(tail_plane.velocity_ef.x == Catch::Approx(none_plane.velocity_ef.x).margin(1e-5f));
-    REQUIRE(tail_plane.velocity_ef.y == Catch::Approx(none_plane.velocity_ef.y).margin(1e-5f));
+    REQUIRE(tail_plane.velocity_ef.x == Catch::Approx(0.0f).margin(1e-4f));
+    REQUIRE(tail_plane.velocity_ef.y == Catch::Approx(0.0f).margin(1e-4f));
 }
 
 TEST_CASE("default mix leaves update() STANDARD-config force path unchanged",

@@ -219,18 +219,14 @@
 #include <fwcpp/math/matrix3.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector3.hpp>
+#include <fwcpp/sim/sim_aircraft.hpp>
+#include <fwcpp/sim/sim_json.hpp>
 
 namespace fwcpp::sim {
 
 // Upstream: AP_Math/definitions.h's GRAVITY_MSS (9.80665f) - reproduced as
 // a local named constant rather than a shared ap-math export, matching
 // this port's existing precedent (ap-nav's l1_control.hpp kGravityMss).
-inline constexpr float kGravityMss = 9.80665f;
-
-// Upstream: AP_Math/definitions.h's SSL_AIR_DENSITY (1.225f kg/m^3) - see
-// file banner's "atmosphere/air density model" exclusion.
-inline constexpr float kSslAirDensity = 1.225f;
-
 // CPP-082 - defaults for airspeed_sensor_differential_pressure() below.
 // Real upstream has TWO independent parameters here: SITL's own
 // simulated-sensor ratio (SITL_Airspeed.cpp's AP_GROUPINFO("RATIO", 7,
@@ -327,12 +323,6 @@ struct WindConfig {
 // the floor" clamp stays the no-config path (existing sim_plane_test).
 // kTailsitter is named for catalog completeness and is a documented no-op
 // (fw-cpp is fixed-wing only).
-enum class GroundBehavior : std::uint8_t {
-    kNone = 0,
-    kNoMovement = 1,
-    kFwdOnly = 2,
-    kTailsitter = 3,
-};
 
 // CPP-030 leftover closer: Plane constructor frame-string mix flags
 // (SIM_Plane.cpp:61-74). kDspoilers/kRedundant need extra servo channels
@@ -380,7 +370,7 @@ struct RedundantInputs {
 // variant). Owns the aircraft's true attitude/velocity/position state and
 // advances it one `update()` call at a time given control-surface
 // deflections and throttle.
-class SimPlane {
+class SimPlane : public Aircraft {
 public:
     // Upstream: Plane::Plane() sets coefficient = default_coefficients,
     // mass = 2.0f, hover_throttle is a const 0.7f member. All three are
@@ -399,8 +389,58 @@ public:
     // passes their own seed explicitly.
     explicit SimPlane(const Coefficients& coeffs = Coefficients{}, float mass_kg = 2.0f, float hover_throttle = 0.7f,
                        std::uint32_t wind_rng_seed = 20260827U)
-        : coefficient(coeffs), mass(mass_kg), hover_throttle(hover_throttle), wind_rng_(wind_rng_seed) {
+        : Aircraft(wind_rng_seed), coefficient(coeffs), hover_throttle(hover_throttle) {
+        mass = mass_kg;
         dcm.identity();
+        ground_behavior = GroundBehavior::kNone;
+    }
+
+    bool load_coeffs(const char* model_json) {
+        JsonValue obj;
+        std::string err;
+        if (!load_json_file(model_json, obj, err)) {
+            return false;
+        }
+        json_get_float(obj, "s", coefficient.s);
+        json_get_float(obj, "b", coefficient.b);
+        json_get_float(obj, "c", coefficient.c);
+        json_get_float(obj, "c_lift_0", coefficient.c_lift_0);
+        json_get_float(obj, "c_lift_deltae", coefficient.c_lift_deltae);
+        json_get_float(obj, "c_lift_a", coefficient.c_lift_a);
+        json_get_float(obj, "c_lift_q", coefficient.c_lift_q);
+        json_get_float(obj, "mcoeff", coefficient.mcoeff);
+        json_get_float(obj, "oswald", coefficient.oswald);
+        json_get_float(obj, "alpha_stall", coefficient.alpha_stall);
+        json_get_float(obj, "c_drag_q", coefficient.c_drag_q);
+        json_get_float(obj, "c_drag_deltae", coefficient.c_drag_deltae);
+        json_get_float(obj, "c_drag_p", coefficient.c_drag_p);
+        json_get_float(obj, "c_y_0", coefficient.c_y_0);
+        json_get_float(obj, "c_y_b", coefficient.c_y_b);
+        json_get_float(obj, "c_y_p", coefficient.c_y_p);
+        json_get_float(obj, "c_y_r", coefficient.c_y_r);
+        json_get_float(obj, "c_y_deltaa", coefficient.c_y_deltaa);
+        json_get_float(obj, "c_y_deltar", coefficient.c_y_deltar);
+        json_get_float(obj, "c_l_0", coefficient.c_l_0);
+        json_get_float(obj, "c_l_p", coefficient.c_l_p);
+        json_get_float(obj, "c_l_b", coefficient.c_l_b);
+        json_get_float(obj, "c_l_r", coefficient.c_l_r);
+        json_get_float(obj, "c_l_deltaa", coefficient.c_l_deltaa);
+        json_get_float(obj, "c_l_deltar", coefficient.c_l_deltar);
+        json_get_float(obj, "c_m_0", coefficient.c_m_0);
+        json_get_float(obj, "c_m_a", coefficient.c_m_a);
+        json_get_float(obj, "c_m_q", coefficient.c_m_q);
+        json_get_float(obj, "c_m_deltae", coefficient.c_m_deltae);
+        json_get_float(obj, "c_n_0", coefficient.c_n_0);
+        json_get_float(obj, "c_n_b", coefficient.c_n_b);
+        json_get_float(obj, "c_n_p", coefficient.c_n_p);
+        json_get_float(obj, "c_n_r", coefficient.c_n_r);
+        json_get_float(obj, "c_n_deltaa", coefficient.c_n_deltaa);
+        json_get_float(obj, "c_n_deltar", coefficient.c_n_deltar);
+        json_get_float(obj, "deltaa_max", coefficient.deltaa_max);
+        json_get_float(obj, "deltae_max", coefficient.deltae_max);
+        json_get_float(obj, "deltar_max", coefficient.deltar_max);
+        json_get_vector3(obj, "cg", coefficient.cg_offset);
+        return true;
     }
 
     // Upstream: Plane::liftCoeff (SIM_Plane.cpp:235) - from last_letter,
@@ -590,8 +630,13 @@ public:
     // iir_coef=0.98 as a constant, tied to upstream's per-tick call
     // cadence, not to an explicit dt argument.
     void update_wind() {
-        // steady wind vector, earth frame - upstream's exact formula,
-        // meteorological "FROM heading" convention (see file banner).
+        SitlInput in;
+        in.wind.speed = wind_config.speed;
+        in.wind.direction = wind_config.direction;
+        in.wind.turbulence = wind_config.turbulence;
+        in.wind.dir_z = wind_config.dir_z;
+        Aircraft::update_wind(in);
+        return;
         wind_ef = math::Vector3f(std::cos(math::radians(wind_config.direction)) * std::cos(math::radians(wind_config.dir_z)),
                                   std::sin(math::radians(wind_config.direction)) * std::cos(math::radians(wind_config.dir_z)),
                                   std::sin(math::radians(wind_config.dir_z)))
@@ -635,7 +680,7 @@ public:
     // file banner's "GROUND MODEL" note. position.z follows NED convention
     // (down positive); the caller initializes position.z = -initial_altitude,
     // so position.z >= 0 means "at or below the starting ground plane".
-    [[nodiscard]] bool on_ground() const { return position.z >= 0.0f; }
+    [[nodiscard]] bool on_ground() const { return Aircraft::on_ground(); }
 
     // CPP-030 leftover closer: Plane::calculate_forces surface mix
     // (SIM_Plane.cpp:405-447). reverse_elevator_rudder runs first (same
@@ -818,7 +863,8 @@ public:
     // `switch (ground_behavior)` block, slung-payload/tether hooks, and
     // adjust_frame_time are excluded - see file banner.
     void update_dynamics(const math::Vector3f& rot_accel, float dt) {
-        // update rotational rates in body frame
+        Aircraft::update_dynamics(rot_accel, dt);
+        return;
         gyro += rot_accel * dt;
 
         gyro.x = math::constrain_value(gyro.x, -math::radians(2000.0f), math::radians(2000.0f));
@@ -969,109 +1015,12 @@ public:
     // default_coefficients, or JSON-loaded - see file banner), Plane::mass
     // (Aircraft::mass, 2.0f), Plane::hover_throttle (const 0.7f).
     Coefficients coefficient;
-    float mass;
     float hover_throttle;
-
-    // Wind-turbulence RNG state - upstream: the process-global libc
-    // rand()/RAND_MAX stream Aircraft::rand_normal shares with every other
-    // SITL rand_normal() call site (see file banner's "rand_normal()-
-    // equivalent" note). Public like every other field in this class (no
-    // access-control split exists anywhere in SimPlane), but internal
-    // plumbing a caller has no reason to read/write directly - only
-    // wind_config (input) and wind_ef (output) are the intended surface.
-    std::mt19937 wind_rng_;
-    std::normal_distribution<double> wind_normal_dist_{0.0, 1.0};
-    std::uniform_real_distribution<float> wind_azimuth_step_dist_{0.0f, 360.0f};
-    // CPP-082: airspeed_sensor_differential_pressure()'s own noise draw -
-    // see that method's own doc comment for why this reuses wind_rng_
-    // rather than a second engine.
     std::uniform_real_distribution<float> airspeed_noise_dist_{-1.0f, 1.0f};
-
-    // True attitude - upstream: Aircraft::dcm (_dcm_matrix's SITL-truth
-    // counterpart; SITL's own dcm, not AhrsDcm's dcm_matrix - see file
-    // banner's "shares no code with the estimator" note).
-    math::Matrix3f dcm;
-
-    // True body-frame angular rate, rad/s - upstream: Aircraft::gyro.
-    math::Vector3f gyro;
-
-    // True body-frame acceleration, m/s^2 - upstream: Aircraft::accel_body.
-    // Doubles as what an ideal accelerometer would read (kinematic +
-    // gravity), matching upstream's own reuse of this one field for both
-    // purposes.
-    math::Vector3f accel_body;
-
-    // True earth-frame (NED) velocity, m/s - upstream: Aircraft::velocity_ef.
-    math::Vector3f velocity_ef;
-
-    // True earth-frame (NED) position relative to the start point, m -
-    // upstream: Aircraft::position (a Vector3p/postype_t upstream, for
-    // long-duration precision; kept as plain Vector3f here - this slice has
-    // no long-duration-precision requirement driving that choice, and
-    // introducing FWCPP_POSTYPE_DOUBLE's postype_t here would coupled this
-    // module to a build option it doesn't otherwise need).
-    math::Vector3f position;
-
-    // Wind configuration - upstream: `sitl_input.wind` (see WindConfig's
-    // own comment). All-zero by default, matching this slice's pre-CPP-051
-    // "wind assumed zero" behavior exactly when a caller never touches it.
     WindConfig wind_config;
-
-    // CPP-030 leftover closer: default kNone preserves the landed floor
-    // clamp. Set kNoMovement / kFwdOnly for taxi/takeoff-roll variants.
-    GroundBehavior ground_behavior = GroundBehavior::kNone;
-
-    // CPP-030 leftover closer: default standard (identity mix).
     FrameConfig frame_config;
-
-    // True earth-frame (NED) wind velocity, m/s - upstream: Aircraft::wind_ef,
-    // POST the real `wind_ef = -wind_ef` sign flip (see update_wind()'s own
-    // note) - i.e. this IS the physical velocity of the moving air mass,
-    // not the pre-negation "FROM heading" construction. Written once per
-    // tick by update_wind() (called from update(); zero-initialized default
-    // if a caller only ever calls update_dynamics() directly).
-    math::Vector3f wind_ef;
-
-    // Turbulence gust IIR-filter state - upstream: Aircraft::turbulence_azimuth
-    // / turbulence_horizontal_speed / turbulence_vertical_speed
-    // (SIM_Aircraft.h:273-275). See update_wind() for the recurrence.
-    float turbulence_azimuth = 0.0f;
-    float turbulence_horizontal_speed = 0.0f;
-    float turbulence_vertical_speed = 0.0f;
-
-    // True earth-frame (NED) airmass-relative velocity, m/s - upstream:
-    // Aircraft::velocity_air_ef = velocity_ef - wind_ef (SIM_Aircraft.cpp:763).
-    // Had no counterpart at all before CPP-051 (velocity_air_bf was derived
-    // straight from velocity_ef); now a real intermediate, matching
-    // upstream's own two-step earth-frame-then-body-frame computation.
-    math::Vector3f velocity_air_ef;
-
-    // True body-frame airmass-relative velocity, m/s - upstream:
-    // Aircraft::velocity_air_bf = dcm.transposed() * velocity_air_ef
-    // (SIM_Aircraft.cpp:766). wind_ef is real as of CPP-051 (see file
-    // banner and update_wind()); with wind_ef at its zero default (no
-    // update_wind() call, or an all-zero wind_config) this equals
-    // dcm.transposed() * velocity_ef exactly, matching this slice's
-    // original pre-CPP-051 behavior.
-    math::Vector3f velocity_air_bf;
-
-    // True angle of attack / sideslip, rad - upstream: Plane::angle_of_attack,
-    // Plane::beta.
     float angle_of_attack = 0.0f;
     float beta = 0.0f;
-
-    // True airspeed, m/s - upstream: Aircraft::airspeed, computed by
-    // update_eas_airspeed() as velocity_air_ef.length() / eas2tas. eas2tas
-    // is held at upstream's own pre-barometer default of 1.0 (no AP_Baro in
-    // this port - see file banner), so this is simply
-    // velocity_air_bf.length() and is recomputed as such by the caller (or
-    // left at its zero-initialized default before the first update()).
-    float airspeed = 0.0f;
-
-    // Air density, kg/m^3 - upstream: Aircraft::air_density, normally
-    // recomputed per-tick from altitude via AP_Baro. Fixed at sea-level
-    // standard density this slice - see file banner.
-    float air_density = kSslAirDensity;
 };
 
 } // namespace fwcpp::sim

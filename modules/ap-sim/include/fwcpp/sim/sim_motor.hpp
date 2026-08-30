@@ -20,16 +20,9 @@
 #include <fwcpp/math/matrix3.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector3.hpp>
+#include <fwcpp/sim/sim_sitl_input.hpp>
 
 namespace fwcpp::sim {
-
-inline constexpr std::uint8_t kSitlServoChannels = 32;
-
-// Upstream: libraries/SITL/SITL_Input.h `struct sitl_input`. Wind fields
-// are omitted here (optional; SimMulticopter does not drive update_wind).
-struct SitlInput {
-    std::uint16_t servos[kSitlServoChannels]{};
-};
 
 // Upstream: AP_MotorsMatrix.h
 inline constexpr float kMotorsYawFactorCw = -1.0f;

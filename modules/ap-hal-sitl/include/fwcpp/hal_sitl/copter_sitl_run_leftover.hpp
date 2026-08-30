@@ -18,6 +18,7 @@
 #include <fwcpp/hal_sitl/sitl_copter_harness.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector3.hpp>
+#include <fwcpp/motors/motors_matrix.hpp>
 #include <fwcpp/sim/sim_multicopter.hpp>
 
 namespace fwcpp::hal_sitl::copter_sitl_run {
@@ -66,14 +67,39 @@ struct LeftoverMission {
     return math::constrain_value(hover + kVelGain * sim.velocity_ef.z, 0.0f, 1.0f);
 }
 
-inline void leftover_apply_collective(copter::LeftoverCopter& copter, const sim::SimMulticopter& sim, float command) {
-    const auto& frame = sim.frame();
-    const std::uint16_t pwm = copter.motors_armed ? frame.command_to_pwm(command) : static_cast<std::uint16_t>(0);
+inline void leftover_apply_collective(copter::LeftoverCopter& copter, const sim::SimMulticopter& sim, float command,
+                                      float dt = 0.0025f) {
+    static motors::MotorsMatrix mixer;
+    static bool inited = false;
+    if (!inited) {
+        mixer.setup_motors(motors::MotorsMatrix::FrameClass::Quad, motors::MotorsMatrix::FrameType::X);
+        mixer.normalise_rpy_factors();
+        mixer.set_throttle_thrust_max(1.0f);
+        inited = true;
+    }
     for (std::uint8_t i = 0; i < sim::kSitlServoChannels; ++i) {
         copter.motor_pwm[i] = 0;
     }
+    if (!copter.motors_armed) {
+        return;
+    }
+    float roll = 0.0f, pitch = 0.0f, yaw = 0.0f;
+    sim.dcm.to_euler(&roll, &pitch, &yaw);
+    const float roll_in = math::constrain_value(-0.5f * roll, -1.0f, 1.0f);
+    const float pitch_in = math::constrain_value(-0.5f * pitch, -1.0f, 1.0f);
+    const float yaw_in = math::constrain_value(-0.2f * sim.gyro.z, -1.0f, 1.0f);
+    bool lr = false, lp = false, ly = false, ll = false, lu = false;
+    mixer.output_armed_stabilizing(roll_in, 0.0f, pitch_in, 0.0f, yaw_in, 0.0f, command, command, 0.0f, 1.0f, dt, lr,
+                                   lp, ly, ll, lu);
+    mixer.set_spool_state(motors::MotorsMatrix::SpoolState::ThrottleUnlimited);
+    motors::ThrustLinParams params;
+    params.curve_expo = 0.0f;
+    params.spin_min = 0.0f;
+    params.spin_max = 1.0f;
+    mixer.output_to_motors(true, false, 0.0f, 0.0f, 0.0f, params, dt, 1000, 2000);
+    const auto& frame = sim.frame();
     for (std::uint8_t i = 0; i < frame.num_motors; ++i) {
-        copter.motor_pwm[frame.motor_offset + frame.motors[i].servo] = pwm;
+        copter.motor_pwm[frame.motor_offset + frame.motors[i].servo] = static_cast<std::uint16_t>(mixer.pwm_out(i));
     }
 }
 

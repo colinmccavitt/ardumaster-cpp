@@ -22,25 +22,24 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <string>
 
 #include <fwcpp/math/matrix3.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector3.hpp>
+#include <fwcpp/sim/sim_atmosphere.hpp>
+#include <fwcpp/sim/sim_json.hpp>
+#include <fwcpp/sim/sim_sitl.hpp>
 #include <fwcpp/sim/sim_motor.hpp>
 
 namespace fwcpp::sim {
 
 inline constexpr std::uint8_t kSimFrameMaxActuators = 32;
-inline constexpr float kSslAirDensity = 1.225f;
-inline constexpr float kGravityMss = 9.80665f;
 
 [[nodiscard]] inline float air_density_for_alt_amsl(float alt_amsl) {
-    const float temp = 288.15f - 0.0065f * alt_amsl;
-    if (!(temp > 1.0f)) {
-        return 0.0f;
-    }
-    return kSslAirDensity * std::pow(temp / 288.15f, 4.256f);
+    return get_air_density_for_alt_amsl(alt_amsl);
 }
 
 [[nodiscard]] inline bool frame_name_matches(const char* name, const char* prefix) {
@@ -446,6 +445,7 @@ struct FrameModel {
     float slew_max = 150.0f;
     float disc_area = 0.385f;
     float mdrag_coef = 0.2f;
+    float bbdrag_coef = 1.0f;
     math::Vector3f moment_of_inertia{};
     math::Vector3f motor_pos[kSimFrameMaxActuators]{};
     math::Vector3f motor_thrust_vec[kSimFrameMaxActuators]{};
@@ -482,9 +482,16 @@ public:
 
     [[nodiscard]] bool valid() const { return motors != nullptr && num_motors > 0; }
 
-    void init(const char* /*frame_str*/) {
+    void init(const char* frame_str) {
         model = FrameModel{};
-        mass_ = model.mass;
+        if (frame_str != nullptr) {
+            const char* colon = std::strchr(frame_str, ':');
+            const std::size_t slen = std::strlen(frame_str);
+            if (colon != nullptr && slen > 5 && std::strcmp(&frame_str[slen - 5], ".json") == 0) {
+                load_frame_params(colon + 1);
+            }
+        }
+        mass_ = model.mass * mass_scale;
 
         const float drag_force = model.mass * kGravityMss * std::tan(math::radians(model.refAngle));
         const float cos_tilt = std::cos(math::radians(model.refAngle));
@@ -499,7 +506,7 @@ public:
             model.mdrag_coef *= drag_force / momentum_drag;
             area_cd_ = 0.0f;
         } else {
-            area_cd_ = (drag_force - momentum_drag) / (0.5f * ref_air_density * model.refSpd * model.refSpd);
+            area_cd_ = model.bbdrag_coef * (drag_force - momentum_drag) / (0.5f * ref_air_density * model.refSpd * model.refSpd);
         }
 
         terminal_rotation_rate = model.refRotRate;
@@ -515,6 +522,7 @@ public:
         const float power_factor = hover_power / hover_thrust;
 
         battery_voltage_ = model.maxVoltage;
+        battery_dirty = true;
 
         for (std::uint8_t i = 0; i < num_motors; ++i) {
             motors[i].setup_params(static_cast<std::uint16_t>(model.pwmMin), static_cast<std::uint16_t>(model.pwmMax),
@@ -548,6 +556,9 @@ public:
                                        battery_voltage_, use_drag, time_us);
             torque += mtorque;
             thrust += mthrust;
+            if (sitl != nullptr && !math::is_zero(sitl->vibe_motor) && rpm_out != nullptr) {
+                rpm_out[motor_offset + i] = motors[i].get_command() * sitl->vibe_motor * 60.0f;
+            }
         }
 
         rot_accel.x = torque.x / model.moment_of_inertia.x;
@@ -605,6 +616,7 @@ public:
         return (-(1.0f - e) + std::sqrt(disc)) / (2.0f * e);
     }
     [[nodiscard]] float battery_voltage() const { return battery_voltage_; }
+    void set_battery_voltage(float v) { battery_voltage_ = v; }
     [[nodiscard]] const FrameModel& get_model() const { return model; }
 
     [[nodiscard]] std::uint16_t command_to_pwm(float command) const {
@@ -619,6 +631,73 @@ public:
         for (std::uint8_t i = 0; i < num_motors; ++i) {
             input.servos[motor_offset + motors[i].servo] = pwm;
         }
+    }
+
+
+    float mass_scale{1.0f};
+    SitlParams* sitl{nullptr};
+    float* rpm_out{nullptr};
+    bool battery_dirty{false};
+
+    void set_mass_scale(float scale) { mass_scale = scale; }
+    void set_sitl(SitlParams* s) { sitl = s; }
+
+    [[nodiscard]] float get_model_batt_max_voltage() const { return model.maxVoltage; }
+    [[nodiscard]] float get_model_batt_capacity_ah() const { return model.battCapacityAh; }
+    [[nodiscard]] float get_model_batt_resistance_ohm() const { return model.refBatRes; }
+    [[nodiscard]] float get_current_amp() const {
+        float current = 0.0f;
+        for (std::uint8_t i = 0; i < num_motors; ++i) {
+            current += motors[i].get_current();
+        }
+        return current;
+    }
+    bool battery_changed() {
+        const bool ret = battery_dirty;
+        battery_dirty = false;
+        return ret;
+    }
+
+    bool load_frame_params(const char* model_json) {
+        JsonValue obj;
+        std::string err;
+        if (!load_json_file(model_json, obj, err)) {
+            return false;
+        }
+        json_get_float(obj, "mass", model.mass);
+        json_get_float(obj, "diagonal_size", model.diagonal_size);
+        json_get_float(obj, "refSpd", model.refSpd);
+        json_get_float(obj, "refAngle", model.refAngle);
+        json_get_float(obj, "refVoltage", model.refVoltage);
+        json_get_float(obj, "refCurrent", model.refCurrent);
+        json_get_float(obj, "refAlt", model.refAlt);
+        json_get_float(obj, "maxVoltage", model.maxVoltage);
+        json_get_float(obj, "battCapacityAh", model.battCapacityAh);
+        json_get_float(obj, "refBatRes", model.refBatRes);
+        json_get_float(obj, "propExpo", model.propExpo);
+        json_get_float(obj, "refRotRate", model.refRotRate);
+        json_get_float(obj, "hoverThrOut", model.hoverThrOut);
+        json_get_float(obj, "pwmMin", model.pwmMin);
+        json_get_float(obj, "pwmMax", model.pwmMax);
+        json_get_float(obj, "spin_min", model.spin_min);
+        json_get_float(obj, "spin_max", model.spin_max);
+        json_get_float(obj, "slew_max", model.slew_max);
+        json_get_float(obj, "disc_area", model.disc_area);
+        json_get_float(obj, "mdrag_coef", model.mdrag_coef);
+        json_get_float(obj, "bbdrag_coef", model.bbdrag_coef);
+        json_get_float(obj, "refTempC", model.refTempC);
+        json_get_float(obj, "num_motors", model.num_motors);
+        json_get_vector3(obj, "moment_inertia", model.moment_of_inertia);
+        char label[32];
+        for (std::uint8_t j = 0; j < kSimFrameMaxActuators; ++j) {
+            std::snprintf(label, sizeof(label), "motor%u_position", static_cast<unsigned>(j + 1));
+            json_get_vector3(obj, label, model.motor_pos[j]);
+            std::snprintf(label, sizeof(label), "motor%u_vector", static_cast<unsigned>(j + 1));
+            json_get_vector3(obj, label, model.motor_thrust_vec[j]);
+            std::snprintf(label, sizeof(label), "motor%u_yaw", static_cast<unsigned>(j + 1));
+            json_get_float(obj, label, model.yaw_factor[j]);
+        }
+        return true;
     }
 
 private:
