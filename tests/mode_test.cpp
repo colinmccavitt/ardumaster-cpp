@@ -1236,6 +1236,7 @@ TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover rest when reached_xy flyi
     REQUIRE(f.table.mode_auto.leftover_avoidance_climbrate);
     REQUIRE(f.table.mode_auto.leftover_d_set_pos_target_from_climb);
     REQUIRE(f.table.mode_auto.pos_D_update);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_nav_att_lean);
     REQUIRE_FALSE(f.table.mode_auto.leftover_surface_tracking_update);
     REQUIRE_FALSE(f.table.mode_auto.leftover_reached_wp_destination_ne);
     REQUIRE_FALSE(f.table.mode_auto.wp_run);
@@ -1269,6 +1270,7 @@ TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover skips NE_set when loiter_
     REQUIRE(f.table.mode_auto.leftover_avoidance_climbrate);
     REQUIRE(f.table.mode_auto.leftover_d_set_pos_target_from_climb);
     REQUIRE(f.table.mode_auto.pos_D_update);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_nav_att_lean);
     REQUIRE_FALSE(f.table.mode_auto.leftover_surface_tracking_update);
     REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
 }
@@ -1293,6 +1295,7 @@ TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover_reached_alt when |alt_err
     REQUIRE(f.table.mode_auto.leftover_avoidance_climbrate);
     REQUIRE(f.table.mode_auto.leftover_d_set_pos_target_from_climb);
     REQUIRE(f.table.mode_auto.pos_D_update);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_nav_att_lean);
     REQUIRE_FALSE(f.table.mode_auto.leftover_surface_tracking_update);
 }
 
@@ -1316,6 +1319,7 @@ TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover_reached_alt on alt_error 
     REQUIRE(f.table.mode_auto.leftover_avoidance_climbrate);
     REQUIRE(f.table.mode_auto.leftover_d_set_pos_target_from_climb);
     REQUIRE(f.table.mode_auto.pos_D_update);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_nav_att_lean);
     REQUIRE_FALSE(f.table.mode_auto.leftover_surface_tracking_update);
 }
 
@@ -1330,8 +1334,13 @@ TEST_CASE("ModeAuto run SubMode NAV_ATTITUDE_TIME leftover nav_attitude_time_run
     require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, false, false, true);
     REQUIRE(f.table.mode_auto.leftover_constrain_climb);
     REQUIRE(f.table.mode_auto.leftover_avoidance_climbrate);
-    REQUIRE_FALSE(f.table.mode_auto.leftover_nav_att_lean);
+    REQUIRE(f.table.mode_auto.leftover_nav_att_lean);
+    REQUIRE(f.table.mode_auto.leftover_d_set_pos_target_from_climb);
+    REQUIRE(f.table.mode_auto.pos_D_update);
     REQUIRE_FALSE(f.table.mode_auto.make_safe_ground_handling);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_surface_tracking_update);
+    REQUIRE_FALSE(f.table.mode_auto.input_thrust_vector_heading);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_sqrt_controller);
     REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
 }
 
@@ -1347,6 +1356,8 @@ TEST_CASE("ModeAuto run SubMode NAV_ATTITUDE_TIME leftover when disarmed_or_land
     REQUIRE_FALSE(f.table.mode_auto.leftover_constrain_climb);
     REQUIRE_FALSE(f.table.mode_auto.leftover_avoidance_climbrate);
     REQUIRE_FALSE(f.table.mode_auto.leftover_nav_att_lean);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_d_set_pos_target_from_climb);
+    REQUIRE_FALSE(f.table.mode_auto.pos_D_update);
 }
 
 TEST_CASE("ModeAuto run SubMode NAV_ATTITUDE_TIME leftover when motors interlock off", "[copter][mode]") {

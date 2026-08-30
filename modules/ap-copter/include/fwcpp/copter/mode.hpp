@@ -27,8 +27,8 @@
 // leftover_surface_tracking_update stays false (AP_RANGEFINDER remaining).
 // ModeAuto::nav_guided_run leftover (ModeGuided::run flag) is on main.
 // ModeAuto::nav_attitude_time_run leftover (ground-handling +
-// constrain/avoidance leftover flags) is this slice.
-// leftover leftover_nav_att_lean stays false (lean/input_euler remaining).
+// constrain/avoidance + leftover leftover_nav_att_lean + leftover leftover_d_set +
+// pos_D_update leftover flags) is this slice.
 // ModeRTL/ModeLand, ModeGuided::run body, land_run_normal_or_precland body,
 // land_run_horizontal_control body, and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
@@ -288,7 +288,8 @@ public:
     bool leftover_surface_tracking_update{false};
     // leftover leftover_d_set_pos_target_from_climb (no pos_control).
     bool leftover_d_set_pos_target_from_climb{false};
-    // leftover leftover_nav_att_lean (lean-angle limit / input_euler remaining).
+    // leftover leftover_nav_att_lean (lean-angle MAX/MIN/limit_length +
+    // leftover leftover_input_euler_angle_roll_pitch_yaw_rad; no bodies).
     bool leftover_nav_att_lean{false};
 
     ModeAuto() = default;
@@ -415,13 +416,16 @@ public:
     void leftover_nav_guided_run() {
         leftover_mode_guided_run = true;
     }
-    // Leftover ModeAuto::nav_attitude_time_run (mode_auto.cpp ~1249-1261).
+    // Leftover ModeAuto::nav_attitude_time_run (mode_auto.cpp ~1249-1275).
     // Ground-handling + leftover leftover_constrain_climb /
-    // leftover leftover_avoidance_climbrate flags. leftover leftover_nav_att_lean
-    // stays false (lean/input_euler remaining). Reuses disarmed_or_landed /
-    // motors_interlock / make_safe_ground_handling. Switch still records
-    // nav_attitude_time_run as the "would call nav_attitude_time_run"
-    // leftover, then this helper.
+    // leftover leftover_avoidance_climbrate + leftover leftover_nav_att_lean
+    // (lean-angle + leftover leftover_input_euler) + leftover leftover_d_set +
+    // pos_D_update leftover flags. leftover leftover_sqrt_controller /
+    // leftover leftover_surface_tracking_update stay false. Reuses
+    // leftover leftover_d_set_pos_target_from_climb / pos_D_update. Reuses
+    // disarmed_or_landed / motors_interlock / make_safe_ground_handling.
+    // Switch still records nav_attitude_time_run as the
+    // "would call nav_attitude_time_run" leftover, then this helper.
     void leftover_nav_attitude_time_run() {
         if (disarmed_or_landed || !motors_interlock) {
             make_safe_ground_handling = true;
@@ -429,6 +433,9 @@ public:
         }
         leftover_constrain_climb = true;
         leftover_avoidance_climbrate = true;
+        leftover_nav_att_lean = true;
+        leftover_d_set_pos_target_from_climb = true;
+        pos_D_update = true;
     }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
@@ -438,7 +445,7 @@ public:
     // (~1129-1133), loiter_run leftover (~1162-1180), circle_run leftover
     // (~1135-1148), loiter_to_alt_run leftover (~1184-1245),
     // nav_guided_run leftover (~1150-1158), and nav_attitude_time_run
-    // leftover (~1249-1261). Switch always runs, including
+    // leftover (~1249-1275). Switch always runs, including
     // while still waiting_to_start. No AP_Mission / detector / GCS / logger
     // / ModeRTL / ModeGuided / circle_nav / *_run bodies. run has no ctx.
     void run() override {
