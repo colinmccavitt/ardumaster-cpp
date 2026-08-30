@@ -3,8 +3,14 @@
 #include <fwcpp/copter/arming.hpp>
 #include <fwcpp/copter/arming_leftover.hpp>
 
+using fwcpp::copter::ArmEffects;
+using fwcpp::copter::ArmInputs;
 using fwcpp::copter::ArmingCopter;
+using fwcpp::copter::DisarmEffects;
+using fwcpp::copter::DisarmInputs;
 using fwcpp::copter::PreArmInputs;
+using fwcpp::copter::leftover_arm;
+using fwcpp::copter::leftover_disarm;
 using fwcpp::copter::pre_arm_checks;
 using fwcpp::copter::arming::PortStatus;
 using fwcpp::copter::arming::completeness_has;
@@ -15,10 +21,9 @@ using fwcpp::copter::arming::remaining_count;
 using fwcpp::copter::arming::this_slice_count;
 
 TEST_CASE("arming leftover catalog this_slice and remaining", "[copter][arming][leftover]") {
-    REQUIRE(remaining_count() > 0);
-    REQUIRE(this_slice_count() == 9);
-    REQUIRE(remaining_count() == 1);
-    REQUIRE(out_of_scope_count() == 1);
+    REQUIRE(this_slice_count() == 10);
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(out_of_scope_count() == 2);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
@@ -32,7 +37,10 @@ TEST_CASE("arming leftover catalog this_slice and remaining", "[copter][arming][
     REQUIRE(completeness_has(
         "parameter_checks / gps / baro / board_voltage / alt / rc_throttle_failsafe",
         PortStatus::kThisSlice));
-    REQUIRE(completeness_has("arm() / disarm()", PortStatus::kRemaining));
+    REQUIRE(completeness_has("arm() / disarm()", PortStatus::kThisSlice));
+    REQUIRE(completeness_has(
+        "arm()/disarm() AHRS/notify/logger/motors/compass/mission body",
+        PortStatus::kOutOfScope));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
 }
 
@@ -471,4 +479,201 @@ TEST_CASE("early motors fail never reaches parameter chain", "[copter][arming]")
     REQUIRE_FALSE(fx.parameter_chain_ran);
     REQUIRE_FALSE(fx.passed);
     REQUIRE_FALSE(arming.pre_arm_check);
+}
+
+TEST_CASE("arm reentry rejected", "[copter][arming]") {
+    ArmingCopter arming{};
+    ArmInputs in{};
+    in.in_arm_motors = true;
+    in.motors_armed = false;
+    in.base_arm_ok = true;
+
+    ArmEffects fx{};
+    REQUIRE_FALSE(leftover_arm(arming, in, fx));
+
+    REQUIRE(fx.reentry_rejected);
+    REQUIRE_FALSE(fx.already_armed_short_circuit);
+    REQUIRE_FALSE(fx.base_arm_called);
+    REQUIRE_FALSE(fx.armed_success_flags);
+    REQUIRE_FALSE(fx.passed);
+    REQUIRE_FALSE(arming.in_arm_motors);
+}
+
+TEST_CASE("arm reentry via ArmingCopter guard", "[copter][arming]") {
+    ArmingCopter arming{};
+    arming.in_arm_motors = true;
+    ArmInputs in{};
+
+    const auto fx = leftover_arm(arming, in);
+
+    REQUIRE(fx.reentry_rejected);
+    REQUIRE_FALSE(fx.passed);
+    REQUIRE(arming.in_arm_motors);  // unchanged on reentry reject
+}
+
+TEST_CASE("arm already armed short-circuit", "[copter][arming]") {
+    ArmingCopter arming{};
+    ArmInputs in{};
+    in.motors_armed = true;
+    in.base_arm_ok = false;  // must not be consulted
+
+    ArmEffects fx{};
+    REQUIRE(leftover_arm(arming, in, fx));
+
+    REQUIRE_FALSE(fx.reentry_rejected);
+    REQUIRE(fx.already_armed_short_circuit);
+    REQUIRE_FALSE(fx.base_arm_called);
+    REQUIRE_FALSE(fx.base_arm_failed);
+    REQUIRE_FALSE(fx.arming_failed_notify);
+    REQUIRE_FALSE(fx.armed_success_flags);
+    REQUIRE(fx.passed);
+    REQUIRE_FALSE(arming.in_arm_motors);
+}
+
+TEST_CASE("arm base fail notifies", "[copter][arming]") {
+    ArmingCopter arming{};
+    ArmInputs in{};
+    in.base_arm_ok = false;
+
+    ArmEffects fx{};
+    REQUIRE_FALSE(leftover_arm(arming, in, fx));
+
+    REQUIRE_FALSE(fx.reentry_rejected);
+    REQUIRE_FALSE(fx.already_armed_short_circuit);
+    REQUIRE(fx.base_arm_called);
+    REQUIRE(fx.base_arm_failed);
+    REQUIRE(fx.arming_failed_notify);
+    REQUIRE_FALSE(fx.armed_success_flags);
+    REQUIRE_FALSE(fx.passed);
+    REQUIRE_FALSE(arming.in_arm_motors);
+}
+
+TEST_CASE("arm success sets armed flags only", "[copter][arming]") {
+    ArmingCopter arming{};
+    ArmInputs in{};
+
+    ArmEffects fx{};
+    REQUIRE(leftover_arm(arming, in, fx));
+
+    REQUIRE_FALSE(fx.reentry_rejected);
+    REQUIRE_FALSE(fx.already_armed_short_circuit);
+    REQUIRE(fx.base_arm_called);
+    REQUIRE_FALSE(fx.base_arm_failed);
+    REQUIRE_FALSE(fx.arming_failed_notify);
+    REQUIRE(fx.armed_success_flags);
+    REQUIRE(fx.passed);
+    REQUIRE_FALSE(arming.in_arm_motors);
+}
+
+TEST_CASE("disarm already disarmed short-circuit", "[copter][arming]") {
+    ArmingCopter arming{};
+    DisarmInputs in{};
+    in.motors_armed = false;
+    in.method_is_gcs = true;
+    in.land_complete = false;  // must not reject when already disarmed
+    in.base_disarm_ok = false;
+
+    DisarmEffects fx{};
+    REQUIRE(leftover_disarm(arming, in, fx));
+
+    REQUIRE(fx.already_disarmed_short_circuit);
+    REQUIRE_FALSE(fx.gcs_flying_rejected);
+    REQUIRE_FALSE(fx.rudder_flying_rejected);
+    REQUIRE_FALSE(fx.base_disarm_called);
+    REQUIRE_FALSE(fx.motors_disarmed_flag);
+    REQUIRE(fx.passed);
+}
+
+TEST_CASE("disarm gcs flying rejected", "[copter][arming]") {
+    ArmingCopter arming{};
+    DisarmInputs in{};
+    in.motors_armed = true;
+    in.do_disarm_checks = true;
+    in.method_is_gcs = true;
+    in.land_complete = false;
+
+    DisarmEffects fx{};
+    REQUIRE_FALSE(leftover_disarm(arming, in, fx));
+
+    REQUIRE_FALSE(fx.already_disarmed_short_circuit);
+    REQUIRE(fx.gcs_flying_rejected);
+    REQUIRE_FALSE(fx.rudder_flying_rejected);
+    REQUIRE_FALSE(fx.base_disarm_called);
+    REQUIRE_FALSE(fx.passed);
+}
+
+TEST_CASE("disarm gcs flying allowed when checks skipped", "[copter][arming]") {
+    ArmingCopter arming{};
+    DisarmInputs in{};
+    in.do_disarm_checks = false;
+    in.method_is_gcs = true;
+    in.land_complete = false;
+
+    const auto fx = leftover_disarm(arming, in);
+
+    REQUIRE_FALSE(fx.gcs_flying_rejected);
+    REQUIRE(fx.base_disarm_called);
+    REQUIRE(fx.motors_disarmed_flag);
+    REQUIRE(fx.passed);
+}
+
+TEST_CASE("disarm rudder flying rejected", "[copter][arming]") {
+    ArmingCopter arming{};
+    DisarmInputs in{};
+    in.method_is_rudder = true;
+    in.has_manual_throttle = false;
+    in.land_complete = false;
+
+    DisarmEffects fx{};
+    REQUIRE_FALSE(leftover_disarm(arming, in, fx));
+
+    REQUIRE_FALSE(fx.gcs_flying_rejected);
+    REQUIRE(fx.rudder_flying_rejected);
+    REQUIRE_FALSE(fx.base_disarm_called);
+    REQUIRE_FALSE(fx.passed);
+}
+
+TEST_CASE("disarm rudder ok with manual throttle while flying", "[copter][arming]") {
+    ArmingCopter arming{};
+    DisarmInputs in{};
+    in.method_is_rudder = true;
+    in.has_manual_throttle = true;
+    in.land_complete = false;
+
+    const auto fx = leftover_disarm(arming, in);
+
+    REQUIRE_FALSE(fx.rudder_flying_rejected);
+    REQUIRE(fx.base_disarm_called);
+    REQUIRE(fx.motors_disarmed_flag);
+    REQUIRE(fx.passed);
+}
+
+TEST_CASE("disarm base fail", "[copter][arming]") {
+    ArmingCopter arming{};
+    DisarmInputs in{};
+    in.base_disarm_ok = false;
+
+    DisarmEffects fx{};
+    REQUIRE_FALSE(leftover_disarm(arming, in, fx));
+
+    REQUIRE(fx.base_disarm_called);
+    REQUIRE(fx.base_disarm_failed);
+    REQUIRE_FALSE(fx.motors_disarmed_flag);
+    REQUIRE_FALSE(fx.passed);
+}
+
+TEST_CASE("disarm success sets motors_disarmed_flag", "[copter][arming]") {
+    ArmingCopter arming{};
+    DisarmInputs in{};
+
+    DisarmEffects fx{};
+    REQUIRE(leftover_disarm(arming, in, fx));
+
+    REQUIRE_FALSE(fx.already_disarmed_short_circuit);
+    REQUIRE_FALSE(fx.gcs_flying_rejected);
+    REQUIRE_FALSE(fx.rudder_flying_rejected);
+    REQUIRE(fx.base_disarm_called);
+    REQUIRE_FALSE(fx.base_disarm_failed);
+    REQUIRE(fx.motors_disarmed_flag);
+    REQUIRE(fx.passed);
 }

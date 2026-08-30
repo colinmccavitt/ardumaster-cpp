@@ -4,11 +4,9 @@
 // Nested under fwcpp::copter::arming so remaining_count() does not collide
 // with copter_leftover.hpp / mode_leftover.hpp in fwcpp::copter.
 //
-// Slice 5: skip_all / mandatory gate + thin parameter AND-chain injects
-// (~71-86) on top of slice 4 motors gate / slice 3 disarm_switch /
-// slice 2 interlock / slice 1 gates. Real parameter/gps/baro helper
-// bodies are scaffold injects only. arm()/disarm() remain. HELI AROT
-// out of scope. ADR-0012: no AP:: singletons, no GCS, no exceptions.
+// Slice 6 (closing): arm()/disarm() entry gates only (~675-695 /
+// ~790-812). Heavy AHRS/notify/logger/motors/compass/mission bodies
+// are kOutOfScope (ADR-0012). HELI AROT out of scope. remaining_count→0.
 
 #include <cstddef>
 #include <cstdint>
@@ -47,8 +45,11 @@ inline constexpr PortItem kCompleteness[] = {
     {"parameter_checks / gps / baro / board_voltage / alt / rc_throttle_failsafe",
      PortStatus::kThisSlice,
      "AP_Arming_Copter.cpp ~71-86; skip_all→mandatory else inject AND-chain scaffold"},
-    {"arm() / disarm()", PortStatus::kRemaining,
-     "AP_Arming_Copter.h arm/disarm overrides; bodies not this slice"},
+    {"arm() / disarm()", PortStatus::kThisSlice,
+     "AP_Arming_Copter.cpp ~675-695 / ~790-812 entry gates; base inject; success flags"},
+    {"arm()/disarm() AHRS/notify/logger/motors/compass/mission body",
+     PortStatus::kOutOfScope,
+     "ADR-0012 no singletons; heavy body after entry (~697-786 / ~814-856)"},
     {"AP:: singletons", PortStatus::kOutOfScope, "ADR-0012 explicit context"},
 };
 

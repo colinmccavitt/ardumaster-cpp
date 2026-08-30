@@ -1,26 +1,26 @@
 #pragma once
 
-// Copter AP_Arming_Copter pre_arm leftover (CCP-038 slice 5).
+// Copter AP_Arming_Copter leftover (CCP-038 slice 6 closing).
 // Upstream ArduCopter/AP_Arming_Copter.cpp pre_arm_checks ~8-13,
-// run_pre_arm_checks ~17-86: already-armed, system_initialized,
-// interlock/E-Stop conflict, motor interlock enabled,
-// disarm_switch_checks, motors->arming_checks, early return when
-// !passed, then should_skip_all_checks → mandatory_checks else
-// parameter/oa/gcs/winch/rc_throttle/alt & AP_Arming::pre_arm_checks
-// (thin inject AND-chain; real check bodies not this slice).
-// HELI AROT out of scope. arm()/disarm() remain.
+// run_pre_arm_checks ~17-86, arm() entry ~675-695, disarm() entry
+// ~790-812. Heavy AHRS/notify/logger/motors/compass/mission bodies
+// are out of scope (ADR-0012). HELI AROT out of scope.
 //
-// Explicit PreArmInputs — no motors / scheduler / GCS / rc objects
-// (ADR-0012). Catalog: arming_leftover.hpp.
+// Explicit ArmInputs / DisarmInputs — no motors / AHRS / notify /
+// logger objects (ADR-0012). Catalog: arming_leftover.hpp.
+
+#include <cstdint>
 
 #include <fwcpp/copter/arming_leftover.hpp>
 
 namespace fwcpp::copter {
 
-// Leftover stand-in for AP_Arming_Copter. No AP_Arming inheritance this
-// slice; pre_arm_check mirrors set_pre_arm_check(bool) storage only.
+// Leftover stand-in for AP_Arming_Copter. No AP_Arming inheritance;
+// pre_arm_check mirrors set_pre_arm_check(bool); in_arm_motors mirrors
+// the static reentry guard in upstream arm().
 struct ArmingCopter {
     bool pre_arm_check{false};
+    bool in_arm_motors{false};
 };
 
 struct PreArmInputs {
@@ -223,6 +223,146 @@ inline void set_pre_arm_check(ArmingCopter& arming, bool b) {
 [[nodiscard]] inline PreArmEffects pre_arm_checks(const PreArmInputs& in = {}) {
     ArmingCopter arming{};
     return pre_arm_checks(arming, in);
+}
+
+// --- arm() / disarm() entry leftover (slice 6) ---
+
+struct ArmInputs {
+    bool motors_armed{false};
+    bool in_arm_motors{false};  // reentry inject (upstream static)
+    bool base_arm_ok{true};     // AP_Arming::arm inject
+    std::uint8_t method{0};     // optional Method enum stand-in
+};
+
+struct ArmEffects {
+    bool reentry_rejected{false};
+    bool already_armed_short_circuit{false};
+    bool base_arm_called{false};
+    bool base_arm_failed{false};
+    bool arming_failed_notify{false};
+    bool armed_success_flags{false};  // would set notify/logger — flag only
+    bool passed{false};
+};
+
+// Upstream arm() ~675-695 entry only. AHRS/notify loops/logger/motors
+// body (~697-786) is kOutOfScope. Returns true iff passed (fx.passed).
+[[nodiscard]] inline bool leftover_arm(ArmingCopter& arming, const ArmInputs& in,
+                                       ArmEffects& fx) {
+    fx = ArmEffects{};
+    (void)in.method;
+
+    // exit immediately if already in this function (~679-682)
+    if (in.in_arm_motors || arming.in_arm_motors) {
+        fx.reentry_rejected = true;
+        fx.passed = false;
+        return false;
+    }
+    arming.in_arm_motors = true;
+
+    // return true if already armed (~685-689)
+    if (in.motors_armed) {
+        fx.already_armed_short_circuit = true;
+        fx.passed = true;
+        arming.in_arm_motors = false;
+        return true;
+    }
+
+    // AP_Arming::arm inject (~691-695)
+    fx.base_arm_called = true;
+    if (!in.base_arm_ok) {
+        fx.base_arm_failed = true;
+        fx.arming_failed_notify = true;  // AP_Notify::events.arming_failed
+        fx.passed = false;
+        arming.in_arm_motors = false;
+        return false;
+    }
+
+    // Success entry complete — heavy body out of scope; flag only.
+    fx.armed_success_flags = true;
+    fx.passed = true;
+    arming.in_arm_motors = false;
+    return true;
+}
+
+[[nodiscard]] inline ArmEffects leftover_arm(ArmingCopter& arming,
+                                             const ArmInputs& in = {}) {
+    ArmEffects fx{};
+    (void)leftover_arm(arming, in, fx);
+    return fx;
+}
+
+struct DisarmInputs {
+    bool motors_armed{true};
+    bool do_disarm_checks{true};
+    bool method_is_gcs{false};
+    bool land_complete{true};
+    bool method_is_rudder{false};
+    bool has_manual_throttle{false};
+    bool base_disarm_ok{true};
+    std::uint8_t method{0};  // optional Method enum stand-in
+};
+
+struct DisarmEffects {
+    bool already_disarmed_short_circuit{false};
+    bool gcs_flying_rejected{false};
+    bool rudder_flying_rejected{false};
+    bool base_disarm_called{false};
+    bool base_disarm_failed{false};
+    bool motors_disarmed_flag{false};
+    bool passed{false};
+};
+
+// Upstream disarm() ~790-812 entry only. Compass/AHRS/mission/logger
+// body (~814-856) is kOutOfScope. Returns true iff passed (fx.passed).
+[[nodiscard]] inline bool leftover_disarm(ArmingCopter& arming,
+                                          const DisarmInputs& in,
+                                          DisarmEffects& fx) {
+    fx = DisarmEffects{};
+    (void)arming;
+    (void)in.method;
+
+    // return immediately if already disarmed (~792-795)
+    if (!in.motors_armed) {
+        fx.already_disarmed_short_circuit = true;
+        fx.passed = true;
+        return true;
+    }
+
+    // do not allow disarm via mavlink if flying (~797-802)
+    if (in.do_disarm_checks && in.method_is_gcs && !in.land_complete) {
+        fx.gcs_flying_rejected = true;
+        fx.passed = false;
+        return false;
+    }
+
+    // rudder disarm while flying without manual throttle (~804-808)
+    if (in.method_is_rudder) {
+        if (!in.has_manual_throttle && !in.land_complete) {
+            fx.rudder_flying_rejected = true;
+            fx.passed = false;
+            return false;
+        }
+    }
+
+    // AP_Arming::disarm inject (~810-812)
+    fx.base_disarm_called = true;
+    if (!in.base_disarm_ok) {
+        fx.base_disarm_failed = true;
+        fx.passed = false;
+        return false;
+    }
+
+    // Success entry — motors->armed(false) as flag; body out of scope.
+    fx.motors_disarmed_flag = true;
+    fx.passed = true;
+    return true;
+}
+
+[[nodiscard]] inline DisarmEffects leftover_disarm(ArmingCopter& arming,
+                                                   const DisarmInputs& in = {}) {
+    DisarmEffects fx{};
+    (void)leftover_disarm(arming, in, fx);
+    return fx;
 }
 
 }  // namespace fwcpp::copter
