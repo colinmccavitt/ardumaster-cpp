@@ -1,10 +1,11 @@
-// CCP-043 slice 2: SitlCopterHarness baro/GPS/compass leftover synthesis.
+// CCP-043 slice 3: SitlCopterHarness closed-loop arm/spool/hold catalog close.
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <fwcpp/compass/compass.hpp>
 #include <fwcpp/copter/leftover_copter.hpp>
 #include <fwcpp/copter/mode.hpp>
+#include <fwcpp/copter/mode_stabilize.hpp>
 #include <fwcpp/hal_sitl/sitl_copter_harness.hpp>
 #include <fwcpp/location.hpp>
 #include <fwcpp/math/vector3.hpp>
@@ -13,7 +14,9 @@
 using fwcpp::Location;
 using fwcpp::compass::Compass;
 using fwcpp::copter::LeftoverCopter;
+using fwcpp::copter::ModeAltHold;
 using fwcpp::copter::ModeStabilize;
+using fwcpp::copter::SpoolState;
 using fwcpp::copter::leftover_copter_tick;
 using fwcpp::hal_sitl::SitlCopterHarness;
 using fwcpp::hal_sitl::sitl_copter::PortStatus;
@@ -72,6 +75,45 @@ TEST_CASE("SitlCopterHarness step synthesizes gyro accel baro GPS compass",
     REQUIRE(copter.tick_count == 2);
 }
 
+TEST_CASE("SitlCopterHarness arm spool hold smoke", "[copter][sitl][ccp-043]") {
+    LeftoverCopter copter{};
+    ModeAltHold althold{};
+    copter.current = &althold;
+    copter.motors_armed = true;
+
+    SimPlane sim{};
+    sim.gyro = Vector3f{0.0f, 0.0f, 0.0f};
+    sim.accel_body = Vector3f{0.0f, 0.0f, -9.81f};
+    sim.position = Vector3f{0.0f, 0.0f, -10.0f};
+
+    SitlCopterHarness harness(copter, sim);
+    REQUIRE_FALSE(copter.motors_armed_injected);
+    REQUIRE_FALSE(copter.spool_injected);
+    REQUIRE_FALSE(copter.attitude_hold_injected);
+    REQUIRE(copter.spool_state == SpoolState::SHUT_DOWN);
+    REQUIRE_FALSE(copter.attitude_hold);
+
+    harness.step(0.0025f);
+
+    REQUIRE(copter.motors_armed_injected);
+    REQUIRE(copter.motors_armed);
+    REQUIRE(copter.spool_injected);
+    REQUIRE(copter.spool_state == SpoolState::THROTTLE_UNLIMITED);
+    REQUIRE(copter.attitude_hold_injected);
+    REQUIRE(copter.attitude_hold);
+    REQUIRE(copter.tick_count == 1);
+    REQUIRE(copter.gyro_injected);
+    REQUIRE(copter.baro_injected);
+
+    // Disarmed path clears spool / attitude-hold flags.
+    copter.motors_armed = false;
+    harness.step(0.0025f);
+    REQUIRE(copter.motors_armed_injected);
+    REQUIRE(copter.spool_state == SpoolState::SHUT_DOWN);
+    REQUIRE_FALSE(copter.attitude_hold);
+    REQUIRE(copter.tick_count == 2);
+}
+
 TEST_CASE("leftover_copter_tick wires update_flight_mode when Mode* set",
           "[copter][sitl][ccp-043]") {
     LeftoverCopter copter{};
@@ -84,10 +126,10 @@ TEST_CASE("leftover_copter_tick wires update_flight_mode when Mode* set",
 
 TEST_CASE("SitlCopterHarness leftover catalog remaining_count",
           "[copter][sitl][ccp-043][leftover]") {
-    REQUIRE(remaining_count() == 2);
-    REQUIRE(this_slice_count() == 7);
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(this_slice_count() == 8);
     REQUIRE(on_main_count() == 2);
-    REQUIRE(out_of_scope_count() == 2);
+    REQUIRE(out_of_scope_count() == 3);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("SitlCopterHarness scaffold", PortStatus::kThisSlice));
@@ -96,7 +138,7 @@ TEST_CASE("SitlCopterHarness leftover catalog remaining_count",
     REQUIRE(completeness_has("baro synthesis", PortStatus::kThisSlice));
     REQUIRE(completeness_has("GPS synthesis", PortStatus::kThisSlice));
     REQUIRE(completeness_has("compass synthesis", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("closed-loop arm/spool/hold", PortStatus::kRemaining));
-    REQUIRE(completeness_has("multirotor aero / motor feedback", PortStatus::kRemaining));
+    REQUIRE(completeness_has("closed-loop arm/spool/hold", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("multirotor aero / motor feedback", PortStatus::kOutOfScope));
     REQUIRE(completeness_has("SitlHarness Plane path (CPP-084)", PortStatus::kOnMain));
 }

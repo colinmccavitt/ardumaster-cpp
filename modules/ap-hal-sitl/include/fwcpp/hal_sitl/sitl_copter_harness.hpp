@@ -6,16 +6,17 @@
 // tangle). Mirrors SitlHarness's structure: hold refs to vehicle + SimPlane,
 // step() synthesizes sensors from sim truth, then advances the vehicle tick.
 //
-// SLICE 2: gyro/accel + baro altitude + GPS lat/lng + compass body field
-// from SimPlane truth into LeftoverCopter buffers/flags, then
-// leftover_copter_tick(). Closed-loop arm/spool/hold and multirotor aero
-// remain. Do NOT copy Rust.
+// SLICE 3 (close): gyro/accel/baro/GPS/compass + closed-loop arm/spool/
+// attitude-hold smoke flags on LeftoverCopter, then leftover_copter_tick().
+// Multirotor aero / motor feedback is kOutOfScope (SimPlane rigid body;
+// CCP-044 may deepen). Do NOT copy Rust.
 
 #include <cstddef>
 #include <cstdint>
 
 #include <fwcpp/compass/compass.hpp>
 #include <fwcpp/copter/leftover_copter.hpp>
+#include <fwcpp/copter/mode_stabilize.hpp>
 #include <fwcpp/location.hpp>
 #include <fwcpp/sim/sim_plane.hpp>
 
@@ -29,8 +30,9 @@ public:
         : copter_(copter), sim_plane_(sim_plane) {}
 
     // Synthesize gyro/accel/baro/GPS/compass from sim_plane_ into leftover
-    // sensor buffers, set inject flags, then leftover_copter_tick(). dt is
-    // reserved for future closed-loop SimPlane feedback (arm/spool/hold).
+    // sensor buffers, inject arm/spool/attitude-hold smoke flags from
+    // leftover motors_armed, then leftover_copter_tick(). dt unused — no
+    // multirotor aero / motor→SimPlane feedback (kOutOfScope; CCP-044).
     void step(float dt) {
         (void)dt;
         copter_.gyro_buffer = sim_plane_.gyro;
@@ -53,6 +55,20 @@ public:
         // Compass::rotate_earth_field_to_body; upstream update_mag_field_bf).
         copter_.compass_field_bf = compass_.rotate_earth_field_to_body(sim_plane_.dcm);
         copter_.compass_injected = true;
+
+        // Closed-loop arm/spool/hold smoke: inject motors_armed visibility
+        // plus spool + attitude-hold mode flags from leftover arm state.
+        // No servo→aero update (multirotor aero kOutOfScope).
+        copter_.motors_armed_injected = true;
+        if (copter_.motors_armed) {
+            copter_.spool_state = copter::SpoolState::THROTTLE_UNLIMITED;
+            copter_.attitude_hold = true;
+        } else {
+            copter_.spool_state = copter::SpoolState::SHUT_DOWN;
+            copter_.attitude_hold = false;
+        }
+        copter_.spool_injected = true;
+        copter_.attitude_hold_injected = true;
 
         copter::leftover_copter_tick(copter_);
     }
@@ -97,14 +113,14 @@ inline constexpr PortItem kCompleteness[] = {
      "home lat/lng + SimPlane NED north/east → leftover gps_lat/gps_lng + flag"},
     {"compass synthesis", PortStatus::kThisSlice,
      "Compass earth field via SimPlane::dcm → compass_field_bf + flag"},
+    {"closed-loop arm/spool/hold", PortStatus::kThisSlice,
+     "step injects motors_armed + spool + attitude_hold smoke; no aero"},
     {"SitlHarness Plane path (CPP-084)", PortStatus::kOnMain,
      "sitl_harness.hpp; Plane+SimPlane closed loop"},
     {"CCP-035 update_flight_mode", PortStatus::kOnMain,
      "update_flight_mode.hpp; harness wires via leftover_copter_tick"},
-    {"closed-loop arm/spool/hold", PortStatus::kRemaining,
-     "Catch2 arm, spool, attitude hold driving SimPlane feedback"},
-    {"multirotor aero / motor feedback", PortStatus::kRemaining,
-     "SimPlane or multirotor stub update from motor outputs"},
+    {"multirotor aero / motor feedback", PortStatus::kOutOfScope,
+     "SimPlane rigid body only; CCP-044 may deepen motor→aero"},
     {"AP:: / HAL SITL singletons", PortStatus::kOutOfScope, "ADR-0012 explicit refs"},
     {"Rust copter-sitl", PortStatus::kOutOfScope, "Do not copy Rust"},
 };

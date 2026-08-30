@@ -6,13 +6,15 @@
 // functions + Mode*). ADR-0012: no AP:: singletons — sensor samples are
 // buffers/flags the harness writes, then leftover_copter_tick() consumes.
 //
-// Slice 2 fills baro altitude, GPS lat/lng, and compass body-field buffers
-// from SitlCopterHarness::step(). Closed-loop arm/spool/hold and multirotor
-// aero remain (see sitl_copter_harness.hpp completeness catalog).
+// Slice 3: closed-loop arm/spool/hold smoke flags on this leftover
+// (motors_armed inject + spool + attitude-hold). Multirotor aero /
+// motor→SimPlane feedback is kOutOfScope (SimPlane rigid body only;
+// CCP-044 may deepen). See sitl_copter_harness.hpp completeness catalog.
 
 #include <cstdint>
 
 #include <fwcpp/copter/mode.hpp>
+#include <fwcpp/copter/mode_stabilize.hpp>
 #include <fwcpp/copter/update_flight_mode.hpp>
 #include <fwcpp/math/vector3.hpp>
 
@@ -34,6 +36,16 @@ struct LeftoverCopter {
     bool baro_injected{false};
     bool gps_injected{false};
     bool compass_injected{false};
+
+    // Closed-loop arm/spool/hold smoke (no multirotor aero). Caller may
+    // set motors_armed before SitlCopterHarness::step(); step injects
+    // spool + attitude_hold from that arm state.
+    bool motors_armed{false};
+    bool motors_armed_injected{false};
+    SpoolState spool_state{SpoolState::SHUT_DOWN};
+    bool spool_injected{false};
+    bool attitude_hold{false};
+    bool attitude_hold_injected{false};
 
     // SITL default home (CMAC) for lat/lng synthesis from NED position —
     // same coords location / update_home_from_ekf tests use.
