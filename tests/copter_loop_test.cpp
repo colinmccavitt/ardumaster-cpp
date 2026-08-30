@@ -129,7 +129,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 46", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 47", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 35);
@@ -2782,6 +2782,8 @@ TEST_CASE("init_ardupilot leftover brushed pwm skips esc cal body",
     REQUIRE_FALSE(fx.esc_cal_body);
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
+    REQUIRE_FALSE(fx.esc_cal_notify);
+    REQUIRE_FALSE(fx.esc_cal_radio_wait);
     REQUIRE_FALSE(fx.esc_cal_clear_after);
     REQUIRE(fx.initialised_params);
     REQUIRE_FALSE(fx.relay_init);
@@ -2825,7 +2827,7 @@ TEST_CASE("init_ardupilot leftover ESCCAL_NONE high throttle would_block flag",
     REQUIRE(fx.esc_cal_switch);
     REQUIRE(fx.esc_cal_high_throttle);
     REQUIRE(fx.esc_cal_would_block);
-    REQUIRE_FALSE(fx.esc_cal_notify);
+    REQUIRE(fx.esc_cal_notify);
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE(fx.esc_cal_clear_after);
@@ -2869,6 +2871,7 @@ TEST_CASE("init_ardupilot leftover ESCCAL_PASSTHROUGH_ALWAYS leftover leftover_e
     REQUIRE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_notify);
+    REQUIRE_FALSE(fx.esc_cal_radio_wait);
     REQUIRE(fx.esc_cal_clear_after);
 }
 
@@ -2881,6 +2884,7 @@ TEST_CASE("init_ardupilot leftover ESCCAL_AUTO leftover leftover_esc_cal_auto",
     REQUIRE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_notify);
+    REQUIRE_FALSE(fx.esc_cal_radio_wait);
     REQUIRE(fx.esc_cal_clear_after);
 }
 
