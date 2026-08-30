@@ -156,4 +156,24 @@ inline std::uint8_t crc8_rds02uf(const std::uint8_t* data, std::uint16_t length)
     return crc;
 }
 
+
+inline std::uint16_t crc_xmodem_update(std::uint16_t crc, std::uint8_t data) {
+    return crc16_ccitt(&data, 1, crc);
+}
+
+inline std::uint8_t crc8_generic_poly(const std::uint8_t* data, std::uint8_t len, std::uint8_t poly,
+                                      std::uint8_t crc = 0) {
+    while (len--) {
+        crc ^= *data++;
+        for (std::uint8_t i = 0; i < 8; i++) {
+            if (crc & 0x80) {
+                crc = static_cast<std::uint8_t>((crc << 1) ^ poly);
+            } else {
+                crc = static_cast<std::uint8_t>(crc << 1);
+            }
+        }
+    }
+    return crc;
+}
+
 }  // namespace fwcpp::sim
