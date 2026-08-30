@@ -1,25 +1,11 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 55 lands
-// init_ardupilot leftover through esc_cal_setup_delay flag
-// (notify/battery/baro + interlock +
-// init_rc_in + allocate_motors call + rc convert/init + init_rc_out
-// leftover + esc_cal brushed skip + ESC cal leftover flags +
-// esc_cal_radio_wait flag + radio_wait_would_loop flag +
-// esc_cal_setup flag + esc_cal_passthrough_would_loop flag +
-// esc_cal_auto_high flag + esc_cal_auto_would_block flag +
-// esc_cal_setup body flags + esc_cal_setup_notify flag +
-// esc_cal_setup_gcs flag + esc_cal_setup_delay flag +
-// initialised_params + failsafe register leftover + GPS/compass
-// leftover flags + attitude_sanity leftover + barometer.calibrate
-// leftover + mission/SmartRTL/logger leftover flags +
-// startup_INS_ground call + land flags + failsafe_enable leftover
-// + ins.set_log_raw_bit + motors->output_min + set_mode leftover
-// flags + variance filt cutoffs + ap.initialised; gated
-// rangefinder/proximity/beacon remaining false). ESC cal
-// motors objects remaining.
-// remaining_count() > 0 is expected after this slice.
+// (Copter.cpp / Copter.h / system.cpp). Slice 56 catalog close:
+// init_ardupilot.hpp ESC-cal leftover flags complete (no while(1)/
+// HAL delay bodies); init_ardupilot on_main; ESC cal motors/SRV/
+// BoardConfig/HAL util objects out_of_scope (ADR-0012 flags-only).
+// remaining_count() == 0 after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
 // Subsystem objects are injected as inputs on later leftover ticks.
@@ -56,10 +42,10 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::read_AHRS", PortStatus::kOnMain, "read_ahrs.hpp; skip_ins_update"},
     {"Copter::throttle_loop", PortStatus::kOnMain,
      "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
-    {"Copter::init_ardupilot", PortStatus::kThisSlice,
-     "init_ardupilot.hpp; through esc_cal_setup_delay flag; motors objects remaining"},
-    {"Copter::init_ardupilot rest", PortStatus::kRemaining,
-     "ESC cal motors objects remaining"},
+    {"Copter::init_ardupilot", PortStatus::kOnMain,
+     "init_ardupilot.hpp ESC-cal leftover flags complete (no while(1)/HAL delay bodies)"},
+    {"Copter::init_ardupilot rest", PortStatus::kOutOfScope,
+     "real motors/SRV/BoardConfig/HAL util objects; ESC cal stays flags-only (ADR-0012)"},
     {"Copter::run_rate_controller_main", PortStatus::kOnMain,
      "run_rate_controller.hpp; set_dt_s + rate_controller_run iff !rate thread"},
     {"Copter::read_inertia", PortStatus::kOnMain,

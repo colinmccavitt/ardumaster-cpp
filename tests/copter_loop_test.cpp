@@ -129,10 +129,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 55", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 1);
-    REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 35);
+TEST_CASE("catalog remaining_count closed after slice 56", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(this_slice_count() == 1);
+    REQUIRE(on_main_count() == 36);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -171,8 +171,8 @@ TEST_CASE("catalog remaining_count stays open after slice 55", "[copter][leftove
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::startup_INS_ground", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::allocate_motors", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::init_ardupilot rest", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::init_ardupilot rest", PortStatus::kOutOfScope));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
 }
 

@@ -135,8 +135,8 @@
 // init_rangefinder stays false (AP_RANGEFINDER remaining).
 // g2.proximity.init stays false (HAL_PROXIMITY remaining).
 // g2.beacon.init stays false (AP_BEACON remaining).
-// The rest of init_ardupilot is ESC cal motors objects —
-// catalog row "Copter::init_ardupilot rest".
+// ESC-cal motors/SRV/BoardConfig/HAL util objects stay out of scope
+// (ADR-0012 flags-only; catalog row "Copter::init_ardupilot rest").
 
 #include <cstdint>
 
