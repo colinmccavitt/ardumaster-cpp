@@ -1,16 +1,16 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 40 lands
+// (Copter.cpp / Copter.h / system.cpp). Slice 41 lands
 // init_ardupilot leftover (notify/battery/baro + interlock +
 // init_rc_in + allocate_motors call + rc convert/init + init_rc_out
 // leftover + esc_cal brushed skip + initialised_params + failsafe
 // register leftover + GPS/compass leftover flags + attitude_sanity
-// leftover; gated airspeed/oa/optflow/mount/camera/precland/
-// landinggear remaining false).
-// Rest of init_ardupilot (ESC cal body, barometer.calibrate,
-// rangefinder, mission/SmartRTL, startup_INS_ground call, …) stays
-// remaining. remaining_count() > 0 is expected after this slice.
+// leftover + barometer.calibrate leftover; gated
+// rangefinder/proximity/beacon remaining false).
+// Rest of init_ardupilot (ESC cal body, mission/SmartRTL, logger,
+// startup_INS_ground call, …) stays remaining. remaining_count() > 0
+// is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
 // Subsystem objects are injected as inputs on later leftover ticks.
@@ -48,9 +48,9 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::throttle_loop", PortStatus::kOnMain,
      "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
     {"Copter::init_ardupilot", PortStatus::kThisSlice,
-     "init_ardupilot.hpp; notify/battery/baro + interlock + init_rc_in + allocate_motors call + rc convert/init + init_rc_out + esc_cal brushed skip + initialised_params + failsafe register leftover + GPS/compass + attitude_sanity leftover; gated airspeed/oa/optflow/mount/camera/precland/landinggear remaining false"},
+     "init_ardupilot.hpp; notify/battery/baro + interlock + init_rc_in + allocate_motors call + rc convert/init + init_rc_out + esc_cal brushed skip + initialised_params + failsafe register leftover + GPS/compass + attitude_sanity + barometer.calibrate leftover; gated rangefinder/proximity/beacon remaining false"},
     {"Copter::init_ardupilot rest", PortStatus::kRemaining,
-     "ESC cal body, barometer.calibrate, rangefinder, mission/SmartRTL, startup_INS_ground call, set_land_complete, failsafe_enable, etc."},
+     "ESC cal body, mission/SmartRTL, logger, startup_INS_ground call, set_land_complete, failsafe_enable, etc."},
     {"Copter::run_rate_controller_main", PortStatus::kOnMain,
      "run_rate_controller.hpp; set_dt_s + rate_controller_run iff !rate thread"},
     {"Copter::read_inertia", PortStatus::kOnMain,

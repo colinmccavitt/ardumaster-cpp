@@ -1,13 +1,13 @@
 #pragma once
 
 // Copter::init_ardupilot leftover. Upstream ArduCopter/system.cpp
-// ~16-129 (after compass.init(); stop BEFORE USERHOOK_INIT /
-// barometer.set_log_baro_bit). No notify / battery / barometer /
-// winch / rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
-// SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
-// airspeed / OA / attitude_control / optflow / camera / precland /
-// landinggear objects — record leftover flags only. Do not invoke
-// the allocate_motors() helper body (call-site leftover flag only).
+// ~16-153 (after landinggear; stop BEFORE mode_auto.mission.init).
+// No notify / battery / barometer / winch / rssi / GCS / OSD /
+// SurfaceTracking / RC_Channel / motors / SRV_Channels / BoardConfig /
+// AP_Relay / HAL / GPS / compass / airspeed / OA / attitude_control /
+// optflow / camera / precland / landinggear / rangefinder / proximity /
+// beacon objects — record leftover flags only. Do not invoke the
+// allocate_motors() helper body (call-site leftover flag only).
 //
 // Always-on this slice (AP_WINCH_ENABLED / AP_RSSI_ENABLED are not
 // enabled in this port):
@@ -40,6 +40,8 @@
 //   gps.set_log_gps_bit(MASK_LOG_GPS) + gps.init() leftover flags
 //   AP::compass().set_log_bit(MASK_LOG_COMPASS) + init leftover flags
 //   attitude_control->parameter_sanity_check() leftover flag only
+//   barometer.set_log_baro_bit(MASK_LOG_IMU) leftover flag
+//   barometer.calibrate() leftover flag
 //
 // surface_tracking.init stays false (AP_RANGEFINDER remaining).
 // relay.init stays false (AP_RELAY remaining).
@@ -50,9 +52,13 @@
 // camera.init stays false (AP_CAMERA remaining).
 // init_precland stays false (AC_PRECLAND remaining).
 // landinggear.init stays false (AP_LANDINGGEAR remaining).
-// The rest of init_ardupilot (ESC cal body, barometer.calibrate,
-// rangefinder, mission/SmartRTL, startup_INS_ground call,
-// set_land_complete, failsafe_enable, etc.) is catalog row
+// USERHOOK_INIT stays false (not implemented).
+// init_rangefinder stays false (AP_RANGEFINDER remaining).
+// g2.proximity.init stays false (HAL_PROXIMITY remaining).
+// g2.beacon.init stays false (AP_BEACON remaining).
+// The rest of init_ardupilot (ESC cal body, mission/SmartRTL,
+// logger, startup_INS_ground call, set_land_complete,
+// failsafe_enable, etc.) is catalog row
 // "Copter::init_ardupilot rest".
 
 #include <cstdint>
@@ -73,9 +79,11 @@ inline constexpr std::int16_t kDefaultPwmMax = 2000;
 // register_timer_failsafe period — ArduCopter/system.cpp ~87
 inline constexpr std::uint16_t kFailsafeCheckPeriodUs = 1000;
 
-// ArduCopter/defines.h MASK_LOG_GPS = (1<<2); MASK_LOG_COMPASS = (1<<13)
+// ArduCopter/defines.h MASK_LOG_GPS = (1<<2); MASK_LOG_COMPASS = (1<<13);
+// MASK_LOG_IMU = (1<<7)
 inline constexpr std::uint32_t kMaskLogGps = 1u << 2;
 inline constexpr std::uint32_t kMaskLogCompass = 1u << 13;
+inline constexpr std::uint32_t kMaskLogImu = 1u << 7;
 
 struct InitArdupilotInputs {
     bool motor_interlock_aux{false};
@@ -142,6 +150,13 @@ struct InitArdupilotEffects {
     bool camera_init{false};            // remaining AP_CAMERA
     bool init_precland{false};          // remaining AC_PRECLAND
     bool landinggear_init{false};       // remaining AP_LANDINGGEAR
+    bool userhook_init{false};          // remaining USERHOOK_INIT
+    bool barometer_set_log_baro_bit{false};
+    std::uint32_t baro_log_bit{0};      // MASK_LOG_IMU
+    bool barometer_calibrate{false};
+    bool init_rangefinder{false};       // remaining AP_RANGEFINDER
+    bool proximity_init{false};         // remaining HAL_PROXIMITY
+    bool beacon_init{false};            // remaining AP_BEACON
 };
 
 [[nodiscard]] inline InitArdupilotEffects init_ardupilot(
@@ -204,6 +219,11 @@ struct InitArdupilotEffects {
     // airspeed_set_log_bit / oa_init stay false (remaining)
     fx.attitude_parameter_sanity_check = true;
     // optflow / camera_mount / camera / precland / landinggear stay false
+    // userhook_init stays false (USERHOOK_INIT not implemented)
+    fx.barometer_set_log_baro_bit = true;
+    fx.baro_log_bit = kMaskLogImu;
+    fx.barometer_calibrate = true;
+    // init_rangefinder / proximity_init / beacon_init stay false (remaining)
     return fx;
 }
 
