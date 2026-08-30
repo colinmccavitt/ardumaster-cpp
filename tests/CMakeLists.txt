@@ -1004,3 +1004,8 @@ catch_discover_tests(mode_acro_test)
 add_executable(autoyaw_test autoyaw_test.cpp)
 target_link_libraries(autoyaw_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(autoyaw_test)
+
+# CCP-039 slice 3: ModeAltHold run via climb_rate and input_euler_angle.
+add_executable(mode_althold_test mode_althold_test.cpp)
+target_link_libraries(mode_althold_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(mode_althold_test)
