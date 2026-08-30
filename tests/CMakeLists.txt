@@ -226,6 +226,14 @@ add_executable(sim_gps_protocols_test sim_gps_protocols_test.cpp)
 target_link_libraries(sim_gps_protocols_test PRIVATE ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sim_gps_protocols_test)
 
+add_executable(sim_rf_protocols_test sim_rf_protocols_test.cpp)
+target_link_libraries(sim_rf_protocols_test PRIVATE ap-sim Catch2::Catch2WithMain)
+catch_discover_tests(sim_rf_protocols_test)
+
+add_executable(sim_periph_test sim_periph_test.cpp)
+target_link_libraries(sim_periph_test PRIVATE ap-sim Catch2::Catch2WithMain)
+catch_discover_tests(sim_periph_test)
+
 add_executable(tecs_test tecs_test.cpp)
 # ap-param added by CPP-049: tecs.hpp itself now #includes several
 # fwcpp/param/ headers for its own "CPP-049 ADDENDUM" (tecs_group_info/

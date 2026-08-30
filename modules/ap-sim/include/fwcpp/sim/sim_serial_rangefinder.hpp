@@ -45,8 +45,8 @@ public:
         if (buflen < 8) {
             return 0;
         }
-        const int cm = static_cast<int>(alt_m * 100.0f + 0.5f);
-        const int n = std::snprintf(reinterpret_cast<char*>(buffer), buflen, "%d\r", cm);
+        const float inches = alt_m * 100 / 2.54f;
+        const int n = std::snprintf(reinterpret_cast<char*>(buffer), buflen, "%u\r", static_cast<unsigned>(inches));
         return n > 0 ? static_cast<std::uint32_t>(n) : 0;
     }
 };
