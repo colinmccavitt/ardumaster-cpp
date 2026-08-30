@@ -13,6 +13,7 @@ using fwcpp::copter::FlightModeContext;
 using fwcpp::copter::FlightModeTable;
 using fwcpp::copter::Mode;
 using fwcpp::copter::ModeAuto;
+using fwcpp::copter::ModeLand;
 using fwcpp::copter::ModeRTL;
 using fwcpp::copter::ModePortStatus;
 using fwcpp::copter::ModeReason;
@@ -247,6 +248,10 @@ TEST_CASE("mode_from_mode_num returns Stabilize AltHold and AUTO", "[copter][mod
     REQUIRE(table.mode_rtl.requires_position() == true);
     REQUIRE(table.mode_rtl.has_manual_throttle() == false);
     REQUIRE(table.mode_rtl.allows_entry_in_rc_failsafe() == true);
+    REQUIRE(table.mode_land.mode_number() == Mode::Number::LAND);
+    REQUIRE(table.mode_land.requires_position() == false);
+    REQUIRE(table.mode_land.has_manual_throttle() == false);
+    REQUIRE(table.mode_land.allows_entry_in_rc_failsafe() == true);
     table.mode_auto.auto_RTL = true;
     REQUIRE(table.mode_auto.mode_number() == Mode::Number::AUTO_RTL);
 }
@@ -2583,11 +2588,92 @@ TEST_CASE("ModeRTL leftover leftover_run LOITER_AT_HOME time not elapsed stays i
     REQUIRE_FALSE(f.table.mode_rtl.state_complete());
 }
 
+TEST_CASE("ModeLand leftover leftover_init defaults set max and clear flags without controller init",
+          "[copter][mode]") {
+    ModeLand land;
+    REQUIRE(land.leftover_position_ok);
+    REQUIRE(land.leftover_ne_is_active);
+    REQUIRE(land.leftover_d_is_active);
+    land.land_pause = true;
+    REQUIRE(land.leftover_init(false));
+    REQUIRE(land.control_position);
+    REQUIRE_FALSE(land.land_pause);
+    REQUIRE(land.leftover_ne_set_max);
+    REQUIRE(land.leftover_d_set_max);
+    REQUIRE_FALSE(land.leftover_ne_init);
+    REQUIRE_FALSE(land.leftover_d_init);
+    REQUIRE(land.leftover_auto_yaw_hold);
+    REQUIRE(land.leftover_land_repo_active_cleared);
+    REQUIRE(land.leftover_prec_land_active_cleared);
+}
+
+TEST_CASE("ModeLand leftover leftover_init NE init when control_position and NE inactive",
+          "[copter][mode]") {
+    ModeLand land;
+    land.leftover_ne_is_active = false;
+    REQUIRE(land.leftover_init(true));
+    REQUIRE(land.control_position);
+    REQUIRE(land.leftover_ne_set_max);
+    REQUIRE(land.leftover_ne_init);
+    REQUIRE_FALSE(land.leftover_d_init);
+    REQUIRE(land.leftover_d_set_max);
+    REQUIRE(land.leftover_auto_yaw_hold);
+}
+
+TEST_CASE("ModeLand leftover leftover_init skips NE init when position not ok", "[copter][mode]") {
+    ModeLand land;
+    land.leftover_position_ok = false;
+    land.leftover_ne_is_active = false;
+    REQUIRE(land.leftover_init(false));
+    REQUIRE_FALSE(land.control_position);
+    REQUIRE(land.leftover_ne_set_max);
+    REQUIRE_FALSE(land.leftover_ne_init);
+    REQUIRE_FALSE(land.land_pause);
+    REQUIRE(land.leftover_land_repo_active_cleared);
+    REQUIRE(land.leftover_prec_land_active_cleared);
+}
+
+TEST_CASE("ModeLand leftover leftover_init D init when D inactive", "[copter][mode]") {
+    ModeLand land;
+    land.leftover_d_is_active = false;
+    REQUIRE(land.leftover_init(false));
+    REQUIRE(land.control_position);
+    REQUIRE(land.leftover_d_set_max);
+    REQUIRE(land.leftover_d_init);
+    REQUIRE_FALSE(land.leftover_ne_init);
+    REQUIRE(land.leftover_auto_yaw_hold);
+}
+
+TEST_CASE("ModeLand leftover leftover_init NE and D init when both inactive with position ok",
+          "[copter][mode]") {
+    ModeLand land;
+    land.leftover_ne_is_active = false;
+    land.leftover_d_is_active = false;
+    REQUIRE(land.leftover_init(false));
+    REQUIRE(land.control_position);
+    REQUIRE(land.leftover_ne_init);
+    REQUIRE(land.leftover_d_init);
+    REQUIRE(land.leftover_ne_set_max);
+    REQUIRE(land.leftover_d_set_max);
+}
+
+TEST_CASE("ModeLand init override calls leftover leftover_init", "[copter][mode]") {
+    ModeLand land;
+    land.leftover_d_is_active = false;
+    land.land_pause = true;
+    REQUIRE(land.init(false));
+    REQUIRE(land.control_position);
+    REQUIRE_FALSE(land.land_pause);
+    REQUIRE(land.leftover_d_init);
+    REQUIRE(land.leftover_ne_set_max);
+    REQUIRE(land.leftover_auto_yaw_hold);
+}
+
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 31);
+    REQUIRE(mode_on_main_count() == 32);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -2618,7 +2704,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeAuto::nav_guided_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::nav_attitude_time_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeRTL::init", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("ModeRTL::run", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeRTL::run", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeLand::init", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));

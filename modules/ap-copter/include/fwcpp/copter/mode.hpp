@@ -41,7 +41,10 @@
 // (disarmed/spool/NE/D + pilot cancel/reposition + attitude /
 // _state_complete leftover flags) + leftover leftover leftover_rtl_land_run +
 // land_run body leftover flags (state_complete/disarm/spool/land_run_normal
-// flag)) is this slice. ModeLand init/run, ModeGuided::run body,
+// flag)) is on main. ModeLand::init leftover (mode_land.cpp ~62-107:
+// control_position / NE+D set_max / conditional NE+D init / land_pause /
+// land_repo+prec_land clear / auto_yaw HOLD) is this slice. landinggear /
+// precland_statemachine OOS or remaining. ModeLand::run, ModeGuided::run body,
 // land_run_normal_or_precland body, land_run_horizontal_control body, and
 // auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
@@ -935,14 +938,80 @@ public:
     [[nodiscard]] bool state_complete() const { return _state_complete; }
 };
 
+// Stub: ModeLand (mode.h ~1289-1348). leftover leftover_init is ModeLand::init
+// (mode_land.cpp ~62-107): control_position from position_ok; NE/D set_max +
+// correction leftover flags; conditional NE/D init; land_pause=false;
+// land_repo/prec_land clear; auto_yaw HOLD. land_start_time / landinggear /
+// precland_statemachine remaining or OOS. ModeLand::run (gps_run/nogps_run)
+// stays later. mode_from_mode_num still returns nullptr for LAND.
+class ModeLand : public Mode {
+public:
+    bool control_position{false};
+    bool land_pause{false};
+    // Injected copter.position_ok(). Default true.
+    bool leftover_position_ok{true};
+    // Injected pos_control->NE_is_active() / D_is_active(). Default true so
+    // init controllers are not required without a pos_control object.
+    bool leftover_ne_is_active{true};
+    bool leftover_d_is_active{true};
+    // Leftover NE_set_max_speed_accel_m + NE_set_correction_speed_accel_m.
+    bool leftover_ne_set_max{false};
+    // Leftover D_set_max_speed_accel_m + D_set_correction_speed_accel_m.
+    bool leftover_d_set_max{false};
+    // Leftover NE_init_controller when control_position && !NE_is_active.
+    bool leftover_ne_init{false};
+    // Leftover D_init_controller when !D_is_active.
+    bool leftover_d_init{false};
+    // Leftover auto_yaw.set_mode(HOLD).
+    bool leftover_auto_yaw_hold{false};
+    // Leftover copter.ap.land_repo_active = false / prec_land_active = false.
+    bool leftover_land_repo_active_cleared{false};
+    bool leftover_prec_land_active_cleared{false};
+
+    ModeLand() = default;
+
+    [[nodiscard]] Number mode_number() const override { return Number::LAND; }
+    [[nodiscard]] bool init(bool ignore_checks) override {
+        return leftover_init(ignore_checks);
+    }
+    // Body is ModeLand::run / gps_run / nogps_run remaining.
+    void run() override {}
+    [[nodiscard]] bool requires_position() const override { return false; }
+    [[nodiscard]] bool has_manual_throttle() const override { return false; }
+
+    // Leftover ModeLand::init (mode_land.cpp ~62-107). ignore_checks unused
+    // upstream (always returns true). No pos_control / wp_nav / auto_yaw /
+    // landinggear / precland objects.
+    [[nodiscard]] bool leftover_init(bool /*ignore_checks*/) {
+        control_position = leftover_position_ok;
+        leftover_ne_set_max = true;
+        leftover_d_set_max = true;
+        leftover_ne_init = false;
+        leftover_d_init = false;
+        if (control_position && !leftover_ne_is_active) {
+            leftover_ne_init = true;
+        }
+        if (!leftover_d_is_active) {
+            leftover_d_init = true;
+        }
+        land_pause = false;
+        leftover_land_repo_active_cleared = true;
+        leftover_prec_land_active_cleared = true;
+        leftover_auto_yaw_hold = true;
+        return true;
+    }
+};
+
 // Caller-owned table. AUTO_RTL is not a true mode (nullptr from
 // mode_from_mode_num); set_mode(AUTO_RTL) uses table.mode_auto.
-// LAND stays nullptr. RTL is table.mode_rtl.
+// LAND stays nullptr from mode_from_mode_num (table.mode_land exists).
+// RTL is table.mode_rtl.
 struct FlightModeTable {
     ModeStabilize stabilize;
     ModeAltHold althold;
     ModeAuto mode_auto;
     ModeRTL mode_rtl;
+    ModeLand mode_land;
 };
 
 struct FlightModeContext {
