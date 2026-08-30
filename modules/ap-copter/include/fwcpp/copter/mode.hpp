@@ -13,8 +13,9 @@
 // Mode is not a heap singleton. The caller owns FlightModeTable;
 // FlightModeContext holds a non-owning Mode* into that table.
 // ADR-0012: header-only, C++20, no exceptions, no AP::, no flight-path alloc.
-// ModeStabilize/Acro/AltHold run bodies are CCP-039. AUTO/RTL/LAND run/init
-// bodies stay later. update_flight_mode is CCP-035 leftover.
+// ModeStabilize/Acro/AltHold run bodies are CCP-039. ModeAuto::init leftover
+// is auto_init (this slice). ModeAuto::run/exit and RTL/LAND stay later.
+// update_flight_mode is CCP-035 leftover.
 
 #include <fwcpp/copter/mode_reason.hpp>
 #include <fwcpp/copter/pilot_input.hpp>
@@ -97,17 +98,25 @@ public:
 
 // Stub: mode_number AUTO_RTL if auto_RTL else AUTO. requires_position is
 // true this slice (upstream NAV_ATTITUDE_TIME exception is leftover).
-// init/exit/run bodies, SubMode, and the separate jump_to_landing /
-// return_path_start AUTO_RTL APIs stay later.
+// init leftover is auto_init (mode_auto.cpp ~23-68). run/exit, SubMode,
+// and the separate jump_to_landing / return_path_start AUTO_RTL APIs stay later.
 class ModeAuto : public Mode {
 public:
     bool auto_RTL{false};
+    bool waiting_to_start{false};
+    bool submode_loiter{false};
+    bool auto_yaw_roi_to_hold{false};
+    bool wp_spline_init{false};
+    bool speed_override_cleared{false};
+    bool guided_limit_clear{false};
+    bool land_repo_active_cleared{false};
 
     ModeAuto() = default;
 
     [[nodiscard]] Number mode_number() const override {
         return auto_RTL ? Number::AUTO_RTL : Number::AUTO;
     }
+    // enter_mode calls auto_init for AUTO / AUTO_RTL; this stub stays unused.
     [[nodiscard]] bool init(bool /*ignore_checks*/) override { return true; }
     void run() override {}
     [[nodiscard]] bool requires_position() const override { return true; }
@@ -177,7 +186,34 @@ struct SetModeInputs {
     // AP_FENCE_ENABLED stand-in for the post-switch leftover.
     bool fence_present{false};
     bool fence_action_report_only{true};
+    // ModeAuto::init leftovers (no AP_Mission / AutoYaw objects).
+    // mission_present defaults true so existing armed AUTO tests still pass.
+    bool mission_present{true};
+    bool starts_with_takeoff{false};
+    bool yaw_mode_is_roi{false};
 };
+
+// Leftover ModeAuto::init (mode_auto.cpp ~23-68). No mission / wp_nav /
+// guided / precland objects. precland_statemachine.init remaining.
+[[nodiscard]] inline bool auto_init(ModeAuto& mode, bool ignore_checks, const SetModeInputs& in) {
+    mode.auto_RTL = false;
+    if (in.mission_present || ignore_checks) {
+        if (in.armed && in.land_complete && !in.starts_with_takeoff) {
+            return false;
+        }
+        mode.submode_loiter = true;
+        if (in.yaw_mode_is_roi) {
+            mode.auto_yaw_roi_to_hold = true;
+        }
+        mode.wp_spline_init = true;
+        mode.speed_override_cleared = true;
+        mode.waiting_to_start = true;
+        mode.guided_limit_clear = true;
+        mode.land_repo_active_cleared = true;
+        return true;
+    }
+    return false;
+}
 
 // Copter::gcs_mode_enabled ~184-215 + AP_Vehicle::block_GCS_mode_change ~1210-1225.
 // mode_list index is the FLTMODE_GCSBLOCK bit. Default mask 0 allows all.
@@ -296,7 +332,12 @@ inline void record_notify_flight_mode(FlightModeContext& ctx, const Mode& next) 
         return false;
     }
 
-    if (!next.init(ignore_checks)) {
+    const Mode::Number next_num = next.mode_number();
+    if (next_num == Mode::Number::AUTO || next_num == Mode::Number::AUTO_RTL) {
+        if (!auto_init(static_cast<ModeAuto&>(next), ignore_checks, in)) {
+            return false;
+        }
+    } else if (!next.init(ignore_checks)) {
         return false;
     }
 

@@ -47,7 +47,10 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"althold_run", ModePortStatus::kOnMain,
      "mode_althold.hpp; CCP-039 landed run() on main"},
     {"remaining mode bodies", ModePortStatus::kRemaining,
-     "AUTO/RTL/LAND/... run/init; ACRO/ALTHOLD catalogued separately"},
+     "ModeAuto::run/exit; RTL/LAND run/init; other modes"},
+    {"ModeAuto::init", ModePortStatus::kThisSlice,
+     "mode_auto.cpp auto_init leftover; mission_present / landed takeoff gate; "
+     "no wp_nav/mission objects; precland remaining"},
     {"FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain,
      "Copter::gcs_mode_enabled + AP_Vehicle::block_GCS_mode_change; injected "
      "fltmode_gcsblock; LAND/RTL not in list"},

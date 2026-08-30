@@ -586,10 +586,83 @@ TEST_CASE("fence_action_report_only does not record fence_manual_recovery_start"
     REQUIRE_FALSE(f.ctx.fence_manual_recovery_start);
 }
 
+TEST_CASE("AUTO init fails when armed landed without takeoff cmd", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.land_complete = true;
+    in.mission_present = true;
+    in.starts_with_takeoff = false;
+    REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE_FALSE(f.table.mode_auto.waiting_to_start);
+    REQUIRE_FALSE(f.ctx.write_mode);
+}
+
+TEST_CASE("AUTO init succeeds when landed with takeoff cmd", "[copter][mode]") {
+    Fixture f;
+    f.table.mode_auto.auto_RTL = true;
+    SetModeInputs in{};
+    in.armed = true;
+    in.land_complete = true;
+    in.starts_with_takeoff = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.mode_auto);
+    REQUIRE(f.table.mode_auto.waiting_to_start);
+    REQUIRE_FALSE(f.table.mode_auto.auto_RTL);
+    REQUIRE(f.table.mode_auto.submode_loiter);
+    REQUIRE(f.table.mode_auto.wp_spline_init);
+    REQUIRE(f.table.mode_auto.speed_override_cleared);
+    REQUIRE(f.table.mode_auto.guided_limit_clear);
+    REQUIRE(f.table.mode_auto.land_repo_active_cleared);
+    REQUIRE_FALSE(f.table.mode_auto.auto_yaw_roi_to_hold);
+}
+
+TEST_CASE("AUTO init fails when no mission and armed", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.land_complete = false;
+    in.mission_present = false;
+    REQUIRE_FALSE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.stabilize);
+    REQUIRE_FALSE(f.table.mode_auto.waiting_to_start);
+}
+
+TEST_CASE("AUTO init succeeds without mission when ignore_checks", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = false;
+    in.mission_present = false;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.mode_auto);
+    REQUIRE(f.table.mode_auto.waiting_to_start);
+}
+
+TEST_CASE("AUTO init ROI leftover sets HOLD", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.yaw_mode_is_roi = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.table.mode_auto.auto_yaw_roi_to_hold);
+    REQUIRE(f.table.mode_auto.waiting_to_start);
+}
+
+TEST_CASE("AUTO_RTL jump path still calls AUTO init", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.jump_to_closest_mission_leg = true;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO_RTL, ModeReason::GCS_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.mode_auto);
+    REQUIRE(f.table.mode_auto.auto_RTL);
+    REQUIRE(f.table.mode_auto.waiting_to_start);
+    REQUIRE(f.table.mode_auto.submode_loiter);
+}
+
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
-    REQUIRE(mode_this_slice_count() == 1);
+    REQUIRE(mode_this_slice_count() == 2);
     REQUIRE(mode_on_main_count() == 15);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
@@ -605,6 +678,7 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("acro_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("althold_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("remaining mode bodies", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("ModeAuto::init", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));
