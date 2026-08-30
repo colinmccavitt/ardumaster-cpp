@@ -6,13 +6,12 @@
 // (ADR-0012). Tests inject sticks, spool, AcroOptions, trainer, and
 // kinematics state.
 //
-// This slice: circular stick limit, input_expo rates, trainer OFF plus
-// LEVELING / LIMITED earth-frame level mix (wrap_PI, constrain,
-// sqrt_controller, euler_derivative_to_body). RATE_LOOP_ONLY calls the
-// real input_rate_bf_roll_pitch_yaw_2_rads; otherwise the real
-// input_rate_bf_roll_pitch_yaw_rads (CCP-032). set_throttle_out with
-// angle_boost=false. scale_I_to_angle_P and AIR_MODE init remain
-// catalogued. ALTHOLD takeoff/avoidance leftover stays on mode_althold.
+// This slice: AIR_MODE init/exit/aux leftover, scale_I_to_angle_P
+// products from injected angle_P × angle_P_scale, and reset_I /
+// reset_target_and_rate call-site flags (ADR-0012 flags-only OK without
+// PID objects). RATE_LOOP_ONLY still calls real
+// input_rate_bf_roll_pitch_yaw_2_rads. ALTHOLD takeoff/avoidance
+// leftover stays on mode_althold.
 //
 // Reuses DesiredSpoolState / SpoolState from mode_stabilize.hpp.
 
@@ -34,6 +33,41 @@ enum class AcroOptions : std::uint8_t {
     AIR_MODE = 1 << 0,
     RATE_LOOP_ONLY = 1 << 1,
 };
+
+// defines.h AirMode leftover for ModeAcro init/exit (DISABLED/ENABLED only).
+enum class AirMode : std::uint8_t {
+    DISABLED = 0,
+    ENABLED = 1,
+};
+
+// ModeAcro::init/exit/air_mode_aux_changed leftover state (~70-91).
+struct ModeAcroAirModeState {
+    AirMode air_mode{AirMode::DISABLED};
+    bool disable_air_mode_reset{false};
+};
+
+// Upstream ModeAcro::init ~70-78: AIR_MODE bit → ENABLED, clear reset latch.
+[[nodiscard]] inline bool leftover_init(ModeAcroAirModeState& st, std::uint8_t acro_options) {
+    if ((acro_options & static_cast<std::uint8_t>(AcroOptions::AIR_MODE)) != 0) {
+        st.disable_air_mode_reset = false;
+        st.air_mode = AirMode::ENABLED;
+    }
+    return true;
+}
+
+// Upstream ModeAcro::exit ~80-86: disable air_mode unless aux latched reset.
+inline void leftover_exit(ModeAcroAirModeState& st, std::uint8_t acro_options) {
+    if (!st.disable_air_mode_reset &&
+        (acro_options & static_cast<std::uint8_t>(AcroOptions::AIR_MODE)) != 0) {
+        st.air_mode = AirMode::DISABLED;
+    }
+    st.disable_air_mode_reset = false;
+}
+
+// Upstream ModeAcro::air_mode_aux_changed ~88-91.
+inline void leftover_air_mode_aux_changed(ModeAcroAirModeState& st) {
+    st.disable_air_mode_reset = true;
+}
 
 // mode.h ModeAcro::Trainer ~440-444.
 enum class AcroTrainer : std::uint8_t {
@@ -91,6 +125,15 @@ struct AcroRunInputs {
     float accel_pitch_max_radss{0.0f};
     float cos_pitch{1.0f};
     math::Quaternion att_target_quat{};
+
+    // Injected for AC_AttitudeControl::scale_I_to_angle_P (~1155-1163).
+    // Products recorded on AcroRunResult; no real PID objects.
+    float angle_p_roll{0.0f};
+    float angle_p_pitch{0.0f};
+    float angle_p_yaw{0.0f};
+    float angle_p_scale_x{1.0f};
+    float angle_p_scale_y{1.0f};
+    float angle_p_scale_z{1.0f};
 };
 
 // Injected trainer inputs for get_pilot_desired_rates_rads (no AP::).
@@ -118,6 +161,12 @@ struct AcroRunResult {
     bool angle_boost{false};
     bool rate_loop_only{false};
     bool scale_I_to_angle_P{false};
+    // Leftover I-scale products from scale_I_to_angle_P (angle_P * scale).
+    float i_scale_roll{0.0f};
+    float i_scale_pitch{0.0f};
+    float i_scale_yaw{0.0f};
+    // Mirrors reset_I / reset_I_smoothly call-site flags (no PID objects).
+    bool reset_I_invoked{false};
     bool input_rate_bf_invoked{false};
     bool input_rate_bf_2_invoked{false};
     float thrust_angle_rad{0.0f};
@@ -265,13 +314,17 @@ struct AcroRunResult {
 
     switch (in.spool_state) {
         case SpoolState::SHUT_DOWN:
+            // Call-site complete as leftover flags (no attitude_kinematics
+            // reset API / PID I-term objects this slice; ADR-0012).
             out.reset_target_and_rate = true;
             out.reset_I = true;
+            out.reset_I_invoked = true;
             pilot_desired_throttle = 0.0f;
             break;
         case SpoolState::GROUND_IDLE:
             out.reset_target_and_rate = true;
             out.reset_I_smoothly = true;
+            out.reset_I_invoked = true;
             pilot_desired_throttle = 0.0f;
             break;
         case SpoolState::THROTTLE_UNLIMITED:
@@ -287,8 +340,11 @@ struct AcroRunResult {
     out.rate_loop_only =
         (in.acro_options & static_cast<std::uint8_t>(AcroOptions::RATE_LOOP_ONLY)) != 0;
     if (out.rate_loop_only) {
-        // scale_I_to_angle_P body is leftover; flag only this slice.
+        // AC_AttitudeControl::scale_I_to_angle_P ~1155-1163 leftover products.
         out.scale_I_to_angle_P = true;
+        out.i_scale_roll = in.angle_p_roll * in.angle_p_scale_x;
+        out.i_scale_pitch = in.angle_p_pitch * in.angle_p_scale_y;
+        out.i_scale_yaw = in.angle_p_yaw * in.angle_p_scale_z;
         control::input_rate_bf_roll_pitch_yaw_2_rads(out.rates.roll_rads, out.rates.pitch_rads, out.rates.yaw_rads,
                                                      state, in.attitude_body, in.gains, in.dt,
                                                      out.ang_vel_body_rads);
@@ -342,12 +398,14 @@ inline constexpr PortItem kCompleteness[] = {
      "mode_althold.hpp; CCP-039 slice 3 on main; takeoff/avoidance leftover"},
     {"trainer LEVEL/LIMITED", PortStatus::kThisSlice,
      "mode_acro.cpp ~133-193; wrap_PI + constrain + sqrt_controller + euler_derivative_to_body mix"},
-    {"scale_I_to_angle_P", PortStatus::kRemaining,
-     "AC_AttitudeControl::scale_I_to_angle_P; flag only if RATE_LOOP_ONLY"},
-    {"AIR_MODE init", PortStatus::kRemaining,
-     "ModeAcro::init/exit/air_mode_aux_changed; AIR_MODE bit leftover"},
-    {"reset_target_and_rate / reset_I bodies", PortStatus::kRemaining,
-     "attitude_kinematics leftover; flags only this slice"},
+    {"scale_I_to_angle_P", PortStatus::kThisSlice,
+     "AC_AttitudeControl::scale_I_to_angle_P ~1155-1163; RATE_LOOP_ONLY "
+     "flag + i_scale = angle_P * angle_P_scale (injected; no PID objects)"},
+    {"AIR_MODE init", PortStatus::kThisSlice,
+     "ModeAcro::init/exit/air_mode_aux_changed ~70-91; AIR_MODE bit leftover state"},
+    {"reset_target_and_rate / reset_I bodies", PortStatus::kThisSlice,
+     "spool switch call-site flags complete (reset_I / reset_I_smoothly / "
+     "reset_target_and_rate + reset_I_invoked); no PID / kinematics objects"},
 };
 
 [[nodiscard]] inline constexpr std::size_t completeness_size() {

@@ -20,11 +20,16 @@ using fwcpp::copter::AcroOptions;
 using fwcpp::copter::AcroRunInputs;
 using fwcpp::copter::AcroTrainer;
 using fwcpp::copter::AcroTrainerInputs;
+using fwcpp::copter::AirMode;
 using fwcpp::copter::DesiredSpoolState;
+using fwcpp::copter::ModeAcroAirModeState;
 using fwcpp::copter::SpoolState;
 using fwcpp::copter::acro_run;
 using fwcpp::copter::get_pilot_desired_rates_rads;
 using fwcpp::copter::input_expo;
+using fwcpp::copter::leftover_air_mode_aux_changed;
+using fwcpp::copter::leftover_exit;
+using fwcpp::copter::leftover_init;
 using fwcpp::copter::acro::PortStatus;
 using fwcpp::copter::acro::completeness_has;
 using fwcpp::copter::acro::completeness_size;
@@ -201,8 +206,71 @@ TEST_CASE("SHUT_DOWN zeros throttle", "[copter][acro]") {
     REQUIRE(out.reset_target_and_rate);
     REQUIRE(out.reset_I);
     REQUIRE_FALSE(out.reset_I_smoothly);
+    REQUIRE(out.reset_I_invoked);
     REQUIRE_FALSE(out.angle_boost);
     REQUIRE(out.desired_spool == DesiredSpoolState::THROTTLE_UNLIMITED);
+}
+
+TEST_CASE("GROUND_IDLE resets I smoothly", "[copter][acro]") {
+    auto in = base_in();
+    in.spool_state = SpoolState::GROUND_IDLE;
+    AttitudeTargetState state = fresh_state();
+    const auto out = acro_run(in, state);
+
+    REQUIRE(out.reset_target_and_rate);
+    REQUIRE(out.reset_I_smoothly);
+    REQUIRE_FALSE(out.reset_I);
+    REQUIRE(out.reset_I_invoked);
+    REQUIRE(out.throttle_out == 0.0f);
+}
+
+TEST_CASE("AIR_MODE leftover init exit aux", "[copter][acro]") {
+    ModeAcroAirModeState st;
+    const auto air = static_cast<std::uint8_t>(AcroOptions::AIR_MODE);
+
+    REQUIRE(st.air_mode == AirMode::DISABLED);
+    REQUIRE_FALSE(st.disable_air_mode_reset);
+
+    REQUIRE(leftover_init(st, air));
+    REQUIRE(st.air_mode == AirMode::ENABLED);
+    REQUIRE_FALSE(st.disable_air_mode_reset);
+
+    leftover_exit(st, air);
+    REQUIRE(st.air_mode == AirMode::DISABLED);
+    REQUIRE_FALSE(st.disable_air_mode_reset);
+
+    REQUIRE(leftover_init(st, air));
+    leftover_air_mode_aux_changed(st);
+    REQUIRE(st.disable_air_mode_reset);
+    leftover_exit(st, air);
+    REQUIRE(st.air_mode == AirMode::ENABLED);
+    REQUIRE_FALSE(st.disable_air_mode_reset);
+
+    ModeAcroAirModeState st_off;
+    REQUIRE(leftover_init(st_off, 0));
+    REQUIRE(st_off.air_mode == AirMode::DISABLED);
+}
+
+TEST_CASE("RATE_LOOP_ONLY scale_I products", "[copter][acro]") {
+    auto in = base_in();
+    in.acro_options = static_cast<std::uint8_t>(AcroOptions::RATE_LOOP_ONLY);
+    in.angle_p_roll = 4.5f;
+    in.angle_p_pitch = 5.0f;
+    in.angle_p_yaw = 3.0f;
+    in.angle_p_scale_x = 0.5f;
+    in.angle_p_scale_y = 0.8f;
+    in.angle_p_scale_z = 1.25f;
+
+    AttitudeTargetState state = fresh_state();
+    const auto out = acro_run(in, state);
+
+    REQUIRE(out.rate_loop_only);
+    REQUIRE(out.scale_I_to_angle_P);
+    REQUIRE(out.input_rate_bf_2_invoked);
+    REQUIRE_FALSE(out.input_rate_bf_invoked);
+    REQUIRE(out.i_scale_roll == Approx(4.5f * 0.5f));
+    REQUIRE(out.i_scale_pitch == Approx(5.0f * 0.8f));
+    REQUIRE(out.i_scale_yaw == Approx(3.0f * 1.25f));
 }
 
 TEST_CASE("trainer OFF matches circular-limit expo path", "[copter][acro]") {
@@ -261,9 +329,9 @@ TEST_CASE("LEVELING nonzero roll attitude pulls rate toward level", "[copter][ac
     REQUIRE(leveling_neg.roll_rads > 0.0f);
 }
 
-TEST_CASE("leftover remaining_count is not zero", "[copter][acro][leftover]") {
-    REQUIRE(remaining_count() > 0);
-    REQUIRE(this_slice_count() == 7);
+TEST_CASE("leftover remaining_count is zero for acro", "[copter][acro][leftover]") {
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(this_slice_count() == 10);
     REQUIRE(on_main_count() == 2);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(completeness_size() ==
@@ -272,7 +340,8 @@ TEST_CASE("leftover remaining_count is not zero", "[copter][acro][leftover]") {
     REQUIRE(completeness_has("stabilize_run", PortStatus::kOnMain));
     REQUIRE(completeness_has("althold_run", PortStatus::kOnMain));
     REQUIRE(completeness_has("trainer LEVEL/LIMITED", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("scale_I_to_angle_P", PortStatus::kRemaining));
-    REQUIRE(completeness_has("AIR_MODE init", PortStatus::kRemaining));
+    REQUIRE(completeness_has("scale_I_to_angle_P", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("AIR_MODE init", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("reset_target_and_rate / reset_I bodies", PortStatus::kThisSlice));
     REQUIRE_FALSE(completeness_has("AUTO_RTL", PortStatus::kRemaining));
 }
