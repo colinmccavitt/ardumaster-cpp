@@ -51,10 +51,10 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain,
      "Copter::gcs_mode_enabled + AP_Vehicle::block_GCS_mode_change; injected "
      "fltmode_gcsblock; LAND/RTL not in list"},
-    {"fence recovery", ModePortStatus::kThisSlice,
+    {"fence recovery", ModePortStatus::kOnMain,
      "DISABLE_MODE_CHANGE gate + manual_recovery_start leftover; no AC_Fence"},
-    {"update_flight_mode FAST_TASK", ModePortStatus::kRemaining,
-     "mode.cpp ~497-508; CCP-035 leftover, not this slice"},
+    {"update_flight_mode FAST_TASK", ModePortStatus::kOnMain,
+     "lives in update_flight_mode.hpp (CCP-035)"},
     {"Write_Mode/notify", ModePortStatus::kOnMain,
      "leftover flags after successful enter; GCS heartbeat/ADSB/camera/rate_tc remaining"},
     {"Drift-as-manual-throttle", ModePortStatus::kOnMain,

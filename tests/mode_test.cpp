@@ -587,10 +587,10 @@ TEST_CASE("fence_action_report_only does not record fence_manual_recovery_start"
 }
 
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
-    REQUIRE(remaining_count() == 2);
+    REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
-    REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 13);
+    REQUIRE(mode_this_slice_count() == 1);
+    REQUIRE(mode_on_main_count() == 15);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -606,8 +606,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("althold_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("remaining mode bodies", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kThisSlice));
-    REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("Write_Mode/notify", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("Drift-as-manual-throttle", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("set_accel_throttle_I", ModePortStatus::kOnMain));
