@@ -15,8 +15,9 @@
 // ADR-0012: header-only, C++20, no exceptions, no AP::, no flight-path alloc.
 // ModeStabilize/Acro/AltHold run bodies are CCP-039. ModeAuto::init leftover
 // is auto_init (on main). ModeAuto::exit leftover is on main. ModeAuto::run
-// waiting_to_start leftover is this slice. Else-path (mission.update / change
-// detector / SubMode) and RTL/LAND stay later. update_flight_mode is CCP-035.
+// waiting_to_start leftover is on main. Else-path leftover (change detector
+// restart + mission.update) is this slice. SubMode switch and RTL/LAND stay
+// later. update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
 #include <fwcpp/copter/pilot_input.hpp>
@@ -101,8 +102,9 @@ public:
 // true this slice (upstream NAV_ATTITUDE_TIME exception is leftover).
 // init leftover is auto_init (mode_auto.cpp ~23-68). exit leftover is
 // ModeAuto::exit (mode_auto.cpp ~71-81). run leftover is waiting_to_start
-// + origin (mode_auto.cpp ~85-98); else-path, SubMode, and the separate
-// jump_to_landing / return_path_start AUTO_RTL APIs stay later.
+// + origin (mode_auto.cpp ~85-98, on main) and else-path change detector
+// + mission.update (mode_auto.cpp ~99-113, this slice). SubMode switch
+// and the separate jump_to_landing / return_path_start AUTO_RTL APIs stay later.
 class ModeAuto : public Mode {
 public:
     bool auto_RTL{false};
@@ -125,6 +127,20 @@ public:
     bool start_or_resume{false};
     // Leftover IGNORE_RETURN(mis_change_detector.check_for_mission_change()).
     bool mis_change_check_init{false};
+    // Injected mis_change_detector.check_for_mission_change() (else-path).
+    bool mission_changed{false};
+    // Injected _mode == SubMode::WP (no SubMode enum this slice).
+    bool submode_is_wp{false};
+    // Injected mission.restart_current_nav_cmd() result.
+    bool restart_nav_ok{false};
+    // Leftover restart_current_nav_cmd call when changed && running && WP.
+    bool restart_nav_cmd{false};
+    // Leftover GCS "restarted command" (no GCS object).
+    bool gcs_mission_changed_restarted{false};
+    // Leftover GCS "failed to restart command" (no GCS object).
+    bool gcs_mission_changed_failed{false};
+    // Leftover mission.update() on the else path (always, even if no change).
+    bool mission_update{false};
 
     ModeAuto() = default;
 
@@ -138,14 +154,26 @@ public:
         mission_stop = mission_running;
         auto_RTL = false;
     }
-    // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98).
-    // Else-path (mission change detector restart + mission.update) and
-    // SubMode switch stay later. No AP_Mission / detector / GCS.
+    // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98)
+    // and else-path change detector + mission.update (~99-113). SubMode
+    // switch stays later. No AP_Mission / detector / GCS.
     void run() override {
-        if (waiting_to_start && has_origin) {
-            start_or_resume = true;
-            waiting_to_start = false;
-            mis_change_check_init = true;
+        if (waiting_to_start) {
+            if (has_origin) {
+                start_or_resume = true;
+                waiting_to_start = false;
+                mis_change_check_init = true;
+            }
+        } else {
+            if (mission_changed && mission_running && submode_is_wp) {
+                restart_nav_cmd = true;
+                if (restart_nav_ok) {
+                    gcs_mission_changed_restarted = true;
+                } else {
+                    gcs_mission_changed_failed = true;
+                }
+            }
+            mission_update = true;
         }
     }
     [[nodiscard]] bool requires_position() const override { return true; }
