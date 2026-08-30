@@ -1,20 +1,16 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 54 lands
-// init_ardupilot leftover through leftover leftover_esc_cal_setup leftover leftover_gcs leftover leftover
-// flag (notify/battery/baro + interlock +
+// (Copter.cpp / Copter.h / system.cpp). Slice 55 lands
+// init_ardupilot leftover through esc_cal_setup_delay flag
+// (notify/battery/baro + interlock +
 // init_rc_in + allocate_motors call + rc convert/init + init_rc_out
 // leftover + esc_cal brushed skip + ESC cal leftover flags +
-// leftover leftover_esc_cal_radio_wait leftover leftover flag +
-// leftover leftover_radio_wait_would_loop leftover leftover flag +
-// leftover leftover_esc_cal_setup leftover leftover flag +
-// leftover leftover_esc_cal_passthrough_would_loop leftover leftover flag +
-// leftover leftover_esc_cal_auto_high leftover leftover flag +
-// leftover leftover_esc_cal_auto_would_block leftover leftover flag +
-// leftover leftover_esc_cal_setup leftover leftover_body leftover leftover flags +
-// leftover leftover_esc_cal_setup leftover leftover_notify leftover leftover flag +
-// leftover leftover_esc_cal_setup leftover leftover_gcs leftover leftover flag +
+// esc_cal_radio_wait flag + radio_wait_would_loop flag +
+// esc_cal_setup flag + esc_cal_passthrough_would_loop flag +
+// esc_cal_auto_high flag + esc_cal_auto_would_block flag +
+// esc_cal_setup body flags + esc_cal_setup_notify flag +
+// esc_cal_setup_gcs flag + esc_cal_setup_delay flag +
 // initialised_params + failsafe register leftover + GPS/compass
 // leftover flags + attitude_sanity leftover + barometer.calibrate
 // leftover + mission/SmartRTL/logger leftover flags +
@@ -22,7 +18,7 @@
 // + ins.set_log_raw_bit + motors->output_min + set_mode leftover
 // flags + variance filt cutoffs + ap.initialised; gated
 // rangefinder/proximity/beacon remaining false). ESC cal
-// HAL/motors objects remaining.
+// motors objects remaining.
 // remaining_count() > 0 is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
@@ -61,9 +57,9 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::throttle_loop", PortStatus::kOnMain,
      "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
     {"Copter::init_ardupilot", PortStatus::kThisSlice,
-     "init_ardupilot.hpp; leftover leftover through leftover leftover_esc_cal_setup leftover leftover_gcs leftover leftover flag; leftover leftover leftover leftover_HAL leftover leftover / leftover leftover leftover leftover_motors leftover leftover remaining"},
+     "init_ardupilot.hpp; through esc_cal_setup_delay flag; motors objects remaining"},
     {"Copter::init_ardupilot rest", PortStatus::kRemaining,
-     "ESC leftover leftover cal leftover leftover HAL leftover leftover / leftover leftover motors leftover leftover objects leftover leftover remaining"},
+     "ESC cal motors objects remaining"},
     {"Copter::run_rate_controller_main", PortStatus::kOnMain,
      "run_rate_controller.hpp; set_dt_s + rate_controller_run iff !rate thread"},
     {"Copter::read_inertia", PortStatus::kOnMain,
