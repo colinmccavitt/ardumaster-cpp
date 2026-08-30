@@ -29,6 +29,7 @@ using fwcpp::copter::UpdateLandAndCrashDetectorsInputs;
 using fwcpp::copter::UpdateRangefinderTerrainOffsetInputs;
 using fwcpp::copter::UpdateThrottleHoverInputs;
 using fwcpp::copter::LoopRateLoggingInputs;
+using fwcpp::copter::TenHzLoggingLoopInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -57,6 +58,7 @@ using fwcpp::copter::scheduler_task_count;
 using fwcpp::copter::this_slice_count;
 using fwcpp::copter::three_hz_loop;
 using fwcpp::copter::loop_rate_logging;
+using fwcpp::copter::ten_hz_logging_loop;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
@@ -82,10 +84,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 15", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 16);
+TEST_CASE("catalog remaining_count stays open after slice 16", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 15);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 19);
+    REQUIRE(on_main_count() == 20);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -107,9 +109,10 @@ TEST_CASE("catalog remaining_count stays open after slice 15", "[copter][leftove
     REQUIRE(completeness_has("Copter::run_nav_updates", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_throttle_hover", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::three_hz_loop", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::loop_rate_logging", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::loop_rate_logging", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::ten_hz_logging_loop", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::ten_hz_logging_loop", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::twentyfive_hz_logging", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
@@ -1198,6 +1201,135 @@ TEST_CASE("loop_rate_logging leftover records SPOL always; attitude/rate/PIDS/IM
     REQUIRE(row->rate_hz == kLoopRateHz);
     REQUIRE(row->max_time_micros == 50);
     REQUIRE(row->priority == 75);
+    REQUIRE(row->gate != nullptr);
+    REQUIRE(std::string_view(row->gate) == "HAL_LOGGING_ENABLED");
+}
+
+TEST_CASE("ten_hz_logging_loop leftover always Write_Attitude; other flags gated",
+          "[copter][ten_hz_logging_loop]") {
+    const auto empty = ten_hz_logging_loop();
+    REQUIRE(empty.write_attitude);
+    REQUIRE(empty.log_write_pids);
+    REQUIRE(empty.log_write_ekf_pos);
+    REQUIRE_FALSE(empty.log_write_attitude);
+    REQUIRE_FALSE(empty.log_write_rate);
+    REQUIRE_FALSE(empty.motors_log_write);
+    REQUIRE_FALSE(empty.write_rcin);
+    REQUIRE_FALSE(empty.write_rssi);
+    REQUIRE_FALSE(empty.write_rcout);
+    REQUIRE_FALSE(empty.pos_control_write_log);
+    REQUIRE_FALSE(empty.write_vibration);
+    REQUIRE_FALSE(empty.proximity_log);
+    REQUIRE_FALSE(empty.beacon_log);
+    REQUIRE_FALSE(empty.winch_write_log);
+    REQUIRE_FALSE(empty.camera_mount_write_log);
+
+    TenHzLoggingLoopInputs med{};
+    med.should_log_attitude_med = true;
+    const auto med_fx = ten_hz_logging_loop(med);
+    REQUIRE(med_fx.write_attitude);
+    REQUIRE(med_fx.log_write_attitude);
+    REQUIRE(med_fx.log_write_rate);
+    REQUIRE(med_fx.log_write_pids);
+    REQUIRE(med_fx.log_write_ekf_pos);
+
+    TenHzLoggingLoopInputs fast = med;
+    fast.should_log_attitude_fast = true;
+    const auto fast_fx = ten_hz_logging_loop(fast);
+    REQUIRE(fast_fx.write_attitude);
+    REQUIRE_FALSE(fast_fx.log_write_attitude);
+    REQUIRE_FALSE(fast_fx.log_write_rate);
+    REQUIRE_FALSE(fast_fx.log_write_pids);
+    REQUIRE_FALSE(fast_fx.log_write_ekf_pos);
+
+    TenHzLoggingLoopInputs logs = med;
+    logs.logs_attitude = true;
+    const auto logs_fx = ten_hz_logging_loop(logs);
+    REQUIRE(logs_fx.write_attitude);
+    REQUIRE_FALSE(logs_fx.log_write_attitude);
+    REQUIRE_FALSE(logs_fx.log_write_rate);
+    REQUIRE_FALSE(logs_fx.log_write_pids);
+    REQUIRE(logs_fx.log_write_ekf_pos);
+
+    TenHzLoggingLoopInputs rate = med;
+    rate.using_rate_thread = true;
+    const auto rate_fx = ten_hz_logging_loop(rate);
+    REQUIRE(rate_fx.write_attitude);
+    REQUIRE(rate_fx.log_write_attitude);
+    REQUIRE_FALSE(rate_fx.log_write_rate);
+    REQUIRE_FALSE(rate_fx.log_write_pids);
+    REQUIRE(rate_fx.log_write_ekf_pos);
+
+    TenHzLoggingLoopInputs mot{};
+    mot.should_log_motbatt = true;
+    const auto mot_fx = ten_hz_logging_loop(mot);
+    REQUIRE(mot_fx.write_attitude);
+    REQUIRE(mot_fx.motors_log_write);
+
+    TenHzLoggingLoopInputs rcin{};
+    rcin.should_log_rcin = true;
+    const auto rcin_fx = ten_hz_logging_loop(rcin);
+    REQUIRE(rcin_fx.write_rcin);
+    REQUIRE_FALSE(rcin_fx.write_rssi);
+
+    TenHzLoggingLoopInputs rcout{};
+    rcout.should_log_rcout = true;
+    const auto rcout_fx = ten_hz_logging_loop(rcout);
+    REQUIRE(rcout_fx.write_rcout);
+
+    TenHzLoggingLoopInputs ntun_pos{};
+    ntun_pos.should_log_ntun = true;
+    ntun_pos.has_manual_throttle = true;
+    ntun_pos.requires_position = true;
+    REQUIRE(ten_hz_logging_loop(ntun_pos).pos_control_write_log);
+
+    TenHzLoggingLoopInputs ntun_land{};
+    ntun_land.should_log_ntun = true;
+    ntun_land.has_manual_throttle = true;
+    ntun_land.landing_with_gps = true;
+    REQUIRE(ten_hz_logging_loop(ntun_land).pos_control_write_log);
+
+    TenHzLoggingLoopInputs ntun_auto{};
+    ntun_auto.should_log_ntun = true;
+    REQUIRE(ten_hz_logging_loop(ntun_auto).pos_control_write_log);
+
+    TenHzLoggingLoopInputs ntun_manual{};
+    ntun_manual.should_log_ntun = true;
+    ntun_manual.has_manual_throttle = true;
+    REQUIRE_FALSE(ten_hz_logging_loop(ntun_manual).pos_control_write_log);
+
+    TenHzLoggingLoopInputs imu{};
+    imu.should_log_imu = true;
+    REQUIRE(ten_hz_logging_loop(imu).write_vibration);
+    TenHzLoggingLoopInputs imu_fast{};
+    imu_fast.should_log_imu_fast = true;
+    REQUIRE(ten_hz_logging_loop(imu_fast).write_vibration);
+    TenHzLoggingLoopInputs imu_raw{};
+    imu_raw.should_log_imu_raw = true;
+    REQUIRE(ten_hz_logging_loop(imu_raw).write_vibration);
+
+    TenHzLoggingLoopInputs leftover{};
+    leftover.should_log_ctun = true;
+    leftover.should_log_any = true;
+    leftover.should_log_camera = true;
+    leftover.should_log_rcin = true;
+    const auto rem = ten_hz_logging_loop(leftover);
+    REQUIRE(rem.should_log_ctun);
+    REQUIRE(rem.should_log_any);
+    REQUIRE(rem.should_log_camera);
+    REQUIRE(rem.write_rcin);
+    REQUIRE_FALSE(rem.write_rssi);
+    REQUIRE_FALSE(rem.proximity_log);
+    REQUIRE_FALSE(rem.beacon_log);
+    REQUIRE_FALSE(rem.winch_write_log);
+    REQUIRE_FALSE(rem.camera_mount_write_log);
+
+    const auto* row = find_scheduler_task("ten_hz_logging_loop");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 10.0f);
+    REQUIRE(row->max_time_micros == 350);
+    REQUIRE(row->priority == 114);
     REQUIRE(row->gate != nullptr);
     REQUIRE(std::string_view(row->gate) == "HAL_LOGGING_ENABLED");
 }

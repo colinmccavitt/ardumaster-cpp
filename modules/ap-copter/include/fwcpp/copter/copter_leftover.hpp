@@ -1,8 +1,8 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 15 lands
-// loop_rate_logging as a leftover tick. remaining_count() > 0
+// (Copter.cpp / Copter.h / system.cpp). Slice 16 lands
+// ten_hz_logging_loop as a leftover tick. remaining_count() > 0
 // is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
@@ -65,9 +65,10 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
      "update_throttle_hover.hpp; level hover records motors->update_throttle_hover(0.01f)"},
     {"Copter::three_hz_loop", PortStatus::kOnMain,
      "three_hz_loop.hpp; always gcs/terrain/deadreckon/low_alt; tuning remaining"},
-    {"Copter::loop_rate_logging", PortStatus::kThisSlice,
+    {"Copter::loop_rate_logging", PortStatus::kOnMain,
      "loop_rate_logging.hpp; attitude/rate/PIDS/IMU/SPOL flags; notch remaining"},
-    {"Copter::ten_hz_logging_loop", PortStatus::kRemaining, "HAL_LOGGING_ENABLED leftover"},
+    {"Copter::ten_hz_logging_loop", PortStatus::kThisSlice,
+     "ten_hz_logging_loop.hpp; Write_Attitude always; med/rate/PIDS/EKF/RC/NTUN/IMU flags"},
     {"Copter::twentyfive_hz_logging", PortStatus::kRemaining, "HAL_LOGGING_ENABLED leftover"},
     {"Copter::one_hz_loop", PortStatus::kRemaining, "1 Hz leftover"},
     {"Copter::ap_value", PortStatus::kRemaining, "packed ap bools"},
