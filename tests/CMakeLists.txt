@@ -975,6 +975,11 @@ add_executable(logger_rotation_test logger_rotation_test.cpp)
 target_link_libraries(logger_rotation_test PRIVATE ap-logger Catch2::Catch2WithMain)
 catch_discover_tests(logger_rotation_test)
 
+# CPP-090 slice 7: DataFlash RAM page map BufferToPage / PageToBuffer.
+add_executable(logger_dataflash_test logger_dataflash_test.cpp)
+target_link_libraries(logger_dataflash_test PRIVATE ap-logger Catch2::Catch2WithMain)
+catch_discover_tests(logger_dataflash_test)
+
 # CPP-088 slice 5: in-memory WSPIDevice command header and transfer.
 add_executable(wspi_test wspi_test.cpp)
 target_link_libraries(wspi_test PRIVATE ap-hal Catch2::Catch2WithMain)

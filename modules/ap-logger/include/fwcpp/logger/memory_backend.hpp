@@ -7,10 +7,11 @@
 // concrete MemoryBackend. No vtable (ADR-0012: no RTTI). No filesystem.
 //
 // MemoryBackend is not a DataFlash device: there is no page erase, wrap,
-// or log index. WriteBlock appends into a fixed-capacity buffer
-// (std::array, compile-time cap). A write that would overflow is dropped
-// whole and counted (upstream _dropped when space < size). No unbounded
-// growth on the flight path.
+// or log index. The RAM DataFlash page map (dataflash_page_map.hpp) is a
+// separate device model with BufferToPage / PageToBuffer. WriteBlock
+// appends into a fixed-capacity buffer (std::array, compile-time cap).
+// A write that would overflow is dropped whole and counted (upstream
+// _dropped when space < size). No unbounded growth on the flight path.
 
 #include <fwcpp/logger/rate_limiter.hpp>
 

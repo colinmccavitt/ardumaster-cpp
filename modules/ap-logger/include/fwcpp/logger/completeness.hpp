@@ -1,9 +1,9 @@
 #pragma once
 
-// CPP-090 completeness: this slice (max-files rotation + erase_next) vs
-// remaining AP_Logger / DataFlash surfaces. remaining_count()==2 until
-// later slices land the DataFlash page map and MAVLink transfer.
-// POSIX/SD FileBackend WriteBlock and EraseAll truncate stay on main.
+// CPP-090 completeness: this slice (DataFlash RAM page map) vs remaining
+// AP_Logger surfaces. remaining_count()==1 until a later slice lands
+// MAVLink transfer. MemoryBackend stays append-only; page map is a
+// separate RAM device model. POSIX/SD FileBackend and max-files on main.
 
 #include <cstddef>
 #include <cstdint>
@@ -29,8 +29,8 @@ inline constexpr LoggerPortItem kLoggerCompleteness[] = {
     {"drop", PortStatus::kOnMain,
      "buffer-full drop counter (upstream _dropped / num_dropped)"},
     {"completeness catalog", PortStatus::kOnMain, "this table"},
-    {"DataFlash page map", PortStatus::kRemaining,
-     "page-based DataFlash layout; BufferToPage / PageToBuffer (NAND)"},
+    {"DataFlash page map", PortStatus::kThisSlice,
+     "RAM page map BufferToPage/PageToBuffer/ErasePage; separate from MemoryBackend; no NAND/SPI"},
     {"POSIX/SD file backend", PortStatus::kOnMain,
      "FileBackend fwrite/write seam; caller-owned FILE*/fd; no ringbuffer/io_timer"},
     {"FMT registry", PortStatus::kOnMain,
@@ -41,7 +41,7 @@ inline constexpr LoggerPortItem kLoggerCompleteness[] = {
      "MAVLink LOG_REQUEST_LIST / LOG_ENTRY listing"},
     {"EraseAll", PortStatus::kOnMain,
      "armed-gate + rewind/truncate of the open stream; no directory walk"},
-    {"max-files rotation", PortStatus::kThisSlice,
+    {"max-files rotation", PortStatus::kOnMain,
      "in-memory log slot table, LASTLOG, next_log_number wrap, erase_next"},
 };
 
