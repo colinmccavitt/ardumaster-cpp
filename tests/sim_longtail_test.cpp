@@ -621,3 +621,177 @@ TEST_CASE("IS31FL3195 colour update 0xC5 latches OUT registers") {
     led.update(ac);
     REQUIRE(led.rgb[0] == 0xAA);
 }
+
+TEST_CASE("Frsky_D parses START_STOP_D plus stuffed 0x5E payload") {
+    Frsky_D d;
+    // 0x5E | BARO_ALT_BP=0x10 | stuffed 0x5E -> 0x5D 0x3E | 0x02
+    const std::uint8_t pkt[] = {0x5E, 0x10, 0x5D, 0x3E, 0x02};
+    d.write_to_device(reinterpret_cast<const char*>(pkt), sizeof(pkt));
+    d.update();
+    REQUIRE(d.received.size() == 1);
+    REQUIRE(d.received[0].id == 0x10);
+    REQUIRE(d.received[0].data == static_cast<std::uint16_t>(0x5E | (0x02 << 8)));
+    REQUIRE(std::string(Frsky::dataid_string(Frsky::DataID::BARO_ALT_BP)) == "BARO_ALT_BP");
+    REQUIRE(std::string(Frsky::dataid_string(Frsky::DataID::VFAS)) == "VFAS");
+}
+
+TEST_CASE("Frsky_D two-message sequence with 0x5D stuffing") {
+    Frsky_D d;
+    // VFAS 0x39 data 0x5D 0x00 stuffed as 0x5D 0x3D, then CURRENT 0x28 data 0x0064
+    const std::uint8_t pkt[] = {0x5E, 0x39, 0x5D, 0x3D, 0x00, 0x5E, 0x28, 0x64, 0x00};
+    d.write_to_device(reinterpret_cast<const char*>(pkt), sizeof(pkt));
+    d.update();
+    REQUIRE(d.received.size() == 2);
+    REQUIRE(d.received[0].id == 0x39);
+    REQUIRE(d.received[0].data == 0x005D);
+    REQUIRE(d.received[1].id == 0x28);
+    REQUIRE(d.received[1].data == 0x0064);
+}
+
+TEST_CASE("CRSF cycles original VTX then telem then battery frames") {
+    CRSF crsf;
+    crsf.update(400);
+    auto a = crsf.drain_to_autopilot();
+    REQUIRE(a.size() == 10);
+    REQUIRE(a[0] == 0xC8);
+    REQUIRE(a[1] == 0x8);
+    REQUIRE(a[2] == 0xF);
+    REQUIRE(a[9] == 0x5F);
+    crsf.update(800);
+    auto b = crsf.drain_to_autopilot();
+    REQUIRE(b.size() == 9);
+    REQUIRE(b[0] == 0xC8);
+    REQUIRE(b[2] == 0x10);
+    REQUIRE(b[8] == 0x1B);
+    crsf.update(1200);
+    auto c = crsf.drain_to_autopilot();
+    REQUIRE(c.size() == 11);
+    REQUIRE(c[0] == 0xC8);
+    REQUIRE(c[2] == 0x8);
+    REQUIRE(c[10] == 0x95);
+}
+
+TEST_CASE("ELRS emits MAVLink2 RADIO_STATUS msgid 109 crc extra 185") {
+    ELRS elrs(2);
+    REQUIRE(elrs.device_baud() == 460800);
+    REQUIRE(elrs.target_port == 5763);
+    elrs.update(20);
+    const auto bytes = elrs.drain_to_autopilot();
+    REQUIRE(bytes.size() >= 21);
+    REQUIRE(bytes[0] == 0xFD);
+    REQUIRE(bytes[1] == 9);
+    const std::uint32_t msgid = static_cast<std::uint32_t>(bytes[7] | (bytes[8] << 8) | (bytes[9] << 16));
+    REQUIRE(msgid == 109);
+    REQUIRE(bytes[5] == 255);
+    REQUIRE(bytes[6] == 0);
+    REQUIRE(bytes[10] == 0);
+    REQUIRE(bytes[11] == 0);
+    REQUIRE(bytes[12] == 0);
+    REQUIRE(bytes[13] == 0);
+    REQUIRE(bytes[14] == 255);
+    REQUIRE(bytes[15] == 255);
+    REQUIRE(bytes[16] == 100);
+    const std::uint16_t crc = mavmin::crc_calculate(bytes.data() + 1, static_cast<std::uint32_t>(9 + 9),
+                                                    mavmin::kCrcRadioStatus);
+    REQUIRE(bytes[19] == static_cast<std::uint8_t>(crc));
+    REQUIRE(bytes[20] == static_cast<std::uint8_t>(crc >> 8));
+}
+
+TEST_CASE("ELRS forwards a complete GCS HEARTBEAT to the autopilot") {
+    ELRS elrs(2);
+    mavmin::Status st{};
+    auto hb = mavmin::encode_heartbeat(1, 1, st);
+    elrs.inject_from_gcs(hb.data(), hb.size());
+    elrs.update(0);
+    elrs.update(1000);
+    const auto bytes = elrs.drain_to_autopilot();
+    bool saw_hb = false;
+    for (std::size_t i = 0; i + 10 < bytes.size(); i++) {
+        if (bytes[i] == 0xFD) {
+            const std::uint32_t msgid =
+                static_cast<std::uint32_t>(bytes[i + 7] | (bytes[i + 8] << 8) | (bytes[i + 9] << 16));
+            if (msgid == 0) {
+                saw_hb = true;
+            }
+        }
+    }
+    REQUIRE(saw_hb);
+}
+
+TEST_CASE("Volz SET_EXTENDED_POSITION uses crc_crc16_ibm not ccitt") {
+    Volz v;
+    v._enabled = true;
+    Volz::Command cmd{};
+    cmd.command_id = Volz::CommandId::SET_EXTENDED_POSITION;
+    cmd.actuator_id = 1;
+    cmd.arg1 = 0x0C;
+    cmd.arg2 = 0x00;
+    cmd.update_checksum();
+    const std::uint16_t ibm = crc_crc16_ibm(0xffff, reinterpret_cast<const std::uint8_t*>(&cmd), 4);
+    REQUIRE(cmd.crc_host() == ibm);
+    const std::uint16_t ccitt = crc16_ccitt(reinterpret_cast<const std::uint8_t*>(&cmd), 4, 0);
+    REQUIRE(ibm != ccitt);
+    v.write_to_device(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+    Aircraft ac;
+    v.update(ac);
+    const auto bytes = v.drain_to_autopilot();
+    REQUIRE(bytes.size() == 6);
+    REQUIRE(bytes[0] == 0x2C);
+    REQUIRE(bytes[1] == 1);
+    Volz::Command resp{};
+    std::memcpy(&resp, bytes.data(), 6);
+    REQUIRE(resp.calculate_checksum() == resp.crc_host());
+    REQUIRE(v.servos[0].desired_position > 0.5f);
+}
+
+TEST_CASE("Volz READ_VOLTAGE CURRENT TEMPERATURE multi-command sequence") {
+    Volz v;
+    v._enabled = true;
+    auto send = [&](Volz::CommandId id) {
+        Volz::Command cmd{};
+        cmd.command_id = id;
+        cmd.actuator_id = 2;
+        cmd.arg1 = 0;
+        cmd.arg2 = 0;
+        cmd.update_checksum();
+        v.write_to_device(reinterpret_cast<const char*>(&cmd), sizeof(cmd));
+    };
+    send(Volz::CommandId::READ_VOLTAGE);
+    send(Volz::CommandId::READ_CURRENT);
+    send(Volz::CommandId::READ_TEMPERATURE);
+    Aircraft ac;
+    v.update(ac);
+    const auto bytes = v.drain_to_autopilot();
+    REQUIRE(bytes.size() == 18);
+    REQUIRE(bytes[0] == 0x31);
+    REQUIRE(bytes[6] == 0x30);
+    REQUIRE(bytes[12] == 0x10);
+    REQUIRE(bytes[1] == 2);
+    REQUIRE(bytes[2] == 5);
+    REQUIRE(bytes[3] == 6);
+    REQUIRE(bytes[8] == 5);
+    REQUIRE(bytes[14] == 75);
+    REQUIRE(bytes[15] == 75);
+}
+
+TEST_CASE("Volz update_sitl_input_pwm respects mask and fail-hold") {
+    Volz v;
+    v._enabled = true;
+    v.servos[0].desired_position = 1.0f;
+    v.servos[1].desired_position = -1.0f;
+    v.servos[3].desired_position = 0.5f;
+    SitlInput in{};
+    in.servos[0] = 1500;
+    in.servos[1] = 1500;
+    in.servos[2] = 1500;
+    in.servos[3] = 1500;
+    v.update_sitl_input_pwm(in);
+    REQUIRE(in.servos[0] == 2000);
+    REQUIRE(in.servos[1] == 1000);
+    REQUIRE(in.servos[2] == 1500);
+    REQUIRE(in.servos[3] == 1750);
+    v._failed_mask = 1U;
+    v.servos[0].desired_position = 0.0f;
+    v.update_sitl_input_pwm(in);
+    REQUIRE(in.servos[0] == 2000);
+}

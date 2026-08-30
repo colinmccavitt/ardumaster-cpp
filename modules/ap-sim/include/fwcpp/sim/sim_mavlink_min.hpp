@@ -21,12 +21,14 @@ inline constexpr std::uint32_t kMsgCommandAck = 77;
 inline constexpr std::uint32_t kMsgCommandLong = 76;
 inline constexpr std::uint32_t kMsgDistanceSensor = 132;
 inline constexpr std::uint32_t kMsgLoweheiserGovEfi = 10151;
+inline constexpr std::uint32_t kMsgRadioStatus = 109;
 
 inline constexpr std::uint8_t kCrcHeartbeat = 50;
 inline constexpr std::uint8_t kCrcCommandLong = 152;
 inline constexpr std::uint8_t kCrcCommandAck = 143;
 inline constexpr std::uint8_t kCrcDistanceSensor = 85;
 inline constexpr std::uint8_t kCrcLoweheiserGovEfi = 195;
+inline constexpr std::uint8_t kCrcRadioStatus = 185;
 
 inline constexpr std::uint16_t kMavCmdLoweheiserSetState = 10151;
 inline constexpr std::uint8_t kMavSensorRotationPitch270 = 24;
@@ -172,6 +174,89 @@ struct Decoder {
         out_cmd->confirmation = p[32];
         out_cmd->src_sys = buf[5];
         out_cmd->src_comp = buf[6];
+        return true;
+    }
+};
+
+
+inline std::vector<std::uint8_t> encode_radio_status(std::uint8_t sysid, std::uint8_t compid, Status& st,
+                                                     std::uint8_t txbuf, std::uint8_t rssi = 255, std::uint8_t remrssi = 255,
+                                                     std::uint8_t noise = 255, std::uint8_t remnoise = 255,
+                                                     std::uint16_t rxerrors = 0, std::uint16_t fixed = 0) {
+    std::uint8_t p[9]{};
+    std::memcpy(&p[0], &rxerrors, 2);
+    std::memcpy(&p[2], &fixed, 2);
+    p[4] = rssi;
+    p[5] = remrssi;
+    p[6] = txbuf;
+    p[7] = noise;
+    p[8] = remnoise;
+    return pack_v2(sysid, compid, kMsgRadioStatus, p, 9, kCrcRadioStatus, st);
+}
+
+struct Frame {
+    std::uint8_t bytes[280]{};
+    std::uint16_t len = 0;
+    std::uint32_t msgid = 0;
+    std::uint8_t sysid = 0;
+    std::uint8_t compid = 0;
+};
+
+struct FrameDecoder {
+    std::uint8_t buf[280]{};
+    std::uint16_t n = 0;
+    std::uint8_t payload_len = 0;
+    bool in_frame = false;
+    bool v2 = true;
+
+    bool feed(std::uint8_t b, Frame* out) {
+        if (!in_frame) {
+            if (b == kStxV2) {
+                buf[0] = b;
+                n = 1;
+                in_frame = true;
+                v2 = true;
+                return false;
+            }
+            if (b == kStxV1) {
+                buf[0] = b;
+                n = 1;
+                in_frame = true;
+                v2 = false;
+                return false;
+            }
+            return false;
+        }
+        if (n == 1) {
+            payload_len = b;
+        }
+        if (n < sizeof(buf)) {
+            buf[n++] = b;
+        } else {
+            in_frame = false;
+            n = 0;
+            return false;
+        }
+        const std::uint16_t need = v2 ? static_cast<std::uint16_t>(12 + payload_len)
+                                      : static_cast<std::uint16_t>(8 + payload_len);
+        if (n < 2 || n < need) {
+            return false;
+        }
+        in_frame = false;
+        if (out) {
+            out->len = n;
+            std::memcpy(out->bytes, buf, n);
+            if (v2) {
+                out->msgid = static_cast<std::uint32_t>(buf[7] | (buf[8] << 8) | (buf[9] << 16));
+                out->sysid = buf[5];
+                out->compid = buf[6];
+            } else {
+                out->msgid = buf[5];
+                out->sysid = buf[3];
+                out->compid = buf[4];
+            }
+        }
+        n = 0;
         return true;
     }
 };
