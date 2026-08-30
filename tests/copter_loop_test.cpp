@@ -31,6 +31,7 @@ using fwcpp::copter::UpdateThrottleHoverInputs;
 using fwcpp::copter::LoopRateLoggingInputs;
 using fwcpp::copter::TenHzLoggingLoopInputs;
 using fwcpp::copter::TwentyfiveHzLoggingInputs;
+using fwcpp::copter::OneHzLoopInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -61,6 +62,7 @@ using fwcpp::copter::three_hz_loop;
 using fwcpp::copter::loop_rate_logging;
 using fwcpp::copter::ten_hz_logging_loop;
 using fwcpp::copter::twentyfive_hz_logging;
+using fwcpp::copter::one_hz_loop;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
@@ -86,10 +88,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 17", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 14);
+TEST_CASE("catalog remaining_count stays open after slice 18", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 13);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 21);
+    REQUIRE(on_main_count() == 22);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -113,9 +115,10 @@ TEST_CASE("catalog remaining_count stays open after slice 17", "[copter][leftove
     REQUIRE(completeness_has("Copter::three_hz_loop", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::loop_rate_logging", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::ten_hz_logging_loop", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::twentyfive_hz_logging", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::twentyfive_hz_logging", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::one_hz_loop", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::one_hz_loop", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::ap_value", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
@@ -1385,4 +1388,61 @@ TEST_CASE("twentyfive_hz_logging leftover records EKF_POS/IMU gated; gyro_fft re
     REQUIRE(row->priority == 117);
     REQUIRE(row->gate != nullptr);
     REQUIRE(std::string_view(row->gate) == "HAL_LOGGING_ENABLED");
+}
+
+TEST_CASE("one_hz_loop leftover always aux+notify_flying; !armed motors; ap_state vs ap_value",
+          "[copter][one_hz_loop]") {
+    const auto empty = one_hz_loop();
+    REQUIRE(empty.enable_aux_servos);
+    REQUIRE(empty.notify_flying);
+    REQUIRE(empty.update_using_interlock);
+    REQUIRE(empty.set_frame_class_and_type);
+    REQUIRE(empty.update_throttle_range);
+    REQUIRE(empty.attitude_control_set_notch_sample_rate);
+    REQUIRE(empty.pos_control_d_accel_pid_set_notch_sample_rate);
+    REQUIRE_FALSE(empty.log_write_ap_state);
+    REQUIRE_FALSE(empty.terrain_logging);
+    REQUIRE_FALSE(empty.adsb_set_is_flying);
+    REQUIRE_FALSE(empty.custom_control_set_notch_sample_rate);
+    REQUIRE_FALSE(empty.started_rate_thread);
+
+    OneHzLoopInputs landed{};
+    landed.land_complete = true;
+    const auto landed_fx = one_hz_loop(landed);
+    REQUIRE(landed_fx.enable_aux_servos);
+    REQUIRE_FALSE(landed_fx.notify_flying);
+
+    OneHzLoopInputs armed{};
+    armed.armed = true;
+    const auto armed_fx = one_hz_loop(armed);
+    REQUIRE(armed_fx.enable_aux_servos);
+    REQUIRE(armed_fx.notify_flying);
+    REQUIRE_FALSE(armed_fx.update_using_interlock);
+    REQUIRE_FALSE(armed_fx.set_frame_class_and_type);
+    REQUIRE_FALSE(armed_fx.update_throttle_range);
+    REQUIRE(armed_fx.attitude_control_set_notch_sample_rate);
+    REQUIRE(armed_fx.pos_control_d_accel_pid_set_notch_sample_rate);
+
+    OneHzLoopInputs log_any{};
+    log_any.should_log_any = true;
+    const auto log_fx = one_hz_loop(log_any);
+    REQUIRE(log_fx.log_write_ap_state);
+    REQUIRE(completeness_has("Copter::ap_value", PortStatus::kRemaining));
+    REQUIRE_FALSE(log_fx.terrain_logging);
+
+    OneHzLoopInputs rate_thr{};
+    rate_thr.using_rate_thread = true;
+    const auto rate_fx = one_hz_loop(rate_thr);
+    REQUIRE_FALSE(rate_fx.attitude_control_set_notch_sample_rate);
+    REQUIRE(rate_fx.pos_control_d_accel_pid_set_notch_sample_rate);
+    REQUIRE_FALSE(rate_fx.custom_control_set_notch_sample_rate);
+    REQUIRE_FALSE(rate_fx.started_rate_thread);
+
+    const auto* row = find_scheduler_task("one_hz_loop");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 1.0f);
+    REQUIRE(row->max_time_micros == 100);
+    REQUIRE(row->priority == 81);
+    REQUIRE(row->gate == nullptr);
 }
