@@ -16,5 +16,6 @@ target_link_libraries(sitl_run PRIVATE ap-hal-sitl)
 add_executable(copter_sitl_run copter_main.cpp)
 target_link_libraries(copter_sitl_run PRIVATE ap-hal-sitl)
 
+# VCP-011: QuadPlane analogue of sitl_run / copter_sitl_run.
 add_executable(quadplane_sitl_run quadplane_main.cpp)
-target_link_libraries(quadplane_sitl_run PRIVATE ap-sim)
+target_link_libraries(quadplane_sitl_run PRIVATE ap-hal-sitl)

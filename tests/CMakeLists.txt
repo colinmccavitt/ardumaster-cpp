@@ -1098,3 +1098,8 @@ catch_discover_tests(copter_sitl_run_test)
 add_executable(sim_longtail_test sim_longtail_test.cpp)
 target_link_libraries(sim_longtail_test PRIVATE ap-sim ap-motors Catch2::Catch2WithMain)
 catch_discover_tests(sim_longtail_test)
+
+# VCP-011: SitlQuadPlaneHarness + quadplane_sitl_run hover/transition catalog.
+add_executable(sitl_quadplane_harness_test sitl_quadplane_harness_test.cpp)
+target_link_libraries(sitl_quadplane_harness_test PRIVATE ap-hal-sitl ap-vehicle ap-sim ap-quadplane Catch2::Catch2WithMain)
+catch_discover_tests(sitl_quadplane_harness_test)
