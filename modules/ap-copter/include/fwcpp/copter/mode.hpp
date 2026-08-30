@@ -19,9 +19,10 @@
 // restart + mission.update) is on main. SubMode switch leftover (dispatch
 // flags only) is on main. auto_RTL landing-sequence leftover is on
 // main. ModeAuto::takeoff_run leftover is on main. ModeAuto::wp_run leftover
-// (disarmed/landed ground handling + spool + wp_nav/pos/attitude flags)
-// is this slice. ModeAuto land/rtl/loiter *_run bodies, ModeRTL/ModeLand,
-// and auto_takeoff.run body stay later.
+// is on main. ModeAuto::land_run leftover (disarmed/landed ground handling
+// + spool + land_run_normal_or_precland flag) is this slice. ModeAuto
+// rtl/loiter *_run bodies, ModeRTL/ModeLand, land_run_normal_or_precland
+// body, and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
@@ -111,8 +112,9 @@ public:
 // + mission.update (mode_auto.cpp ~99-113, on main), SubMode switch
 // dispatch flags (mode_auto.cpp ~116-164, on main), auto_RTL
 // landing-sequence leftover (mode_auto.cpp ~166-174, on main),
-// takeoff_run leftover (mode_auto.cpp ~1075-1083, on main), and
-// wp_run leftover (mode_auto.cpp ~1087-1107, this slice). Other
+// takeoff_run leftover (mode_auto.cpp ~1075-1083, on main),
+// wp_run leftover (mode_auto.cpp ~1087-1107, on main), and
+// land_run leftover (mode_auto.cpp ~1111-1125, this slice). Other
 // *_run bodies and set_submode stay later.
 class ModeAuto : public Mode {
 public:
@@ -212,6 +214,8 @@ public:
     bool pos_D_update{false};
     // Leftover attitude_control->input_thrust_vector_heading (no attitude).
     bool input_thrust_vector_heading{false};
+    // Leftover land_run_normal_or_precland() (body stays later).
+    bool land_run_normal_or_precland{false};
 
     ModeAuto() = default;
 
@@ -248,13 +252,25 @@ public:
         pos_D_update = true;
         input_thrust_vector_heading = true;
     }
+    // Leftover ModeAuto::land_run (mode_auto.cpp ~1111-1125). Reuses
+    // disarmed_or_landed / make_safe_ground_handling / desired_spool_unlimited.
+    // Switch still records land_run as the "would call land_run" leftover,
+    // then this helper. land_run_normal_or_precland body stays later.
+    void leftover_land_run() {
+        if (disarmed_or_landed) {
+            make_safe_ground_handling = true;
+            return;
+        }
+        desired_spool_unlimited = true;
+        land_run_normal_or_precland = true;
+    }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
     // leftover flags (~116-164), auto_RTL landing-sequence leftover
-    // (~166-174), takeoff_run leftover (~1075-1083), and wp_run leftover
-    // (~1087-1107). Switch always runs, including while still
-    // waiting_to_start. No AP_Mission / detector / GCS / logger /
-    // *_run bodies. run has no ctx.
+    // (~166-174), takeoff_run leftover (~1075-1083), wp_run leftover
+    // (~1087-1107), and land_run leftover (~1111-1125). Switch always
+    // runs, including while still waiting_to_start. No AP_Mission /
+    // detector / GCS / logger / *_run bodies. run has no ctx.
     void run() override {
         if (waiting_to_start) {
             if (has_origin) {
@@ -291,6 +307,7 @@ public:
         terrain_failsafe_status = false;
         pos_D_update = false;
         input_thrust_vector_heading = false;
+        land_run_normal_or_precland = false;
 
         switch (submode) {
         case SubMode::TAKEOFF:
@@ -304,6 +321,7 @@ public:
             break;
         case SubMode::LAND:
             land_run = true;
+            leftover_land_run();
             break;
         case SubMode::RTL:
             rtl_run = true;
