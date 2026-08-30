@@ -1064,3 +1064,8 @@ catch_discover_tests(mode_drift_test)
 add_executable(sitl_copter_harness_test sitl_copter_harness_test.cpp)
 target_link_libraries(sitl_copter_harness_test PRIVATE ap-hal-sitl ap-copter ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sitl_copter_harness_test)
+
+# CCP-044 slice 2: copter_sitl_run leftover aero + arm/takeoff/hold/land catalog close.
+add_executable(copter_sitl_run_test copter_sitl_run_test.cpp)
+target_link_libraries(copter_sitl_run_test PRIVATE ap-hal-sitl ap-copter ap-sim Catch2::Catch2WithMain)
+catch_discover_tests(copter_sitl_run_test)
