@@ -4,9 +4,9 @@
 // ModeDrift. Nested under fwcpp::copter::loiter so remaining_count() does not
 // collide with mode_leftover.hpp / althold / arming leftovers.
 //
-// Slice 2: ModeLoiter::run leftover flags through state machine on this
-// slice; POSHOLD / DRIFT remaining. Fence/avoidance ticket-OOS.
-// precision_loiter OOS (AC_PRECLAND). ADR-0012: no AP:: singletons.
+// Slice 3: ModePosHold::init leftover scaffold on this slice; ModePosHold::run
+// / ModeDrift remaining. ModeLoiter init+run on main. Fence/avoidance
+// ticket-OOS. precision_loiter OOS (AC_PRECLAND). ADR-0012: no AP:: singletons.
 
 #include <cstddef>
 #include <cstdint>
@@ -28,12 +28,15 @@ struct PortItem {
 
 inline constexpr PortItem kCompleteness[] = {
     {"leftover catalog", PortStatus::kThisSlice, "this table"},
-    {"ModeLoiter::init", PortStatus::kThisSlice,
+    {"ModeLoiter::init", PortStatus::kOnMain,
      "mode_loiter.cpp ~10-38; leftover_init flags; no loiter_nav / pos_control"},
-    {"ModeLoiter::run", PortStatus::kThisSlice,
+    {"ModeLoiter::run", PortStatus::kOnMain,
      "mode_loiter.cpp ~80-188; leftover_run flags through state machine; no "
      "loiter_nav / pos / attitude objects"},
-    {"ModePosHold", PortStatus::kRemaining, "mode_poshold.cpp; not started"},
+    {"ModePosHold::init", PortStatus::kThisSlice,
+     "mode_poshold.cpp ~71-107; leftover_init flags; no loiter_nav / pos_control"},
+    {"ModePosHold::run", PortStatus::kRemaining,
+     "mode_poshold.cpp ~111+; leftover_run_called only; RP/alt-hold/loiter remaining"},
     {"ModeDrift", PortStatus::kRemaining, "mode_drift.cpp; not started"},
     {"precision_loiter", PortStatus::kOutOfScope,
      "mode_loiter.cpp do_precision_loiter / precision_loiter_xy; AC_PRECLAND"},

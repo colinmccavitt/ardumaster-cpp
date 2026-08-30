@@ -194,15 +194,16 @@ TEST_CASE("ModeLoiter run override calls leftover_run", "[copter][loiter]") {
 
 TEST_CASE("loiter leftover catalog remaining_count", "[copter][loiter][leftover]") {
     REQUIRE(remaining_count() == 2);
-    REQUIRE(this_slice_count() == 3);
-    REQUIRE(on_main_count() == 0);
+    REQUIRE(this_slice_count() == 2);
+    REQUIRE(on_main_count() == 2);
     REQUIRE(out_of_scope_count() == 3);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("ModeLoiter::init", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("ModeLoiter::run", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("ModePosHold", PortStatus::kRemaining));
+    REQUIRE(completeness_has("ModeLoiter::init", PortStatus::kOnMain));
+    REQUIRE(completeness_has("ModeLoiter::run", PortStatus::kOnMain));
+    REQUIRE(completeness_has("ModePosHold::init", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("ModePosHold::run", PortStatus::kRemaining));
     REQUIRE(completeness_has("ModeDrift", PortStatus::kRemaining));
     REQUIRE(completeness_has("precision_loiter", PortStatus::kOutOfScope));
     REQUIRE(completeness_has("fence / avoidance", PortStatus::kOutOfScope));
