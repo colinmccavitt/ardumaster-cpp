@@ -1,11 +1,11 @@
 #pragma once
 
 // Copter::init_ardupilot leftover. Upstream ArduCopter/system.cpp
-// ~16-71 (after init_rc_out(); stop BEFORE esc_calibration_startup_check).
+// ~16-87 (after init_rc_out(); stop BEFORE gps.set_log_gps_bit).
 // No notify / battery / barometer / winch / rssi / GCS / OSD /
-// SurfaceTracking / RC_Channel / motors / SRV_Channels / BoardConfig
-// objects — record leftover flags only. Do not invoke the
-// allocate_motors() helper body (call-site leftover flag only).
+// SurfaceTracking / RC_Channel / motors / SRV_Channels / BoardConfig /
+// AP_Relay / HAL objects — record leftover flags only. Do not invoke
+// the allocate_motors() helper body (call-site leftover flag only).
 //
 // Always-on this slice (AP_WINCH_ENABLED / AP_RSSI_ENABLED are not
 // enabled in this port):
@@ -30,11 +30,17 @@
 //     set_update_rate, convert_pwm_min_max, update_throttle_range,
 //     update_aux_servo_function, safety_ignore_mask. Skip heli
 //     set_esc_scaling. Do not invent motors / SRV / BoardConfig.
+//   esc_calibration_startup_check() — brushed skip only
+//     (motors->is_brushed_pwm_type() early return). Non-brushed ESC
+//     cal body stays remaining (delay/read_radio/arming/while(1)).
+//   ap.initialised_params = true
+//   register_timer_failsafe(failsafe_check_static, 1000) — flag only
 //
 // surface_tracking.init stays false (AP_RANGEFINDER remaining).
-// The rest of init_ardupilot (ESC cal, GPS/compass,
-// startup_INS_ground call, relay, failsafe register, etc.) is
-// catalog row "Copter::init_ardupilot rest".
+// relay.init stays false (AP_RELAY remaining).
+// The rest of init_ardupilot (ESC cal body, GPS/compass,
+// startup_INS_ground call, etc.) is catalog row
+// "Copter::init_ardupilot rest".
 
 #include <cstdint>
 
@@ -51,12 +57,16 @@ inline constexpr std::uint16_t kAuxArmdisarmAirmode = 154;
 inline constexpr std::int16_t kDefaultPwmMin = 1000;
 inline constexpr std::int16_t kDefaultPwmMax = 2000;
 
+// register_timer_failsafe period — ArduCopter/system.cpp ~87
+inline constexpr std::uint16_t kFailsafeCheckPeriodUs = 1000;
+
 struct InitArdupilotInputs {
     bool motor_interlock_aux{false};
     bool throttle_configured{false};
     std::int16_t radio_min{0};
     std::int16_t radio_max{0};
     std::uint16_t rc_speed{0};
+    bool is_brushed_pwm{false};  // motors->is_brushed_pwm_type()
 };
 
 struct InitArdupilotEffects {
@@ -95,6 +105,12 @@ struct InitArdupilotEffects {
     bool update_throttle_range{false};
     bool update_aux_servo_function{false};
     bool safety_ignore_mask{false};     // flag only — no BoardConfig / motor_mask
+    bool esc_cal_skipped{false};        // brushed early return
+    bool esc_cal_body{false};           // remaining — delay/read_radio/arming/while(1)
+    bool initialised_params{false};
+    bool relay_init{false};             // remaining AP_RELAY
+    bool register_timer_failsafe{false};
+    std::uint16_t register_timer_failsafe_period{0};
 };
 
 [[nodiscard]] inline InitArdupilotEffects init_ardupilot(
@@ -138,6 +154,15 @@ struct InitArdupilotEffects {
     fx.update_throttle_range = true;
     fx.update_aux_servo_function = true;
     fx.safety_ignore_mask = true;
+    // esc_calibration_startup_check leftover — brushed skip only.
+    // esc_cal_body stays false (non-brushed body remaining).
+    if (in.is_brushed_pwm) {
+        fx.esc_cal_skipped = true;
+    }
+    fx.initialised_params = true;
+    // relay_init stays false (AP_RELAY remaining)
+    fx.register_timer_failsafe = true;
+    fx.register_timer_failsafe_period = kFailsafeCheckPeriodUs;
     return fx;
 }
 

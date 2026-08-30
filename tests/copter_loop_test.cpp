@@ -128,7 +128,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 37", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 38", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 35);
@@ -2689,6 +2689,12 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE(fx.update_throttle_range);
     REQUIRE(fx.update_aux_servo_function);
     REQUIRE(fx.safety_ignore_mask);
+    REQUIRE_FALSE(fx.esc_cal_skipped);
+    REQUIRE_FALSE(fx.esc_cal_body);
+    REQUIRE(fx.initialised_params);
+    REQUIRE_FALSE(fx.relay_init);
+    REQUIRE(fx.register_timer_failsafe);
+    REQUIRE(fx.register_timer_failsafe_period == 1000);
 }
 
 TEST_CASE("init_ardupilot leftover throttle_configured injects radio min max",
@@ -2711,4 +2717,17 @@ TEST_CASE("init_ardupilot leftover motor_interlock_aux sets using_interlock",
     in.motor_interlock_aux = true;
     const auto fx = init_ardupilot(in);
     REQUIRE(fx.using_interlock);
+}
+
+TEST_CASE("init_ardupilot leftover brushed pwm skips esc cal body",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.is_brushed_pwm = true;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_skipped);
+    REQUIRE_FALSE(fx.esc_cal_body);
+    REQUIRE(fx.initialised_params);
+    REQUIRE_FALSE(fx.relay_init);
+    REQUIRE(fx.register_timer_failsafe);
+    REQUIRE(fx.register_timer_failsafe_period == 1000);
 }
