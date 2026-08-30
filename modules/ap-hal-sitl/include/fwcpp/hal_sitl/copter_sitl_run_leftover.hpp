@@ -1,20 +1,13 @@
 #pragma once
 
-// CCP-044 leftover completeness catalog + leftover motor->SimPlane aero
-// and arm/takeoff/hold/land mission. Upstream ROLE: SITL::MultiCopter
-// (libraries/SITL/SIM_Multicopter.cpp calculate_forces / update) plus
-// the standalone SITL executable shape of AP_HAL_SITL HAL_SITL_Class
-// (mirrors CPP-085 sitl/sitl_run, not a literal HAL port).
+// CCP-044 leftover mission (arm / takeoff / hold / land) driving CCP-045
+// SimMulticopter Frame/Motor plant via SitlCopterHarness::step.
 //
-// Slice 2 (close): leftover_multirotor_aero (collective throttle as
-// body-z thrust through SimPlane::update_dynamics) + leftover_mission
-// advance (arm / takeoff / hold / land) + copter_sitl_run main() drives
-// leftover_copter_sitl_step. Full SIM_Multicopter Frame/Motor mixing,
-// GCS/MAVLink, and interactive run are kOutOfScope (disclosed
-// simplification; ADR-0012). remaining_count()==0.
-//
-// Do NOT copy Rust. Do NOT change SitlCopterHarness::step() physics
-// (CCP-043 remaining_count==0; aero lives here, called before step()).
+// The leftover body-z shortcut (leftover_multirotor_aero shoving a single
+// collective force through SimPlane::update_dynamics) is gone. Collective
+// leftover throttle becomes four (or N) motor PWM values mixed by
+// SIM_Frame / SIM_Motor. leftover_hold_command is leftover mission
+// altitude-rate damping (not AC_PosControl, not the plant).
 
 #include <cstddef>
 #include <cstdint>
@@ -25,7 +18,7 @@
 #include <fwcpp/hal_sitl/sitl_copter_harness.hpp>
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector3.hpp>
-#include <fwcpp/sim/sim_plane.hpp>
+#include <fwcpp/sim/sim_multicopter.hpp>
 
 namespace fwcpp::hal_sitl::copter_sitl_run {
 
@@ -40,11 +33,11 @@ enum class MissionPhase : std::uint8_t {
 struct LeftoverMission {
     MissionPhase phase{MissionPhase::kDisarmed};
     float takeoff_alt_m{10.0f};
-    float climb_throttle{0.90f};
-    float land_throttle{0.40f};
+    float climb_command{0.70f};
+    float land_command{0.20f};
     float hold_s{2.0f};
     float hold_elapsed_s{0.0f};
-    float throttle{0.0f};
+    float command{0.0f};
     copter::TakeOffState takeoff{};
 };
 
@@ -64,24 +57,24 @@ struct LeftoverMission {
     return "?";
 }
 
-// Leftover SITL::MultiCopter::calculate_forces -- collective throttle as
-// body-z thrust only. hover_throttle produces 1g (hover). Full
-// SIM_Frame / SIM_Motor mixing is kOutOfScope.
-inline void leftover_multirotor_aero(sim::SimPlane& sim, float throttle, float dt) {
-    const float thr = math::constrain_value(throttle, 0.0f, 1.0f);
-    const float hover = (sim.hover_throttle > 0.0f) ? sim.hover_throttle : 0.7f;
-    const float thrust_acc = (thr / hover) * sim::kGravityMss;
-    sim.accel_body = math::Vector3f{0.0f, 0.0f, -thrust_acc};
-    sim.update_dynamics(math::Vector3f{0.0f, 0.0f, 0.0f}, dt);
-}
-
-// Leftover hover throttle: hover_throttle plus a thin vertical-rate
-// damper so HOLD kills climb/descent (not AC_PosControl). NED +z down:
-// positive vz (descending) -> more throttle.
-[[nodiscard]] inline float leftover_hover_throttle(const sim::SimPlane& sim) {
-    const float hover = (sim.hover_throttle > 0.0f) ? sim.hover_throttle : 0.7f;
+// Leftover mission hold: hoverThrOut plus a thin vertical-rate damper.
+// NED +z down: positive vz (descending) -> more command. This is leftover
+// poscontrol, NOT the plant — the plant is Frame/Motor at that command.
+[[nodiscard]] inline float leftover_hold_command(const sim::SimMulticopter& sim) {
+    const float hover = sim.hover_command();
     constexpr float kVelGain = 0.08f;
     return math::constrain_value(hover + kVelGain * sim.velocity_ef.z, 0.0f, 1.0f);
+}
+
+inline void leftover_apply_collective(copter::LeftoverCopter& copter, const sim::SimMulticopter& sim, float command) {
+    const auto& frame = sim.frame();
+    const std::uint16_t pwm = copter.motors_armed ? frame.command_to_pwm(command) : static_cast<std::uint16_t>(0);
+    for (std::uint8_t i = 0; i < sim::kSitlServoChannels; ++i) {
+        copter.motor_pwm[i] = 0;
+    }
+    for (std::uint8_t i = 0; i < frame.num_motors; ++i) {
+        copter.motor_pwm[frame.motor_offset + frame.motors[i].servo] = pwm;
+    }
 }
 
 inline void leftover_mission_begin_takeoff(LeftoverMission& mission) {
@@ -89,18 +82,15 @@ inline void leftover_mission_begin_takeoff(LeftoverMission& mission) {
     mission.hold_elapsed_s = 0.0f;
 }
 
-// One leftover tick of the charter mission: arm, takeoff, hold, land.
-// Sets leftover motors_armed / land_complete / throttle; caller then
-// leftover_multirotor_aero + SitlCopterHarness::step.
-inline void leftover_mission_advance(copter::LeftoverCopter& copter, sim::SimPlane& sim,
-                                     LeftoverMission& mission, float dt) {
+inline void leftover_mission_advance(copter::LeftoverCopter& copter, sim::SimMulticopter& sim, LeftoverMission& mission,
+                                     float dt) {
     const float alt_m = -sim.position.z;
 
     switch (mission.phase) {
     case MissionPhase::kDisarmed:
         copter.motors_armed = false;
         copter.land_complete = true;
-        mission.throttle = 0.0f;
+        mission.command = 0.0f;
         break;
 
     case MissionPhase::kTakeoff: {
@@ -113,24 +103,23 @@ inline void leftover_mission_advance(copter::LeftoverCopter& copter, sim::SimPla
             in.takeoff_alt_m = mission.takeoff_alt_m;
             in.current_alt_m = alt_m;
             copter::UserTakeoffEffects fx;
-            if (leftover_do_user_takeoff_U_m(in, fx, &mission.takeoff, alt_m) &&
-                fx.leftover_takeoff_start_m) {
+            if (leftover_do_user_takeoff_U_m(in, fx, &mission.takeoff, alt_m) && fx.leftover_takeoff_start_m) {
                 copter.land_complete = false;
             }
         }
-        mission.throttle = mission.climb_throttle;
+        mission.command = mission.climb_command;
         if (alt_m >= mission.takeoff_alt_m) {
             mission.takeoff._running = false;
             mission.phase = MissionPhase::kHold;
             mission.hold_elapsed_s = 0.0f;
-            mission.throttle = leftover_hover_throttle(sim);
+            mission.command = leftover_hold_command(sim);
         }
         break;
     }
 
     case MissionPhase::kHold:
         copter.motors_armed = true;
-        mission.throttle = leftover_hover_throttle(sim);
+        mission.command = leftover_hold_command(sim);
         mission.hold_elapsed_s += dt;
         if (mission.hold_elapsed_s >= mission.hold_s) {
             mission.phase = MissionPhase::kLand;
@@ -139,7 +128,7 @@ inline void leftover_mission_advance(copter::LeftoverCopter& copter, sim::SimPla
 
     case MissionPhase::kLand: {
         copter.motors_armed = true;
-        mission.throttle = mission.land_throttle;
+        mission.command = mission.land_command;
         if (sim.on_ground()) {
             copter::LandDetectorInputs lin;
             lin.motors_armed = true;
@@ -156,7 +145,7 @@ inline void leftover_mission_advance(copter::LeftoverCopter& copter, sim::SimPla
             if (lfx.land_complete) {
                 copter.land_complete = true;
                 copter.motors_armed = false;
-                mission.throttle = 0.0f;
+                mission.command = 0.0f;
                 mission.phase = MissionPhase::kLanded;
             }
         }
@@ -166,16 +155,16 @@ inline void leftover_mission_advance(copter::LeftoverCopter& copter, sim::SimPla
     case MissionPhase::kLanded:
         copter.motors_armed = false;
         copter.land_complete = true;
-        mission.throttle = 0.0f;
+        mission.command = 0.0f;
         break;
     }
+
+    leftover_apply_collective(copter, sim, mission.command);
 }
 
-// Physics then CCP-043 sensor inject + leftover_copter_tick.
-inline void leftover_copter_sitl_step(SitlCopterHarness& harness, LeftoverMission& mission,
-                                      float dt) {
-    leftover_mission_advance(harness.copter(), harness.sim_plane(), mission, dt);
-    leftover_multirotor_aero(harness.sim_plane(), mission.throttle, dt);
+// Mission leftover then CCP-043/045 harness (sensors + Frame/Motor plant).
+inline void leftover_copter_sitl_step(SitlCopterHarness& harness, LeftoverMission& mission, float dt) {
+    leftover_mission_advance(harness.copter(), harness.sim(), mission, dt);
     harness.step(dt);
 }
 
@@ -193,29 +182,30 @@ struct PortItem {
 };
 
 inline constexpr PortItem kCompleteness[] = {
-    {"leftover catalog", PortStatus::kThisSlice, "this table; CCP-044 close"},
+    {"leftover catalog", PortStatus::kThisSlice, "this table; CCP-044 mission leftover + CCP-045 plant"},
     {"copter_sitl_run scaffold", PortStatus::kThisSlice,
-     "sitl/copter_main.cpp + CMake copter_sitl_run target (slice 1)"},
-    {"leftover_multirotor_aero", PortStatus::kThisSlice,
-     "collective throttle as body-z thrust; SimPlane::update_dynamics"},
-    {"leftover_mission_advance", PortStatus::kThisSlice,
-     "arm / takeoff / hold / land leftover state machine"},
-    {"leftover_hover_throttle", PortStatus::kThisSlice,
-     "HOLD vertical-rate damper around hover_throttle; not AC_PosControl"},
+     "sitl/copter_main.cpp + CMake copter_sitl_run target"},
+    {"leftover_mission_advance", PortStatus::kThisSlice, "arm / takeoff / hold / land leftover state machine"},
+    {"leftover_hold_command", PortStatus::kThisSlice,
+     "HOLD leftover rate damper around hoverThrOut; not the plant"},
+    {"leftover_apply_collective", PortStatus::kThisSlice,
+     "leftover collective command → per-motor PWM (equal mix into Frame)"},
     {"leftover_copter_sitl_step", PortStatus::kThisSlice,
-     "aero then SitlCopterHarness::step (CCP-043 sensor inject)"},
+     "mission then SitlCopterHarness::step (sensors + SimMulticopter update)"},
     {"copter_sitl_run arm/takeoff/hold/land", PortStatus::kThisSlice,
-     "main() drives leftover mission; periodic telemetry; success on LANDED"},
+     "main() drives leftover mission on the real Frame/Motor plant"},
     {"SitlCopterHarness sensor synth (CCP-043)", PortStatus::kOnMain,
-     "sitl_copter_harness.hpp remaining_count()==0"},
+     "sitl_copter_harness.hpp"},
     {"leftover takeoff / land_detector (CCP-041)", PortStatus::kOnMain,
      "takeoff.hpp + land_detector.hpp remaining_count()==0"},
-    {"SIM_Multicopter Frame/Motor mixing", PortStatus::kOutOfScope,
-     "disclosed simplification: collective body-z thrust only, no SIM_Frame"},
+    {"SIM_Multicopter Frame/Motor mixing", PortStatus::kOnMain,
+     "CCP-045: sim_multicopter.hpp / sim_frame.hpp / sim_motor.hpp — not leftover body-z"},
     {"GCS / MAVLink / interactive run", PortStatus::kOutOfScope,
      "no GCS in this port; bounded duration like CPP-085"},
     {"AP:: / HAL SITL singletons", PortStatus::kOutOfScope, "ADR-0012 explicit refs"},
     {"Rust copter-sitl", PortStatus::kOutOfScope, "Do not copy Rust"},
+    {"JSON custom frame models / battery drain / shove-twist-clamp", PortStatus::kOutOfScope,
+     "optional original extras; default_model + constant voltage"},
 };
 
 [[nodiscard]] inline constexpr std::size_t completeness_size() {

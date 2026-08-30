@@ -210,6 +210,10 @@ add_executable(sim_plane_test sim_plane_test.cpp)
 target_link_libraries(sim_plane_test PRIVATE ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sim_plane_test)
 
+add_executable(sim_multicopter_test sim_multicopter_test.cpp)
+target_link_libraries(sim_multicopter_test PRIVATE ap-sim Catch2::Catch2WithMain)
+catch_discover_tests(sim_multicopter_test)
+
 add_executable(sim_leftover_test sim_leftover_test.cpp)
 target_link_libraries(sim_leftover_test PRIVATE ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sim_leftover_test)
