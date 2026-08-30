@@ -989,11 +989,83 @@ TEST_CASE("ModeAuto run SubMode switch clears previous leftover flags", "[copter
     require_submode_runs(f.table.mode_auto, false, true, false, false, false, false, false, false, false);
 }
 
+TEST_CASE("ModeAuto run auto_RTL with no landing flags clears and writes AUTO_RTL_EXIT", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.auto_RTL = true;
+    REQUIRE_FALSE(f.table.mode_auto.in_landing_sequence);
+    REQUIRE_FALSE(f.table.mode_auto.in_return_path);
+    REQUIRE_FALSE(f.table.mode_auto.mission_complete);
+    f.table.mode_auto.run();
+    REQUIRE_FALSE(f.table.mode_auto.auto_RTL);
+    REQUIRE(f.table.mode_auto.write_mode_auto_rtl_exit);
+    REQUIRE(f.table.mode_auto.written_mode_number == Mode::Number::AUTO);
+    REQUIRE(f.table.mode_auto.written_reason == ModeReason::AUTO_RTL_EXIT);
+    REQUIRE(f.table.mode_auto.mode_number() == Mode::Number::AUTO);
+}
+
+TEST_CASE("ModeAuto run auto_RTL with in_landing_sequence stays without write", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.auto_RTL = true;
+    f.table.mode_auto.in_landing_sequence = true;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.auto_RTL);
+    REQUIRE_FALSE(f.table.mode_auto.write_mode_auto_rtl_exit);
+    REQUIRE(f.table.mode_auto.mode_number() == Mode::Number::AUTO_RTL);
+}
+
+TEST_CASE("ModeAuto run auto_RTL with in_return_path stays without write", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.auto_RTL = true;
+    f.table.mode_auto.in_return_path = true;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.auto_RTL);
+    REQUIRE_FALSE(f.table.mode_auto.write_mode_auto_rtl_exit);
+}
+
+TEST_CASE("ModeAuto run auto_RTL with mission_complete stays without write", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.auto_RTL = true;
+    f.table.mode_auto.mission_complete = true;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.auto_RTL);
+    REQUIRE_FALSE(f.table.mode_auto.write_mode_auto_rtl_exit);
+}
+
+TEST_CASE("ModeAuto run without auto_RTL does not write AUTO_RTL_EXIT leftover", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    REQUIRE_FALSE(f.table.mode_auto.auto_RTL);
+    f.table.mode_auto.run();
+    REQUIRE_FALSE(f.table.mode_auto.auto_RTL);
+    REQUIRE_FALSE(f.table.mode_auto.write_mode_auto_rtl_exit);
+}
+
+TEST_CASE("ModeAuto run auto_RTL leftover keeps LOITER SubMode dispatch", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.auto_RTL = true;
+    f.table.mode_auto.submode = ModeAuto::SubMode::LOITER;
+    f.table.mode_auto.run();
+    REQUIRE_FALSE(f.table.mode_auto.auto_RTL);
+    REQUIRE(f.table.mode_auto.write_mode_auto_rtl_exit);
+    require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, true, false, false);
+}
+
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 19);
+    REQUIRE(mode_on_main_count() == 20);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -1012,7 +1084,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeAuto::exit", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::run else-path", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("ModeAuto::run SubMode switch", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeAuto::run SubMode switch", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeAuto::run auto_RTL landing-sequence", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));

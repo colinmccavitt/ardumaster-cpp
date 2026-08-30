@@ -17,8 +17,9 @@
 // is auto_init (on main). ModeAuto::exit leftover is on main. ModeAuto::run
 // waiting_to_start leftover is on main. Else-path leftover (change detector
 // restart + mission.update) is on main. SubMode switch leftover (dispatch
-// flags only) is this slice. ModeAuto *_run bodies, ModeRTL/ModeLand, and
-// auto_RTL landing-sequence leftover stay later. update_flight_mode is CCP-035.
+// flags only) is on main. auto_RTL landing-sequence leftover (clear +
+// Write_Mode AUTO_RTL_EXIT) is this slice. ModeAuto *_run bodies and
+// ModeRTL/ModeLand stay later. update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
 #include <fwcpp/copter/pilot_input.hpp>
@@ -104,9 +105,10 @@ public:
 // init leftover is auto_init (mode_auto.cpp ~23-68). exit leftover is
 // ModeAuto::exit (mode_auto.cpp ~71-81). run leftover is waiting_to_start
 // + origin (mode_auto.cpp ~85-98, on main), else-path change detector
-// + mission.update (mode_auto.cpp ~99-113, on main), and SubMode switch
-// dispatch flags (mode_auto.cpp ~116-164, this slice). *_run bodies,
-// set_submode, and auto_RTL landing-sequence leftover stay later.
+// + mission.update (mode_auto.cpp ~99-113, on main), SubMode switch
+// dispatch flags (mode_auto.cpp ~116-164, on main), and auto_RTL
+// landing-sequence leftover (mode_auto.cpp ~166-174, this slice). *_run
+// bodies and set_submode stay later.
 class ModeAuto : public Mode {
 public:
     // Copter-4.7.0 mode.h ~563-578. NAV_PAYLOAD_PLACE omitted this slice.
@@ -173,6 +175,17 @@ public:
     bool loiter_run{false};
     bool loiter_to_alt_run{false};
     bool nav_attitude_time_run{false};
+    // Injected mission.get_in_landing_sequence_flag() (no AP_Mission).
+    bool in_landing_sequence{false};
+    // Injected mission.get_in_return_path_flag().
+    bool in_return_path{false};
+    // Injected mission.state() == MISSION_COMPLETE. Do not reuse
+    // mission_running (that is MISSION_RUNNING).
+    bool mission_complete{false};
+    // Leftover logger.Write_Mode after auto_RTL clear (no logger / ctx).
+    bool write_mode_auto_rtl_exit{false};
+    Number written_mode_number{Number::AUTO};
+    ModeReason written_reason{ModeReason::UNKNOWN};
 
     ModeAuto() = default;
 
@@ -187,9 +200,10 @@ public:
         auto_RTL = false;
     }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
-    // else-path change detector + mission.update (~99-113), and SubMode
-    // switch leftover flags (~116-164). Switch always runs, including while
-    // still waiting_to_start. No AP_Mission / detector / GCS / *_run bodies.
+    // else-path change detector + mission.update (~99-113), SubMode switch
+    // leftover flags (~116-164), and auto_RTL landing-sequence leftover
+    // (~166-174). Switch always runs, including while still waiting_to_start.
+    // No AP_Mission / detector / GCS / logger / *_run bodies. run has no ctx.
     void run() override {
         if (waiting_to_start) {
             if (has_origin) {
@@ -251,6 +265,19 @@ public:
         case SubMode::NAV_ATTITUDE_TIME:
             nav_attitude_time_run = true;
             break;
+        }
+
+        // only pretend to be in auto RTL so long as mission still thinks
+        // its in a landing sequence or the mission has completed
+        const bool auto_rtl_active =
+            in_landing_sequence || in_return_path || mission_complete;
+        if (auto_RTL && !auto_rtl_active) {
+            auto_RTL = false;
+            write_mode_auto_rtl_exit = true;
+            // Upstream logs flightmode->mode_number() after auto_RTL=false,
+            // so AUTO not AUTO_RTL. No FlightModeContext / logger here.
+            written_mode_number = mode_number();
+            written_reason = ModeReason::AUTO_RTL_EXIT;
         }
     }
     [[nodiscard]] bool requires_position() const override { return true; }
