@@ -44,6 +44,8 @@ using fwcpp::copter::LostVehicleCheckInputs;
 using fwcpp::copter::TakeoffCheckInputs;
 using fwcpp::copter::GetWpDistanceMInputs;
 using fwcpp::copter::UpdateAutoArmedInputs;
+using fwcpp::copter::StartupInsGroundInputs;
+using fwcpp::copter::VehicleClass;
 using fwcpp::copter::DesiredSpoolState;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
@@ -86,6 +88,7 @@ using fwcpp::copter::lost_vehicle_check;
 using fwcpp::copter::takeoff_check;
 using fwcpp::copter::get_wp_distance_m;
 using fwcpp::copter::update_auto_armed;
+using fwcpp::copter::startup_ins_ground;
 using fwcpp::copter::kLostVehicleDelay;
 using fwcpp::copter::kLostVehicleStickThreshold;
 using fwcpp::copter::kTakeoffCheckAvgLoadMax;
@@ -117,10 +120,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 28", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 3);
+TEST_CASE("catalog remaining_count stays open after slice 29", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 2);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 32);
+    REQUIRE(on_main_count() == 33);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -156,8 +159,9 @@ TEST_CASE("catalog remaining_count stays open after slice 28", "[copter][leftove
     REQUIRE(completeness_has("Copter::lost_vehicle_check", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::takeoff_check", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::get_wp_distance_m", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::startup_INS_ground", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::startup_INS_ground", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::allocate_motors", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
 }
@@ -2192,4 +2196,36 @@ TEST_CASE("update_auto_armed disarmed motors stay not auto_armed",
     in.motors_armed = false;
     REQUIRE_FALSE(update_auto_armed(in));
     REQUIRE_FALSE(update_auto_armed());
+}
+
+TEST_CASE("startup_INS_ground leftover records ahrs init COPTER ins init reset",
+          "[copter][startup_ins_ground]") {
+    REQUIRE(static_cast<int>(VehicleClass::UNKNOWN) == 0);
+    REQUIRE(static_cast<int>(VehicleClass::GROUND) == 1);
+    REQUIRE(static_cast<int>(VehicleClass::COPTER) == 2);
+    REQUIRE(static_cast<int>(VehicleClass::FIXED_WING) == 3);
+    REQUIRE(static_cast<int>(VehicleClass::SUBMARINE) == 4);
+
+    const auto fx = startup_ins_ground();
+    REQUIRE(fx.ahrs_init);
+    REQUIRE(fx.vehicle_class == VehicleClass::COPTER);
+    REQUIRE(static_cast<int>(fx.vehicle_class) == 2);
+    REQUIRE(fx.ins_init);
+    REQUIRE(fx.ins_loop_rate_hz == 400);
+    REQUIRE(fx.ahrs_reset);
+}
+
+TEST_CASE("startup_INS_ground leftover copies injected loop_rate_hz",
+          "[copter][startup_ins_ground]") {
+    REQUIRE(startup_ins_ground({.loop_rate_hz = 400}).ins_loop_rate_hz == 400);
+    REQUIRE(startup_ins_ground({.loop_rate_hz = 50}).ins_loop_rate_hz == 50);
+
+    StartupInsGroundInputs in{};
+    in.loop_rate_hz = 50;
+    const auto fx = startup_ins_ground(in);
+    REQUIRE(fx.ahrs_init);
+    REQUIRE(fx.vehicle_class == VehicleClass::COPTER);
+    REQUIRE(fx.ins_init);
+    REQUIRE(fx.ins_loop_rate_hz == 50);
+    REQUIRE(fx.ahrs_reset);
 }
