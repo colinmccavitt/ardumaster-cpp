@@ -4,9 +4,10 @@
 // Nested under fwcpp::copter::arming so remaining_count() does not collide
 // with copter_leftover.hpp / mode_leftover.hpp in fwcpp::copter.
 //
-// Slice 1: pre_arm_checks wrapper + run_pre_arm_checks already-armed gate
-// and system_initialized check. Interlock / motors / gps / baro / arm /
-// disarm bodies remain. ADR-0012: no AP:: singletons, no GCS, no exceptions.
+// Slice 2: interlock/E-Stop conflict + motor interlock enabled on top of
+// slice 1 already-armed / system_initialized. disarm_switch / motors /
+// gps / baro / arm / disarm bodies remain. ADR-0012: no AP:: singletons,
+// no GCS, no exceptions.
 
 #include <cstddef>
 #include <cstdint>
@@ -34,9 +35,9 @@ inline constexpr PortItem kCompleteness[] = {
      "AP_Arming_Copter.cpp ~19-22; motors_armed short-circuit return true"},
     {"system_initialized check", PortStatus::kThisSlice,
      "AP_Arming_Copter.cpp ~24-27; inject system_initialized; check_failed flag"},
-    {"interlock/estop conflict", PortStatus::kRemaining,
+    {"interlock/estop conflict", PortStatus::kThisSlice,
      "AP_Arming_Copter.cpp ~29-37; MOTOR_INTERLOCK vs MOTOR_ESTOP/ARM_EMERGENCY_STOP"},
-    {"motor interlock enabled", PortStatus::kRemaining,
+    {"motor interlock enabled", PortStatus::kThisSlice,
      "AP_Arming_Copter.cpp ~42-45; using_interlock && motor_interlock_switch"},
     {"disarm_switch_checks", PortStatus::kRemaining,
      "AP_Arming_Copter.cpp ~47-49; AP_Arming::disarm_switch_checks"},

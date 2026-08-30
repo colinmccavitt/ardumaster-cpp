@@ -1,11 +1,12 @@
 #pragma once
 
-// Copter AP_Arming_Copter pre_arm leftover scaffold (CCP-038 slice 1).
+// Copter AP_Arming_Copter pre_arm leftover (CCP-038 slice 2).
 // Upstream ArduCopter/AP_Arming_Copter.cpp pre_arm_checks ~8-13,
-// run_pre_arm_checks ~17-27 (already-armed + system_initialized only).
+// run_pre_arm_checks ~17-45 (already-armed, system_initialized,
+// interlock/E-Stop conflict, motor interlock enabled).
 //
-// Explicit PreArmInputs — no motors / scheduler / GCS objects (ADR-0012).
-// Interlock, disarm_switch, motors->arming_checks, parameter/gps/baro/
+// Explicit PreArmInputs — no motors / scheduler / GCS / rc objects
+// (ADR-0012). disarm_switch, motors->arming_checks, parameter/gps/baro/
 // board_voltage/alt/rc_throttle_failsafe, and arm()/disarm() remain.
 // Catalog: arming_leftover.hpp.
 
@@ -23,6 +24,13 @@ struct PreArmInputs {
     bool motors_armed{false};
     bool system_initialized{true};  // inject; default true so pass path works
     bool display_failure{false};    // record only; no GCS
+    // RC aux option presence (inject; no rc().find_channel_for_option).
+    bool has_motor_interlock_option{false};
+    bool has_motor_estop_option{false};
+    bool has_arm_emergency_stop_option{false};
+    // copter.ap.using_interlock / motor_interlock_switch injects.
+    bool using_interlock{false};
+    bool motor_interlock_switch{false};
 };
 
 struct PreArmEffects {
@@ -31,13 +39,20 @@ struct PreArmEffects {
     bool system_init_checked{false};
     bool system_init_failed{false};
     bool check_failed_system_init{false};  // would call check_failed
+    bool interlock_estop_conflict_checked{false};
+    bool interlock_estop_conflict_failed{false};
+    bool check_failed_interlock_estop{false};
+    bool motor_interlock_enabled_checked{false};
+    bool motor_interlock_enabled_failed{false};
+    bool check_failed_motor_interlock{false};
     bool passed{false};
     bool set_pre_arm_check_called{false};
     bool set_pre_arm_check_value{false};
 };
 
 // Upstream run_pre_arm_checks: already-armed short-circuit, then
-// system_initialized. Further checks remain (not run this slice).
+// system_initialized, then interlock/E-Stop conflict + motor interlock
+// enabled (accumulate failures). Further checks remain (not this slice).
 [[nodiscard]] inline PreArmEffects run_pre_arm_checks(const PreArmInputs& in = {}) {
     PreArmEffects fx{};
     fx.pre_arm_ran = true;
@@ -58,8 +73,29 @@ struct PreArmEffects {
         return fx;
     }
 
-    // Further checks remaining — treat as passed for this scaffold only.
-    fx.passed = true;
+    bool passed = true;
+
+    // Interlock and E-Stop conflict (~29-37). Continue on failure.
+    fx.interlock_estop_conflict_checked = true;
+    if (in.has_motor_interlock_option &&
+        (in.has_motor_estop_option || in.has_arm_emergency_stop_option)) {
+        fx.interlock_estop_conflict_failed = true;
+        fx.check_failed_interlock_estop = true;
+        (void)in.display_failure;
+        passed = false;
+    }
+
+    // Motor interlock enabled (~42-45). Continue on failure.
+    fx.motor_interlock_enabled_checked = true;
+    if (in.using_interlock && in.motor_interlock_switch) {
+        fx.motor_interlock_enabled_failed = true;
+        fx.check_failed_motor_interlock = true;
+        (void)in.display_failure;
+        passed = false;
+    }
+
+    // Further checks remaining (disarm_switch / motors / …) — not this slice.
+    fx.passed = passed;
     return fx;
 }
 
