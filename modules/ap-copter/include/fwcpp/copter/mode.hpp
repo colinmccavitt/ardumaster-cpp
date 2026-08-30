@@ -17,9 +17,11 @@
 // is auto_init (on main). ModeAuto::exit leftover is on main. ModeAuto::run
 // waiting_to_start leftover is on main. Else-path leftover (change detector
 // restart + mission.update) is on main. SubMode switch leftover (dispatch
-// flags only) is on main. auto_RTL landing-sequence leftover (clear +
-// Write_Mode AUTO_RTL_EXIT) is this slice. ModeAuto *_run bodies and
-// ModeRTL/ModeLand stay later. update_flight_mode is CCP-035.
+// flags only) is on main. auto_RTL landing-sequence leftover is on
+// main. ModeAuto::takeoff_run leftover (AllowTakeOffWithoutRaisingThrottle
+// + auto_takeoff.run flag) is this slice. ModeAuto wp/land/rtl/loiter
+// *_run bodies, ModeRTL/ModeLand, and auto_takeoff.run body stay later.
+// update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
 #include <fwcpp/copter/pilot_input.hpp>
@@ -106,9 +108,10 @@ public:
 // ModeAuto::exit (mode_auto.cpp ~71-81). run leftover is waiting_to_start
 // + origin (mode_auto.cpp ~85-98, on main), else-path change detector
 // + mission.update (mode_auto.cpp ~99-113, on main), SubMode switch
-// dispatch flags (mode_auto.cpp ~116-164, on main), and auto_RTL
-// landing-sequence leftover (mode_auto.cpp ~166-174, this slice). *_run
-// bodies and set_submode stay later.
+// dispatch flags (mode_auto.cpp ~116-164, on main), auto_RTL
+// landing-sequence leftover (mode_auto.cpp ~166-174, on main), and
+// takeoff_run leftover (mode_auto.cpp ~1075-1083, this slice). Other
+// *_run bodies and set_submode stay later.
 class ModeAuto : public Mode {
 public:
     // Copter-4.7.0 mode.h ~563-578. NAV_PAYLOAD_PLACE omitted this slice.
@@ -186,6 +189,13 @@ public:
     bool write_mode_auto_rtl_exit{false};
     Number written_mode_number{Number::AUTO};
     ModeReason written_reason{ModeReason::UNKNOWN};
+    // Injected Option::AllowTakeOffWithoutRaisingThrottle. No Option
+    // enum / g.auto_options bitmask this slice.
+    bool allow_takeoff_without_raising_throttle{false};
+    // Leftover copter.set_auto_armed(true) when the option is enabled.
+    bool set_auto_armed{false};
+    // Leftover auto_takeoff.run() call (body stays later).
+    bool auto_takeoff_run{false};
 
     ModeAuto() = default;
 
@@ -199,11 +209,21 @@ public:
         mission_stop = mission_running;
         auto_RTL = false;
     }
+    // Leftover ModeAuto::takeoff_run (mode_auto.cpp ~1075-1083). No Copter
+    // / AutoTakeoff / Option enum. Switch still records takeoff_run as the
+    // "would call takeoff_run" leftover, then this helper.
+    void leftover_takeoff_run() {
+        if (allow_takeoff_without_raising_throttle) {
+            set_auto_armed = true;
+        }
+        auto_takeoff_run = true;
+    }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
-    // leftover flags (~116-164), and auto_RTL landing-sequence leftover
-    // (~166-174). Switch always runs, including while still waiting_to_start.
-    // No AP_Mission / detector / GCS / logger / *_run bodies. run has no ctx.
+    // leftover flags (~116-164), auto_RTL landing-sequence leftover
+    // (~166-174), and takeoff_run leftover (~1075-1083). Switch always
+    // runs, including while still waiting_to_start. No AP_Mission /
+    // detector / GCS / logger / *_run bodies. run has no ctx.
     void run() override {
         if (waiting_to_start) {
             if (has_origin) {
@@ -232,10 +252,13 @@ public:
         loiter_run = false;
         loiter_to_alt_run = false;
         nav_attitude_time_run = false;
+        set_auto_armed = false;
+        auto_takeoff_run = false;
 
         switch (submode) {
         case SubMode::TAKEOFF:
             takeoff_run = true;
+            leftover_takeoff_run();
             break;
         case SubMode::WP:
         case SubMode::CIRCLE_MOVE_TO_EDGE:
