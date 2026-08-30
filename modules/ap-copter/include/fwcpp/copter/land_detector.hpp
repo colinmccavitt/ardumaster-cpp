@@ -8,7 +8,8 @@
 //
 // Do NOT port crash_check / thrust_loss_check / yaw_imbalance_check bodies
 // this slice — catalog remaining. ModeRTL / ModeLand leftovers already on
-// main (CCP-036). takeoff.cpp helpers and land_run_normal body remain.
+// main (CCP-036). takeoff helpers gates are CCP-041 slice 2 (takeoff.hpp);
+// land_run_normal body remains.
 //
 // Separate from update_land_and_crash_detectors.hpp (CCP-035 vehicle-loop
 // leftover). Nested catalog under fwcpp::copter::land_detector so
@@ -106,8 +107,9 @@ inline constexpr PortItem kCompleteness[] = {
      "CCP-036; mode.hpp ModeLand::init/run leftovers on main"},
     {"land_run_normal body", PortStatus::kRemaining,
      "land_run_normal_or_precland / land_run_horizontal_control bodies"},
-    {"takeoff helpers", PortStatus::kRemaining,
-     "ArduCopter/takeoff.cpp; Mode::_TakeOff / do_user_takeoff / auto_takeoff"},
+    {"takeoff helpers", PortStatus::kThisSlice,
+     "takeoff.cpp do_user_takeoff_U_m gates (~18-40); start_m body remaining "
+     "(leftover_takeoff_start_m flag); see takeoff.hpp"},
     {"crash_check / thrust_loss / yaw_imbalance", PortStatus::kRemaining,
      "land_detector.cpp ~30-32 call sites; full bodies not ported"},
     {"update_land_detector stationary AND-gate", PortStatus::kRemaining,

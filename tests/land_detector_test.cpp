@@ -62,8 +62,8 @@ TEST_CASE("leftover_update_land_and_crash_detectors filter + no crash body",
 
 TEST_CASE("land_detector leftover catalog remaining_count",
           "[copter][land_detector][leftover]") {
-    REQUIRE(remaining_count() == 5);
-    REQUIRE(this_slice_count() == 3);
+    REQUIRE(remaining_count() == 4);
+    REQUIRE(this_slice_count() == 4);
     REQUIRE(on_main_count() == 2);
     REQUIRE(out_of_scope_count() == 3);
     REQUIRE(completeness_size() ==
@@ -71,10 +71,10 @@ TEST_CASE("land_detector leftover catalog remaining_count",
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_update_land_and_crash_detectors", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_update_land_detector", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("takeoff helpers", PortStatus::kThisSlice));
     REQUIRE(completeness_has("ModeRTL", PortStatus::kOnMain));
     REQUIRE(completeness_has("ModeLand", PortStatus::kOnMain));
     REQUIRE(completeness_has("land_run_normal body", PortStatus::kRemaining));
-    REQUIRE(completeness_has("takeoff helpers", PortStatus::kRemaining));
     REQUIRE(completeness_has("crash_check / thrust_loss / yaw_imbalance", PortStatus::kRemaining));
-    REQUIRE_FALSE(completeness_has("takeoff helpers", PortStatus::kThisSlice));
+    REQUIRE_FALSE(completeness_has("takeoff helpers", PortStatus::kRemaining));
 }

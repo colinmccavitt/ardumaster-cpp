@@ -1034,6 +1034,11 @@ add_executable(land_detector_test land_detector_test.cpp)
 target_link_libraries(land_detector_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(land_detector_test)
 
+# CCP-041 slice 2: do_user_takeoff_U_m leftover gates + catalog.
+add_executable(takeoff_test takeoff_test.cpp)
+target_link_libraries(takeoff_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(takeoff_test)
+
 # CPP-023 slice 1: ConversionInfo + convert_old_parameters_scaled leftover.
 add_executable(param_conversion_test param_conversion_test.cpp)
 target_link_libraries(param_conversion_test PRIVATE ap-param Catch2::Catch2WithMain)
