@@ -1,12 +1,12 @@
 #pragma once
 
-// CPP-087 slice 1 completeness catalog.
+// CPP-087 slice 2 completeness catalog.
 //
-// This slice is the wire seam only: MAVLink 2 framing, HEARTBEAT
-// pack/unpack, and a msgid dispatch stub. Remaining rows are later
-// CPP-087 work (COMMAND_LONG, PARAM, MISSION, vehicle handlers, XML
-// dialect generation). Do not generate the entire mavlink dialect here.
-// remaining_count() is intentionally > 0.
+// Slice 1 (on main): MAVLink 2 framing, HEARTBEAT pack/unpack, msgid
+// dispatch stub, leftover catalog. This slice: COMMAND_LONG pack/unpack
+// + ARM/DISARM + DO_SET_MODE + COMMAND_ACK. Remaining rows are later
+// CPP-087 work (PARAM, MISSION, vehicle handlers, XML dialect).
+// remaining_count() is 4.
 
 #include <cstddef>
 #include <cstdint>
@@ -26,14 +26,15 @@ struct GcsPortItem {
 };
 
 inline constexpr GcsPortItem kGcsCompleteness[] = {
-    {"MAVLink 2 framing", PortStatus::kThisSlice,
+    {"MAVLink 2 framing", PortStatus::kOnMain,
      "stx 0xFD, flags, seq, sysid, compid, msgid 24-bit LE, payload, CRC-16/MCRF4XX"},
-    {"HEARTBEAT pack/unpack", PortStatus::kThisSlice,
+    {"HEARTBEAT pack/unpack", PortStatus::kOnMain,
      "msgid 0: type, autopilot, base_mode, custom_mode, system_status, mavlink_version=3"},
-    {"msgid dispatch stub", PortStatus::kThisSlice,
+    {"msgid dispatch stub", PortStatus::kOnMain,
      "known HEARTBEAT vs unknown; no GCS singleton"},
-    {"leftover catalog", PortStatus::kThisSlice, "this table"},
-    {"COMMAND_LONG", PortStatus::kRemaining, "msgid 76 ARM/DISARM DO_SET_MODE NAV_TAKEOFF"},
+    {"leftover catalog", PortStatus::kOnMain, "this table"},
+    {"COMMAND_LONG", PortStatus::kThisSlice,
+     "msgid 76 ARM/DISARM DO_SET_MODE + COMMAND_ACK msgid 77"},
     {"PARAM protocol", PortStatus::kRemaining, "PARAM_REQUEST_LIST / PARAM_SET / PARAM_VALUE"},
     {"MISSION", PortStatus::kRemaining, "MISSION_ITEM_INT / MISSION_REQUEST_INT"},
     {"Plane/Copter vehicle handlers", PortStatus::kRemaining,

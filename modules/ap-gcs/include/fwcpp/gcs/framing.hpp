@@ -18,13 +18,16 @@ inline constexpr std::size_t kHeaderLenV2 = 10;
 inline constexpr std::size_t kCrcLen = 2;
 inline constexpr std::size_t kMaxPayloadLen = 255;
 inline constexpr std::uint32_t kMsgIdHeartbeat = 0;
+inline constexpr std::uint32_t kMsgIdCommandLong = 76;
+inline constexpr std::uint32_t kMsgIdCommandAck = 77;
 
-// HEARTBEAT CRC extra from the pinned modules/mavlink defs.
-// pymavlink message_checksum() over message_definitions/v1.0/minimal.xml
-// (included by standard.xml -> common.xml) yields 50. Same-tree
-// libraries/AP_Scripting/modules/MAVLink/mavlink_msg_HEARTBEAT.lua
-// records HEARTBEAT.crc_extra = 50.
+// CRC extras from same-tree lua (libraries/AP_Scripting/modules/MAVLink):
+// HEARTBEAT.crc_extra = 50 msgid 0; COMMAND_LONG.crc_extra = 152 msgid 76;
+// COMMAND_ACK.crc_extra = 143 msgid 77. Also pinned in
+// modules/mavlink/message_definitions/v1.0/{minimal,common}.xml.
 inline constexpr std::uint8_t kHeartbeatCrcExtra = 50;
+inline constexpr std::uint8_t kCommandLongCrcExtra = 152;
+inline constexpr std::uint8_t kCommandAckCrcExtra = 143;
 
 struct Frame {
     std::uint8_t seq{};
@@ -84,10 +87,18 @@ enum class DecodeError : std::uint8_t {
     return crc;
 }
 
-// This slice pins HEARTBEAT only. Unknown msgids have no extra.
+// Known msgid extras. encode_v2 refuses unknown msgid (returns 0).
 [[nodiscard]] inline constexpr bool crc_extra(std::uint32_t msgid, std::uint8_t& extra) {
     if (msgid == kMsgIdHeartbeat) {
         extra = kHeartbeatCrcExtra;
+        return true;
+    }
+    if (msgid == kMsgIdCommandLong) {
+        extra = kCommandLongCrcExtra;
+        return true;
+    }
+    if (msgid == kMsgIdCommandAck) {
+        extra = kCommandAckCrcExtra;
         return true;
     }
     return false;
