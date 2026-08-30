@@ -9,7 +9,6 @@
 // HAL_LOGGING_ENABLED should_log(MASK_LOG_CTUN) Log_Write_Control_Tuning
 // + optional notch / gyro_fft stay remaining: write flags stay false.
 // Injected should_log_ctun is recorded only (no log writes).
-// run_nav_updates is a later leftover.
 
 namespace fwcpp::copter {
 

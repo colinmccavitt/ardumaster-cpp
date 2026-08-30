@@ -56,6 +56,7 @@ using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
 using fwcpp::copter::update_home_from_ekf;
+using fwcpp::copter::run_nav_updates;
 using fwcpp::copter::update_altitude;
 using fwcpp::copter::update_batt_compass;
 using fwcpp::copter::update_land_and_crash_detectors;
@@ -75,10 +76,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 11", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 20);
+TEST_CASE("catalog remaining_count stays open after slice 12", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 19);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 15);
+    REQUIRE(on_main_count() == 16);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -96,8 +97,10 @@ TEST_CASE("catalog remaining_count stays open after slice 11", "[copter][leftove
     REQUIRE(completeness_has("Copter::update_land_and_crash_detectors", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_rangefinder_terrain_offset", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_batt_compass", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::update_altitude", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_altitude", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::run_nav_updates", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -968,4 +971,19 @@ TEST_CASE("update_altitude should_log_ctun leftover records without writing logs
     REQUIRE_FALSE(fx.log_write_control_tuning);
     REQUIRE_FALSE(fx.write_notch_log_messages);
     REQUIRE_FALSE(fx.gyro_fft_write_log_messages);
+}
+
+TEST_CASE("run_nav_updates records update_super_simple_bearing(false)",
+          "[copter][run_nav_updates]") {
+    const auto fx = run_nav_updates();
+    REQUIRE(fx.update_super_simple_bearing);
+    REQUIRE_FALSE(fx.force_update);
+
+    const auto* row = find_scheduler_task("run_nav_updates");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 50.0f);
+    REQUIRE(row->max_time_micros == 100);
+    REQUIRE(row->priority == 45);
+    REQUIRE(row->gate == nullptr);
 }

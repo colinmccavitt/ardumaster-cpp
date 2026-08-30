@@ -19,6 +19,7 @@
 #include <fwcpp/copter/update_flight_mode.hpp>
 #include <fwcpp/copter/update_home_from_ekf.hpp>
 #include <fwcpp/copter/update_land_and_crash_detectors.hpp>
+#include <fwcpp/copter/run_nav_updates.hpp>
 #include <fwcpp/copter/update_altitude.hpp>
 #include <fwcpp/copter/update_batt_compass.hpp>
 #include <fwcpp/copter/update_rangefinder_terrain_offset.hpp>
