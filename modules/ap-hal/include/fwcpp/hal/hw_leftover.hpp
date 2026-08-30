@@ -1,10 +1,9 @@
 #pragma once
 
-// CPP-089 slice 2 completeness catalog: compile-only LinuxHalContext
-// reusing SITL seams. BoardKind + Watchdog stub are on main (slice 1).
-// remaining_count() is ChibiOS peripherals + ESP32. Do not edit
-// leftover.hpp — that catalog's remaining_count() stays 0 after
-// CPP-088 WSPI.
+// CPP-089 slice 3 completeness catalog: compile-only ChibiOSHalContext
+// reusing SITL seams. BoardKind + Watchdog + LinuxHalContext are on
+// main. remaining_count() is ESP32 only. Do not edit leftover.hpp —
+// that catalog's remaining_count() stays 0 after CPP-088 WSPI.
 
 #include <cstddef>
 #include <cstdint>
@@ -38,9 +37,9 @@ inline constexpr HwPortItem kHwCompleteness[] = {
     {"SITL storage", PortStatus::kOnMain, "param RawStorage (CPP-025)"},
     {"SITL Util", PortStatus::kOnMain,
      "soft_armed, safety_switch, system_id, persistent_data (CPP-088)"},
-    {"ChibiOS peripherals", PortStatus::kRemaining,
-     "ChibiOS time/UART/RC/GPIO/storage on a bring-up class (not watchdog stub)"},
-    {"Linux backend", PortStatus::kThisSlice,
+    {"ChibiOS peripherals", PortStatus::kThisSlice,
+     "ChibiOSHalContext: injected now_ms + SITL UartDriver/Gpio/RC/storage/Watchdog; no ch.h/hwdef/IWDG"},
+    {"Linux backend", PortStatus::kOnMain,
      "LinuxHalContext: injected now_ms + SITL UartDriver/Gpio/RC/storage/Watchdog; no termios/sysfs"},
     {"ESP32 backend", PortStatus::kRemaining,
      "ESP32 HAL surface: time, UART, RC, GPIO, storage"},

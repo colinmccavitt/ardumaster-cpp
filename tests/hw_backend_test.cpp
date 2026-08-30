@@ -1,4 +1,5 @@
-// CPP-089: BoardKind + Watchdog stub (slice 1); LinuxHalContext (slice 2).
+// CPP-089: BoardKind + Watchdog stub (slice 1); LinuxHalContext (slice 2);
+// ChibiOSHalContext (slice 3).
 
 #include <array>
 #include <cstdint>
@@ -6,12 +7,14 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <fwcpp/hal/board.hpp>
+#include <fwcpp/hal/chibios_hal.hpp>
 #include <fwcpp/hal/hw_leftover.hpp>
 #include <fwcpp/hal/leftover.hpp>
 #include <fwcpp/hal/linux_hal.hpp>
 #include <fwcpp/hal/watchdog.hpp>
 
 using fwcpp::hal::BoardKind;
+using fwcpp::hal::ChibiOSHalContext;
 using fwcpp::hal::LinuxHalContext;
 using fwcpp::hal::PinMode;
 using fwcpp::hal::Watchdog;
@@ -132,10 +135,64 @@ TEST_CASE("LinuxHalContext GPIO/RC/storage members exist and compile", "[hal][hw
     REQUIRE(linux.watchdog.is_initialized());
 }
 
+TEST_CASE("ChibiOSHalContext board_kind is kChibiOS", "[hal][hw][chibios]") {
+    REQUIRE(ChibiOSHalContext::board_kind() == BoardKind::kChibiOS);
+    ChibiOSHalContext chibios;
+    REQUIRE(chibios.board_kind() == BoardKind::kChibiOS);
+    REQUIRE(kDefaultBoardKind == BoardKind::kSitl);
+}
+
+TEST_CASE("ChibiOSHalContext UART write/read round-trips via in-memory UartDriver",
+          "[hal][hw][chibios][uart]") {
+    ChibiOSHalContext chibios;
+    const std::uint8_t payload[4] = {0x10, 0x20, 0x30, 0x40};
+    REQUIRE(chibios.uart.write(payload, 4) == 4);
+
+    std::uint8_t drained[4] = {};
+    REQUIRE(chibios.uart.drain_tx(drained, 4) == 4);
+    REQUIRE(chibios.uart.inject_rx(drained, 4) == 4);
+
+    std::uint8_t out[4] = {};
+    REQUIRE(chibios.uart.read(out, 4) == 4);
+    REQUIRE(out[0] == 0x10);
+    REQUIRE(out[1] == 0x20);
+    REQUIRE(out[2] == 0x30);
+    REQUIRE(out[3] == 0x40);
+}
+
+TEST_CASE("ChibiOSHalContext GPIO/RC/storage/watchdog members exist and compile",
+          "[hal][hw][chibios]") {
+    ChibiOSHalContext chibios(250);
+    REQUIRE(chibios.now_ms() == 250);
+    chibios.set_now_ms(1000);
+    REQUIRE(chibios.now_ms() == 1000);
+
+    chibios.gpio.set_pin_mode(3, PinMode::kOutput);
+    chibios.gpio.write(3, 1);
+    REQUIRE(chibios.gpio.read(3) == 1);
+
+    chibios.rc_input.set_channel(0, 1500);
+    REQUIRE(chibios.rc_input.read(0) == 1500);
+
+    chibios.rc_output.force_safety_off();
+    chibios.rc_output.write(0, 1600);
+    REQUIRE(chibios.rc_output.read(0) == 1600);
+
+    const std::uint8_t bytes[3] = {1, 2, 3};
+    REQUIRE(chibios.storage.write_block(0, bytes, 3));
+    std::uint8_t readback[3] = {};
+    REQUIRE(chibios.storage.read_block(readback, 0, 3));
+    REQUIRE(readback[0] == 1);
+    REQUIRE(readback[2] == 3);
+
+    chibios.watchdog.init();
+    REQUIRE(chibios.watchdog.is_initialized());
+}
+
 TEST_CASE("hw leftover remaining_count matches catalog", "[hal][hw][leftover]") {
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 8);
-    REQUIRE(remaining_count() == 2);
+    REQUIRE(on_main_count() == 9);
+    REQUIRE(remaining_count() == 1);
     REQUIRE(out_of_scope_count() == 4);
     REQUIRE(hw_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -148,8 +205,8 @@ TEST_CASE("hw leftover remaining_count matches catalog", "[hal][hw][leftover]") 
     REQUIRE(completeness_has("SITL GPIO", PortStatus::kOnMain));
     REQUIRE(completeness_has("SITL storage", PortStatus::kOnMain));
     REQUIRE(completeness_has("SITL Util", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Linux backend", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("ChibiOS peripherals", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Linux backend", PortStatus::kOnMain));
+    REQUIRE(completeness_has("ChibiOS peripherals", PortStatus::kThisSlice));
     REQUIRE(completeness_has("ESP32 backend", PortStatus::kRemaining));
     REQUIRE(completeness_has("ChibiOS peripheral drivers", PortStatus::kOutOfScope));
     REQUIRE(completeness_has("hwdef.dat", PortStatus::kOutOfScope));
