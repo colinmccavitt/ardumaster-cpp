@@ -1,0 +1,82 @@
+// CCP-043 slice 1: SitlCopterHarness leftover scaffold.
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
+
+#include <fwcpp/copter/leftover_copter.hpp>
+#include <fwcpp/copter/mode.hpp>
+#include <fwcpp/hal_sitl/sitl_copter_harness.hpp>
+#include <fwcpp/math/vector3.hpp>
+#include <fwcpp/sim/sim_plane.hpp>
+
+using fwcpp::copter::LeftoverCopter;
+using fwcpp::copter::ModeStabilize;
+using fwcpp::copter::leftover_copter_tick;
+using fwcpp::hal_sitl::SitlCopterHarness;
+using fwcpp::hal_sitl::sitl_copter::PortStatus;
+using fwcpp::hal_sitl::sitl_copter::completeness_has;
+using fwcpp::hal_sitl::sitl_copter::completeness_size;
+using fwcpp::hal_sitl::sitl_copter::on_main_count;
+using fwcpp::hal_sitl::sitl_copter::out_of_scope_count;
+using fwcpp::hal_sitl::sitl_copter::remaining_count;
+using fwcpp::hal_sitl::sitl_copter::this_slice_count;
+using fwcpp::math::Vector3f;
+using fwcpp::sim::SimPlane;
+
+TEST_CASE("SitlCopterHarness constructs and step increments tick counter",
+          "[copter][sitl][ccp-043]") {
+    LeftoverCopter copter{};
+    SimPlane sim{};
+    sim.gyro = Vector3f{0.1f, -0.2f, 0.3f};
+    sim.accel_body = Vector3f{0.0f, 0.0f, -9.81f};
+
+    SitlCopterHarness harness(copter, sim);
+    REQUIRE(harness.tick_count() == 0);
+    REQUIRE(copter.tick_count == 0);
+    REQUIRE_FALSE(copter.gyro_injected);
+    REQUIRE_FALSE(copter.accel_injected);
+
+    harness.step(0.0025f);
+    REQUIRE(harness.tick_count() == 1);
+    REQUIRE(copter.tick_count == 1);
+    REQUIRE(copter.gyro_injected);
+    REQUIRE(copter.accel_injected);
+    REQUIRE(copter.gyro_buffer.x == Catch::Approx(0.1f));
+    REQUIRE(copter.gyro_buffer.y == Catch::Approx(-0.2f));
+    REQUIRE(copter.gyro_buffer.z == Catch::Approx(0.3f));
+    REQUIRE(copter.accel_buffer.z == Catch::Approx(-9.81f));
+    REQUIRE_FALSE(copter.baro_injected);
+    REQUIRE_FALSE(copter.gps_injected);
+    REQUIRE_FALSE(copter.compass_injected);
+
+    harness.step(0.0025f);
+    REQUIRE(copter.tick_count == 2);
+}
+
+TEST_CASE("leftover_copter_tick wires update_flight_mode when Mode* set",
+          "[copter][sitl][ccp-043]") {
+    LeftoverCopter copter{};
+    ModeStabilize stabilize{};
+    copter.current = &stabilize;
+    REQUIRE(copter.tick_count == 0);
+    leftover_copter_tick(copter);
+    REQUIRE(copter.tick_count == 1);
+}
+
+TEST_CASE("SitlCopterHarness leftover catalog remaining_count",
+          "[copter][sitl][ccp-043][leftover]") {
+    REQUIRE(remaining_count() == 5);
+    REQUIRE(this_slice_count() == 4);
+    REQUIRE(on_main_count() == 2);
+    REQUIRE(out_of_scope_count() == 2);
+    REQUIRE(completeness_size() ==
+            on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
+    REQUIRE(completeness_has("SitlCopterHarness scaffold", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("leftover_copter_tick", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("gyro/accel synthesis", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("closed-loop arm/spool/hold", PortStatus::kRemaining));
+    REQUIRE(completeness_has("baro synthesis", PortStatus::kRemaining));
+    REQUIRE(completeness_has("GPS synthesis", PortStatus::kRemaining));
+    REQUIRE(completeness_has("compass synthesis", PortStatus::kRemaining));
+    REQUIRE(completeness_has("multirotor aero / motor feedback", PortStatus::kRemaining));
+    REQUIRE(completeness_has("SitlHarness Plane path (CPP-084)", PortStatus::kOnMain));
+}

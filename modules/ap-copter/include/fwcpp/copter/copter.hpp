@@ -3,6 +3,7 @@
 #include <fwcpp/copter/autoyaw.hpp>
 #include <fwcpp/copter/check_ekf_reset.hpp>
 #include <fwcpp/copter/copter_leftover.hpp>
+#include <fwcpp/copter/leftover_copter.hpp>
 #include <fwcpp/copter/mode.hpp>
 #include <fwcpp/copter/mode_reason.hpp>
 #include <fwcpp/copter/mode_acro.hpp>
