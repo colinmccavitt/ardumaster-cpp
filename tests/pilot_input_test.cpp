@@ -10,6 +10,7 @@ using Catch::Approx;
 using fwcpp::copter::get_pilot_desired_climb_rate_ms;
 using fwcpp::copter::get_pilot_desired_lean_angles_rad;
 using fwcpp::copter::get_pilot_desired_throttle;
+using fwcpp::copter::get_pilot_desired_velocity;
 using fwcpp::copter::get_pilot_desired_yaw_rate_rads;
 using fwcpp::copter::get_pilot_speed_dn_ms;
 using fwcpp::copter::input_expo;
@@ -100,10 +101,10 @@ TEST_CASE("above deadband is positive climb using speed_up", "[copter][pilot]") 
 }
 
 TEST_CASE("leftover remaining_count", "[copter][pilot][leftover]") {
-    REQUIRE(remaining_count() == 2);
+    REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 8);
+    REQUIRE(on_main_count() == 9);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -115,9 +116,9 @@ TEST_CASE("leftover remaining_count", "[copter][pilot][leftover]") {
     REQUIRE(completeness_has("set_accel_throttle_I", PortStatus::kOnMain));
     REQUIRE(completeness_has("get_pilot_desired_climb_rate", PortStatus::kOnMain));
     REQUIRE(completeness_has("get_pilot_speed_dn", PortStatus::kOnMain));
-    REQUIRE(completeness_has("AutoYaw state machine", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("AutoYaw state machine", PortStatus::kOnMain));
     REQUIRE(completeness_has("weathervane", PortStatus::kRemaining));
-    REQUIRE(completeness_has("get_pilot_desired_velocity", PortStatus::kRemaining));
+    REQUIRE(completeness_has("get_pilot_desired_velocity", PortStatus::kThisSlice));
 }
 
 TEST_CASE("rc_input_to_roll_pitch_rad matches tan/atan mapping", "[copter][pilot]") {
@@ -131,4 +132,27 @@ TEST_CASE("rc_input_to_roll_pitch_rad matches tan/atan mapping", "[copter][pilot
     rc_input_to_roll_pitch_rad(1.0f, 0.0f, angle_max, angle_max, roll, pitch);
     REQUIRE(roll == Approx(angle_max).margin(1e-5f));
     REQUIRE(pitch == Approx(0.0f).margin(1e-6f));
+}
+
+TEST_CASE("invalid RC zeros desired velocity", "[copter][pilot]") {
+    const auto vel = get_pilot_desired_velocity(false, 1.0f, -1.0f, 5.0f, 0.0f);
+    REQUIRE(vel.x == 0.0f);
+    REQUIRE(vel.y == 0.0f);
+}
+
+TEST_CASE("zero sticks zeros desired velocity", "[copter][pilot]") {
+    const auto vel = get_pilot_desired_velocity(true, 0.0f, 0.0f, 5.0f, 1.2f);
+    REQUIRE(vel.is_zero());
+}
+
+TEST_CASE("square-to-circle 45 deg vs axis length is vel_max", "[copter][pilot]") {
+    const float vel_max = 5.0f;
+    const auto axis = get_pilot_desired_velocity(true, 0.0f, -1.0f, vel_max, 0.0f);
+    REQUIRE(axis.length() == Approx(vel_max).margin(1e-5f));
+
+    const auto diag = get_pilot_desired_velocity(true, 1.0f, -1.0f, vel_max, 0.0f);
+    REQUIRE(diag.length() == Approx(vel_max).margin(1e-5f));
+
+    const auto roll_axis = get_pilot_desired_velocity(true, 1.0f, 0.0f, vel_max, 0.0f);
+    REQUIRE(roll_axis.length() == Approx(vel_max).margin(1e-5f));
 }

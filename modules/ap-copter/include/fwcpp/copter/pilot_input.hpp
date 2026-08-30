@@ -12,11 +12,13 @@
 //   ArduCopter/Attitude.cpp set_accel_throttle_I_from_pilot_throttle ~120-127
 //   ArduCopter/Attitude.cpp get_pilot_desired_climb_rate_ms ~69-112
 //   ArduCopter/Attitude.cpp get_pilot_speed_dn_ms ~129-137
+//   ArduCopter/mode.cpp get_pilot_desired_velocity ~572-596
+//   AP_AHRS/AP_AHRS_Backend.cpp body_to_earth2D ~246-249
 //
 // Not copied from quadplane_pilot_input.hpp (different vehicle, cd-based
 // lean path). Mode::run() bodies stay CCP-039. AutoYaw get_heading
-// PILOT_RATE vs HOLD is autoyaw.hpp (this slice). weathervane /
-// get_pilot_desired_velocity stay leftover (see leftover catalog below).
+// PILOT_RATE vs HOLD is autoyaw.hpp (on main). weathervane stays leftover
+// (see leftover catalog below).
 
 #include <algorithm>
 #include <cmath>
@@ -157,6 +159,36 @@ inline void rc_input_to_roll_pitch_rad(float roll_in_norm, float pitch_in_norm, 
     return 0.0f;
 }
 
+// mode.cpp:572. Invalid RC zeros. Stick vector is (-pitch, roll) in
+// body NE; is_zero early-returns. body_to_earth2D is the 2D yaw rotate
+// (x*cos-y*sin, x*sin+y*cos). Square-to-circle: vel_scalar = vel_ne /
+// MAX(|x|,|y|); vel_ne *= vel_max / vel_scalar.length().
+[[nodiscard]] inline math::Vector2f get_pilot_desired_velocity(bool has_valid_input,
+                                                               float roll_norm,
+                                                               float pitch_norm,
+                                                               float vel_max,
+                                                               float yaw_rad) {
+    math::Vector2f vel_ne_ms;
+    if (!has_valid_input) {
+        return vel_ne_ms;
+    }
+
+    vel_ne_ms = math::Vector2f(-pitch_norm, roll_norm);
+    if (vel_ne_ms.is_zero()) {
+        return vel_ne_ms;
+    }
+
+    const float cs = std::cos(yaw_rad);
+    const float sn = std::sin(yaw_rad);
+    vel_ne_ms = math::Vector2f(vel_ne_ms.x * cs - vel_ne_ms.y * sn,
+                               vel_ne_ms.x * sn + vel_ne_ms.y * cs);
+
+    const math::Vector2f vel_scalar =
+        vel_ne_ms / std::max(std::fabs(vel_ne_ms.x), std::fabs(vel_ne_ms.y));
+    vel_ne_ms *= vel_max / vel_scalar.length();
+    return vel_ne_ms;
+}
+
 // Nested so leftover remaining_count() does not collide with
 // copter_leftover.hpp / mode_leftover.hpp in fwcpp::copter.
 namespace pilot {
@@ -190,10 +222,11 @@ inline constexpr PortItem kCompleteness[] = {
      "Attitude.cpp ~69-112; deadband mid+/-dz; skip TOY_MODE"},
     {"get_pilot_speed_dn", PortStatus::kOnMain,
      "Attitude.cpp ~129-137; zero dn uses |speed_up|"},
-    {"AutoYaw state machine", PortStatus::kThisSlice,
+    {"AutoYaw state machine", PortStatus::kOnMain,
      "autoyaw.cpp get_heading ~330-347 PILOT_RATE vs HOLD"},
     {"weathervane", PortStatus::kRemaining, "update_weathervane; WEATHERVANE_ENABLED"},
-    {"get_pilot_desired_velocity", PortStatus::kRemaining, "mode.cpp ~572"},
+    {"get_pilot_desired_velocity", PortStatus::kThisSlice,
+     "mode.cpp ~572-596; body_to_earth2D + square-to-circle"},
 };
 
 [[nodiscard]] inline constexpr std::size_t completeness_size() {

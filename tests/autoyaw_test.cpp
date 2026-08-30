@@ -65,9 +65,9 @@ TEST_CASE("weathervane not invoked", "[copter][autoyaw]") {
     REQUIRE_FALSE(yaw.weathervane_invoked());
 }
 
-TEST_CASE("leftover remaining_count==2", "[copter][autoyaw][leftover]") {
-    REQUIRE(remaining_count() == 2);
+TEST_CASE("leftover remaining_count==1", "[copter][autoyaw][leftover]") {
+    REQUIRE(remaining_count() == 1);
     REQUIRE(completeness_has("weathervane", PortStatus::kRemaining));
-    REQUIRE(completeness_has("get_pilot_desired_velocity", PortStatus::kRemaining));
-    REQUIRE(completeness_has("AutoYaw state machine", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("get_pilot_desired_velocity", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("AutoYaw state machine", PortStatus::kOnMain));
 }
