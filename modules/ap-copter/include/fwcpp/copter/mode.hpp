@@ -21,10 +21,10 @@
 // main. ModeAuto::takeoff_run leftover is on main. ModeAuto::wp_run leftover
 // is on main. ModeAuto::land_run leftover is on main. ModeAuto::rtl_run
 // leftover is on main. ModeAuto::loiter_run leftover is on main.
-// ModeAuto::circle_run leftover (circle_nav update_ms + pos/attitude;
-// no spool/disarmed) is this slice. ModeAuto loiter_to_alt_run body,
-// nav_guided_run, ModeRTL/ModeLand, land_run_normal_or_precland body,
-// and auto_takeoff.run body stay later.
+// ModeAuto::circle_run leftover is on main. ModeAuto::loiter_to_alt_run
+// leftover (ground-handling + reached_xy leftover_wp_run reuse) is this
+// slice. loiter_start/alt/horizontal, nav_guided_run, ModeRTL/ModeLand,
+// land_run_normal_or_precland body, and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
@@ -118,9 +118,10 @@ public:
 // wp_run leftover (mode_auto.cpp ~1087-1107, on main),
 // land_run leftover (mode_auto.cpp ~1111-1125, on main),
 // rtl_run leftover (mode_auto.cpp ~1129-1133, on main),
-// loiter_run leftover (mode_auto.cpp ~1162-1180, on main), and
-// circle_run leftover (mode_auto.cpp ~1135-1148, this slice). Other
-// *_run bodies and set_submode stay later.
+// loiter_run leftover (mode_auto.cpp ~1162-1180, on main),
+// circle_run leftover (mode_auto.cpp ~1135-1148, on main), and
+// loiter_to_alt_run leftover (mode_auto.cpp ~1184-1199, this slice).
+// Other *_run bodies and set_submode stay later.
 class ModeAuto : public Mode {
 public:
     // Copter-4.7.0 mode.h ~563-578. NAV_PAYLOAD_PLACE omitted this slice.
@@ -229,6 +230,16 @@ public:
     // Leftover circle_nav->update_ms() from ModeAuto::circle_run. No
     // circle_nav object. Distinct from leftover update_wpnav.
     bool leftover_circle_nav_update{false};
+    // Injected motors->get_interlock(). Default true so the flying path
+    // works without a motors object.
+    bool motors_interlock{true};
+    // Injected loiter_to_alt.reached_destination_xy (no loiter_to_alt
+    // struct / pos_control).
+    bool leftover_loiter_to_alt_reached_xy{false};
+    // Leftover wp_nav->reached_wp_destination_NE() query when checking xy.
+    bool leftover_reached_wp_destination_ne{false};
+    // loiter_start_done / alt_error / land_run_horizontal_control remaining.
+    bool leftover_loiter_to_alt_rest{false};
 
     ModeAuto() = default;
 
@@ -305,15 +316,34 @@ public:
         pos_D_update = true;
         input_thrust_vector_heading = true;
     }
+    // Leftover ModeAuto::loiter_to_alt_run (mode_auto.cpp ~1184-1199).
+    // Ground-handling + reached_xy leftover_wp_run reuse. No motors /
+    // wp_nav / pos_control. Switch still records loiter_to_alt_run as the
+    // "would call loiter_to_alt_run" leftover, then this helper.
+    // loiter_start_done / alt_error / land_run_horizontal_control remaining.
+    // Do not call leftover_loiter_run.
+    void leftover_loiter_to_alt_run() {
+        if (disarmed_or_landed || !motors_interlock) {
+            make_safe_ground_handling = true;
+            return;
+        }
+        if (!leftover_loiter_to_alt_reached_xy) {
+            leftover_reached_wp_destination_ne = true;
+            leftover_wp_run();
+            return;
+        }
+        leftover_loiter_to_alt_rest = false;
+    }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
     // leftover flags (~116-164), auto_RTL landing-sequence leftover
     // (~166-174), takeoff_run leftover (~1075-1083), wp_run leftover
     // (~1087-1107), land_run leftover (~1111-1125), rtl_run leftover
-    // (~1129-1133), loiter_run leftover (~1162-1180), and circle_run
-    // leftover (~1135-1148). Switch always runs, including while still
-    // waiting_to_start. No AP_Mission / detector / GCS / logger / ModeRTL /
-    // circle_nav / *_run bodies. run has no ctx.
+    // (~1129-1133), loiter_run leftover (~1162-1180), circle_run leftover
+    // (~1135-1148), and loiter_to_alt_run leftover (~1184-1199). Switch
+    // always runs, including while still waiting_to_start. No AP_Mission /
+    // detector / GCS / logger / ModeRTL / circle_nav / *_run bodies. run
+    // has no ctx.
     void run() override {
         if (waiting_to_start) {
             if (has_origin) {
@@ -354,6 +384,8 @@ public:
         leftover_mode_rtl_run = false;
         leftover_mode_rtl_disarm_on_land = false;
         leftover_circle_nav_update = false;
+        leftover_reached_wp_destination_ne = false;
+        leftover_loiter_to_alt_rest = false;
 
         switch (submode) {
         case SubMode::TAKEOFF:
@@ -389,6 +421,7 @@ public:
             break;
         case SubMode::LOITER_TO_ALT:
             loiter_to_alt_run = true;
+            leftover_loiter_to_alt_run();
             break;
         case SubMode::NAV_ATTITUDE_TIME:
             nav_attitude_time_run = true;
