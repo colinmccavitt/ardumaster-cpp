@@ -90,6 +90,7 @@ void require_wp_run_flying(const ModeAuto& m) {
     REQUIRE_FALSE(m.leftover_avoidance_climbrate);
     REQUIRE_FALSE(m.leftover_d_set_pos_target_from_climb);
     REQUIRE_FALSE(m.leftover_surface_tracking_update);
+    REQUIRE_FALSE(m.leftover_nav_att_lean);
 }
 
 void require_no_wp_run_leftovers(const ModeAuto& m) {
@@ -114,6 +115,7 @@ void require_no_wp_run_leftovers(const ModeAuto& m) {
     REQUIRE_FALSE(m.leftover_avoidance_climbrate);
     REQUIRE_FALSE(m.leftover_d_set_pos_target_from_climb);
     REQUIRE_FALSE(m.leftover_surface_tracking_update);
+    REQUIRE_FALSE(m.leftover_nav_att_lean);
 }
 
 void require_land_run_flying(const ModeAuto& m) {
@@ -187,6 +189,7 @@ void require_loiter_to_alt_wp_run_reuse(const ModeAuto& m) {
     REQUIRE_FALSE(m.leftover_avoidance_climbrate);
     REQUIRE_FALSE(m.leftover_d_set_pos_target_from_climb);
     REQUIRE_FALSE(m.leftover_surface_tracking_update);
+    REQUIRE_FALSE(m.leftover_nav_att_lean);
     REQUIRE_FALSE(m.land_run_normal_or_precland);
     REQUIRE_FALSE(m.leftover_mode_rtl_run);
     REQUIRE_FALSE(m.leftover_mode_guided_run);
@@ -1321,8 +1324,44 @@ TEST_CASE("ModeAuto run SubMode NAV_ATTITUDE_TIME leftover nav_attitude_time_run
     REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
     f.table.mode_auto.waiting_to_start = false;
     f.table.mode_auto.submode = ModeAuto::SubMode::NAV_ATTITUDE_TIME;
+    REQUIRE_FALSE(f.table.mode_auto.disarmed_or_landed);
+    REQUIRE(f.table.mode_auto.motors_interlock);
     f.table.mode_auto.run();
     require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, false, false, true);
+    REQUIRE(f.table.mode_auto.leftover_constrain_climb);
+    REQUIRE(f.table.mode_auto.leftover_avoidance_climbrate);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_nav_att_lean);
+    REQUIRE_FALSE(f.table.mode_auto.make_safe_ground_handling);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
+}
+
+TEST_CASE("ModeAuto run SubMode NAV_ATTITUDE_TIME leftover when disarmed_or_landed", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::NAV_ATTITUDE_TIME;
+    f.table.mode_auto.disarmed_or_landed = true;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.nav_attitude_time_run);
+    REQUIRE(f.table.mode_auto.make_safe_ground_handling);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_constrain_climb);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_avoidance_climbrate);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_nav_att_lean);
+}
+
+TEST_CASE("ModeAuto run SubMode NAV_ATTITUDE_TIME leftover when motors interlock off", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::NAV_ATTITUDE_TIME;
+    REQUIRE_FALSE(f.table.mode_auto.disarmed_or_landed);
+    f.table.mode_auto.motors_interlock = false;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.nav_attitude_time_run);
+    REQUIRE(f.table.mode_auto.make_safe_ground_handling);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_constrain_climb);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_avoidance_climbrate);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_nav_att_lean);
 }
 
 TEST_CASE("ModeAuto run SubMode NAVGUIDED closed does not set nav_guided_run", "[copter][mode]") {
@@ -1347,6 +1386,9 @@ TEST_CASE("ModeAuto run SubMode NAVGUIDED open leftover nav_guided_run", "[copte
     REQUIRE(f.table.mode_auto.leftover_mode_guided_run);
     REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
     REQUIRE_FALSE(f.table.mode_auto.leftover_circle_nav_update);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_constrain_climb);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_avoidance_climbrate);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_nav_att_lean);
 }
 
 TEST_CASE("ModeAuto run SubMode NAV_SCRIPT_TIME open leftover nav_guided_run", "[copter][mode]") {
@@ -1497,7 +1539,7 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 28);
+    REQUIRE(mode_on_main_count() == 29);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -1525,7 +1567,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeAuto::loiter_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::circle_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::loiter_to_alt_run", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("ModeAuto::nav_guided_run", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeAuto::nav_guided_run", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeAuto::nav_attitude_time_run", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));

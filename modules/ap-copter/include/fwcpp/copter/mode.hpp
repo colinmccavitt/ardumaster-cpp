@@ -25,10 +25,12 @@
 // leftover (ground-handling / reached_xy leftover_wp_run / loiter_start /
 // alt_error / land_run_horizontal / climb flags) is on main.
 // leftover_surface_tracking_update stays false (AP_RANGEFINDER remaining).
-// ModeAuto::nav_guided_run leftover (ModeGuided::run flag) is this slice.
-// nav_attitude_time_run, ModeRTL/ModeLand, ModeGuided::run body,
-// land_run_normal_or_precland body, land_run_horizontal_control body,
-// and auto_takeoff.run body stay later.
+// ModeAuto::nav_guided_run leftover (ModeGuided::run flag) is on main.
+// ModeAuto::nav_attitude_time_run leftover (ground-handling +
+// constrain/avoidance leftover flags) is this slice.
+// leftover leftover_nav_att_lean stays false (lean/input_euler remaining).
+// ModeRTL/ModeLand, ModeGuided::run body, land_run_normal_or_precland body,
+// land_run_horizontal_control body, and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
@@ -286,6 +288,8 @@ public:
     bool leftover_surface_tracking_update{false};
     // leftover leftover_d_set_pos_target_from_climb (no pos_control).
     bool leftover_d_set_pos_target_from_climb{false};
+    // leftover leftover_nav_att_lean (lean-angle limit / input_euler remaining).
+    bool leftover_nav_att_lean{false};
 
     ModeAuto() = default;
 
@@ -411,14 +415,30 @@ public:
     void leftover_nav_guided_run() {
         leftover_mode_guided_run = true;
     }
+    // Leftover ModeAuto::nav_attitude_time_run (mode_auto.cpp ~1249-1261).
+    // Ground-handling + leftover leftover_constrain_climb /
+    // leftover leftover_avoidance_climbrate flags. leftover leftover_nav_att_lean
+    // stays false (lean/input_euler remaining). Reuses disarmed_or_landed /
+    // motors_interlock / make_safe_ground_handling. Switch still records
+    // nav_attitude_time_run as the "would call nav_attitude_time_run"
+    // leftover, then this helper.
+    void leftover_nav_attitude_time_run() {
+        if (disarmed_or_landed || !motors_interlock) {
+            make_safe_ground_handling = true;
+            return;
+        }
+        leftover_constrain_climb = true;
+        leftover_avoidance_climbrate = true;
+    }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
     // leftover flags (~116-164), auto_RTL landing-sequence leftover
     // (~166-174), takeoff_run leftover (~1075-1083), wp_run leftover
     // (~1087-1107), land_run leftover (~1111-1125), rtl_run leftover
     // (~1129-1133), loiter_run leftover (~1162-1180), circle_run leftover
-    // (~1135-1148), loiter_to_alt_run leftover (~1184-1245), and
-    // nav_guided_run leftover (~1150-1158). Switch always runs, including
+    // (~1135-1148), loiter_to_alt_run leftover (~1184-1245),
+    // nav_guided_run leftover (~1150-1158), and nav_attitude_time_run
+    // leftover (~1249-1261). Switch always runs, including
     // while still waiting_to_start. No AP_Mission / detector / GCS / logger
     // / ModeRTL / ModeGuided / circle_nav / *_run bodies. run has no ctx.
     void run() override {
@@ -475,6 +495,7 @@ public:
         leftover_avoidance_climbrate = false;
         leftover_surface_tracking_update = false;
         leftover_d_set_pos_target_from_climb = false;
+        leftover_nav_att_lean = false;
 
         switch (submode) {
         case SubMode::TAKEOFF:
@@ -515,6 +536,7 @@ public:
             break;
         case SubMode::NAV_ATTITUDE_TIME:
             nav_attitude_time_run = true;
+            leftover_nav_attitude_time_run();
             break;
         }
 
