@@ -40,4 +40,5 @@
 #include <fwcpp/copter/update_auto_armed.hpp>
 #include <fwcpp/copter/startup_ins_ground.hpp>
 #include <fwcpp/copter/allocate_motors.hpp>
+#include <fwcpp/copter/init_ardupilot.hpp>
 #include <fwcpp/copter/update_throttle_hover.hpp>

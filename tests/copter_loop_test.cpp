@@ -94,6 +94,7 @@ using fwcpp::copter::get_wp_distance_m;
 using fwcpp::copter::update_auto_armed;
 using fwcpp::copter::startup_ins_ground;
 using fwcpp::copter::allocate_motors;
+using fwcpp::copter::init_ardupilot;
 using fwcpp::copter::kLostVehicleDelay;
 using fwcpp::copter::kLostVehicleStickThreshold;
 using fwcpp::copter::kTakeoffCheckAvgLoadMax;
@@ -125,10 +126,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 33", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 34", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 34);
+    REQUIRE(on_main_count() == 35);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -166,8 +167,9 @@ TEST_CASE("catalog remaining_count stays open after slice 33", "[copter][leftove
     REQUIRE(completeness_has("Copter::get_wp_distance_m", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::startup_INS_ground", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::allocate_motors", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::allocate_motors", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::init_ardupilot rest", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
 }
 
@@ -2646,4 +2648,15 @@ TEST_CASE("allocate_motors leftover attitude_ok false skips convert flags",
     REQUIRE_FALSE(fx.convert_loiter_parameters);
     REQUIRE_FALSE(fx.convert_circle_parameters);
     REQUIRE_FALSE(fx.invalidate_count);
+}
+
+TEST_CASE("init_ardupilot leftover default notify battery baro",
+          "[copter][init_ardupilot]") {
+    const auto fx = init_ardupilot();
+    REQUIRE(fx.notify_init);
+    REQUIRE(fx.notify_flight_mode);
+    REQUIRE(fx.battery_init);
+    REQUIRE(fx.barometer_init);
+    REQUIRE_FALSE(fx.winch_init);
+    REQUIRE_FALSE(fx.rssi_init);
 }

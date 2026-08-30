@@ -1,12 +1,12 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 33 lands
-// allocate_motors leftover (class selection + controllers +
-// PID defaults + convert leftover flags; conversion table
-// bodies remaining).
-// remaining_count() > 0 is expected after this slice. Next
-// remaining is Copter::init_ardupilot.
+// (Copter.cpp / Copter.h / system.cpp). Slice 34 lands
+// init_ardupilot leftover (notify.init + notify_flight_mode,
+// battery.init, barometer.init flags only). Rest of
+// init_ardupilot (RC, GPS, compass, allocate_motors call, …)
+// stays remaining.
+// remaining_count() > 0 is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
 // Subsystem objects are injected as inputs on later leftover ticks.
@@ -43,7 +43,10 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::read_AHRS", PortStatus::kOnMain, "read_ahrs.hpp; skip_ins_update"},
     {"Copter::throttle_loop", PortStatus::kOnMain,
      "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
-    {"Copter::init_ardupilot", PortStatus::kRemaining, "system.cpp init"},
+    {"Copter::init_ardupilot", PortStatus::kThisSlice,
+     "init_ardupilot.hpp; notify/battery/baro leftover; RC/GPS/compass/rest remaining"},
+    {"Copter::init_ardupilot rest", PortStatus::kRemaining,
+     "RC in/out, interlock, allocate_motors call, GPS/compass, startup_INS_ground call, etc."},
     {"Copter::run_rate_controller_main", PortStatus::kOnMain,
      "run_rate_controller.hpp; set_dt_s + rate_controller_run iff !rate thread"},
     {"Copter::read_inertia", PortStatus::kOnMain,
@@ -97,7 +100,7 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
      "update_auto_armed.hpp; inject flags; resulting auto_armed bool"},
     {"Copter::startup_INS_ground", PortStatus::kOnMain,
      "startup_ins_ground.hpp; ahrs.init + COPTER + ins.init + ahrs.reset"},
-    {"Copter::allocate_motors", PortStatus::kThisSlice,
+    {"Copter::allocate_motors", PortStatus::kOnMain,
      "allocate_motors.hpp; class selection + controllers + PID defaults + convert leftover flags; conversion table bodies remaining"},
     {"AP:: singletons", PortStatus::kOutOfScope, "ADR-0012 explicit Copter context"},
     {"AP_Param var_info", PortStatus::kOutOfScope, "inject params via setters"},
