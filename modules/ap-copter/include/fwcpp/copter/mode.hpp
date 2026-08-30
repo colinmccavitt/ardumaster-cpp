@@ -43,8 +43,11 @@
 // land_run body leftover flags (state_complete/disarm/spool/land_run_normal
 // flag)) is on main. ModeLand::init leftover (mode_land.cpp ~62-107:
 // control_position / NE+D set_max / conditional NE+D init / land_pause /
-// land_repo+prec_land clear / auto_yaw HOLD) is this slice. landinggear /
-// precland_statemachine OOS or remaining. ModeLand::run, ModeGuided::run body,
+// land_repo+prec_land clear / auto_yaw HOLD) is on main. landinggear /
+// precland_statemachine OOS or remaining. ModeLand::run leftover
+// (mode_land.cpp ~112-146: leftover leftover_run dispatch + leftover
+// leftover_gps_run thin body; leftover leftover_nogps_run call-site flag
+// only) is this slice. nogps_run body, ModeGuided::run body,
 // land_run_normal_or_precland body, land_run_horizontal_control body, and
 // auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
@@ -942,8 +945,11 @@ public:
 // (mode_land.cpp ~62-107): control_position from position_ok; NE/D set_max +
 // correction leftover flags; conditional NE/D init; land_pause=false;
 // land_repo/prec_land clear; auto_yaw HOLD. land_start_time / landinggear /
-// precland_statemachine remaining or OOS. ModeLand::run (gps_run/nogps_run)
-// stays later. mode_from_mode_num still returns nullptr for LAND.
+// precland_statemachine remaining or OOS. leftover leftover_run is
+// ModeLand::run (mode_land.cpp ~112-119) dispatch + leftover leftover_gps_run
+// (mode_land.cpp ~124-146) thin body; leftover leftover_nogps_run is
+// call-site flag only (nogps_run body remaining). mode_from_mode_num still
+// returns nullptr for LAND.
 class ModeLand : public Mode {
 public:
     bool control_position{false};
@@ -967,6 +973,26 @@ public:
     // Leftover copter.ap.land_repo_active = false / prec_land_active = false.
     bool leftover_land_repo_active_cleared{false};
     bool leftover_prec_land_active_cleared{false};
+    // Injected copter.ap.land_complete (gps_run disarm gate).
+    bool leftover_land_complete{false};
+    // Injected motors->get_spool_state() == GROUND_IDLE.
+    bool leftover_spool_ground_idle{false};
+    // Injected is_disarmed_or_landed().
+    bool leftover_disarmed_or_landed{false};
+    // Injected millis()-land_start_time >= LAND_WITH_DELAY_MS.
+    bool leftover_land_pause_elapsed{false};
+    // leftover leftover_run entry dispatch recorded.
+    bool leftover_run_dispatched{false};
+    // leftover leftover_nogps_run call-site (body remaining).
+    bool leftover_nogps_run{false};
+    // Leftover arming.disarm(LANDED) when land_complete && spool GROUND_IDLE.
+    bool leftover_disarm_landed{false};
+    // Leftover make_safe_ground_handling when disarmed_or_landed.
+    bool leftover_make_safe_ground_handling{false};
+    // Leftover motors->set_desired_spool_state(THROTTLE_UNLIMITED).
+    bool leftover_desired_spool_unlimited{false};
+    // Leftover land_run_normal_or_precland(land_pause) call-site (body remaining).
+    bool leftover_land_run_normal_or_precland{false};
 
     ModeLand() = default;
 
@@ -974,8 +1000,8 @@ public:
     [[nodiscard]] bool init(bool ignore_checks) override {
         return leftover_init(ignore_checks);
     }
-    // Body is ModeLand::run / gps_run / nogps_run remaining.
-    void run() override {}
+    // upstream mode_land.cpp: run() { if (control_position) gps_run(); else nogps_run(); }
+    void run() override { leftover_run(); }
     [[nodiscard]] bool requires_position() const override { return false; }
     [[nodiscard]] bool has_manual_throttle() const override { return false; }
 
@@ -999,6 +1025,45 @@ public:
         leftover_prec_land_active_cleared = true;
         leftover_auto_yaw_hold = true;
         return true;
+    }
+
+    // Leftover ModeLand::run (mode_land.cpp ~112-119). Resets gps/nogps
+    // leftover effect flags at entry so a later path switch does not leave
+    // stale true flags. Inject inputs leftover_land_complete /
+    // leftover_spool_ground_idle / leftover_disarmed_or_landed /
+    // leftover_land_pause_elapsed are not cleared. Dispatches leftover
+    // leftover_gps_run or leftover leftover_nogps_run call-site flag.
+    void leftover_run() {
+        leftover_run_dispatched = false;
+        leftover_nogps_run = false;
+        leftover_disarm_landed = false;
+        leftover_make_safe_ground_handling = false;
+        leftover_desired_spool_unlimited = false;
+        leftover_land_run_normal_or_precland = false;
+        leftover_run_dispatched = true;
+        if (control_position) {
+            leftover_gps_run();
+        } else {
+            leftover_nogps_run = true;
+        }
+    }
+
+    // Leftover ModeLand::gps_run (mode_land.cpp ~124-146). No motors /
+    // arming / land_run_normal_or_precland objects. land_run_normal body
+    // remaining.
+    void leftover_gps_run() {
+        if (leftover_land_complete && leftover_spool_ground_idle) {
+            leftover_disarm_landed = true;
+        }
+        if (leftover_disarmed_or_landed) {
+            leftover_make_safe_ground_handling = true;
+            return;
+        }
+        leftover_desired_spool_unlimited = true;
+        if (land_pause && leftover_land_pause_elapsed) {
+            land_pause = false;
+        }
+        leftover_land_run_normal_or_precland = true;
     }
 };
 

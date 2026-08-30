@@ -2669,11 +2669,138 @@ TEST_CASE("ModeLand init override calls leftover leftover_init", "[copter][mode]
     REQUIRE(land.leftover_auto_yaw_hold);
 }
 
+TEST_CASE("ModeLand leftover leftover_run control_position true takes leftover leftover_gps_run",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = true;
+    land.leftover_run();
+    REQUIRE(land.leftover_run_dispatched);
+    REQUIRE_FALSE(land.leftover_nogps_run);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_normal_or_precland);
+    REQUIRE_FALSE(land.leftover_make_safe_ground_handling);
+    REQUIRE_FALSE(land.leftover_disarm_landed);
+}
+
+TEST_CASE("ModeLand leftover leftover_run control_position false sets leftover leftover_nogps_run",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.leftover_land_complete = true;
+    land.leftover_spool_ground_idle = true;
+    land.leftover_run();
+    REQUIRE(land.leftover_run_dispatched);
+    REQUIRE(land.leftover_nogps_run);
+    REQUIRE_FALSE(land.leftover_desired_spool_unlimited);
+    REQUIRE_FALSE(land.leftover_land_run_normal_or_precland);
+    REQUIRE_FALSE(land.leftover_disarm_landed);
+    REQUIRE_FALSE(land.leftover_make_safe_ground_handling);
+}
+
+TEST_CASE("ModeLand leftover leftover_gps_run disarm when land_complete and spool ground_idle",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = true;
+    land.leftover_land_complete = true;
+    land.leftover_spool_ground_idle = true;
+    land.leftover_run();
+    REQUIRE(land.leftover_disarm_landed);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_normal_or_precland);
+}
+
+TEST_CASE("ModeLand leftover leftover_gps_run skips disarm without land_complete",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = true;
+    land.leftover_land_complete = false;
+    land.leftover_spool_ground_idle = true;
+    land.leftover_run();
+    REQUIRE_FALSE(land.leftover_disarm_landed);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+}
+
+TEST_CASE("ModeLand leftover leftover_gps_run skips disarm without spool ground_idle",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = true;
+    land.leftover_land_complete = true;
+    land.leftover_spool_ground_idle = false;
+    land.leftover_run();
+    REQUIRE_FALSE(land.leftover_disarm_landed);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+}
+
+TEST_CASE("ModeLand leftover leftover_gps_run make_safe when disarmed_or_landed",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = true;
+    land.leftover_disarmed_or_landed = true;
+    land.leftover_land_complete = true;
+    land.leftover_spool_ground_idle = true;
+    land.land_pause = true;
+    land.leftover_land_pause_elapsed = true;
+    land.leftover_run();
+    REQUIRE(land.leftover_disarm_landed);
+    REQUIRE(land.leftover_make_safe_ground_handling);
+    REQUIRE_FALSE(land.leftover_desired_spool_unlimited);
+    REQUIRE_FALSE(land.leftover_land_run_normal_or_precland);
+    REQUIRE(land.land_pause);
+}
+
+TEST_CASE("ModeLand leftover leftover_gps_run clears land_pause when elapsed",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = true;
+    land.land_pause = true;
+    land.leftover_land_pause_elapsed = true;
+    land.leftover_run();
+    REQUIRE_FALSE(land.land_pause);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_normal_or_precland);
+}
+
+TEST_CASE("ModeLand leftover leftover_gps_run keeps land_pause when not elapsed",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = true;
+    land.land_pause = true;
+    land.leftover_land_pause_elapsed = false;
+    land.leftover_run();
+    REQUIRE(land.land_pause);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_normal_or_precland);
+}
+
+TEST_CASE("ModeLand run override calls leftover leftover_run", "[copter][mode]") {
+    ModeLand land;
+    land.control_position = true;
+    land.run();
+    REQUIRE(land.leftover_run_dispatched);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_normal_or_precland);
+    REQUIRE_FALSE(land.leftover_nogps_run);
+}
+
+TEST_CASE("ModeLand leftover leftover_run resets stale gps effect flags", "[copter][mode]") {
+    ModeLand land;
+    land.control_position = true;
+    land.leftover_desired_spool_unlimited = true;
+    land.leftover_land_run_normal_or_precland = true;
+    land.leftover_disarm_landed = true;
+    land.control_position = false;
+    land.leftover_run();
+    REQUIRE(land.leftover_nogps_run);
+    REQUIRE_FALSE(land.leftover_desired_spool_unlimited);
+    REQUIRE_FALSE(land.leftover_land_run_normal_or_precland);
+    REQUIRE_FALSE(land.leftover_disarm_landed);
+}
+
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 32);
+    REQUIRE(mode_on_main_count() == 33);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -2705,7 +2832,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeAuto::nav_attitude_time_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeRTL::init", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeRTL::run", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("ModeLand::init", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeLand::init", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeLand::run", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));
