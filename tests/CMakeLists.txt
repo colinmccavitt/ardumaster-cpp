@@ -980,6 +980,10 @@ add_executable(logger_dataflash_test logger_dataflash_test.cpp)
 target_link_libraries(logger_dataflash_test PRIVATE ap-logger Catch2::Catch2WithMain)
 catch_discover_tests(logger_dataflash_test)
 
+add_executable(logger_transfer_test logger_transfer_test.cpp)
+target_link_libraries(logger_transfer_test PRIVATE ap-logger Catch2::Catch2WithMain)
+catch_discover_tests(logger_transfer_test)
+
 # CPP-088 slice 5: in-memory WSPIDevice command header and transfer.
 add_executable(wspi_test wspi_test.cpp)
 target_link_libraries(wspi_test PRIVATE ap-hal Catch2::Catch2WithMain)

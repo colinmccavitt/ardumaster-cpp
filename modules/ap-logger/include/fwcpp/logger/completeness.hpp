@@ -1,9 +1,9 @@
 #pragma once
 
-// CPP-090 completeness: this slice (DataFlash RAM page map) vs remaining
-// AP_Logger surfaces. remaining_count()==1 until a later slice lands
-// MAVLink transfer. MemoryBackend stays append-only; page map is a
-// separate RAM device model. POSIX/SD FileBackend and max-files on main.
+// CPP-090 completeness: closing slice — MAVLink LOG_REQUEST_LIST /
+// LOG_ENTRY transfer. remaining_count()==0. DataFlash page map and
+// POSIX/SD FileBackend / max-files are on main. LOG_REQUEST_DATA /
+// ERASE / END stay out of scope.
 
 #include <cstddef>
 #include <cstdint>
@@ -29,7 +29,7 @@ inline constexpr LoggerPortItem kLoggerCompleteness[] = {
     {"drop", PortStatus::kOnMain,
      "buffer-full drop counter (upstream _dropped / num_dropped)"},
     {"completeness catalog", PortStatus::kOnMain, "this table"},
-    {"DataFlash page map", PortStatus::kThisSlice,
+    {"DataFlash page map", PortStatus::kOnMain,
      "RAM page map BufferToPage/PageToBuffer/ErasePage; separate from MemoryBackend; no NAND/SPI"},
     {"POSIX/SD file backend", PortStatus::kOnMain,
      "FileBackend fwrite/write seam; caller-owned FILE*/fd; no ringbuffer/io_timer"},
@@ -37,12 +37,14 @@ inline constexpr LoggerPortItem kLoggerCompleteness[] = {
      "LogStructure / log_Format, Fill_Format, Write_Format, lookup by name/type"},
     {"streaming", PortStatus::kOnMain,
      "WriteStreaming rate-limit gate (should_log_streaming, 1000/rate_hz ms)"},
-    {"transfer", PortStatus::kRemaining,
-     "MAVLink LOG_REQUEST_LIST / LOG_ENTRY listing"},
+    {"transfer", PortStatus::kThisSlice,
+     "MAVLink LOG_REQUEST_LIST / LOG_ENTRY listing via LogDirectory"},
     {"EraseAll", PortStatus::kOnMain,
      "armed-gate + rewind/truncate of the open stream; no directory walk"},
     {"max-files rotation", PortStatus::kOnMain,
      "in-memory log slot table, LASTLOG, next_log_number wrap, erase_next"},
+    {"LOG_REQUEST_DATA/ERASE/END", PortStatus::kOutOfScope,
+     "msgid 119/121/122 stubs only; no LOG_DATA stream or erase-via-MAVLink"},
 };
 
 [[nodiscard]] inline constexpr std::size_t logger_completeness_size() {

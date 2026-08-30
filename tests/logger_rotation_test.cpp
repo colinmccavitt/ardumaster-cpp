@@ -137,10 +137,10 @@ TEST_CASE("FileBackend EraseAll pokes injected LogDirectory", "[logger][rotation
     std::fclose(f);
 }
 
-TEST_CASE("leftover remaining_count is 1 after max-files on main", "[logger][rotation][completeness]") {
-    REQUIRE(remaining_count() == 1);
-    REQUIRE(completeness_has("DataFlash page map", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("transfer", PortStatus::kRemaining));
+TEST_CASE("leftover remaining_count is 0 after transfer close", "[logger][rotation][completeness]") {
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(completeness_has("DataFlash page map", PortStatus::kOnMain));
+    REQUIRE(completeness_has("transfer", PortStatus::kThisSlice));
     REQUIRE(completeness_has("POSIX/SD file backend", PortStatus::kOnMain));
     REQUIRE(completeness_has("EraseAll", PortStatus::kOnMain));
     REQUIRE(completeness_has("max-files rotation", PortStatus::kOnMain));

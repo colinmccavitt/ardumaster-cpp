@@ -100,10 +100,10 @@ TEST_CASE("finish_write_page flushes and wraps", "[logger][dataflash]") {
     REQUIRE(map.buffer()[3] == 4);
 }
 
-TEST_CASE("leftover remaining_count is 1 after DataFlash page map", "[logger][dataflash][completeness]") {
-    REQUIRE(remaining_count() == 1);
-    REQUIRE(completeness_has("DataFlash page map", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("transfer", PortStatus::kRemaining));
+TEST_CASE("leftover remaining_count is 0 after transfer close", "[logger][dataflash][completeness]") {
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(completeness_has("DataFlash page map", PortStatus::kOnMain));
+    REQUIRE(completeness_has("transfer", PortStatus::kThisSlice));
     REQUIRE(completeness_has("max-files rotation", PortStatus::kOnMain));
-    REQUIRE_FALSE(completeness_has("DataFlash page map", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("transfer", PortStatus::kRemaining));
 }
