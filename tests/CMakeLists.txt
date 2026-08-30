@@ -1039,7 +1039,7 @@ add_executable(takeoff_test takeoff_test.cpp)
 target_link_libraries(takeoff_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(takeoff_test)
 
-# CPP-023 slice 1–3: convert_old_parameters + width + REVERSE/FORCE.
+# CPP-023 slice 1–2: convert_old_parameters + leftover_convert_parameter_width.
 add_executable(param_conversion_test param_conversion_test.cpp)
 target_link_libraries(param_conversion_test PRIVATE ap-param Catch2::Catch2WithMain)
 catch_discover_tests(param_conversion_test)
@@ -1058,11 +1058,3 @@ catch_discover_tests(failsafe_test)
 add_executable(mode_drift_test mode_drift_test.cpp)
 target_link_libraries(mode_drift_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_drift_test)
-# CCP-042: failsafe radio leftover scaffold + FS_THR on_event leftover.
-add_executable(failsafe_test failsafe_test.cpp)
-target_link_libraries(failsafe_test PRIVATE ap-copter Catch2::Catch2WithMain)
-catch_discover_tests(failsafe_test)
-# CCP-043 slice 1: SitlCopterHarness leftover scaffold + catalog.
-add_executable(sitl_copter_harness_test sitl_copter_harness_test.cpp)
-target_link_libraries(sitl_copter_harness_test PRIVATE ap-hal-sitl ap-copter ap-sim Catch2::Catch2WithMain)
-catch_discover_tests(sitl_copter_harness_test)
