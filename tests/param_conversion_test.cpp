@@ -8,8 +8,10 @@
 using Catch::Approx;
 using fwcpp::param::ClassConversionInfo;
 using fwcpp::param::ConversionInfo;
+using fwcpp::param::G2ConversionEntry;
 using fwcpp::param::NewParamStore;
 using fwcpp::param::OldParamStore;
+using fwcpp::param::ToplevelConversionEntry;
 using fwcpp::param::VarType;
 using fwcpp::param::WidthConvertEffects;
 using fwcpp::param::WidthConvertInputs;
@@ -19,8 +21,12 @@ using fwcpp::param::convert_old_parameter;
 using fwcpp::param::convert_old_parameters;
 using fwcpp::param::convert_old_parameters_scaled;
 using fwcpp::param::find_old_parameter;
+using fwcpp::param::leftover_convert_bitmask_parameter_width;
+using fwcpp::param::leftover_convert_centi_parameter;
 using fwcpp::param::leftover_convert_class;
+using fwcpp::param::leftover_convert_g2;
 using fwcpp::param::leftover_convert_parameter_width;
+using fwcpp::param::leftover_convert_toplevel;
 using fwcpp::param::new_store_find;
 using fwcpp::param::new_store_put;
 using fwcpp::param::old_store_put;
@@ -262,11 +268,98 @@ TEST_CASE("leftover_convert_class null table is no-op", "[param][conversion][cla
     REQUIRE(neu.count == 0);
 }
 
+TEST_CASE("leftover_convert_g2 loops entries into leftover_convert_class",
+          "[param][conversion][g2]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    constexpr std::uint16_t kG2Key = 55;
+    REQUIRE(old_store_put(old, kG2Key, 0, static_cast<std::uint8_t>(VarType::Float), 1.0f));
+    REQUIRE(old_store_put(old, kG2Key, 1, static_cast<std::uint8_t>(VarType::Float), 2.0f));
+    REQUIRE(old_store_put(old, kG2Key, 10, static_cast<std::uint8_t>(VarType::Float), 3.0f));
+    const ClassConversionInfo obj_a[] = {
+        {0, static_cast<std::uint8_t>(VarType::Float), "G2_A0"},
+        {1, static_cast<std::uint8_t>(VarType::Float), "G2_A1"},
+    };
+    const ClassConversionInfo obj_b[] = {
+        {10, static_cast<std::uint8_t>(VarType::Float), "G2_B0"},
+    };
+    const G2ConversionEntry entries[] = {
+        {obj_a, 2},
+        {obj_b, 1},
+    };
+    leftover_convert_g2(kG2Key, entries, 2, old, neu);
+    float a0 = 0.0f;
+    float a1 = 0.0f;
+    float b0 = 0.0f;
+    REQUIRE(new_store_find(neu, "G2_A0", a0));
+    REQUIRE(a0 == Approx(1.0f));
+    REQUIRE(new_store_find(neu, "G2_A1", a1));
+    REQUIRE(a1 == Approx(2.0f));
+    REQUIRE(new_store_find(neu, "G2_B0", b0));
+    REQUIRE(b0 == Approx(3.0f));
+}
+
+TEST_CASE("leftover_convert_g2 null entries is no-op", "[param][conversion][g2]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    leftover_convert_g2(1, nullptr, 0, old, neu);
+    REQUIRE(neu.count == 0);
+}
+
+TEST_CASE("leftover_convert_toplevel uses per-entry old_key",
+          "[param][conversion][g2]") {
+    OldParamStore old{};
+    NewParamStore neu{};
+    REQUIRE(old_store_put(old, 7, 0, static_cast<std::uint8_t>(VarType::Float), 4.0f));
+    REQUIRE(old_store_put(old, 8, 0, static_cast<std::uint8_t>(VarType::Float), 5.0f));
+    const ClassConversionInfo t7[] = {
+        {0, static_cast<std::uint8_t>(VarType::Float), "TOP_7"},
+    };
+    const ClassConversionInfo t8[] = {
+        {0, static_cast<std::uint8_t>(VarType::Float), "TOP_8"},
+    };
+    const ToplevelConversionEntry entries[] = {
+        {7, t7, 1},
+        {8, t8, 1},
+    };
+    leftover_convert_toplevel(entries, 2, old, neu);
+    float v7 = 0.0f;
+    float v8 = 0.0f;
+    REQUIRE(new_store_find(neu, "TOP_7", v7));
+    REQUIRE(v7 == Approx(4.0f));
+    REQUIRE(new_store_find(neu, "TOP_8", v8));
+    REQUIRE(v8 == Approx(5.0f));
+}
+
+TEST_CASE("leftover_convert_centi_parameter scales by 0.01",
+          "[param][conversion][width]") {
+    WidthConvertInputs in{};
+    in.old_value_found = true;
+    in.old_value = 250.0f;
+    in.scale_factor = 99.0f; // ignored — centi forces 0.01
+    WidthConvertEffects fx{};
+    REQUIRE(leftover_convert_centi_parameter(in, fx));
+    REQUIRE(fx.converted);
+    REQUIRE(fx.new_value == Approx(2.5f));
+}
+
+TEST_CASE("leftover_convert_bitmask_parameter_width uses bitmask path",
+          "[param][conversion][width]") {
+    WidthConvertInputs in{};
+    in.old_value_found = true;
+    in.old_value = 15.9f;
+    in.bitmask = false; // ignored — bitmask helper forces true
+    WidthConvertEffects fx{};
+    REQUIRE(leftover_convert_bitmask_parameter_width(in, fx));
+    REQUIRE(fx.converted);
+    REQUIRE(fx.new_value == 15.0f);
+}
+
 TEST_CASE("conversion leftover catalog remaining_count", "[param][conversion][leftover]") {
-    REQUIRE(remaining_count() == 4);
-    REQUIRE(this_slice_count() == 8);
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(this_slice_count() == 10);
     REQUIRE(on_main_count() == 0);
-    REQUIRE(out_of_scope_count() == 1);
+    REQUIRE(out_of_scope_count() == 3);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("ConversionInfo", PortStatus::kThisSlice));
@@ -274,8 +367,11 @@ TEST_CASE("conversion leftover catalog remaining_count", "[param][conversion][le
     REQUIRE(completeness_has("_convert_parameter_width", PortStatus::kThisSlice));
     REQUIRE(completeness_has("convert_old_parameter REVERSE/FORCE", PortStatus::kThisSlice));
     REQUIRE(completeness_has("convert_class", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("bitmask / centi width helpers", PortStatus::kRemaining));
-    REQUIRE(completeness_has("convert_g2 / convert_toplevel objects", PortStatus::kRemaining));
+    REQUIRE(completeness_has("convert_g2 / convert_toplevel objects", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("bitmask / centi width helpers", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("find_old_parameter EEPROM scan", PortStatus::kOutOfScope));
+    REQUIRE(completeness_has("flush after convert", PortStatus::kOutOfScope));
     REQUIRE(completeness_has("AP_Param singleton / EEPROM", PortStatus::kOutOfScope));
-    REQUIRE_FALSE(completeness_has("convert_class", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("convert_g2 / convert_toplevel objects", PortStatus::kRemaining));
+    REQUIRE_FALSE(completeness_has("bitmask / centi width helpers", PortStatus::kRemaining));
 }

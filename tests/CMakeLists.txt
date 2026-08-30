@@ -1039,7 +1039,8 @@ add_executable(takeoff_test takeoff_test.cpp)
 target_link_libraries(takeoff_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(takeoff_test)
 
-# CPP-023 slice 1–4: convert_old_parameters + width + REVERSE/FORCE + convert_class.
+# CPP-023 slice 1–5: convert_old_parameters + width + REVERSE/FORCE + convert_class +
+# convert_g2/toplevel + catalog close (remaining_count 0).
 add_executable(param_conversion_test param_conversion_test.cpp)
 target_link_libraries(param_conversion_test PRIVATE ap-param Catch2::Catch2WithMain)
 catch_discover_tests(param_conversion_test)

@@ -1,19 +1,21 @@
 #pragma once
 
-// CPP-023 slice 1–4: AP_Param ConversionInfo + convert_old_parameters_scaled
+// CPP-023 slice 1–5: AP_Param ConversionInfo + convert_old_parameters_scaled
 // leftover scaffold (Plane-4.7.0 AP_Param.cpp ~2125-2160, convert_old_parameter
-// ~2068-2121), _convert_parameter_width leftover (~2222+), and convert_class
-// leftover (~2143-2193). ADR-0012: no EEPROM / no AP_Param singleton —
-// injected OldParamStore / NewParamStore and WidthConvertInputs stand in for
-// storage scan, find_var_info, and save.
+// ~2068-2121), _convert_parameter_width leftover (~2222+), convert_class
+// leftover (~2143-2193), and convert_g2 / convert_toplevel thin leftovers
+// (~2197-2218). ADR-0012: no EEPROM / no AP_Param singleton — injected
+// OldParamStore / NewParamStore and WidthConvertInputs stand in for storage
+// scan, find_var_info, and save.
 //
 // Slice 1: table loop, inject lookup, scaler apply into NewParamStore by
 // new_name. Slice 2: leftover_convert_parameter_width (configured skip, inject
 // old value, scale or bitmask stub). Slice 3: CONVERT_FLAG_REVERSE / FORCE on
 // convert_old_parameter (inject new_configured). Slice 4: leftover_convert_class
 // (old class key → ClassConversionInfo table → convert_old_parameter).
-// Remaining (bitmasks/centi, convert_g2, EEPROM find_old_parameter) in
-// conversion_leftover.hpp.
+// Slice 5 (close): leftover_convert_g2 / leftover_convert_toplevel (loop →
+// leftover_convert_class); thin centi/bitmask width wrappers; EEPROM scan +
+// flush catalogued kOutOfScope.
 
 #include <cstddef>
 #include <cstdint>
@@ -199,7 +201,7 @@ inline void convert_old_parameters(const ConversionInfo* table, std::uint8_t tab
 // old_group_element from idx/group_shift, find_old_parameter, then
 // memcpy+save into object_pointer+offset. This leftover uses new_name +
 // NewParamStore instead of object_pointer; no nested AP_PARAM_GROUP recurse
-// (convert_g2 / recurse_sub_groups remain catalogued).
+// (convert_g2 / convert_toplevel are thin loops over leftover_convert_class).
 //
 // Table rows are {type, new_name} (+ old_group_element for inject matching);
 // shared old class key is the leftover_convert_class param_key argument.
@@ -222,6 +224,52 @@ inline void leftover_convert_class(std::uint16_t param_key, const ClassConversio
         ConversionInfo info{param_key, table[i].old_group_element, table[i].type,
                             table[i].new_name};
         convert_old_parameter(info, 1.0f, 0, old, neu, new_configured);
+    }
+}
+
+// Inject stand-in for one G2ObjectConversion row (AP_Param.h ~481-485).
+// Upstream carries object_pointer + GroupInfo*; this leftover supplies the
+// ClassConversionInfo field table already (same shape as convert_class).
+// old_group_element packing (old_index / group_shift) is assumed done by the
+// caller — ADR-0012 inject, no find_top_level_key_by_pointer.
+struct G2ConversionEntry {
+    const ClassConversionInfo* table = nullptr;
+    std::uint8_t table_size = 0;
+};
+
+// Leftover convert_g2_objects (AP_Param.cpp ~2197-2208): injected g2_old_key
+// → walk G2ConversionEntry[] → leftover_convert_class per entry.
+inline void leftover_convert_g2(std::uint16_t g2_old_key, const G2ConversionEntry* entries,
+                                std::uint8_t num_entries, const OldParamStore& old,
+                                NewParamStore& neu, bool new_configured = false) {
+    if (entries == nullptr) {
+        return;
+    }
+    for (std::uint8_t i = 0; i < num_entries; ++i) {
+        leftover_convert_class(g2_old_key, entries[i].table, entries[i].table_size, old, neu,
+                               new_configured);
+    }
+}
+
+// Inject stand-in for one TopLevelObjectConversion row (AP_Param.h ~490-494).
+// Upstream old_index is the former top-level key passed to convert_class.
+struct ToplevelConversionEntry {
+    std::uint16_t old_key = 0;
+    const ClassConversionInfo* table = nullptr;
+    std::uint8_t table_size = 0;
+};
+
+// Leftover convert_toplevel_objects (AP_Param.cpp ~2210-2216): each entry's
+// old_key → leftover_convert_class (same as convert_class is_top_level path).
+inline void leftover_convert_toplevel(const ToplevelConversionEntry* entries,
+                                      std::uint8_t num_entries, const OldParamStore& old,
+                                      NewParamStore& neu, bool new_configured = false) {
+    if (entries == nullptr) {
+        return;
+    }
+    for (std::uint8_t i = 0; i < num_entries; ++i) {
+        leftover_convert_class(entries[i].old_key, entries[i].table, entries[i].table_size, old,
+                               neu, new_configured);
     }
 }
 
@@ -249,9 +297,9 @@ struct WidthConvertEffects {
 // returns the computed new float only — no EEPROM write.
 //
 // Non-bitmask: new_value = old_value * scale_factor.
-// Bitmask: simple truncating cast through uint32 (float→u32→float). Full
-// typed AP_Int8/16/32 unsigned widen (int8 -1 → 255) remains under
-// "bitmask / centi width helpers" in the leftover catalog.
+// Bitmask: simple truncating cast through uint32 (float→u32→float). Typed
+// AP_Int8/16/32 unsigned widen (int8 -1 → 255) is not reproduced — inject
+// already holds a float-cast old value.
 [[nodiscard]] inline bool leftover_convert_parameter_width(const WidthConvertInputs& in,
                                                            WidthConvertEffects& fx) {
     fx = WidthConvertEffects{};
@@ -272,6 +320,26 @@ struct WidthConvertEffects {
     }
     fx.converted = true;
     return true;
+}
+
+// Thin leftover for convert_centi_parameter (AP_Param.h ~505-507): width
+// convert with scale_factor 0.01f, bitmask false.
+[[nodiscard]] inline bool leftover_convert_centi_parameter(const WidthConvertInputs& in,
+                                                           WidthConvertEffects& fx) {
+    WidthConvertInputs scaled = in;
+    scaled.scale_factor = 0.01f;
+    scaled.bitmask = false;
+    return leftover_convert_parameter_width(scaled, fx);
+}
+
+// Thin leftover for convert_bitmask_parameter_width (AP_Param.h ~508-511):
+// width convert with scale_factor 1.0f, bitmask true.
+[[nodiscard]] inline bool leftover_convert_bitmask_parameter_width(const WidthConvertInputs& in,
+                                                                   WidthConvertEffects& fx) {
+    WidthConvertInputs bm = in;
+    bm.scale_factor = 1.0f;
+    bm.bitmask = true;
+    return leftover_convert_parameter_width(bm, fx);
 }
 
 } // namespace fwcpp::param

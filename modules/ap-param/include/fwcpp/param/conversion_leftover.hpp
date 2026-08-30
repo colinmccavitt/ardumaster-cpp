@@ -2,8 +2,8 @@
 
 // CPP-023 leftover completeness catalog — AP_Param conversion/upgrade
 // (Plane-4.7.0 AP_Param.cpp convert_old_* / _convert_parameter_width /
-// convert_class). Nested under fwcpp::param::conversion so remaining_count()
-// does not collide with other param helpers.
+// convert_class / convert_g2). Nested under fwcpp::param::conversion so
+// remaining_count() does not collide with other param helpers.
 //
 // Slice 1: ConversionInfo + convert_old_parameters_scaled leftover scaffold
 // (inject OldParamStore / NewParamStore; no EEPROM).
@@ -11,7 +11,9 @@
 // Slice 3: convert_old_parameter CONVERT_FLAG_REVERSE / FORCE (inject
 // new_configured).
 // Slice 4: leftover_convert_class (old class key → ClassConversionInfo table →
-// convert_old_parameter). Remaining rows are later CPP-023 work.
+// convert_old_parameter).
+// Slice 5 (close): leftover_convert_g2 / leftover_convert_toplevel + thin
+// centi/bitmask wrappers; EEPROM scan + flush → kOutOfScope (ADR-0012).
 
 #include <cstddef>
 #include <cstdint>
@@ -43,18 +45,18 @@ inline constexpr PortItem kCompleteness[] = {
      "inject OldParamStore; no EEPROM scan"},
     {"convert_old_parameter REVERSE/FORCE", PortStatus::kThisSlice,
      "CONVERT_FLAG_REVERSE (_REV→_REVERSED) / FORCE + inject new_configured"},
-    {"find_old_parameter EEPROM scan", PortStatus::kRemaining,
-     "AP_Param.cpp ~2047-2062 scan()+read_block"},
+    {"find_old_parameter EEPROM scan", PortStatus::kOutOfScope,
+     "ADR-0012 inject OldParamStore; no scan()+read_block"},
     {"convert_class", PortStatus::kThisSlice,
      "AP_Param.cpp ~2143-2193; leftover_convert_class inject; no object_pointer/flush"},
-    {"convert_g2 / convert_toplevel objects", PortStatus::kRemaining,
-     "AP_Param.cpp ~2197-2218"},
+    {"convert_g2 / convert_toplevel objects", PortStatus::kThisSlice,
+     "AP_Param.cpp ~2197-2218; leftover_convert_g2/toplevel → leftover_convert_class"},
     {"_convert_parameter_width", PortStatus::kThisSlice,
      "AP_Param.cpp ~2222+; leftover_convert_parameter_width inject; no EEPROM"},
-    {"bitmask / centi width helpers", PortStatus::kRemaining,
-     "convert_bitmask_parameter_width / convert_centi_parameter; typed mask widen"},
-    {"flush after convert", PortStatus::kRemaining,
-     "AP_Param.cpp ~2137-2139 / ~2190-2192 StorageManager flush"},
+    {"bitmask / centi width helpers", PortStatus::kThisSlice,
+     "thin leftover_convert_centi / leftover_convert_bitmask over width inject"},
+    {"flush after convert", PortStatus::kOutOfScope,
+     "no StorageManager flush; ADR-0012 inject stores"},
     {"AP_Param singleton / EEPROM", PortStatus::kOutOfScope,
      "ADR-0012 inject stores; no hal.storage singleton"},
 };
