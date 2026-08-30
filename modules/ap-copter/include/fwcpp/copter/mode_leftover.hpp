@@ -48,9 +48,8 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"althold_run", ModePortStatus::kOnMain,
      "mode_althold.hpp; CCP-039 landed run() on main"},
     {"remaining mode bodies", ModePortStatus::kRemaining,
-     "ModeLand::nogps_run body; other modes; auto_takeoff.run body; "
-     "land_run_normal_or_precland body; land_run_horizontal_control body; "
-     "ModeGuided::run body"},
+     "other modes; auto_takeoff.run body; land_run_normal_or_precland body; "
+     "land_run_horizontal_control body; ModeGuided::run body"},
     {"ModeAuto::init", ModePortStatus::kOnMain,
      "mode_auto.cpp auto_init leftover; mission_present / landed takeoff gate; "
      "no wp_nav/mission objects; precland remaining"},
@@ -107,11 +106,11 @@ inline constexpr ModePortItem kModeCompleteness[] = {
      "mode_land.cpp ~62-107 leftover leftover_init; control_position / NE+D set_max / "
      "conditional NE+D init / land_pause / land_repo+prec_land clear / auto_yaw HOLD; "
      "landinggear/precland_statemachine remaining or OOS"},
-    {"ModeLand::run", ModePortStatus::kThisSlice,
-     "mode_land.cpp ~112-146 leftover leftover_run dispatch + leftover leftover_gps_run "
-     "thin body (disarm/make_safe/spool/land_pause clear/land_run_normal flag); "
-     "leftover leftover_nogps_run call-site flag only; nogps_run body + "
-     "land_run_normal_or_precland body remaining"},
+    {"ModeLand::run", ModePortStatus::kOnMain,
+     "mode_land.cpp ~112-193 leftover leftover_run dispatch + leftover leftover_gps_run "
+     "thin body + leftover leftover_nogps_run thin body (pilot cancel/reposition + "
+     "disarm/make_safe/spool/land_pause clear/vertical + attitude_nogps flags); "
+     "land_run_normal_or_precland / land_run_horizontal_control bodies remaining"},
     {"FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain,
      "Copter::gcs_mode_enabled + AP_Vehicle::block_GCS_mode_change; injected "
      "fltmode_gcsblock; LAND/RTL not in list"},

@@ -45,11 +45,10 @@
 // control_position / NE+D set_max / conditional NE+D init / land_pause /
 // land_repo+prec_land clear / auto_yaw HOLD) is on main. landinggear /
 // precland_statemachine OOS or remaining. ModeLand::run leftover
-// (mode_land.cpp ~112-146: leftover leftover_run dispatch + leftover
-// leftover_gps_run thin body; leftover leftover_nogps_run call-site flag
-// only) is this slice. nogps_run body, ModeGuided::run body,
-// land_run_normal_or_precland body, land_run_horizontal_control body, and
-// auto_takeoff.run body stay later.
+// (mode_land.cpp ~112-193: leftover leftover_run dispatch + leftover
+// leftover_gps_run thin body + leftover leftover_nogps_run thin body) is on
+// main. ModeGuided::run body, land_run_normal_or_precland body,
+// land_run_horizontal_control body, and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
@@ -947,9 +946,9 @@ public:
 // land_repo/prec_land clear; auto_yaw HOLD. land_start_time / landinggear /
 // precland_statemachine remaining or OOS. leftover leftover_run is
 // ModeLand::run (mode_land.cpp ~112-119) dispatch + leftover leftover_gps_run
-// (mode_land.cpp ~124-146) thin body; leftover leftover_nogps_run is
-// call-site flag only (nogps_run body remaining). mode_from_mode_num still
-// returns nullptr for LAND.
+// (mode_land.cpp ~124-146) thin body + leftover leftover_nogps_run
+// (mode_land.cpp ~151-193) thin body. mode_from_mode_num still returns
+// nullptr for LAND.
 class ModeLand : public Mode {
 public:
     bool control_position{false};
@@ -973,7 +972,7 @@ public:
     // Leftover copter.ap.land_repo_active = false / prec_land_active = false.
     bool leftover_land_repo_active_cleared{false};
     bool leftover_prec_land_active_cleared{false};
-    // Injected copter.ap.land_complete (gps_run disarm gate).
+    // Injected copter.ap.land_complete (gps/nogps disarm gate).
     bool leftover_land_complete{false};
     // Injected motors->get_spool_state() == GROUND_IDLE.
     bool leftover_spool_ground_idle{false};
@@ -983,8 +982,8 @@ public:
     bool leftover_land_pause_elapsed{false};
     // leftover leftover_run entry dispatch recorded.
     bool leftover_run_dispatched{false};
-    // leftover leftover_nogps_run call-site (body remaining).
-    bool leftover_nogps_run{false};
+    // leftover leftover_nogps_run path taken (set by leftover leftover_nogps_run).
+    bool leftover_nogps_run_taken{false};
     // Leftover arming.disarm(LANDED) when land_complete && spool GROUND_IDLE.
     bool leftover_disarm_landed{false};
     // Leftover make_safe_ground_handling when disarmed_or_landed.
@@ -993,6 +992,23 @@ public:
     bool leftover_desired_spool_unlimited{false};
     // Leftover land_run_normal_or_precland(land_pause) call-site (body remaining).
     bool leftover_land_run_normal_or_precland{false};
+    // nogps_run pilot injects (mode_land.cpp ~156-169). Defaults false/safe;
+    // not cleared at leftover_run entry.
+    bool leftover_rc_has_valid_input{false};
+    bool leftover_high_throttle_cancels_land{false};
+    bool leftover_throttle_above_land_cancel{false};
+    bool leftover_land_repositioning{false};
+    // nogps_run pilot / attitude leftover effects (reset at leftover_run entry).
+    bool leftover_land_cancel_by_pilot{false};
+    bool leftover_set_mode_althold_escape{false};
+    bool leftover_log_land_cancelled{false};
+    bool leftover_update_simple_mode{false};
+    bool leftover_get_pilot_lean_angles{false};
+    // Leftover land_run_vertical_control(land_pause) call-site (no body).
+    bool leftover_land_run_vertical{false};
+    // Leftover attitude_control input_euler_angle_roll_pitch_euler_rate_yaw
+    // (nogps horizontal substitute; land_run_horizontal_control body remaining).
+    bool leftover_attitude_nogps{false};
 
     ModeLand() = default;
 
@@ -1031,20 +1047,27 @@ public:
     // leftover effect flags at entry so a later path switch does not leave
     // stale true flags. Inject inputs leftover_land_complete /
     // leftover_spool_ground_idle / leftover_disarmed_or_landed /
-    // leftover_land_pause_elapsed are not cleared. Dispatches leftover
-    // leftover_gps_run or leftover leftover_nogps_run call-site flag.
+    // leftover_land_pause_elapsed / nogps pilot injects are not cleared.
+    // Dispatches leftover leftover_gps_run or leftover leftover_nogps_run.
     void leftover_run() {
         leftover_run_dispatched = false;
-        leftover_nogps_run = false;
+        leftover_nogps_run_taken = false;
         leftover_disarm_landed = false;
         leftover_make_safe_ground_handling = false;
         leftover_desired_spool_unlimited = false;
         leftover_land_run_normal_or_precland = false;
+        leftover_land_cancel_by_pilot = false;
+        leftover_set_mode_althold_escape = false;
+        leftover_log_land_cancelled = false;
+        leftover_update_simple_mode = false;
+        leftover_get_pilot_lean_angles = false;
+        leftover_land_run_vertical = false;
+        leftover_attitude_nogps = false;
         leftover_run_dispatched = true;
         if (control_position) {
             leftover_gps_run();
         } else {
-            leftover_nogps_run = true;
+            leftover_nogps_run();
         }
     }
 
@@ -1064,6 +1087,40 @@ public:
             land_pause = false;
         }
         leftover_land_run_normal_or_precland = true;
+    }
+
+    // Leftover ModeLand::nogps_run (mode_land.cpp ~151-193). Pilot cancel
+    // goes ALT_HOLD directly (no LOITER attempt). Reposition: simple_mode +
+    // lean angles. Flying path: spool + land_pause clear + vertical control
+    // call-site; attitude leftover always after state machine. No motors /
+    // attitude / set_mode objects. land_run_horizontal_control body remaining.
+    void leftover_nogps_run() {
+        leftover_nogps_run_taken = true;
+        if (leftover_rc_has_valid_input) {
+            if (leftover_high_throttle_cancels_land &&
+                leftover_throttle_above_land_cancel) {
+                leftover_log_land_cancelled = true;
+                leftover_land_cancel_by_pilot = true;
+                leftover_set_mode_althold_escape = true;
+            }
+            if (leftover_land_repositioning) {
+                leftover_update_simple_mode = true;
+                leftover_get_pilot_lean_angles = true;
+            }
+        }
+        if (leftover_land_complete && leftover_spool_ground_idle) {
+            leftover_disarm_landed = true;
+        }
+        if (leftover_disarmed_or_landed) {
+            leftover_make_safe_ground_handling = true;
+        } else {
+            leftover_desired_spool_unlimited = true;
+            if (land_pause && leftover_land_pause_elapsed) {
+                land_pause = false;
+            }
+            leftover_land_run_vertical = true;
+        }
+        leftover_attitude_nogps = true;
     }
 };
 

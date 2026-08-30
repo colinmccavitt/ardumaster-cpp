@@ -2675,23 +2675,24 @@ TEST_CASE("ModeLand leftover leftover_run control_position true takes leftover l
     land.control_position = true;
     land.leftover_run();
     REQUIRE(land.leftover_run_dispatched);
-    REQUIRE_FALSE(land.leftover_nogps_run);
+    REQUIRE_FALSE(land.leftover_nogps_run_taken);
+    REQUIRE_FALSE(land.leftover_attitude_nogps);
     REQUIRE(land.leftover_desired_spool_unlimited);
     REQUIRE(land.leftover_land_run_normal_or_precland);
     REQUIRE_FALSE(land.leftover_make_safe_ground_handling);
     REQUIRE_FALSE(land.leftover_disarm_landed);
 }
 
-TEST_CASE("ModeLand leftover leftover_run control_position false sets leftover leftover_nogps_run",
+TEST_CASE("ModeLand leftover leftover_run control_position false takes leftover leftover_nogps_run",
           "[copter][mode]") {
     ModeLand land;
     land.control_position = false;
-    land.leftover_land_complete = true;
-    land.leftover_spool_ground_idle = true;
     land.leftover_run();
     REQUIRE(land.leftover_run_dispatched);
-    REQUIRE(land.leftover_nogps_run);
-    REQUIRE_FALSE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_nogps_run_taken);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_vertical);
+    REQUIRE(land.leftover_attitude_nogps);
     REQUIRE_FALSE(land.leftover_land_run_normal_or_precland);
     REQUIRE_FALSE(land.leftover_disarm_landed);
     REQUIRE_FALSE(land.leftover_make_safe_ground_handling);
@@ -2772,6 +2773,153 @@ TEST_CASE("ModeLand leftover leftover_gps_run keeps land_pause when not elapsed"
     REQUIRE(land.leftover_land_run_normal_or_precland);
 }
 
+TEST_CASE("ModeLand leftover leftover_nogps_run disarm when land_complete and spool ground_idle",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.leftover_land_complete = true;
+    land.leftover_spool_ground_idle = true;
+    land.leftover_run();
+    REQUIRE(land.leftover_nogps_run_taken);
+    REQUIRE(land.leftover_disarm_landed);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_vertical);
+    REQUIRE(land.leftover_attitude_nogps);
+    REQUIRE_FALSE(land.leftover_land_run_normal_or_precland);
+}
+
+TEST_CASE("ModeLand leftover leftover_nogps_run make_safe when disarmed_or_landed",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.leftover_disarmed_or_landed = true;
+    land.leftover_land_complete = true;
+    land.leftover_spool_ground_idle = true;
+    land.land_pause = true;
+    land.leftover_land_pause_elapsed = true;
+    land.leftover_run();
+    REQUIRE(land.leftover_disarm_landed);
+    REQUIRE(land.leftover_make_safe_ground_handling);
+    REQUIRE_FALSE(land.leftover_desired_spool_unlimited);
+    REQUIRE_FALSE(land.leftover_land_run_vertical);
+    REQUIRE(land.leftover_attitude_nogps);
+    REQUIRE(land.land_pause);
+}
+
+TEST_CASE("ModeLand leftover leftover_nogps_run clears land_pause when elapsed",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.land_pause = true;
+    land.leftover_land_pause_elapsed = true;
+    land.leftover_run();
+    REQUIRE_FALSE(land.land_pause);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_vertical);
+    REQUIRE(land.leftover_attitude_nogps);
+}
+
+TEST_CASE("ModeLand leftover leftover_nogps_run keeps land_pause when not elapsed",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.land_pause = true;
+    land.leftover_land_pause_elapsed = false;
+    land.leftover_run();
+    REQUIRE(land.land_pause);
+    REQUIRE(land.leftover_land_run_vertical);
+    REQUIRE(land.leftover_attitude_nogps);
+}
+
+TEST_CASE("ModeLand leftover leftover_nogps_run pilot cancel sets althold escape",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.leftover_rc_has_valid_input = true;
+    land.leftover_high_throttle_cancels_land = true;
+    land.leftover_throttle_above_land_cancel = true;
+    land.leftover_run();
+    REQUIRE(land.leftover_land_cancel_by_pilot);
+    REQUIRE(land.leftover_set_mode_althold_escape);
+    REQUIRE(land.leftover_log_land_cancelled);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_vertical);
+    REQUIRE(land.leftover_attitude_nogps);
+    REQUIRE_FALSE(land.leftover_update_simple_mode);
+    REQUIRE_FALSE(land.leftover_get_pilot_lean_angles);
+}
+
+TEST_CASE("ModeLand leftover leftover_nogps_run pilot cancel requires high throttle behavior",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.leftover_rc_has_valid_input = true;
+    land.leftover_high_throttle_cancels_land = false;
+    land.leftover_throttle_above_land_cancel = true;
+    land.leftover_run();
+    REQUIRE_FALSE(land.leftover_land_cancel_by_pilot);
+    REQUIRE_FALSE(land.leftover_set_mode_althold_escape);
+    REQUIRE_FALSE(land.leftover_log_land_cancelled);
+}
+
+TEST_CASE("ModeLand leftover leftover_nogps_run pilot cancel requires throttle above cancel",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.leftover_rc_has_valid_input = true;
+    land.leftover_high_throttle_cancels_land = true;
+    land.leftover_throttle_above_land_cancel = false;
+    land.leftover_run();
+    REQUIRE_FALSE(land.leftover_land_cancel_by_pilot);
+    REQUIRE_FALSE(land.leftover_set_mode_althold_escape);
+}
+
+TEST_CASE("ModeLand leftover leftover_nogps_run reposition sets simple and lean angles",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.leftover_rc_has_valid_input = true;
+    land.leftover_land_repositioning = true;
+    land.leftover_run();
+    REQUIRE(land.leftover_update_simple_mode);
+    REQUIRE(land.leftover_get_pilot_lean_angles);
+    REQUIRE_FALSE(land.leftover_land_cancel_by_pilot);
+    REQUIRE(land.leftover_land_run_vertical);
+    REQUIRE(land.leftover_attitude_nogps);
+}
+
+TEST_CASE("ModeLand leftover leftover_nogps_run skips pilot when rc invalid",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.leftover_rc_has_valid_input = false;
+    land.leftover_high_throttle_cancels_land = true;
+    land.leftover_throttle_above_land_cancel = true;
+    land.leftover_land_repositioning = true;
+    land.leftover_run();
+    REQUIRE_FALSE(land.leftover_land_cancel_by_pilot);
+    REQUIRE_FALSE(land.leftover_set_mode_althold_escape);
+    REQUIRE_FALSE(land.leftover_update_simple_mode);
+    REQUIRE_FALSE(land.leftover_get_pilot_lean_angles);
+    REQUIRE(land.leftover_attitude_nogps);
+}
+
+TEST_CASE("ModeLand leftover leftover_nogps_run cancel and reposition together",
+          "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.leftover_rc_has_valid_input = true;
+    land.leftover_high_throttle_cancels_land = true;
+    land.leftover_throttle_above_land_cancel = true;
+    land.leftover_land_repositioning = true;
+    land.leftover_run();
+    REQUIRE(land.leftover_land_cancel_by_pilot);
+    REQUIRE(land.leftover_set_mode_althold_escape);
+    REQUIRE(land.leftover_log_land_cancelled);
+    REQUIRE(land.leftover_update_simple_mode);
+    REQUIRE(land.leftover_get_pilot_lean_angles);
+}
+
 TEST_CASE("ModeLand run override calls leftover leftover_run", "[copter][mode]") {
     ModeLand land;
     land.control_position = true;
@@ -2779,7 +2927,27 @@ TEST_CASE("ModeLand run override calls leftover leftover_run", "[copter][mode]")
     REQUIRE(land.leftover_run_dispatched);
     REQUIRE(land.leftover_desired_spool_unlimited);
     REQUIRE(land.leftover_land_run_normal_or_precland);
-    REQUIRE_FALSE(land.leftover_nogps_run);
+    REQUIRE_FALSE(land.leftover_nogps_run_taken);
+}
+
+TEST_CASE("ModeLand leftover leftover_run resets stale nogps effect flags", "[copter][mode]") {
+    ModeLand land;
+    land.control_position = false;
+    land.leftover_desired_spool_unlimited = true;
+    land.leftover_land_run_vertical = true;
+    land.leftover_attitude_nogps = true;
+    land.leftover_disarm_landed = true;
+    land.leftover_land_cancel_by_pilot = true;
+    land.leftover_get_pilot_lean_angles = true;
+    land.control_position = true;
+    land.leftover_run();
+    REQUIRE_FALSE(land.leftover_nogps_run_taken);
+    REQUIRE_FALSE(land.leftover_land_run_vertical);
+    REQUIRE_FALSE(land.leftover_attitude_nogps);
+    REQUIRE_FALSE(land.leftover_land_cancel_by_pilot);
+    REQUIRE_FALSE(land.leftover_get_pilot_lean_angles);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_normal_or_precland);
 }
 
 TEST_CASE("ModeLand leftover leftover_run resets stale gps effect flags", "[copter][mode]") {
@@ -2790,8 +2958,10 @@ TEST_CASE("ModeLand leftover leftover_run resets stale gps effect flags", "[copt
     land.leftover_disarm_landed = true;
     land.control_position = false;
     land.leftover_run();
-    REQUIRE(land.leftover_nogps_run);
-    REQUIRE_FALSE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_nogps_run_taken);
+    REQUIRE(land.leftover_desired_spool_unlimited);
+    REQUIRE(land.leftover_land_run_vertical);
+    REQUIRE(land.leftover_attitude_nogps);
     REQUIRE_FALSE(land.leftover_land_run_normal_or_precland);
     REQUIRE_FALSE(land.leftover_disarm_landed);
 }
@@ -2799,8 +2969,8 @@ TEST_CASE("ModeLand leftover leftover_run resets stale gps effect flags", "[copt
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
-    REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 33);
+    REQUIRE(mode_this_slice_count() == 1);
+    REQUIRE(mode_on_main_count() == 34);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -2833,7 +3003,7 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeRTL::init", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeRTL::run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeLand::init", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("ModeLand::run", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeLand::run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));
