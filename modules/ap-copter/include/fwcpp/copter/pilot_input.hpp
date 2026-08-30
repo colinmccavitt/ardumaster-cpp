@@ -17,8 +17,8 @@
 //
 // Not copied from quadplane_pilot_input.hpp (different vehicle, cd-based
 // lean path). Mode::run() bodies stay CCP-039. AutoYaw get_heading
-// PILOT_RATE vs HOLD is autoyaw.hpp (on main). weathervane stays leftover
-// (see leftover catalog below).
+// PILOT_RATE vs HOLD is autoyaw.hpp (on main). weathervane leftover tick
+// is AutoYaw::update_weathervane (this slice; no AC_WeatherVane math).
 
 #include <algorithm>
 #include <cmath>
@@ -224,8 +224,9 @@ inline constexpr PortItem kCompleteness[] = {
      "Attitude.cpp ~129-137; zero dn uses |speed_up|"},
     {"AutoYaw state machine", PortStatus::kOnMain,
      "autoyaw.cpp get_heading ~330-347 PILOT_RATE vs HOLD"},
-    {"weathervane", PortStatus::kRemaining, "update_weathervane; WEATHERVANE_ENABLED"},
-    {"get_pilot_desired_velocity", PortStatus::kThisSlice,
+    {"weathervane", PortStatus::kThisSlice,
+     "autoyaw.cpp update_weathervane ~376-401; injected get_yaw_out; no AC_WeatherVane"},
+    {"get_pilot_desired_velocity", PortStatus::kOnMain,
      "mode.cpp ~572-596; body_to_earth2D + square-to-circle"},
 };
 

@@ -101,10 +101,9 @@ TEST_CASE("above deadband is positive climb using speed_up", "[copter][pilot]") 
 }
 
 TEST_CASE("leftover remaining_count", "[copter][pilot][leftover]") {
-    REQUIRE(remaining_count() == 1);
-    REQUIRE(remaining_count() > 0);
+    REQUIRE(remaining_count() == 0);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 9);
+    REQUIRE(on_main_count() == 10);
     REQUIRE(out_of_scope_count() == 0);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
@@ -117,8 +116,8 @@ TEST_CASE("leftover remaining_count", "[copter][pilot][leftover]") {
     REQUIRE(completeness_has("get_pilot_desired_climb_rate", PortStatus::kOnMain));
     REQUIRE(completeness_has("get_pilot_speed_dn", PortStatus::kOnMain));
     REQUIRE(completeness_has("AutoYaw state machine", PortStatus::kOnMain));
-    REQUIRE(completeness_has("weathervane", PortStatus::kRemaining));
-    REQUIRE(completeness_has("get_pilot_desired_velocity", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("weathervane", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("get_pilot_desired_velocity", PortStatus::kOnMain));
 }
 
 TEST_CASE("rc_input_to_roll_pitch_rad matches tan/atan mapping", "[copter][pilot]") {
