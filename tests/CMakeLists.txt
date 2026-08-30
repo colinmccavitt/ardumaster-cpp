@@ -1024,3 +1024,8 @@ catch_discover_tests(arming_test)
 add_executable(mode_loiter_test mode_loiter_test.cpp)
 target_link_libraries(mode_loiter_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_loiter_test)
+
+# CCP-041 slice 1: land_detector leftover scaffold + catalog.
+add_executable(land_detector_test land_detector_test.cpp)
+target_link_libraries(land_detector_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(land_detector_test)
