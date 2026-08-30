@@ -42,6 +42,7 @@ using fwcpp::copter::AutoDisarmCheckInputs;
 using fwcpp::copter::StandbyUpdateInputs;
 using fwcpp::copter::LostVehicleCheckInputs;
 using fwcpp::copter::TakeoffCheckInputs;
+using fwcpp::copter::GetWpDistanceMInputs;
 using fwcpp::copter::DesiredSpoolState;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
@@ -82,6 +83,7 @@ using fwcpp::copter::auto_disarm_check;
 using fwcpp::copter::standby_update;
 using fwcpp::copter::lost_vehicle_check;
 using fwcpp::copter::takeoff_check;
+using fwcpp::copter::get_wp_distance_m;
 using fwcpp::copter::kLostVehicleDelay;
 using fwcpp::copter::kLostVehicleStickThreshold;
 using fwcpp::copter::kTakeoffCheckAvgLoadMax;
@@ -113,10 +115,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 26", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 5);
+TEST_CASE("catalog remaining_count stays open after slice 27", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 4);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 30);
+    REQUIRE(on_main_count() == 31);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -150,8 +152,8 @@ TEST_CASE("catalog remaining_count stays open after slice 26", "[copter][leftove
     REQUIRE(completeness_has("Copter::auto_disarm_check", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::standby_update", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::lost_vehicle_check", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::takeoff_check", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::get_wp_distance_m", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::takeoff_check", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::get_wp_distance_m", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -2089,4 +2091,19 @@ TEST_CASE("takeoff_check block landed !load stays blocked; 2001ms gcs leftover",
     REQUIRE(warned.spoolup_block);
     REQUIRE(warned.warning_ms == in.now_ms);
     REQUIRE(warned.gcs_cpu_overload);
+}
+
+TEST_CASE("get_wp_distance_m copies injected distance and always returns true",
+          "[copter][get_wp_distance_m]") {
+    float distance = -1.0f;
+    REQUIRE(get_wp_distance_m(distance, GetWpDistanceMInputs{.wp_distance_m = 12.5f}));
+    REQUIRE(distance == 12.5f);
+
+    distance = 99.0f;
+    REQUIRE(get_wp_distance_m(distance, GetWpDistanceMInputs{.wp_distance_m = 0.0f}));
+    REQUIRE(distance == 0.0f);
+
+    distance = 7.0f;
+    REQUIRE(get_wp_distance_m(distance));
+    REQUIRE(distance == 0.0f);
 }
