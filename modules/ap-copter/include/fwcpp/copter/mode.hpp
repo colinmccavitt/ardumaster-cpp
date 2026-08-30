@@ -22,14 +22,17 @@
 // is on main. ModeAuto::land_run leftover is on main. ModeAuto::rtl_run
 // leftover is on main. ModeAuto::loiter_run leftover is on main.
 // ModeAuto::circle_run leftover is on main. ModeAuto::loiter_to_alt_run
-// leftover (ground-handling + reached_xy leftover_wp_run reuse) is this
-// slice. loiter_start/alt/horizontal, nav_guided_run, ModeRTL/ModeLand,
-// land_run_normal_or_precland body, and auto_takeoff.run body stay later.
+// leftover (ground-handling / reached_xy leftover_wp_run / loiter_start /
+// alt_error / land_run_horizontal flags) is this slice. sqrt_controller /
+// avoidance / climb, nav_guided_run, ModeRTL/ModeLand,
+// land_run_normal_or_precland body, land_run_horizontal_control body,
+// and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
 #include <fwcpp/copter/pilot_input.hpp>
 
+#include <cmath>
 #include <cstdint>
 
 namespace fwcpp::copter {
@@ -120,7 +123,7 @@ public:
 // rtl_run leftover (mode_auto.cpp ~1129-1133, on main),
 // loiter_run leftover (mode_auto.cpp ~1162-1180, on main),
 // circle_run leftover (mode_auto.cpp ~1135-1148, on main), and
-// loiter_to_alt_run leftover (mode_auto.cpp ~1184-1199, this slice).
+// loiter_to_alt_run leftover (mode_auto.cpp ~1184-1223, this slice).
 // Other *_run bodies and set_submode stay later.
 class ModeAuto : public Mode {
 public:
@@ -238,8 +241,34 @@ public:
     bool leftover_loiter_to_alt_reached_xy{false};
     // Leftover wp_nav->reached_wp_destination_NE() query when checking xy.
     bool leftover_reached_wp_destination_ne{false};
-    // loiter_start_done / alt_error / land_run_horizontal_control remaining.
+    // True when leftover_loiter_to_alt_run entered the rest leftover
+    // (loiter_start / alt_error / land_run_horizontal flags).
     bool leftover_loiter_to_alt_rest{false};
+    // Injected loiter_to_alt.loiter_start_done. Becomes true after the
+    // first rest-path loiter_start leftover.
+    bool leftover_loiter_start_done{false};
+    // Injected pos_control->NE_is_active().
+    bool leftover_ne_is_active{false};
+    // Leftover pos_control->NE_set_max_speed_accel_m.
+    bool leftover_ne_set_max_speed_accel{false};
+    // Leftover pos_control->NE_set_correction_speed_accel_m.
+    bool leftover_ne_set_correction_speed_accel{false};
+    // Leftover pos_control->NE_init_controller() when !NE_is_active.
+    bool leftover_ne_init_controller{false};
+    // Injected copter.current_loc.alt (cm).
+    std::int32_t current_loc_alt_cm{0};
+    // Injected loiter_to_alt.alt_m.
+    float leftover_loiter_to_alt_alt_m{0.0f};
+    // Injected previous loiter_to_alt.alt_error_m (sign-change check).
+    float leftover_prev_alt_error_m{0.0f};
+    // Computed alt_error_m this tick.
+    float leftover_alt_error_m{0.0f};
+    // Leftover loiter_to_alt.reached_alt.
+    bool leftover_reached_alt{false};
+    // Leftover land_run_horizontal_control() call (body remaining).
+    bool leftover_land_run_horizontal_control{false};
+    // sqrt_controller / avoidance / D_update remaining this slice.
+    bool leftover_loiter_to_alt_climb{false};
 
     ModeAuto() = default;
 
@@ -316,12 +345,13 @@ public:
         pos_D_update = true;
         input_thrust_vector_heading = true;
     }
-    // Leftover ModeAuto::loiter_to_alt_run (mode_auto.cpp ~1184-1199).
-    // Ground-handling + reached_xy leftover_wp_run reuse. No motors /
-    // wp_nav / pos_control. Switch still records loiter_to_alt_run as the
+    // Leftover ModeAuto::loiter_to_alt_run (mode_auto.cpp ~1184-1223).
+    // Ground-handling + reached_xy leftover_wp_run reuse + loiter_start /
+    // alt_error / land_run_horizontal flags. No motors / wp_nav /
+    // pos_control. Switch still records loiter_to_alt_run as the
     // "would call loiter_to_alt_run" leftover, then this helper.
-    // loiter_start_done / alt_error / land_run_horizontal_control remaining.
-    // Do not call leftover_loiter_run.
+    // sqrt_controller / avoidance / climb remaining. Do not call
+    // leftover_loiter_run.
     void leftover_loiter_to_alt_run() {
         if (disarmed_or_landed || !motors_interlock) {
             make_safe_ground_handling = true;
@@ -332,7 +362,24 @@ public:
             leftover_wp_run();
             return;
         }
-        leftover_loiter_to_alt_rest = false;
+        leftover_loiter_to_alt_rest = true;
+        if (!leftover_loiter_start_done) {
+            leftover_ne_set_max_speed_accel = true;
+            leftover_ne_set_correction_speed_accel = true;
+            if (!leftover_ne_is_active) {
+                leftover_ne_init_controller = true;
+            }
+            leftover_loiter_start_done = true;
+        }
+        leftover_alt_error_m = static_cast<float>(current_loc_alt_cm) * 0.01f -
+                               leftover_loiter_to_alt_alt_m;
+        if (fabsf(leftover_alt_error_m) < 0.05f) {
+            leftover_reached_alt = true;
+        } else if (leftover_alt_error_m * leftover_prev_alt_error_m < 0.0f) {
+            leftover_reached_alt = true;
+        }
+        leftover_prev_alt_error_m = leftover_alt_error_m;
+        leftover_land_run_horizontal_control = true;
     }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
@@ -340,7 +387,7 @@ public:
     // (~166-174), takeoff_run leftover (~1075-1083), wp_run leftover
     // (~1087-1107), land_run leftover (~1111-1125), rtl_run leftover
     // (~1129-1133), loiter_run leftover (~1162-1180), circle_run leftover
-    // (~1135-1148), and loiter_to_alt_run leftover (~1184-1199). Switch
+    // (~1135-1148), and loiter_to_alt_run leftover (~1184-1223). Switch
     // always runs, including while still waiting_to_start. No AP_Mission /
     // detector / GCS / logger / ModeRTL / circle_nav / *_run bodies. run
     // has no ctx.
@@ -386,6 +433,12 @@ public:
         leftover_circle_nav_update = false;
         leftover_reached_wp_destination_ne = false;
         leftover_loiter_to_alt_rest = false;
+        leftover_ne_set_max_speed_accel = false;
+        leftover_ne_set_correction_speed_accel = false;
+        leftover_ne_init_controller = false;
+        leftover_reached_alt = false;
+        leftover_land_run_horizontal_control = false;
+        leftover_loiter_to_alt_climb = false;
 
         switch (submode) {
         case SubMode::TAKEOFF:
