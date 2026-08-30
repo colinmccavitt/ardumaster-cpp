@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <cmath>
 #include <cstdint>
 #include <string_view>
 
@@ -36,6 +37,7 @@ using fwcpp::copter::ApValueInputs;
 using fwcpp::copter::InitSimpleBearingInputs;
 using fwcpp::copter::SimpleMode;
 using fwcpp::copter::UpdateSimpleModeInputs;
+using fwcpp::copter::UpdateSuperSimpleBearingInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -70,6 +72,8 @@ using fwcpp::copter::one_hz_loop;
 using fwcpp::copter::ap_value;
 using fwcpp::copter::init_simple_bearing;
 using fwcpp::copter::update_simple_mode;
+using fwcpp::copter::update_super_simple_bearing;
+using fwcpp::copter::kSuperSimpleRadiusM;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
@@ -95,10 +99,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 21", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 10);
+TEST_CASE("catalog remaining_count stays open after slice 22", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 9);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 25);
+    REQUIRE(on_main_count() == 26);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -127,8 +131,9 @@ TEST_CASE("catalog remaining_count stays open after slice 21", "[copter][leftove
     REQUIRE(completeness_has("Copter::one_hz_loop", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::ap_value", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::init_simple_bearing", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::update_simple_mode", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::update_simple_mode", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::auto_disarm_check", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -1626,4 +1631,101 @@ TEST_CASE("update_simple_mode SUPERSIMPLE uses super_simple trig",
     const auto simple_fx = update_simple_mode(in);
     REQUIRE(simple_fx.roll_control_in == 10.0f);
     REQUIRE(simple_fx.pitch_control_in == 20.0f);
+}
+
+TEST_CASE("update_super_simple_bearing !force NONE does not update",
+          "[copter][update_super_simple_bearing]") {
+    REQUIRE(kSuperSimpleRadiusM == 10.0f);
+
+    UpdateSuperSimpleBearingInputs in{};
+    in.force_update = false;
+    in.simple_mode = SimpleMode::NONE;
+    in.home_distance_m = 20.0f;
+    in.home_bearing_rad = fwcpp::math::radians(20.0f);
+    in.super_simple_last_bearing_rad = 0.0f;
+
+    const auto fx = update_super_simple_bearing(in);
+    REQUIRE_FALSE(fx.updated);
+    REQUIRE(fx.skipped_not_supersimple);
+    REQUIRE_FALSE(fx.skipped_inside_radius);
+    REQUIRE_FALSE(fx.skipped_bearing_unchanged);
+    REQUIRE(fx.super_simple_last_bearing_rad == 0.0f);
+}
+
+TEST_CASE("update_super_simple_bearing !force SUPERSIMPLE inside radius does not update",
+          "[copter][update_super_simple_bearing]") {
+    UpdateSuperSimpleBearingInputs in{};
+    in.force_update = false;
+    in.simple_mode = SimpleMode::SUPERSIMPLE;
+    in.home_distance_m = 9.9f;
+    in.home_bearing_rad = fwcpp::math::radians(20.0f);
+    in.super_simple_last_bearing_rad = 0.0f;
+
+    const auto fx = update_super_simple_bearing(in);
+    REQUIRE_FALSE(fx.updated);
+    REQUIRE(fx.skipped_inside_radius);
+    REQUIRE_FALSE(fx.skipped_not_supersimple);
+    REQUIRE(fx.super_simple_last_bearing_rad == 0.0f);
+}
+
+TEST_CASE("update_super_simple_bearing !force SUPERSIMPLE bearing change under 5deg",
+          "[copter][update_super_simple_bearing]") {
+    UpdateSuperSimpleBearingInputs in{};
+    in.force_update = false;
+    in.simple_mode = SimpleMode::SUPERSIMPLE;
+    in.home_distance_m = kSuperSimpleRadiusM;
+    in.home_bearing_rad = fwcpp::math::radians(4.0f);
+    in.super_simple_last_bearing_rad = 0.0f;
+
+    const auto fx = update_super_simple_bearing(in);
+    REQUIRE_FALSE(fx.updated);
+    REQUIRE(fx.skipped_bearing_unchanged);
+    REQUIRE_FALSE(fx.skipped_not_supersimple);
+    REQUIRE_FALSE(fx.skipped_inside_radius);
+    REQUIRE(fx.super_simple_last_bearing_rad == 0.0f);
+}
+
+TEST_CASE("update_super_simple_bearing force_update bypasses mode and radius",
+          "[copter][update_super_simple_bearing]") {
+    UpdateSuperSimpleBearingInputs in{};
+    in.force_update = true;
+    in.simple_mode = SimpleMode::NONE;
+    in.home_distance_m = 1.0f;
+    in.home_bearing_rad = fwcpp::math::radians(4.0f);
+    in.super_simple_last_bearing_rad = 0.0f;
+
+    const auto under = update_super_simple_bearing(in);
+    REQUIRE_FALSE(under.updated);
+    REQUIRE(under.skipped_bearing_unchanged);
+    REQUIRE_FALSE(under.skipped_not_supersimple);
+    REQUIRE_FALSE(under.skipped_inside_radius);
+    REQUIRE(under.super_simple_last_bearing_rad == 0.0f);
+
+    in.home_bearing_rad = fwcpp::math::radians(10.0f);
+    const auto fx = update_super_simple_bearing(in);
+    REQUIRE(fx.updated);
+    REQUIRE_FALSE(fx.skipped_not_supersimple);
+    REQUIRE_FALSE(fx.skipped_inside_radius);
+    REQUIRE_FALSE(fx.skipped_bearing_unchanged);
+    REQUIRE(fx.super_simple_last_bearing_rad == in.home_bearing_rad);
+    const float angle_rad = fx.super_simple_last_bearing_rad + fwcpp::math::radians(180.0f);
+    REQUIRE(fx.super_simple_cos_yaw == std::cos(angle_rad));
+    REQUIRE(fx.super_simple_sin_yaw == std::sin(angle_rad));
+}
+
+TEST_CASE("update_super_simple_bearing writes last_bearing and reverse-home trig",
+          "[copter][update_super_simple_bearing]") {
+    UpdateSuperSimpleBearingInputs in{};
+    in.force_update = false;
+    in.simple_mode = SimpleMode::SUPERSIMPLE;
+    in.home_distance_m = kSuperSimpleRadiusM;
+    in.home_bearing_rad = fwcpp::math::radians(30.0f);
+    in.super_simple_last_bearing_rad = 0.0f;
+
+    const auto fx = update_super_simple_bearing(in);
+    REQUIRE(fx.updated);
+    REQUIRE(fx.super_simple_last_bearing_rad == in.home_bearing_rad);
+    const float angle_rad = fx.super_simple_last_bearing_rad + fwcpp::math::radians(180.0f);
+    REQUIRE(fx.super_simple_cos_yaw == std::cos(angle_rad));
+    REQUIRE(fx.super_simple_sin_yaw == std::sin(angle_rad));
 }

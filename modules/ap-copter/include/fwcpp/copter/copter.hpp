@@ -31,4 +31,5 @@
 #include <fwcpp/copter/ap_value.hpp>
 #include <fwcpp/copter/init_simple_bearing.hpp>
 #include <fwcpp/copter/update_simple_mode.hpp>
+#include <fwcpp/copter/update_super_simple_bearing.hpp>
 #include <fwcpp/copter/update_throttle_hover.hpp>
