@@ -1,16 +1,15 @@
 #pragma once
 
-// CCP-042 failsafe leftover — ArduCopter radio failsafe (events.cpp
-// failsafe_radio_on_event FS_THR_ENABLE → FailsafeAction; do_failsafe_action
-// dispatcher → set_mode_* flags; AP_State.cpp set_failsafe_radio edge).
-// failsafe.cpp CPU watchdog (failsafe_enable / failsafe_check) stays catalog
-// remaining.
+// CCP-042 failsafe leftover — ArduCopter radio + GCS failsafe (events.cpp
+// failsafe_radio_on_event FS_THR_ENABLE → FailsafeAction; failsafe_gcs_check
+// thin inject → do_failsafe_action RTL; do_failsafe_action dispatcher →
+// set_mode_* flags; AP_State.cpp set_failsafe_radio / set_failsafe_gcs edge).
 //
-// ADR-0012: no GCS / Notify / logger objects — announce_failsafe and
-// mode-change notify are bool flags. Inject motors_armed + radio_failsafe.
-// Override ladder (continue-landing/auto/guided), battery/terrain/deadreckon
-// sources, GCS failsafe, crash_check remain (see failsafe_leftover.hpp).
-// Do NOT copy Rust COP-019.
+// Slice 4 close: leftover_failsafe_gcs_check; secondary sources / override
+// ladder / crash_check / CPU watchdog / ModeBrake body catalogued OOS
+// (see failsafe_leftover.hpp). ADR-0012: no GCS / Notify / logger objects —
+// announce_failsafe and mode-change notify are bool flags. Do NOT copy Rust
+// COP-019.
 
 #include <cstddef>
 #include <cstdint>
@@ -41,11 +40,13 @@ enum class FailsafeAction : std::uint8_t {
     BrakeLand = 7,          // BRAKE_LAND
 };
 
-// Injected inputs for radio-failsafe thin gate. radio_failsafe stands in for
-// failsafe.radio already latched (or the edge inject from set_failsafe_radio).
+// Injected inputs for radio/GCS failsafe thin gates. radio_failsafe /
+// gcs_failsafe stand in for failsafe.radio / failsafe.gcs already latched
+// (or the edge inject from set_failsafe_radio / set_failsafe_gcs).
 struct FailsafeInputs {
     bool motors_armed{false};
     bool radio_failsafe{false};
+    bool gcs_failsafe{false};
 };
 
 struct FailsafeEffects {
@@ -63,16 +64,18 @@ struct FailsafeEffects {
     bool leftover_set_mode_brake_or_land{false};
     // TERMINATE → arming.disarm / afs.gcs_terminate (no set_mode).
     bool leftover_terminate{false};
-    // ADR-0012: announce_failsafe("Radio") / GCS send_text as flags.
+    // ADR-0012: announce_failsafe("Radio" / "GCS") / GCS send_text as flags.
     bool gcs_announce_radio_failsafe{false};
+    bool gcs_announce_gcs_failsafe{false};
     bool notify_failsafe_mode_change{false};
     bool radio_failsafe_acted{false};
+    bool gcs_failsafe_acted{false};
     // Stand-in for do_failsafe_action call site / body entered (events.cpp ~485).
     bool leftover_do_failsafe_action{false};
 };
 
 // Thin leftover: armed && radio failsafe inject → RTL-or-land flags.
-// Full override ladder remains in the catalog.
+// Full override ladder is ticket-OOS (see catalog).
 inline void leftover_failsafe_radio_check(const FailsafeInputs& in,
                                           FailsafeEffects& fx) {
     if (!(in.motors_armed && in.radio_failsafe)) {
@@ -163,6 +166,19 @@ inline void leftover_do_failsafe_action(FailsafeAction action, FailsafeEffects& 
     }
     leftover_do_failsafe_action(desired_action, fx);
     return desired_action;
+}
+
+// Thin leftover: armed && gcs_failsafe inject → do_failsafe_action(RTL).
+// No heartbeat-age / FS_GCS_ENABLE table / override ladder this ticket
+// (events.cpp failsafe_gcs_check ~125 + failsafe_gcs_on_event ~163).
+inline void leftover_failsafe_gcs_check(const FailsafeInputs& in,
+                                        FailsafeEffects& fx) {
+    if (!(in.motors_armed && in.gcs_failsafe)) {
+        return;
+    }
+    fx.gcs_failsafe_acted = true;
+    fx.gcs_announce_gcs_failsafe = true;
+    leftover_do_failsafe_action(FailsafeAction::Rtl, fx);
 }
 
 }  // namespace fwcpp::copter

@@ -8,6 +8,7 @@ using fwcpp::copter::FailsafeEffects;
 using fwcpp::copter::FailsafeInputs;
 using fwcpp::copter::FsThrEnable;
 using fwcpp::copter::leftover_do_failsafe_action;
+using fwcpp::copter::leftover_failsafe_gcs_check;
 using fwcpp::copter::leftover_failsafe_radio_check;
 using fwcpp::copter::leftover_failsafe_radio_on_event;
 using fwcpp::copter::leftover_set_mode_rtl_or_land;
@@ -235,12 +236,54 @@ TEST_CASE("leftover_failsafe_radio_on_event unknown FS_THR → Land flags",
     REQUIRE(fx.leftover_set_mode_land_with_pause);
 }
 
+TEST_CASE("leftover_failsafe_gcs_check disarmed ignores gcs failsafe",
+          "[copter][failsafe]") {
+    FailsafeInputs in{};
+    in.motors_armed = false;
+    in.gcs_failsafe = true;
+    FailsafeEffects fx{};
+    leftover_failsafe_gcs_check(in, fx);
+    REQUIRE_FALSE(fx.gcs_failsafe_acted);
+    REQUIRE_FALSE(fx.leftover_do_failsafe_action);
+    REQUIRE_FALSE(fx.leftover_set_mode_rtl_or_land);
+    REQUIRE_FALSE(fx.gcs_announce_gcs_failsafe);
+}
+
+TEST_CASE("leftover_failsafe_gcs_check armed without gcs inject is quiet",
+          "[copter][failsafe]") {
+    FailsafeInputs in{};
+    in.motors_armed = true;
+    in.gcs_failsafe = false;
+    FailsafeEffects fx{};
+    leftover_failsafe_gcs_check(in, fx);
+    REQUIRE_FALSE(fx.gcs_failsafe_acted);
+    REQUIRE_FALSE(fx.leftover_do_failsafe_action);
+    REQUIRE_FALSE(fx.leftover_set_mode_rtl_or_land);
+    REQUIRE_FALSE(fx.gcs_announce_gcs_failsafe);
+}
+
+TEST_CASE("leftover_failsafe_gcs_check armed + gcs inject → do_failsafe_action RTL",
+          "[copter][failsafe]") {
+    FailsafeInputs in{};
+    in.motors_armed = true;
+    in.gcs_failsafe = true;
+    FailsafeEffects fx{};
+    leftover_failsafe_gcs_check(in, fx);
+    REQUIRE(fx.gcs_failsafe_acted);
+    REQUIRE(fx.gcs_announce_gcs_failsafe);
+    REQUIRE(fx.leftover_do_failsafe_action);
+    REQUIRE(fx.leftover_set_mode_rtl_or_land);
+    REQUIRE(fx.notify_failsafe_mode_change);
+    REQUIRE_FALSE(fx.radio_failsafe_acted);
+    REQUIRE_FALSE(fx.gcs_announce_radio_failsafe);
+}
+
 TEST_CASE("failsafe leftover catalog remaining_count",
           "[copter][failsafe][leftover]") {
-    REQUIRE(remaining_count() == 6);
-    REQUIRE(this_slice_count() == 5);
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(this_slice_count() == 6);
     REQUIRE(on_main_count() == 2);
-    REQUIRE(out_of_scope_count() == 2);
+    REQUIRE(out_of_scope_count() == 7);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
@@ -248,16 +291,17 @@ TEST_CASE("failsafe leftover catalog remaining_count",
     REQUIRE(completeness_has("leftover_set_mode_rtl_or_land", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_failsafe_radio_on_event", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_do_failsafe_action", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("leftover_failsafe_gcs_check", PortStatus::kThisSlice));
     REQUIRE(completeness_has("failsafe_enable call site", PortStatus::kOnMain));
     REQUIRE(completeness_has("ModeRTL / ModeLand", PortStatus::kOnMain));
-    REQUIRE(completeness_has("failsafe_radio_on_event override ladder", PortStatus::kRemaining));
-    REQUIRE(completeness_has("failsafe_gcs_check / failsafe_gcs_on_event", PortStatus::kRemaining));
-    REQUIRE(completeness_has("battery / terrain / deadreckon failsafe", PortStatus::kRemaining));
-    REQUIRE(completeness_has("crash_check / thrust_loss / yaw_imbalance", PortStatus::kRemaining));
-    REQUIRE(completeness_has("failsafe.cpp CPU watchdog", PortStatus::kRemaining));
-    REQUIRE(completeness_has("ModeBrake failsafe path", PortStatus::kRemaining));
+    REQUIRE(completeness_has("failsafe_radio_on_event override ladder", PortStatus::kOutOfScope));
+    REQUIRE(completeness_has("battery / terrain / deadreckon failsafe", PortStatus::kOutOfScope));
+    REQUIRE(completeness_has("failsafe.cpp CPU watchdog", PortStatus::kOutOfScope));
+    REQUIRE(completeness_has("crash_check / thrust_loss / yaw_imbalance", PortStatus::kOutOfScope));
+    REQUIRE(completeness_has("ModeBrake failsafe path", PortStatus::kOutOfScope));
     REQUIRE(completeness_has("GCS / Notify / logger objects", PortStatus::kOutOfScope));
+    REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
     REQUIRE_FALSE(completeness_has("leftover_do_failsafe_action", PortStatus::kRemaining));
-    REQUIRE_FALSE(completeness_has("do_failsafe_action / battery / terrain / deadreckon",
+    REQUIRE_FALSE(completeness_has("failsafe_gcs_check / failsafe_gcs_on_event",
                                    PortStatus::kRemaining));
 }

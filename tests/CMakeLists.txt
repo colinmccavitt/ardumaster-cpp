@@ -1049,7 +1049,7 @@ add_executable(mode_poshold_test mode_poshold_test.cpp)
 target_link_libraries(mode_poshold_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_poshold_test)
 
-# CCP-042 slice 1: failsafe radio leftover scaffold + catalog.
+# CCP-042 slice 4: GCS failsafe leftover + catalog close (remaining_count 0).
 add_executable(failsafe_test failsafe_test.cpp)
 target_link_libraries(failsafe_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(failsafe_test)
