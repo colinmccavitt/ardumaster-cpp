@@ -19,10 +19,12 @@
 // restart + mission.update) is on main. SubMode switch leftover (dispatch
 // flags only) is on main. auto_RTL landing-sequence leftover is on
 // main. ModeAuto::takeoff_run leftover is on main. ModeAuto::wp_run leftover
-// is on main. ModeAuto::land_run leftover (disarmed/landed ground handling
-// + spool + land_run_normal_or_precland flag) is this slice. ModeAuto
-// rtl/loiter *_run bodies, ModeRTL/ModeLand, land_run_normal_or_precland
-// body, and auto_takeoff.run body stay later.
+// is on main. ModeAuto::land_run leftover is on main. ModeAuto::rtl_run
+// leftover is on main. ModeAuto::loiter_run leftover is on main.
+// ModeAuto::circle_run leftover (circle_nav update_ms + pos/attitude;
+// no spool/disarmed) is this slice. ModeAuto loiter_to_alt_run body,
+// nav_guided_run, ModeRTL/ModeLand, land_run_normal_or_precland body,
+// and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
@@ -113,8 +115,11 @@ public:
 // dispatch flags (mode_auto.cpp ~116-164, on main), auto_RTL
 // landing-sequence leftover (mode_auto.cpp ~166-174, on main),
 // takeoff_run leftover (mode_auto.cpp ~1075-1083, on main),
-// wp_run leftover (mode_auto.cpp ~1087-1107, on main), and
-// land_run leftover (mode_auto.cpp ~1111-1125, this slice). Other
+// wp_run leftover (mode_auto.cpp ~1087-1107, on main),
+// land_run leftover (mode_auto.cpp ~1111-1125, on main),
+// rtl_run leftover (mode_auto.cpp ~1129-1133, on main),
+// loiter_run leftover (mode_auto.cpp ~1162-1180, on main), and
+// circle_run leftover (mode_auto.cpp ~1135-1148, this slice). Other
 // *_run bodies and set_submode stay later.
 class ModeAuto : public Mode {
 public:
@@ -221,6 +226,9 @@ public:
     // argument (always false), not a ModeRTL state machine.
     bool leftover_mode_rtl_run{false};
     bool leftover_mode_rtl_disarm_on_land{false};
+    // Leftover circle_nav->update_ms() from ModeAuto::circle_run. No
+    // circle_nav object. Distinct from leftover update_wpnav.
+    bool leftover_circle_nav_update{false};
 
     ModeAuto() = default;
 
@@ -285,14 +293,27 @@ public:
     void leftover_loiter_run() {
         leftover_wp_run();
     }
+    // Leftover ModeAuto::circle_run (mode_auto.cpp ~1135-1148). Unlike
+    // wp_run/loiter_run there is no is_disarmed_or_landed check and no
+    // spool. leftover_circle_nav_update stands in for circle_nav->update_ms;
+    // do not set update_wpnav. No circle_nav object. Switch still records
+    // circle_run as the "would call circle_run" leftover, then this helper.
+    // CIRCLE_MOVE_TO_EDGE stays leftover_wp_run.
+    void leftover_circle_run() {
+        leftover_circle_nav_update = true;
+        terrain_failsafe_status = true;
+        pos_D_update = true;
+        input_thrust_vector_heading = true;
+    }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
     // leftover flags (~116-164), auto_RTL landing-sequence leftover
     // (~166-174), takeoff_run leftover (~1075-1083), wp_run leftover
     // (~1087-1107), land_run leftover (~1111-1125), rtl_run leftover
-    // (~1129-1133), and loiter_run leftover (~1162-1180). Switch always
-    // runs, including while still waiting_to_start. No AP_Mission /
-    // detector / GCS / logger / ModeRTL / *_run bodies. run has no ctx.
+    // (~1129-1133), loiter_run leftover (~1162-1180), and circle_run
+    // leftover (~1135-1148). Switch always runs, including while still
+    // waiting_to_start. No AP_Mission / detector / GCS / logger / ModeRTL /
+    // circle_nav / *_run bodies. run has no ctx.
     void run() override {
         if (waiting_to_start) {
             if (has_origin) {
@@ -332,6 +353,7 @@ public:
         land_run_normal_or_precland = false;
         leftover_mode_rtl_run = false;
         leftover_mode_rtl_disarm_on_land = false;
+        leftover_circle_nav_update = false;
 
         switch (submode) {
         case SubMode::TAKEOFF:
@@ -353,6 +375,7 @@ public:
             break;
         case SubMode::CIRCLE:
             circle_run = true;
+            leftover_circle_run();
             break;
         case SubMode::NAVGUIDED:
         case SubMode::NAV_SCRIPT_TIME:
