@@ -33,6 +33,7 @@ using fwcpp::copter::TenHzLoggingLoopInputs;
 using fwcpp::copter::TwentyfiveHzLoggingInputs;
 using fwcpp::copter::OneHzLoopInputs;
 using fwcpp::copter::ApValueInputs;
+using fwcpp::copter::InitSimpleBearingInputs;
 using fwcpp::copter::completeness_has;
 using fwcpp::copter::copter_completeness_size;
 using fwcpp::copter::find_scheduler_task;
@@ -65,6 +66,7 @@ using fwcpp::copter::ten_hz_logging_loop;
 using fwcpp::copter::twentyfive_hz_logging;
 using fwcpp::copter::one_hz_loop;
 using fwcpp::copter::ap_value;
+using fwcpp::copter::init_simple_bearing;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
@@ -90,10 +92,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 19", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 12);
+TEST_CASE("catalog remaining_count stays open after slice 20", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 11);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 23);
+    REQUIRE(on_main_count() == 24);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -120,8 +122,9 @@ TEST_CASE("catalog remaining_count stays open after slice 19", "[copter][leftove
     REQUIRE(completeness_has("Copter::twentyfive_hz_logging", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Copter::one_hz_loop", PortStatus::kOnMain));
-    REQUIRE(completeness_has("Copter::ap_value", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::init_simple_bearing", PortStatus::kRemaining));
+    REQUIRE(completeness_has("Copter::ap_value", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::init_simple_bearing", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::update_simple_mode", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
@@ -1466,4 +1469,42 @@ TEST_CASE("ap_value leftover packs injected bools in PACKED ap field order",
     ApValueInputs prec{};
     prec.prec_land_active = true;
     REQUIRE(ap_value(prec) == (1U << 26));
+}
+
+TEST_CASE("init_simple_bearing default yaw 0 last_bearing is wrap_2PI(radians(180))",
+          "[copter][init_simple_bearing]") {
+    const auto fx = init_simple_bearing();
+    REQUIRE(fx.simple_cos_yaw == 0.0f);
+    REQUIRE(fx.simple_sin_yaw == 0.0f);
+    REQUIRE(fx.super_simple_last_bearing_rad ==
+            fwcpp::math::wrap_2PI(fwcpp::math::radians(180.0f)));
+    REQUIRE(fx.super_simple_cos_yaw == fx.simple_cos_yaw);
+    REQUIRE(fx.super_simple_sin_yaw == fx.simple_sin_yaw);
+    REQUIRE_FALSE(fx.log_init_simple_bearing);
+}
+
+TEST_CASE("init_simple_bearing captures injected cos/sin and copies super_simple",
+          "[copter][init_simple_bearing]") {
+    InitSimpleBearingInputs in{};
+    in.cos_yaw = 0.5f;
+    in.sin_yaw = -0.8660254f;
+    in.yaw_rad = 1.0f;
+
+    const auto fx = init_simple_bearing(in);
+    REQUIRE(fx.simple_cos_yaw == 0.5f);
+    REQUIRE(fx.simple_sin_yaw == -0.8660254f);
+    REQUIRE(fx.super_simple_cos_yaw == 0.5f);
+    REQUIRE(fx.super_simple_sin_yaw == -0.8660254f);
+    REQUIRE(fx.super_simple_last_bearing_rad ==
+            fwcpp::math::wrap_2PI(1.0f + fwcpp::math::radians(180.0f)));
+    REQUIRE_FALSE(fx.log_init_simple_bearing);
+}
+
+TEST_CASE("init_simple_bearing log flag follows should_log_any",
+          "[copter][init_simple_bearing]") {
+    REQUIRE_FALSE(init_simple_bearing({}).log_init_simple_bearing);
+
+    InitSimpleBearingInputs logged{};
+    logged.should_log_any = true;
+    REQUIRE(init_simple_bearing(logged).log_init_simple_bearing);
 }
