@@ -78,6 +78,7 @@ void require_wp_run_flying(const ModeAuto& m) {
     REQUIRE_FALSE(m.make_safe_ground_handling);
     REQUIRE_FALSE(m.land_run_normal_or_precland);
     REQUIRE_FALSE(m.leftover_mode_rtl_run);
+    REQUIRE_FALSE(m.leftover_mode_guided_run);
     REQUIRE_FALSE(m.leftover_circle_nav_update);
     REQUIRE_FALSE(m.leftover_reached_wp_destination_ne);
     REQUIRE_FALSE(m.leftover_loiter_to_alt_rest);
@@ -100,6 +101,7 @@ void require_no_wp_run_leftovers(const ModeAuto& m) {
     REQUIRE_FALSE(m.input_thrust_vector_heading);
     REQUIRE_FALSE(m.land_run_normal_or_precland);
     REQUIRE_FALSE(m.leftover_mode_rtl_run);
+    REQUIRE_FALSE(m.leftover_mode_guided_run);
     REQUIRE_FALSE(m.leftover_circle_nav_update);
     REQUIRE_FALSE(m.leftover_reached_wp_destination_ne);
     REQUIRE_FALSE(m.leftover_loiter_to_alt_rest);
@@ -120,6 +122,7 @@ void require_land_run_flying(const ModeAuto& m) {
     REQUIRE(m.land_run_normal_or_precland);
     REQUIRE_FALSE(m.make_safe_ground_handling);
     REQUIRE_FALSE(m.leftover_mode_rtl_run);
+    REQUIRE_FALSE(m.leftover_mode_guided_run);
     REQUIRE_FALSE(m.leftover_circle_nav_update);
     REQUIRE_FALSE(m.leftover_reached_wp_destination_ne);
     REQUIRE_FALSE(m.leftover_loiter_to_alt_rest);
@@ -138,6 +141,7 @@ void require_loiter_run_flying(const ModeAuto& m) {
     REQUIRE_FALSE(m.loiter_to_alt_run);
     REQUIRE_FALSE(m.land_run_normal_or_precland);
     REQUIRE_FALSE(m.leftover_mode_rtl_run);
+    REQUIRE_FALSE(m.leftover_mode_guided_run);
     REQUIRE_FALSE(m.leftover_circle_nav_update);
     REQUIRE_FALSE(m.leftover_reached_wp_destination_ne);
     REQUIRE_FALSE(m.leftover_loiter_to_alt_rest);
@@ -156,6 +160,7 @@ void require_circle_run(const ModeAuto& m) {
     REQUIRE_FALSE(m.wp_run);
     REQUIRE_FALSE(m.land_run_normal_or_precland);
     REQUIRE_FALSE(m.leftover_mode_rtl_run);
+    REQUIRE_FALSE(m.leftover_mode_guided_run);
     REQUIRE_FALSE(m.leftover_reached_wp_destination_ne);
     REQUIRE_FALSE(m.leftover_loiter_to_alt_rest);
     REQUIRE_FALSE(m.leftover_land_run_horizontal_control);
@@ -184,6 +189,7 @@ void require_loiter_to_alt_wp_run_reuse(const ModeAuto& m) {
     REQUIRE_FALSE(m.leftover_surface_tracking_update);
     REQUIRE_FALSE(m.land_run_normal_or_precland);
     REQUIRE_FALSE(m.leftover_mode_rtl_run);
+    REQUIRE_FALSE(m.leftover_mode_guided_run);
     REQUIRE_FALSE(m.leftover_circle_nav_update);
 }
 
@@ -1025,6 +1031,7 @@ TEST_CASE("ModeAuto run SubMode WP leftover wp_run when disarmed_or_landed", "[c
     REQUIRE_FALSE(f.table.mode_auto.input_thrust_vector_heading);
     REQUIRE_FALSE(f.table.mode_auto.land_run_normal_or_precland);
     REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
     REQUIRE_FALSE(f.table.mode_auto.leftover_circle_nav_update);
 }
 
@@ -1067,6 +1074,7 @@ TEST_CASE("ModeAuto run SubMode LAND leftover land_run when disarmed_or_landed",
     REQUIRE_FALSE(f.table.mode_auto.desired_spool_unlimited);
     REQUIRE_FALSE(f.table.mode_auto.land_run_normal_or_precland);
     REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
     REQUIRE_FALSE(f.table.mode_auto.leftover_circle_nav_update);
 }
 
@@ -1081,6 +1089,7 @@ TEST_CASE("ModeAuto run SubMode RTL leftover rtl_run", "[copter][mode]") {
     REQUIRE(f.table.mode_auto.rtl_run);
     REQUIRE(f.table.mode_auto.leftover_mode_rtl_run);
     REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_disarm_on_land);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
     REQUIRE_FALSE(f.table.mode_auto.land_run);
     REQUIRE_FALSE(f.table.mode_auto.land_run_normal_or_precland);
     REQUIRE_FALSE(f.table.mode_auto.leftover_circle_nav_update);
@@ -1128,6 +1137,7 @@ TEST_CASE("ModeAuto run SubMode LOITER leftover loiter_run when disarmed_or_land
     REQUIRE_FALSE(f.table.mode_auto.wp_run);
     REQUIRE_FALSE(f.table.mode_auto.land_run_normal_or_precland);
     REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
     REQUIRE_FALSE(f.table.mode_auto.leftover_circle_nav_update);
 }
 
@@ -1170,6 +1180,7 @@ TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover when disarmed_or_landed",
     REQUIRE_FALSE(f.table.mode_auto.leftover_surface_tracking_update);
     REQUIRE_FALSE(f.table.mode_auto.wp_run);
     REQUIRE_FALSE(f.table.mode_auto.loiter_run);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
 }
 
 TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover when motors interlock off", "[copter][mode]") {
@@ -1194,6 +1205,7 @@ TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover when motors interlock off
     REQUIRE_FALSE(f.table.mode_auto.leftover_avoidance_climbrate);
     REQUIRE_FALSE(f.table.mode_auto.leftover_d_set_pos_target_from_climb);
     REQUIRE_FALSE(f.table.mode_auto.leftover_surface_tracking_update);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
 }
 
 TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover rest when reached_xy flying default",
@@ -1228,6 +1240,7 @@ TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover rest when reached_xy flyi
     REQUIRE_FALSE(f.table.mode_auto.make_safe_ground_handling);
     REQUIRE_FALSE(f.table.mode_auto.desired_spool_unlimited);
     REQUIRE_FALSE(f.table.mode_auto.update_wpnav);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
 }
 
 TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover skips NE_set when loiter_start_done",
@@ -1254,6 +1267,7 @@ TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover skips NE_set when loiter_
     REQUIRE(f.table.mode_auto.leftover_d_set_pos_target_from_climb);
     REQUIRE(f.table.mode_auto.pos_D_update);
     REQUIRE_FALSE(f.table.mode_auto.leftover_surface_tracking_update);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
 }
 
 TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover_reached_alt when |alt_error|<0.05",
@@ -1319,6 +1333,7 @@ TEST_CASE("ModeAuto run SubMode NAVGUIDED closed does not set nav_guided_run", "
     REQUIRE_FALSE(f.table.mode_auto.nav_guided_or_scripting);
     f.table.mode_auto.run();
     require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, false, false, false);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
 }
 
 TEST_CASE("ModeAuto run SubMode NAVGUIDED open leftover nav_guided_run", "[copter][mode]") {
@@ -1329,6 +1344,9 @@ TEST_CASE("ModeAuto run SubMode NAVGUIDED open leftover nav_guided_run", "[copte
     f.table.mode_auto.nav_guided_or_scripting = true;
     f.table.mode_auto.run();
     require_submode_runs(f.table.mode_auto, false, false, false, false, false, true, false, false, false);
+    REQUIRE(f.table.mode_auto.leftover_mode_guided_run);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_circle_nav_update);
 }
 
 TEST_CASE("ModeAuto run SubMode NAV_SCRIPT_TIME open leftover nav_guided_run", "[copter][mode]") {
@@ -1339,6 +1357,8 @@ TEST_CASE("ModeAuto run SubMode NAV_SCRIPT_TIME open leftover nav_guided_run", "
     f.table.mode_auto.nav_guided_or_scripting = true;
     f.table.mode_auto.run();
     require_submode_runs(f.table.mode_auto, false, false, false, false, false, true, false, false, false);
+    REQUIRE(f.table.mode_auto.leftover_mode_guided_run);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
 }
 
 TEST_CASE("ModeAuto run SubMode switch fires while waiting_to_start", "[copter][mode]") {
@@ -1385,6 +1405,7 @@ TEST_CASE("ModeAuto run SubMode switch clears previous leftover flags", "[copter
     require_submode_runs(f.table.mode_auto, false, false, false, true, false, false, false, false, false);
     REQUIRE(f.table.mode_auto.leftover_mode_rtl_run);
     REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_disarm_on_land);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_guided_run);
     REQUIRE_FALSE(f.table.mode_auto.land_run);
     REQUIRE_FALSE(f.table.mode_auto.land_run_normal_or_precland);
     REQUIRE_FALSE(f.table.mode_auto.leftover_circle_nav_update);
@@ -1475,7 +1496,7 @@ TEST_CASE("ModeAuto run auto_RTL leftover keeps LOITER SubMode dispatch", "[copt
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
-    REQUIRE(mode_this_slice_count() == 1);
+    REQUIRE(mode_this_slice_count() == 2);
     REQUIRE(mode_on_main_count() == 28);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
@@ -1504,6 +1525,7 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeAuto::loiter_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::circle_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::loiter_to_alt_run", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeAuto::nav_guided_run", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));

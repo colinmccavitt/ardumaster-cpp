@@ -25,7 +25,8 @@
 // leftover (ground-handling / reached_xy leftover_wp_run / loiter_start /
 // alt_error / land_run_horizontal / climb flags) is on main.
 // leftover_surface_tracking_update stays false (AP_RANGEFINDER remaining).
-// nav_guided_run, nav_attitude_time_run, ModeRTL/ModeLand,
+// ModeAuto::nav_guided_run leftover (ModeGuided::run flag) is this slice.
+// nav_attitude_time_run, ModeRTL/ModeLand, ModeGuided::run body,
 // land_run_normal_or_precland body, land_run_horizontal_control body,
 // and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
@@ -231,6 +232,9 @@ public:
     // argument (always false), not a ModeRTL state machine.
     bool leftover_mode_rtl_run{false};
     bool leftover_mode_rtl_disarm_on_land{false};
+    // Leftover copter.mode_guided.run() from ModeAuto::nav_guided_run.
+    // No ModeGuided object / run body this slice.
+    bool leftover_mode_guided_run{false};
     // Leftover circle_nav->update_ms() from ModeAuto::circle_run. No
     // circle_nav object. Distinct from leftover update_wpnav.
     bool leftover_circle_nav_update{false};
@@ -400,16 +404,23 @@ public:
         leftover_d_set_pos_target_from_climb = true;
         pos_D_update = true;
     }
+    // Leftover ModeAuto::nav_guided_run (mode_auto.cpp ~1150-1158). Records
+    // ModeGuided::run as a flag only. No ModeGuided object / run body.
+    // Switch still records nav_guided_run as the "would call nav_guided_run"
+    // leftover when nav_guided_or_scripting, then this helper.
+    void leftover_nav_guided_run() {
+        leftover_mode_guided_run = true;
+    }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
     // leftover flags (~116-164), auto_RTL landing-sequence leftover
     // (~166-174), takeoff_run leftover (~1075-1083), wp_run leftover
     // (~1087-1107), land_run leftover (~1111-1125), rtl_run leftover
     // (~1129-1133), loiter_run leftover (~1162-1180), circle_run leftover
-    // (~1135-1148), and loiter_to_alt_run leftover (~1184-1245). Switch
-    // always runs, including while still waiting_to_start. No AP_Mission /
-    // detector / GCS / logger / ModeRTL / circle_nav / *_run bodies. run
-    // has no ctx.
+    // (~1135-1148), loiter_to_alt_run leftover (~1184-1245), and
+    // nav_guided_run leftover (~1150-1158). Switch always runs, including
+    // while still waiting_to_start. No AP_Mission / detector / GCS / logger
+    // / ModeRTL / ModeGuided / circle_nav / *_run bodies. run has no ctx.
     void run() override {
         if (waiting_to_start) {
             if (has_origin) {
@@ -449,6 +460,7 @@ public:
         land_run_normal_or_precland = false;
         leftover_mode_rtl_run = false;
         leftover_mode_rtl_disarm_on_land = false;
+        leftover_mode_guided_run = false;
         leftover_circle_nav_update = false;
         leftover_reached_wp_destination_ne = false;
         leftover_loiter_to_alt_rest = false;
@@ -490,6 +502,7 @@ public:
         case SubMode::NAV_SCRIPT_TIME:
             if (nav_guided_or_scripting) {
                 nav_guided_run = true;
+                leftover_nav_guided_run();
             }
             break;
         case SubMode::LOITER:
