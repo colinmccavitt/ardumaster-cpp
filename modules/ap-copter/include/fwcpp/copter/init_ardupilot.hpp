@@ -4,7 +4,7 @@
 // ~16-200 (through ap.initialised = true) plus
 // esc_calibration.cpp ~10-73 leftover flags (no while(1) / HAL
 // delay / leftover leftover_read_radio leftover leftover_loop /
-// leftover leftover_passthrough leftover leftover_would leftover leftover_loop leftover leftover_flag leftover leftover_/ leftover leftover_esc_cal_auto_high leftover leftover / leftover leftover_esc_cal_auto_would_block leftover leftover flags leftover leftover_/ leftover leftover_esc_calibration_setup leftover leftover_body leftover leftover remaining). No notify / battery /
+// leftover leftover_passthrough leftover leftover_would leftover leftover_loop leftover leftover_flag leftover leftover_/ leftover leftover_esc_cal_auto_high leftover leftover / leftover leftover_esc_cal_auto_would_block leftover leftover flags leftover leftover_/ leftover leftover_esc_calibration_setup leftover leftover_body leftover leftover flags). No notify / battery /
 // barometer / winch /
 // rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
 // SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
@@ -57,17 +57,30 @@
 //     leftover_esc_cal_passthrough flag (IF_THROTTLE_HIGH &&
 //     throttle >= 950, or ALWAYS); leftover leftover_esc_cal_auto
 //     flag iff ESCCAL_AUTO; leftover leftover_esc_cal_setup leftover
-//     leftover flag (call site only) iff leftover leftover_esc_cal_passthrough
+//     leftover flag iff leftover leftover_esc_cal_passthrough
 //     OR leftover leftover_esc_cal_auto. leftover leftover_esc_cal_passthrough_would_loop
 //     leftover leftover flag iff leftover leftover_esc_cal_passthrough
 //     (upstream leftover leftover_while leftover leftover_1 leftover leftover_after
 //     leftover leftover_esc_calibration_setup leftover leftover_— leftover leftover_do leftover leftover_NOT leftover leftover_loop leftover leftover_or leftover leftover_notify leftover leftover_/ leftover leftover_read_radio leftover leftover_/ leftover leftover_delay leftover leftover_/ leftover leftover_motors).
 //     leftover leftover_esc_cal_auto_high leftover leftover flag + leftover leftover_esc_cal_auto_would_block leftover leftover flag iff leftover leftover_esc_cal_auto
 //     (upstream leftover leftover_esc_calibration_auto leftover leftover after leftover leftover_esc_calibration_setup leftover leftover_— leftover leftover_raise leftover leftover_throttle leftover leftover_1.0f leftover leftover_then leftover leftover_5s leftover leftover_loop leftover leftover then leftover leftover_while leftover leftover_1 leftover leftover_output leftover leftover_0.0f leftover leftover_— leftover leftover_do leftover leftover_NOT leftover leftover_loop leftover leftover_or leftover leftover_delay leftover leftover_/ leftover leftover_motors leftover leftover_/ leftover leftover_SRV leftover leftover_/ leftover leftover_notify).
+//     leftover leftover_esc_calibration_setup leftover leftover_body leftover leftover flags
+//     when leftover leftover_esc_cal_setup: leftover leftover_save_none,
+//     leftover leftover_update_rate + leftover leftover_rate_hz
+//     (leftover leftover_is_normal_pwm ? leftover leftover_rc_speed : 50),
+//     leftover leftover_init_safety, leftover leftover_safety_wait /
+//     leftover leftover_safety_would_loop iff leftover leftover_safety_disarmed
+//     (no leftover leftover_while leftover leftover_safety leftover leftover / leftover leftover_delay
+//     / leftover leftover_notify leftover leftover.update / leftover leftover_GCS).
+//     leftover leftover_motors_armed / leftover leftover_srv_enable /
+//     leftover leftover_soft_armed IFF leftover leftover_esc_cal_setup AND
+//     NOT leftover leftover_safety_disarmed. Inject leftover leftover_is_normal_pwm
+//     default true, leftover leftover_rc_speed default 490, leftover
+//     leftover_safety_disarmed default false. Do not leftover leftover_HAL
+//     leftover leftover / leftover leftover_motors leftover leftover objects.
 //     leftover leftover_esc_cal_clear_after
 //     iff != DISABLED. Do not leftover leftover_esc_cal_passthrough
 //     / leftover leftover_esc_cal_auto leftover leftover_bodies.
-//     Do not leftover leftover_esc_calibration_setup leftover leftover_body.
 //   ap.initialised_params = true
 //   register_timer_failsafe(failsafe_check_static, 1000) — flag only
 //   gps.set_log_gps_bit(MASK_LOG_GPS) + gps.init() leftover flags
@@ -108,7 +121,7 @@
 // init_rangefinder stays false (AP_RANGEFINDER remaining).
 // g2.proximity.init stays false (HAL_PROXIMITY remaining).
 // g2.beacon.init stays false (AP_BEACON remaining).
-// The rest of init_ardupilot is ESC cal setup body —
+// The rest of init_ardupilot is ESC cal HAL/motors/notify objects —
 // catalog row "Copter::init_ardupilot rest".
 
 #include <cstdint>
@@ -154,12 +167,18 @@ enum class ESCCalibrationModes : std::uint8_t {
 
 inline constexpr std::int16_t kEscCalibrationHighThrottle = 950;
 
+// RC_FAST_SPEED typical (non-heli) — ArduCopter/config.h ~65-66
+inline constexpr std::uint16_t kDefaultRcSpeedHz = 490;
+
+// esc_calibration_setup non-oneshot motors->set_update_rate
+inline constexpr std::uint16_t kEscCalReducedRateHz = 50;
+
 struct InitArdupilotInputs {
     bool motor_interlock_aux{false};
     bool throttle_configured{false};
     std::int16_t radio_min{0};
     std::int16_t radio_max{0};
-    std::uint16_t rc_speed{0};
+    std::uint16_t rc_speed{kDefaultRcSpeedHz};  // g.rc_speed typical
     bool is_brushed_pwm{false};  // motors->is_brushed_pwm_type()
     std::uint8_t initial_mode{0};  // g.initial_mode; Mode::Number::STABILIZE=0
     bool initial_mode_ok{true};    // set_mode(initial_mode, INITIALISED) result
@@ -167,6 +186,8 @@ struct InitArdupilotInputs {
     ESCCalibrationModes esc_calibrate{ESCCalibrationModes::ESCCAL_NONE};
     std::int16_t throttle_control_in{0};  // channel_throttle->get_control_in()
     std::uint32_t last_radio_update_ms{1};  // inject; 0 would enter leftover leftover_radio leftover leftover_wait leftover leftover_loop
+    bool is_normal_pwm{true};      // motors->is_normal_pwm_type(); leftover leftover_esc_cal_setup leftover leftover_rate
+    bool safety_disarmed{false};   // leftover leftover_SAFETY_DISARMED; leftover leftover_wait leftover leftover skipped by default
 };
 
 struct InitArdupilotEffects {
@@ -217,7 +238,16 @@ struct InitArdupilotEffects {
     bool esc_cal_notify{false};         // leftover leftover_AP_Notify + leftover leftover_gcs send_text
     bool esc_cal_passthrough{false};    // leftover flag only — no passthrough body
     bool esc_cal_auto{false};           // leftover flag only — no auto body
-    bool esc_cal_setup{false};          // leftover leftover flag — call site only, no setup body
+    bool esc_cal_setup{false};          // leftover leftover flag — call site + leftover leftover_body leftover leftover flags
+    bool esc_cal_setup_save_none{false};  // leftover leftover_g.esc_calibrate.set_and_save(ESCCAL_NONE)
+    bool esc_cal_setup_update_rate{false};  // leftover leftover_motors->set_update_rate leftover leftover flag
+    std::uint16_t esc_cal_setup_rate_hz{0};  // leftover leftover_is_normal_pwm ? leftover leftover_rc_speed : 50
+    bool esc_cal_setup_init_safety{false};  // leftover leftover_BoardConfig.init_safety leftover leftover flag
+    bool esc_cal_setup_safety_wait{false};  // leftover leftover flag iff leftover leftover_safety_disarmed
+    bool esc_cal_setup_safety_would_loop{false};  // leftover leftover flag iff leftover leftover_safety_disarmed — no while
+    bool esc_cal_setup_motors_armed{false};  // leftover leftover flag IFF leftover leftover_setup AND NOT leftover leftover_safety_disarmed
+    bool esc_cal_setup_srv_enable{false};    // leftover leftover flag IFF leftover leftover_setup AND NOT leftover leftover_safety_disarmed
+    bool esc_cal_setup_soft_armed{false};    // leftover leftover flag IFF leftover leftover_setup AND NOT leftover leftover_safety_disarmed
     bool esc_cal_passthrough_would_loop{false};  // leftover leftover flag iff leftover leftover_esc_cal_passthrough — no while(1)
     bool esc_cal_auto_high{false};      // leftover leftover flag iff leftover leftover_esc_cal_auto — raise 1.0f / 5s; no delay / motors
     bool esc_cal_auto_would_block{false};  // leftover leftover flag iff leftover leftover_esc_cal_auto — while(1) 0.0f; no while(1)
@@ -318,10 +348,9 @@ struct InitArdupilotEffects {
     // leftover leftover_esc_cal_notify is a leftover leftover flag
     // only (no AP_Notify / GCS). leftover leftover_esc_cal_passthrough
     // / leftover leftover_esc_cal_auto are flags only — no bodies.
-    // leftover leftover_esc_cal_setup leftover leftover flag (call
-    // site only) iff leftover leftover_esc_cal_passthrough OR leftover
-    // leftover_esc_cal_auto — no leftover leftover_esc_calibration_setup
-    // leftover leftover_body. leftover leftover_esc_cal_passthrough_would_loop
+    // leftover leftover_esc_cal_setup leftover leftover flag iff leftover leftover_esc_cal_passthrough OR leftover
+    // leftover_esc_cal_auto — leftover leftover_esc_calibration_setup leftover leftover_body leftover leftover flags
+    // (no leftover leftover_HAL leftover leftover / leftover leftover_motors leftover leftover objects leftover leftover / leftover leftover_while leftover leftover_safety). leftover leftover_esc_cal_passthrough_would_loop
     // leftover leftover flag iff leftover leftover_esc_cal_passthrough
     // (no while(1) / leftover leftover_notify / leftover leftover_read_radio /
     // leftover leftover_delay / leftover leftover_motors). leftover leftover_esc_cal_auto_high
@@ -362,6 +391,19 @@ struct InitArdupilotEffects {
             }
             if (fx.esc_cal_passthrough || fx.esc_cal_auto) {
                 fx.esc_cal_setup = true;
+                fx.esc_cal_setup_save_none = true;
+                fx.esc_cal_setup_update_rate = true;
+                fx.esc_cal_setup_rate_hz =
+                    in.is_normal_pwm ? in.rc_speed : kEscCalReducedRateHz;
+                fx.esc_cal_setup_init_safety = true;
+                if (in.safety_disarmed) {
+                    fx.esc_cal_setup_safety_wait = true;
+                    fx.esc_cal_setup_safety_would_loop = true;
+                } else {
+                    fx.esc_cal_setup_motors_armed = true;
+                    fx.esc_cal_setup_srv_enable = true;
+                    fx.esc_cal_setup_soft_armed = true;
+                }
             }
             if (fx.esc_cal_passthrough) {
                 fx.esc_cal_passthrough_would_loop = true;

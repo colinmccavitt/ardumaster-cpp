@@ -1,9 +1,8 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 51 lands
-// init_ardupilot leftover through leftover leftover_esc_cal_auto_high
-// leftover leftover / leftover leftover_esc_cal_auto_would_block leftover leftover
+// (Copter.cpp / Copter.h / system.cpp). Slice 52 lands
+// init_ardupilot leftover through leftover leftover_esc_cal_setup leftover leftover_body leftover leftover
 // flags (notify/battery/baro + interlock +
 // init_rc_in + allocate_motors call + rc convert/init + init_rc_out
 // leftover + esc_cal brushed skip + ESC cal leftover flags +
@@ -13,6 +12,7 @@
 // leftover leftover_esc_cal_passthrough_would_loop leftover leftover flag +
 // leftover leftover_esc_cal_auto_high leftover leftover flag +
 // leftover leftover_esc_cal_auto_would_block leftover leftover flag +
+// leftover leftover_esc_cal_setup leftover leftover_body leftover leftover flags +
 // initialised_params + failsafe register leftover + GPS/compass
 // leftover flags + attitude_sanity leftover + barometer.calibrate
 // leftover + mission/SmartRTL/logger leftover flags +
@@ -20,7 +20,7 @@
 // + ins.set_log_raw_bit + motors->output_min + set_mode leftover
 // flags + variance filt cutoffs + ap.initialised; gated
 // rangefinder/proximity/beacon remaining false). ESC cal
-// setup body remaining.
+// HAL/motors/notify objects remaining.
 // remaining_count() > 0 is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
@@ -59,9 +59,9 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::throttle_loop", PortStatus::kOnMain,
      "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
     {"Copter::init_ardupilot", PortStatus::kThisSlice,
-     "init_ardupilot.hpp; leftover leftover through leftover leftover_esc_cal_auto_high leftover leftover / leftover leftover_esc_cal_auto_would_block leftover leftover flags; leftover leftover_esc_calibration_setup leftover leftover_body leftover leftover remaining"},
+     "init_ardupilot.hpp; leftover leftover through leftover leftover_esc_cal_setup leftover leftover_body leftover leftover flags; leftover leftover_HAL leftover leftover / leftover leftover_motors leftover leftover objects leftover leftover remaining"},
     {"Copter::init_ardupilot rest", PortStatus::kRemaining,
-     "ESC cal setup body remaining"},
+     "ESC cal HAL/motors/notify objects remaining"},
     {"Copter::run_rate_controller_main", PortStatus::kOnMain,
      "run_rate_controller.hpp; set_dt_s + rate_controller_run iff !rate thread"},
     {"Copter::read_inertia", PortStatus::kOnMain,

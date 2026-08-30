@@ -129,7 +129,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 51", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 52", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 35);
@@ -2699,6 +2699,8 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_setup);
+    REQUIRE_FALSE(fx.esc_cal_setup_save_none);
+    REQUIRE_FALSE(fx.esc_cal_setup_motors_armed);
     REQUIRE_FALSE(fx.esc_cal_passthrough_would_loop);
     REQUIRE_FALSE(fx.esc_cal_auto_high);
     REQUIRE_FALSE(fx.esc_cal_auto_would_block);
@@ -2755,6 +2757,8 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_setup);
+    REQUIRE_FALSE(fx.esc_cal_setup_save_none);
+    REQUIRE_FALSE(fx.esc_cal_setup_motors_armed);
     REQUIRE_FALSE(fx.esc_cal_passthrough_would_loop);
     REQUIRE_FALSE(fx.esc_cal_auto_high);
     REQUIRE_FALSE(fx.esc_cal_auto_would_block);
@@ -2793,6 +2797,15 @@ TEST_CASE("init_ardupilot leftover brushed pwm skips esc cal body",
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_setup);
+    REQUIRE_FALSE(fx.esc_cal_setup_save_none);
+    REQUIRE_FALSE(fx.esc_cal_setup_update_rate);
+    REQUIRE(fx.esc_cal_setup_rate_hz == 0);
+    REQUIRE_FALSE(fx.esc_cal_setup_init_safety);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_wait);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_would_loop);
+    REQUIRE_FALSE(fx.esc_cal_setup_motors_armed);
+    REQUIRE_FALSE(fx.esc_cal_setup_srv_enable);
+    REQUIRE_FALSE(fx.esc_cal_setup_soft_armed);
     REQUIRE_FALSE(fx.esc_cal_passthrough_would_loop);
     REQUIRE_FALSE(fx.esc_cal_auto_high);
     REQUIRE_FALSE(fx.esc_cal_auto_would_block);
@@ -2842,6 +2855,8 @@ TEST_CASE("init_ardupilot leftover rc_cal fail clears esc calibrate",
     REQUIRE_FALSE(fx.esc_cal_switch);
     REQUIRE_FALSE(fx.esc_cal_would_block);
     REQUIRE_FALSE(fx.esc_cal_setup);
+    REQUIRE_FALSE(fx.esc_cal_setup_save_none);
+    REQUIRE_FALSE(fx.esc_cal_setup_motors_armed);
     REQUIRE_FALSE(fx.esc_cal_passthrough_would_loop);
     REQUIRE_FALSE(fx.esc_cal_auto_high);
     REQUIRE_FALSE(fx.esc_cal_auto_would_block);
@@ -2861,6 +2876,8 @@ TEST_CASE("init_ardupilot leftover ESCCAL_NONE high throttle would_block flag",
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_setup);
+    REQUIRE_FALSE(fx.esc_cal_setup_save_none);
+    REQUIRE_FALSE(fx.esc_cal_setup_motors_armed);
     REQUIRE_FALSE(fx.esc_cal_passthrough_would_loop);
     REQUIRE_FALSE(fx.esc_cal_auto_high);
     REQUIRE_FALSE(fx.esc_cal_auto_would_block);
@@ -2878,6 +2895,15 @@ TEST_CASE("init_ardupilot leftover ESCCAL_PASSTHROUGH_IF_THROTTLE_HIGH high thro
     REQUIRE(fx.esc_cal_switch);
     REQUIRE(fx.esc_cal_passthrough);
     REQUIRE(fx.esc_cal_setup);
+    REQUIRE(fx.esc_cal_setup_save_none);
+    REQUIRE(fx.esc_cal_setup_update_rate);
+    REQUIRE(fx.esc_cal_setup_rate_hz == 490);
+    REQUIRE(fx.esc_cal_setup_init_safety);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_wait);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_would_loop);
+    REQUIRE(fx.esc_cal_setup_motors_armed);
+    REQUIRE(fx.esc_cal_setup_srv_enable);
+    REQUIRE(fx.esc_cal_setup_soft_armed);
     REQUIRE(fx.esc_cal_passthrough_would_loop);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_auto_high);
@@ -2899,6 +2925,8 @@ TEST_CASE("init_ardupilot leftover ESCCAL_PASSTHROUGH_IF_THROTTLE_HIGH low throt
     REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_setup);
+    REQUIRE_FALSE(fx.esc_cal_setup_save_none);
+    REQUIRE_FALSE(fx.esc_cal_setup_motors_armed);
     REQUIRE_FALSE(fx.esc_cal_passthrough_would_loop);
     REQUIRE_FALSE(fx.esc_cal_auto_high);
     REQUIRE_FALSE(fx.esc_cal_auto_would_block);
@@ -2914,6 +2942,15 @@ TEST_CASE("init_ardupilot leftover ESCCAL_PASSTHROUGH_ALWAYS leftover leftover_e
     REQUIRE(fx.esc_cal_switch);
     REQUIRE(fx.esc_cal_passthrough);
     REQUIRE(fx.esc_cal_setup);
+    REQUIRE(fx.esc_cal_setup_save_none);
+    REQUIRE(fx.esc_cal_setup_update_rate);
+    REQUIRE(fx.esc_cal_setup_rate_hz == 490);
+    REQUIRE(fx.esc_cal_setup_init_safety);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_wait);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_would_loop);
+    REQUIRE(fx.esc_cal_setup_motors_armed);
+    REQUIRE(fx.esc_cal_setup_srv_enable);
+    REQUIRE(fx.esc_cal_setup_soft_armed);
     REQUIRE(fx.esc_cal_passthrough_would_loop);
     REQUIRE_FALSE(fx.esc_cal_auto);
     REQUIRE_FALSE(fx.esc_cal_auto_high);
@@ -2932,6 +2969,15 @@ TEST_CASE("init_ardupilot leftover ESCCAL_AUTO leftover leftover_esc_cal_auto",
     REQUIRE(fx.esc_cal_switch);
     REQUIRE(fx.esc_cal_auto);
     REQUIRE(fx.esc_cal_setup);
+    REQUIRE(fx.esc_cal_setup_save_none);
+    REQUIRE(fx.esc_cal_setup_update_rate);
+    REQUIRE(fx.esc_cal_setup_rate_hz == 490);
+    REQUIRE(fx.esc_cal_setup_init_safety);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_wait);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_would_loop);
+    REQUIRE(fx.esc_cal_setup_motors_armed);
+    REQUIRE(fx.esc_cal_setup_srv_enable);
+    REQUIRE(fx.esc_cal_setup_soft_armed);
     REQUIRE(fx.esc_cal_auto_high);
     REQUIRE(fx.esc_cal_auto_would_block);
     REQUIRE_FALSE(fx.esc_cal_passthrough);
@@ -2958,4 +3004,57 @@ TEST_CASE("init_ardupilot leftover ESCCAL_DISABLED skips leftover leftover_esc_c
     REQUIRE_FALSE(fx.esc_cal_clear_after);
     REQUIRE_FALSE(fx.esc_cal_would_block);
     REQUIRE_FALSE(fx.esc_cal_notify);
+}
+
+TEST_CASE("init_ardupilot leftover ESCCAL_AUTO leftover leftover_is_normal_pwm false rate 50",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.esc_calibrate = ESCCalibrationModes::ESCCAL_AUTO;
+    in.is_normal_pwm = false;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_setup);
+    REQUIRE(fx.esc_cal_setup_save_none);
+    REQUIRE(fx.esc_cal_setup_update_rate);
+    REQUIRE(fx.esc_cal_setup_rate_hz == 50);
+    REQUIRE(fx.esc_cal_setup_init_safety);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_wait);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_would_loop);
+    REQUIRE(fx.esc_cal_setup_motors_armed);
+    REQUIRE(fx.esc_cal_setup_srv_enable);
+    REQUIRE(fx.esc_cal_setup_soft_armed);
+}
+
+TEST_CASE("init_ardupilot leftover ESCCAL_AUTO leftover leftover_safety_disarmed skips arm",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.esc_calibrate = ESCCalibrationModes::ESCCAL_AUTO;
+    in.safety_disarmed = true;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_setup);
+    REQUIRE(fx.esc_cal_setup_save_none);
+    REQUIRE(fx.esc_cal_setup_update_rate);
+    REQUIRE(fx.esc_cal_setup_rate_hz == 490);
+    REQUIRE(fx.esc_cal_setup_init_safety);
+    REQUIRE(fx.esc_cal_setup_safety_wait);
+    REQUIRE(fx.esc_cal_setup_safety_would_loop);
+    REQUIRE_FALSE(fx.esc_cal_setup_motors_armed);
+    REQUIRE_FALSE(fx.esc_cal_setup_srv_enable);
+    REQUIRE_FALSE(fx.esc_cal_setup_soft_armed);
+}
+
+TEST_CASE("init_ardupilot leftover ESCCAL_NONE leftover leftover_esc_cal_setup leftover leftover_body false",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.esc_calibrate = ESCCalibrationModes::ESCCAL_NONE;
+    const auto fx = init_ardupilot(in);
+    REQUIRE_FALSE(fx.esc_cal_setup);
+    REQUIRE_FALSE(fx.esc_cal_setup_save_none);
+    REQUIRE_FALSE(fx.esc_cal_setup_update_rate);
+    REQUIRE(fx.esc_cal_setup_rate_hz == 0);
+    REQUIRE_FALSE(fx.esc_cal_setup_init_safety);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_wait);
+    REQUIRE_FALSE(fx.esc_cal_setup_safety_would_loop);
+    REQUIRE_FALSE(fx.esc_cal_setup_motors_armed);
+    REQUIRE_FALSE(fx.esc_cal_setup_srv_enable);
+    REQUIRE_FALSE(fx.esc_cal_setup_soft_armed);
 }
