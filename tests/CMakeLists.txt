@@ -1044,7 +1044,14 @@ add_executable(param_conversion_test param_conversion_test.cpp)
 target_link_libraries(param_conversion_test PRIVATE ap-param Catch2::Catch2WithMain)
 catch_discover_tests(param_conversion_test)
 
+<<<<<<< HEAD
 # CCP-040 slice 3: ModePosHold leftover_init scaffold + catalog.
 add_executable(mode_poshold_test mode_poshold_test.cpp)
 target_link_libraries(mode_poshold_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(mode_poshold_test)
+=======
+# CCP-042 slice 1: failsafe radio leftover scaffold + catalog.
+add_executable(failsafe_test failsafe_test.cpp)
+target_link_libraries(failsafe_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(failsafe_test)
+>>>>>>> 07fb2f0 (CCP-042 slice 1: failsafe radio leftover scaffold)
