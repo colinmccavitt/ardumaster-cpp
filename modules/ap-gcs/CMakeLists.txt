@@ -1,4 +1,4 @@
-# CPP-087 slice 3: GCS_MAVLink wire seam + COMMAND_LONG + PARAM (INTERFACE, no singleton).
+# CPP-087 slice 4: GCS_MAVLink wire seam + COMMAND_LONG + PARAM + MISSION (INTERFACE, no singleton).
 add_library(ap-gcs INTERFACE)
 target_include_directories(ap-gcs INTERFACE include)
 target_compile_features(ap-gcs INTERFACE cxx_std_20)

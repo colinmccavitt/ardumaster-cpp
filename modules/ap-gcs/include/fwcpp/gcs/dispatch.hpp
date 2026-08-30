@@ -1,9 +1,9 @@
 #pragma once
 
 // Msgid dispatch: HEARTBEAT, COMMAND_LONG (ARM/DISARM, DO_SET_MODE),
-// PARAM_REQUEST_LIST / PARAM_SET. One caller-owned channel (ADR-0012: no
-// GCS singleton). Hooks and ParamStore are injected. Later slices add
-// MISSION and vehicle handlers.
+// PARAM_REQUEST_LIST / PARAM_SET, MISSION_REQUEST_INT → ITEM_INT. One
+// caller-owned channel (ADR-0012: no GCS singleton). Hooks, ParamStore,
+// and MissionStore are injected. Later slices add vehicle handlers.
 
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +12,7 @@
 #include <fwcpp/gcs/command.hpp>
 #include <fwcpp/gcs/framing.hpp>
 #include <fwcpp/gcs/heartbeat.hpp>
+#include <fwcpp/gcs/mission.hpp>
 #include <fwcpp/gcs/param.hpp>
 #include <fwcpp/result.hpp>
 
@@ -27,6 +28,7 @@ enum class DispatchKind : std::uint8_t {
     kCommandLong = 2,
     kParamRequestList = 3,
     kParamSet = 4,
+    kMissionRequestInt = 5,
 };
 
 struct Dispatch {
@@ -40,6 +42,9 @@ struct Dispatch {
     ParamValue param_value{};
     std::uint16_t param_count{};
     bool param_applied{false};
+    MissionRequestInt mission_request_int{};
+    MissionItemInt mission_item_int{};
+    bool mission_item_found{false};
     bool from_gcs{false};
     std::uint32_t msgid{};
 };
@@ -53,6 +58,8 @@ public:
     void set_hooks(const CommandHooks& hooks) { hooks_ = hooks; }
 
     void set_param_store(ParamStore& store) { params_ = &store; }
+
+    void set_mission_store(MissionStore& store) { mission_ = &store; }
 
     [[nodiscard]] std::uint32_t last_gcs_heartbeat_ms() const { return last_gcs_heartbeat_ms_; }
 
@@ -100,6 +107,20 @@ public:
         return encode_v2(frame, out);
     }
 
+    [[nodiscard]] std::size_t send_mission_item_int(std::span<std::uint8_t> out,
+                                                    const MissionItemInt& item) {
+        std::uint8_t payload[kMissionItemIntLen]{};
+        if (pack_mission_item_int(item, payload) == 0) {
+            return 0;
+        }
+        Frame frame{};
+        if (!make_frame(seq_, sysid_, compid_, kMsgIdMissionItemInt, payload, frame)) {
+            return 0;
+        }
+        seq_ = static_cast<std::uint8_t>(seq_ + 1);
+        return encode_v2(frame, out);
+    }
+
     [[nodiscard]] Dispatch handle_message(const Frame& frame, std::uint32_t now_ms) {
         if (frame.msgid == kMsgIdCommandLong) {
             return handle_command_long_frame(frame);
@@ -109,6 +130,9 @@ public:
         }
         if (frame.msgid == kMsgIdParamSet) {
             return handle_param_set_frame(frame);
+        }
+        if (frame.msgid == kMsgIdMissionRequestInt) {
+            return handle_mission_request_int_frame(frame);
         }
         if (frame.msgid != kMsgIdHeartbeat) {
             Dispatch d{};
@@ -228,6 +252,40 @@ public:
         return send_param_value(out, d.param_value);
     }
 
+    [[nodiscard]] Dispatch handle_mission_request_int_frame(const Frame& frame) {
+        MissionRequestInt req{};
+        if (!mission_request_int_from_frame(frame, req)) {
+            Dispatch d{};
+            d.kind = DispatchKind::kUnknown;
+            d.msgid = kMsgIdMissionRequestInt;
+            return d;
+        }
+        Dispatch d{};
+        d.kind = DispatchKind::kMissionRequestInt;
+        d.mission_request_int = req;
+        d.msgid = kMsgIdMissionRequestInt;
+        if (mission_ == nullptr) {
+            return d;
+        }
+        MissionItemInt item{};
+        if (reply_mission_request_int(*mission_, req, item)) {
+            d.mission_item_int = item;
+            d.mission_item_found = true;
+        }
+        return d;
+    }
+
+    // Handle MISSION_REQUEST_INT and encode MISSION_ITEM_INT into out.
+    // Returns framed length, or 0 if seq unknown / no store.
+    [[nodiscard]] std::size_t handle_mission_request_int(const Frame& frame,
+                                                         std::span<std::uint8_t> out) {
+        const Dispatch d = handle_mission_request_int_frame(frame);
+        if (!d.mission_item_found) {
+            return 0;
+        }
+        return send_mission_item_int(out, d.mission_item_int);
+    }
+
     [[nodiscard]] Result<Dispatch, DecodeError> handle_bytes(std::span<const std::uint8_t> buf,
                                                             std::uint32_t now_ms) {
         auto decoded = decode_v2(buf);
@@ -245,6 +303,7 @@ private:
     std::uint32_t last_gcs_heartbeat_ms_{0};
     CommandHooks hooks_{};
     ParamStore* params_{nullptr};
+    MissionStore* mission_{nullptr};
 };
 
 }  // namespace fwcpp::gcs

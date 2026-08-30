@@ -22,19 +22,27 @@ inline constexpr std::uint32_t kMsgIdHeartbeat = 0;
 inline constexpr std::uint32_t kMsgIdParamRequestList = 21;
 inline constexpr std::uint32_t kMsgIdParamValue = 22;
 inline constexpr std::uint32_t kMsgIdParamSet = 23;
+inline constexpr std::uint32_t kMsgIdMissionCount = 44;
+inline constexpr std::uint32_t kMsgIdMissionRequestInt = 51;
+inline constexpr std::uint32_t kMsgIdMissionItemInt = 73;
 inline constexpr std::uint32_t kMsgIdCommandLong = 76;
 inline constexpr std::uint32_t kMsgIdCommandAck = 77;
 
 // CRC extras from same-tree lua (libraries/AP_Scripting/modules/MAVLink)
-// where present, else pymavlink message_checksum of pinned
-// modules/mavlink/message_definitions/v1.0/common.xml:
+// where present, else pymavlink message_checksum / generated headers of
+// pinned modules/mavlink/message_definitions/v1.0/common.xml:
 // HEARTBEAT.crc_extra = 50 msgid 0; PARAM_REQUEST_LIST = 159 msgid 21;
 // PARAM_VALUE = 220 msgid 22; PARAM_SET = 168 msgid 23;
+// MISSION_COUNT = 221 msgid 44; MISSION_REQUEST_INT = 196 msgid 51;
+// MISSION_ITEM_INT = 38 msgid 73;
 // COMMAND_LONG.crc_extra = 152 msgid 76; COMMAND_ACK.crc_extra = 143 msgid 77.
 inline constexpr std::uint8_t kHeartbeatCrcExtra = 50;
 inline constexpr std::uint8_t kParamRequestListCrcExtra = 159;
 inline constexpr std::uint8_t kParamValueCrcExtra = 220;
 inline constexpr std::uint8_t kParamSetCrcExtra = 168;
+inline constexpr std::uint8_t kMissionCountCrcExtra = 221;
+inline constexpr std::uint8_t kMissionRequestIntCrcExtra = 196;
+inline constexpr std::uint8_t kMissionItemIntCrcExtra = 38;
 inline constexpr std::uint8_t kCommandLongCrcExtra = 152;
 inline constexpr std::uint8_t kCommandAckCrcExtra = 143;
 
@@ -120,6 +128,18 @@ enum class DecodeError : std::uint8_t {
     }
     if (msgid == kMsgIdParamSet) {
         extra = kParamSetCrcExtra;
+        return true;
+    }
+    if (msgid == kMsgIdMissionCount) {
+        extra = kMissionCountCrcExtra;
+        return true;
+    }
+    if (msgid == kMsgIdMissionRequestInt) {
+        extra = kMissionRequestIntCrcExtra;
+        return true;
+    }
+    if (msgid == kMsgIdMissionItemInt) {
+        extra = kMissionItemIntCrcExtra;
         return true;
     }
     return false;

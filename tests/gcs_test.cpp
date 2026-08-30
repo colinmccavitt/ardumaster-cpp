@@ -1,4 +1,4 @@
-// CPP-087 slice 3: COMMAND_LONG + PARAM_REQUEST_LIST / PARAM_SET / PARAM_VALUE.
+// CPP-087 slice 4: COMMAND_LONG + PARAM + MISSION_ITEM_INT / REQUEST_INT.
 
 #include <array>
 #include <cstdint>
@@ -17,6 +17,10 @@ using fwcpp::gcs::Frame;
 using fwcpp::gcs::GcsMavlink;
 using fwcpp::gcs::Heartbeat;
 using fwcpp::gcs::MavResult;
+using fwcpp::gcs::MissionCount;
+using fwcpp::gcs::MissionItemInt;
+using fwcpp::gcs::MissionRequestInt;
+using fwcpp::gcs::MissionStore;
 using fwcpp::gcs::ParamSet;
 using fwcpp::gcs::ParamStore;
 using fwcpp::gcs::ParamValue;
@@ -39,14 +43,26 @@ using fwcpp::gcs::kMagicForceArmValue;
 using fwcpp::gcs::kMavAutopilotArdupilotmega;
 using fwcpp::gcs::kMavCmdComponentArmDisarm;
 using fwcpp::gcs::kMavCmdDoSetMode;
+using fwcpp::gcs::kMavCmdNavWaypoint;
+using fwcpp::gcs::kMavFrameGlobalRelAlt;
+using fwcpp::gcs::kMavMissionTypeMission;
 using fwcpp::gcs::kMavModeFlagCustomModeEnabled;
 using fwcpp::gcs::kMavModeFlagDecodePositionSafety;
 using fwcpp::gcs::kMavParamTypeReal32;
 using fwcpp::gcs::kMavTypeFixedWing;
 using fwcpp::gcs::kMavlinkVersion;
+using fwcpp::gcs::kMissionCountCrcExtra;
+using fwcpp::gcs::kMissionCountLen;
+using fwcpp::gcs::kMissionItemIntCrcExtra;
+using fwcpp::gcs::kMissionItemIntLen;
+using fwcpp::gcs::kMissionRequestIntCrcExtra;
+using fwcpp::gcs::kMissionRequestIntLen;
 using fwcpp::gcs::kMsgIdCommandAck;
 using fwcpp::gcs::kMsgIdCommandLong;
 using fwcpp::gcs::kMsgIdHeartbeat;
+using fwcpp::gcs::kMsgIdMissionCount;
+using fwcpp::gcs::kMsgIdMissionItemInt;
+using fwcpp::gcs::kMsgIdMissionRequestInt;
 using fwcpp::gcs::kMsgIdParamRequestList;
 using fwcpp::gcs::kMsgIdParamSet;
 using fwcpp::gcs::kMsgIdParamValue;
@@ -62,10 +78,16 @@ using fwcpp::gcs::kParamValueLen;
 using fwcpp::gcs::kStxV2;
 using fwcpp::gcs::leftover_completeness_size;
 using fwcpp::gcs::make_frame;
+using fwcpp::gcs::make_mission_count;
+using fwcpp::gcs::mission_item_int_from_frame;
+using fwcpp::gcs::mission_store_insert;
 using fwcpp::gcs::on_main_count;
 using fwcpp::gcs::pack_command_ack;
 using fwcpp::gcs::pack_command_long;
 using fwcpp::gcs::pack_heartbeat;
+using fwcpp::gcs::pack_mission_count;
+using fwcpp::gcs::pack_mission_item_int;
+using fwcpp::gcs::pack_mission_request_int;
 using fwcpp::gcs::pack_param_request_list;
 using fwcpp::gcs::pack_param_set;
 using fwcpp::gcs::pack_param_value;
@@ -78,6 +100,9 @@ using fwcpp::gcs::this_slice_count;
 using fwcpp::gcs::unpack_command_ack;
 using fwcpp::gcs::unpack_command_long;
 using fwcpp::gcs::unpack_heartbeat;
+using fwcpp::gcs::unpack_mission_count;
+using fwcpp::gcs::unpack_mission_item_int;
+using fwcpp::gcs::unpack_mission_request_int;
 using fwcpp::gcs::unpack_param_value;
 
 namespace {
@@ -195,6 +220,39 @@ Frame frame_param_set(const char* name, float value, std::uint8_t target_system 
     return frame;
 }
 
+MissionItemInt make_waypoint(std::uint16_t seq, std::int32_t lat_e7, std::int32_t lon_e7, float alt) {
+    MissionItemInt item{};
+    item.param1 = 0.0f;
+    item.param2 = 0.0f;
+    item.param3 = 0.0f;
+    item.param4 = 0.0f;
+    item.x = lat_e7;
+    item.y = lon_e7;
+    item.z = alt;
+    item.seq = seq;
+    item.command = kMavCmdNavWaypoint;
+    item.target_system = 1;
+    item.target_component = 1;
+    item.frame = kMavFrameGlobalRelAlt;
+    item.current = seq == 0 ? 1 : 0;
+    item.autocontinue = 1;
+    item.mission_type = kMavMissionTypeMission;
+    return item;
+}
+
+Frame frame_mission_request_int(std::uint16_t seq, std::uint8_t target_system = 1) {
+    MissionRequestInt req{};
+    req.seq = seq;
+    req.target_system = target_system;
+    req.target_component = 1;
+    req.mission_type = kMavMissionTypeMission;
+    std::array<std::uint8_t, kMissionRequestIntLen> payload{};
+    REQUIRE(pack_mission_request_int(req, payload) == kMissionRequestIntLen);
+    Frame frame{};
+    REQUIRE(make_frame(0, 255, 190, kMsgIdMissionRequestInt, payload, frame));
+    return frame;
+}
+
 }  // namespace
 
 TEST_CASE("HEARTBEAT payload and MAVLink2 frame round-trip", "[gcs][heartbeat]") {
@@ -279,9 +337,9 @@ TEST_CASE("send_heartbeat dispatches as msgid 0", "[gcs][dispatch]") {
 }
 
 TEST_CASE("leftover catalog this slice vs remaining", "[gcs][leftover]") {
-    REQUIRE(remaining_count() == 3);
+    REQUIRE(remaining_count() == 2);
     REQUIRE(this_slice_count() == 1);
-    REQUIRE(on_main_count() == 5);
+    REQUIRE(on_main_count() == 6);
     REQUIRE(leftover_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count());
     REQUIRE(completeness_has("MAVLink 2 framing", PortStatus::kOnMain));
@@ -289,8 +347,8 @@ TEST_CASE("leftover catalog this slice vs remaining", "[gcs][leftover]") {
     REQUIRE(completeness_has("msgid dispatch stub", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kOnMain));
     REQUIRE(completeness_has("COMMAND_LONG", PortStatus::kOnMain));
-    REQUIRE(completeness_has("PARAM protocol", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("MISSION", PortStatus::kRemaining));
+    REQUIRE(completeness_has("PARAM protocol", PortStatus::kOnMain));
+    REQUIRE(completeness_has("MISSION", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Plane/Copter vehicle handlers", PortStatus::kRemaining));
     REQUIRE(completeness_has("XML dialect generation", PortStatus::kRemaining));
 }
@@ -655,4 +713,140 @@ TEST_CASE("PARAM_SET unknown name does not crash", "[gcs][param]") {
 
     std::array<std::uint8_t, 48> wire{};
     REQUIRE(gcs.handle_param_set(frame_param_set("NO_SUCH_PARAM", 4.0f), wire) == 0);
+}
+
+TEST_CASE("crc extra for MISSION_REQUEST_INT ITEM_INT COUNT", "[gcs][framing][mission]") {
+    std::uint8_t extra = 0;
+    REQUIRE(crc_extra(kMsgIdMissionRequestInt, extra));
+    REQUIRE(extra == kMissionRequestIntCrcExtra);
+    REQUIRE(extra == 196);
+    REQUIRE(crc_extra(kMsgIdMissionItemInt, extra));
+    REQUIRE(extra == kMissionItemIntCrcExtra);
+    REQUIRE(extra == 38);
+    REQUIRE(crc_extra(kMsgIdMissionCount, extra));
+    REQUIRE(extra == kMissionCountCrcExtra);
+    REQUIRE(extra == 221);
+}
+
+TEST_CASE("MISSION_REQUEST_INT pack/unpack size-sorted v2", "[gcs][mission]") {
+    MissionRequestInt req{};
+    req.seq = 0;
+    req.target_system = 1;
+    req.target_component = 1;
+    req.mission_type = kMavMissionTypeMission;
+    std::array<std::uint8_t, kMissionRequestIntLen> payload{};
+    REQUIRE(pack_mission_request_int(req, payload) == kMissionRequestIntLen);
+    REQUIRE(payload[0] == 0);
+    REQUIRE(payload[1] == 0);
+    REQUIRE(payload[2] == 1);
+    REQUIRE(payload[3] == 1);
+    REQUIRE(payload[4] == kMavMissionTypeMission);
+
+    MissionRequestInt unpacked{};
+    REQUIRE(unpack_mission_request_int(payload, unpacked));
+    REQUIRE(unpacked.seq == 0);
+    REQUIRE(unpacked.target_system == 1);
+    REQUIRE(unpacked.target_component == 1);
+    REQUIRE(unpacked.mission_type == kMavMissionTypeMission);
+}
+
+TEST_CASE("MISSION_ITEM_INT pack/unpack size-sorted v2", "[gcs][mission]") {
+    const MissionItemInt item = make_waypoint(0, 377749000, -1224194000, 100.0f);
+    std::array<std::uint8_t, kMissionItemIntLen> payload{};
+    REQUIRE(pack_mission_item_int(item, payload) == kMissionItemIntLen);
+    REQUIRE(payload[28] == 0);
+    REQUIRE(payload[29] == 0);
+    REQUIRE(payload[30] == static_cast<std::uint8_t>(kMavCmdNavWaypoint));
+    REQUIRE(payload[31] == 0);
+    REQUIRE(payload[32] == 1);
+    REQUIRE(payload[37] == kMavMissionTypeMission);
+
+    MissionItemInt unpacked{};
+    REQUIRE(unpack_mission_item_int(payload, unpacked));
+    REQUIRE(unpacked.seq == 0);
+    REQUIRE(unpacked.command == kMavCmdNavWaypoint);
+    REQUIRE(unpacked.x == 377749000);
+    REQUIRE(unpacked.y == -1224194000);
+    REQUIRE(unpacked.z == 100.0f);
+    REQUIRE(unpacked.frame == kMavFrameGlobalRelAlt);
+    REQUIRE(unpacked.current == 1);
+    REQUIRE(unpacked.autocontinue == 1);
+
+    Frame frame{};
+    REQUIRE(make_frame(0, 1, 1, kMsgIdMissionItemInt, payload, frame));
+    std::array<std::uint8_t, 64> wire{};
+    const std::size_t n = encode_v2(frame, wire);
+    REQUIRE(n == 10 + kMissionItemIntLen + 2);
+    auto decoded = decode_v2(std::span<const std::uint8_t>(wire.data(), n));
+    REQUIRE(decoded.has_value());
+    REQUIRE(decoded.value().msgid == kMsgIdMissionItemInt);
+    MissionItemInt from_frame{};
+    REQUIRE(mission_item_int_from_frame(decoded.value(), from_frame));
+    REQUIRE(from_frame.x == 377749000);
+    REQUIRE(from_frame.command == kMavCmdNavWaypoint);
+}
+
+TEST_CASE("MISSION_COUNT stub pack/unpack", "[gcs][mission]") {
+    MissionStore store;
+    REQUIRE(mission_store_insert(store, make_waypoint(0, 1, 2, 10.0f)));
+    const MissionCount count = make_mission_count(store, 255, 190, kMavMissionTypeMission);
+    REQUIRE(count.count == 1);
+    std::array<std::uint8_t, kMissionCountLen> payload{};
+    REQUIRE(pack_mission_count(count, payload) == kMissionCountLen);
+    MissionCount unpacked{};
+    REQUIRE(unpack_mission_count(payload, unpacked));
+    REQUIRE(unpacked.count == 1);
+    REQUIRE(unpacked.target_system == 255);
+    REQUIRE(unpacked.target_component == 190);
+    REQUIRE(unpacked.mission_type == kMavMissionTypeMission);
+
+    Frame frame{};
+    REQUIRE(make_frame(0, 1, 1, kMsgIdMissionCount, payload, frame));
+    std::array<std::uint8_t, 32> wire{};
+    const std::size_t n = encode_v2(frame, wire);
+    REQUIRE(n == 10 + kMissionCountLen + 2);
+    auto decoded = decode_v2(std::span<const std::uint8_t>(wire.data(), n));
+    REQUIRE(decoded.has_value());
+    REQUIRE(decoded.value().msgid == kMsgIdMissionCount);
+}
+
+TEST_CASE("MISSION_REQUEST_INT replies with MISSION_ITEM_INT", "[gcs][mission]") {
+    MissionStore store;
+    REQUIRE(mission_store_insert(store, make_waypoint(0, 377749000, -1224194000, 100.0f)));
+    GcsMavlink gcs;
+    gcs.set_mission_store(store);
+
+    const Frame in = frame_mission_request_int(0);
+    const auto d = gcs.handle_message(in, 0);
+    REQUIRE(d.kind == DispatchKind::kMissionRequestInt);
+    REQUIRE(d.mission_item_found);
+    REQUIRE(d.mission_item_int.seq == 0);
+    REQUIRE(d.mission_item_int.x == 377749000);
+    REQUIRE(d.mission_item_int.command == kMavCmdNavWaypoint);
+
+    std::array<std::uint8_t, 64> wire{};
+    const std::size_t n = gcs.handle_mission_request_int(in, wire);
+    REQUIRE(n == 10 + kMissionItemIntLen + 2);
+    auto decoded = decode_v2(std::span<const std::uint8_t>(wire.data(), n));
+    REQUIRE(decoded.has_value());
+    REQUIRE(decoded.value().msgid == kMsgIdMissionItemInt);
+    MissionItemInt item{};
+    REQUIRE(mission_item_int_from_frame(decoded.value(), item));
+    REQUIRE(item.seq == 0);
+    REQUIRE(item.y == -1224194000);
+    REQUIRE(item.z == 100.0f);
+}
+
+TEST_CASE("MISSION_REQUEST_INT unknown seq does not crash", "[gcs][mission]") {
+    MissionStore store;
+    REQUIRE(mission_store_insert(store, make_waypoint(0, 1, 2, 10.0f)));
+    GcsMavlink gcs;
+    gcs.set_mission_store(store);
+
+    const auto d = gcs.handle_mission_request_int_frame(frame_mission_request_int(9));
+    REQUIRE(d.kind == DispatchKind::kMissionRequestInt);
+    REQUIRE_FALSE(d.mission_item_found);
+
+    std::array<std::uint8_t, 64> wire{};
+    REQUIRE(gcs.handle_mission_request_int(frame_mission_request_int(9), wire) == 0);
 }
