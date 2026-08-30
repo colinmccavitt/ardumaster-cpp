@@ -4,9 +4,10 @@
 // ModeDrift. Nested under fwcpp::copter::loiter so remaining_count() does not
 // collide with mode_leftover.hpp / althold / arming leftovers.
 //
-// Slice 3: ModePosHold::init leftover scaffold on this slice; ModePosHold::run
-// / ModeDrift remaining. ModeLoiter init+run on main. Fence/avoidance
-// ticket-OOS. precision_loiter OOS (AC_PRECLAND). ADR-0012: no AP:: singletons.
+// Slice 4: ModeDrift::init + ModeDrift::run leftover flags on this slice
+// (spool/attitude call-sites; no real vel/braker math). ModePosHold::run
+// remaining. ModeLoiter init+run on main. Fence/avoidance ticket-OOS.
+// precision_loiter OOS (AC_PRECLAND). ADR-0012: no AP:: singletons.
 
 #include <cstddef>
 #include <cstdint>
@@ -37,7 +38,11 @@ inline constexpr PortItem kCompleteness[] = {
      "mode_poshold.cpp ~71-107; leftover_init flags; no loiter_nav / pos_control"},
     {"ModePosHold::run", PortStatus::kRemaining,
      "mode_poshold.cpp ~111+; leftover_run_called only; RP/alt-hold/loiter remaining"},
-    {"ModeDrift", PortStatus::kRemaining, "mode_drift.cpp; not started"},
+    {"ModeDrift::init", PortStatus::kThisSlice,
+     "mode_drift.cpp ~49-52; leftover_init returns true"},
+    {"ModeDrift::run", PortStatus::kThisSlice,
+     "mode_drift.cpp ~56-145; leftover_run flags through spool/attitude; no "
+     "real vel/braker math"},
     {"precision_loiter", PortStatus::kOutOfScope,
      "mode_loiter.cpp do_precision_loiter / precision_loiter_xy; AC_PRECLAND"},
     {"fence / avoidance", PortStatus::kOutOfScope, "ticket OOS; no AC_Fence / AC_Avoid"},

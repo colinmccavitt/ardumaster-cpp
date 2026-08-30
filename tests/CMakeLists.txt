@@ -1053,3 +1053,11 @@ catch_discover_tests(mode_poshold_test)
 add_executable(failsafe_test failsafe_test.cpp)
 target_link_libraries(failsafe_test PRIVATE ap-copter Catch2::Catch2WithMain)
 catch_discover_tests(failsafe_test)
+<<<<<<< HEAD
+=======
+
+# CCP-040 slice 4: ModeDrift leftover scaffold + catalog.
+add_executable(mode_drift_test mode_drift_test.cpp)
+target_link_libraries(mode_drift_test PRIVATE ap-copter Catch2::Catch2WithMain)
+catch_discover_tests(mode_drift_test)
+>>>>>>> ce060a5 (CCP-040 slice 4: ModeDrift leftover scaffold)
