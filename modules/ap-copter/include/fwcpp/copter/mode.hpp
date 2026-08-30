@@ -1,6 +1,6 @@
 #pragma once
 
-// Copter Mode base + Stabilize/AltHold/ModeAuto stubs + set_mode checks.
+// Copter Mode base + Stabilize/AltHold/ModeAuto/ModeRTL stubs + set_mode checks.
 // Upstream ArduCopter/mode.h Number ~77-109, Mode virtuals ~119-143,
 // ModeStabilize ~1723, ModeAltHold ~498, ModeAuto ~531-545; mode.cpp
 // mode_from_mode_num ~32, set_mode ~313-474 (AUTO_RTL ~345-350,
@@ -28,8 +28,10 @@
 // ModeAuto::nav_guided_run leftover (ModeGuided::run flag) is on main.
 // ModeAuto::nav_attitude_time_run leftover (ground-handling +
 // constrain/avoidance + leftover leftover_nav_att_lean + leftover leftover_d_set +
-// pos_D_update leftover flags) is this slice.
-// ModeRTL/ModeLand, ModeGuided::run body, land_run_normal_or_precland body,
+// pos_D_update leftover flags) is on main.
+// ModeRTL::init leftover (home_is_set gate + leftover wp_and_spline/STARTING
+// flags) is this slice. leftover leftover_precland_statemachine remaining.
+// ModeRTL::run, ModeLand, ModeGuided::run body, land_run_normal_or_precland body,
 // land_run_horizontal_control body, and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
 
@@ -229,8 +231,8 @@ public:
     bool input_thrust_vector_heading{false};
     // Leftover land_run_normal_or_precland() (body stays later).
     bool land_run_normal_or_precland{false};
-    // Leftover copter.mode_rtl.run(false) from ModeAuto::rtl_run. No
-    // ModeRTL object / run body this slice. disarm_on_land is the
+    // Leftover copter.mode_rtl.run(false) from ModeAuto::rtl_run.
+    // Does not call ModeRTL::init or run. disarm_on_land is the
     // argument (always false), not a ModeRTL state machine.
     bool leftover_mode_rtl_run{false};
     bool leftover_mode_rtl_disarm_on_land{false};
@@ -340,9 +342,9 @@ public:
         land_run_normal_or_precland = true;
     }
     // Leftover ModeAuto::rtl_run (mode_auto.cpp ~1129-1133). Records
-    // ModeRTL::run(false) as flags only. No ModeRTL object / run body.
-    // Switch still records rtl_run as the "would call rtl_run" leftover,
-    // then this helper.
+    // ModeRTL::run(false) as flags only. Does not call ModeRTL::init
+    // or ModeRTL::run. Switch still records rtl_run as the "would call
+    // rtl_run" leftover, then this helper.
     void leftover_rtl_run() {
         leftover_mode_rtl_run = true;
         leftover_mode_rtl_disarm_on_land = false;
@@ -564,12 +566,70 @@ public:
     [[nodiscard]] bool has_manual_throttle() const override { return false; }
 };
 
+// Stub: ModeRTL (mode.h ~1495-1570). init leftover is ModeRTL::init
+// (mode_rtl.cpp ~80-105). home_is_set / failsafe.terrain injected.
+// leftover leftover_precland_statemachine remaining. run() empty this
+// slice. Do not dump run(bool) / climb_start / return_start / LAND.
+class ModeRTL : public Mode {
+public:
+    enum class SubMode : std::uint8_t {
+        STARTING,
+        INITIAL_CLIMB,
+        RETURN_HOME,
+        LOITER_AT_HOME,
+        FINAL_DESCENT,
+        LAND,
+    };
+
+    // Injected AP::ahrs().home_is_set(). Default true so armed+position_ok
+    // set_mode(RTL) works without a SetModeInputs field.
+    bool home_is_set{true};
+    // Injected copter.failsafe.terrain.
+    bool failsafe_terrain{false};
+    // leftover wp_nav->wp_and_spline_init_m (no wp_nav).
+    bool leftover_wp_and_spline_init{false};
+    // leftover terrain_following_allowed = !failsafe.terrain.
+    bool leftover_terrain_following_allowed{false};
+    // leftover copter.ap.land_repo_active / prec_land_active.
+    bool leftover_land_repo_active{false};
+    bool leftover_prec_land_active{false};
+    // leftover leftover_precland_statemachine_init stays false (remaining).
+    bool leftover_precland_statemachine_init{false};
+    SubMode _state{SubMode::STARTING};
+    bool _state_complete{false};
+
+    ModeRTL() = default;
+
+    [[nodiscard]] Number mode_number() const override { return Number::RTL; }
+    [[nodiscard]] bool init(bool ignore_checks) override {
+        if (!ignore_checks && !home_is_set) {
+            return false;
+        }
+        leftover_wp_and_spline_init = true;
+        _state = SubMode::STARTING;
+        _state_complete = true;
+        leftover_terrain_following_allowed = !failsafe_terrain;
+        leftover_land_repo_active = false;
+        leftover_prec_land_active = false;
+        return true;
+    }
+    // Empty leftover this slice. Do not dump run(bool).
+    void run() override {}
+    [[nodiscard]] bool requires_position() const override { return true; }
+    [[nodiscard]] bool has_manual_throttle() const override { return false; }
+
+    [[nodiscard]] SubMode state() const { return _state; }
+    [[nodiscard]] bool state_complete() const { return _state_complete; }
+};
+
 // Caller-owned table. AUTO_RTL is not a true mode (nullptr from
 // mode_from_mode_num); set_mode(AUTO_RTL) uses table.mode_auto.
+// LAND stays nullptr. RTL is table.mode_rtl.
 struct FlightModeTable {
     ModeStabilize stabilize;
     ModeAltHold althold;
     ModeAuto mode_auto;
+    ModeRTL mode_rtl;
 };
 
 struct FlightModeContext {
@@ -707,6 +767,8 @@ struct SetModeInputs {
             return &table.althold;
         case Mode::Number::AUTO:
             return &table.mode_auto;
+        case Mode::Number::RTL:
+            return &table.mode_rtl;
         default:
             return nullptr;
     }

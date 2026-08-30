@@ -34,7 +34,8 @@ inline constexpr ModePortItem kModeCompleteness[] = {
      "mode_number, init, exit, run, requires_position, has_manual_throttle, "
      "allows_entry_in_rc_failsafe; takeoff_stop no-op"},
     {"mode_from_mode_num stabilize+althold", ModePortStatus::kOnMain,
-     "STABILIZE, ALT_HOLD, AUTO; AUTO_RTL stays nullptr (not a true mode)"},
+     "STABILIZE, ALT_HOLD, AUTO, RTL; AUTO_RTL stays nullptr (not a true mode); "
+     "LAND stays nullptr"},
     {"set_mode checks", ModePortStatus::kOnMain,
      "already-in, GCS gate, unknown, ignore_checks, throttle-too-high, "
      "position, alt, rc_failsafe, init, exit+switch"},
@@ -47,7 +48,7 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"althold_run", ModePortStatus::kOnMain,
      "mode_althold.hpp; CCP-039 landed run() on main"},
     {"remaining mode bodies", ModePortStatus::kRemaining,
-     "RTL/LAND run/init; other modes; auto_takeoff.run body; "
+     "ModeRTL::run; ModeLand init/run; other modes; auto_takeoff.run body; "
      "land_run_normal_or_precland body; land_run_horizontal_control body; "
      "ModeGuided::run body"},
     {"ModeAuto::init", ModePortStatus::kOnMain,
@@ -82,7 +83,7 @@ inline constexpr ModePortItem kModeCompleteness[] = {
      "no motors / precland / land_run_normal_or_precland body"},
     {"ModeAuto::rtl_run", ModePortStatus::kOnMain,
      "mode_auto.cpp ~1129-1133; leftover ModeRTL::run(false) flag; "
-     "no ModeRTL body"},
+     "does not call ModeRTL::init or run"},
     {"ModeAuto::loiter_run", ModePortStatus::kOnMain,
      "mode_auto.cpp ~1162-1180; leftover same flags as wp_run; "
      "no motors / wp_nav / pos / attitude objects"},
@@ -94,8 +95,11 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"ModeAuto::nav_guided_run", ModePortStatus::kOnMain,
      "mode_auto.cpp ~1150-1158; leftover ModeGuided::run flag; "
      "no ModeGuided body"},
-    {"ModeAuto::nav_attitude_time_run", ModePortStatus::kThisSlice,
-     "leftover through pos_D_update leftover flags; ModeRTL remaining"},
+    {"ModeAuto::nav_attitude_time_run", ModePortStatus::kOnMain,
+     "leftover through pos_D_update leftover flags"},
+    {"ModeRTL::init", ModePortStatus::kThisSlice,
+     "home_is_set gate + leftover wp_and_spline/STARTING flags; leftover "
+     "leftover_precland_statemachine remaining; no run body"},
     {"FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain,
      "Copter::gcs_mode_enabled + AP_Vehicle::block_GCS_mode_change; injected "
      "fltmode_gcsblock; LAND/RTL not in list"},
