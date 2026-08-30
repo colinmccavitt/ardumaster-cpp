@@ -19,6 +19,11 @@
 #include <fwcpp/math/scalar.hpp>
 #include <fwcpp/math/vector3.hpp>
 #include <fwcpp/motors/motors_matrix.hpp>
+#include <fwcpp/pid/ac_p_1d.hpp>
+#include <fwcpp/pid/ac_pid.hpp>
+#include <fwcpp/pid/ac_pid_basic.hpp>
+#include <fwcpp/poscontrol/pos_control_d.hpp>
+#include <fwcpp/poscontrol/pos_control_defaults.hpp>
 #include <fwcpp/sim/sim_multicopter.hpp>
 
 namespace fwcpp::hal_sitl::copter_sitl_run {
@@ -58,13 +63,52 @@ struct LeftoverMission {
     return "?";
 }
 
-// Leftover mission hold: hoverThrOut plus a thin vertical-rate damper.
-// NED +z down: positive vz (descending) -> more command. This is leftover
-// poscontrol, NOT the plant — the plant is Frame/Motor at that command.
-[[nodiscard]] inline float leftover_hold_command(const sim::SimMulticopter& sim) {
-    const float hover = sim.hover_command();
-    constexpr float kVelGain = 0.08f;
-    return math::constrain_value(hover + kVelGain * sim.velocity_ef.z, 0.0f, 1.0f);
+// CCP-064: AC_PosControl D cascade (pos -> vel -> accel -> throttle).
+// Replaces the leftover 1-line vz damper. NED +z down. throttle_hover is
+// Frame::hover_command() so leftover_apply_collective PWM matches expo.
+inline void leftover_init_poscontrol(copter::LeftoverCopter& copter) {
+    if (copter.pos_d_inited) {
+        return;
+    }
+    copter.p_pos_d = pid::AcP1d::with_kp(1.0f);
+    copter.pid_vel_d = pid::AcPidBasic::with_gains(5.0f, 0.0f, 0.0f, 0.0f, 10.0f, 0.0f, 0.0f);
+    copter.pid_accel_d.set_kP(0.5f);
+    copter.pid_accel_d.set_kI(1.0f);
+    copter.pid_accel_d.set_imax(1.0f);
+    copter.d_limits = poscontrol::d_set_max_speed_accel_m(
+        copter.d_limits, poscontrol::kPoscontrolSpeedDownMs, poscontrol::kPoscontrolSpeedUpMs,
+        poscontrol::kPoscontrolAccelDMss, poscontrol::kPoscontrolJerkDMsss, copter.pid_accel_d);
+    copter.pos_d_inited = true;
+}
+
+[[nodiscard]] inline float leftover_poscontrol_throttle(copter::LeftoverCopter& copter,
+                                                        const sim::SimMulticopter& sim,
+                                                        float pos_d_target_m,
+                                                        float vel_d_desired_ms) {
+    leftover_init_poscontrol(copter);
+    copter.pos_d.pos_desired_m = pos_d_target_m;
+    copter.pos_d.vel_desired_ms = vel_d_desired_ms;
+    poscontrol::DUpdateInputs inp{};
+    inp.dt = copter.loop_dt > 0.0f ? copter.loop_dt : 0.0025f;
+    inp.now_ms = copter.now_ms;
+    inp.estimates.pos_m = sim.position.z;
+    inp.estimates.vel_ms = sim.velocity_ef.z;
+    inp.estimated_accel_d_mss = 0.0f;
+    inp.throttle_hover = sim.hover_command();
+    inp.vel_max_down_ms = copter.d_limits.vel_max_down_ms;
+    if (inp.vel_max_down_ms <= 0.0f) {
+        inp.vel_max_down_ms = poscontrol::kPoscontrolSpeedDownMs;
+    }
+    const auto out = copter.pos_d.update_controller(copter.p_pos_d, copter.pid_vel_d, copter.pid_accel_d, inp);
+    copter.throttle_out = math::constrain_value(out.throttle_out, 0.0f, 1.0f);
+    return copter.throttle_out;
+}
+
+// Hold: AC_PosControl D to the leftover mission altitude (not vz damper).
+[[nodiscard]] inline float leftover_hold_command(copter::LeftoverCopter& copter,
+                                                 const sim::SimMulticopter& sim,
+                                                 float hold_alt_m) {
+    return leftover_poscontrol_throttle(copter, sim, -hold_alt_m, 0.0f);
 }
 
 inline void leftover_apply_collective(copter::LeftoverCopter& copter, const sim::SimMulticopter& sim, float command,
@@ -133,19 +177,19 @@ inline void leftover_mission_advance(copter::LeftoverCopter& copter, sim::SimMul
                 copter.land_complete = false;
             }
         }
-        mission.command = mission.climb_command;
+        mission.command = leftover_poscontrol_throttle(copter, sim, -mission.takeoff_alt_m, -2.5f);
         if (alt_m >= mission.takeoff_alt_m) {
             mission.takeoff._running = false;
             mission.phase = MissionPhase::kHold;
             mission.hold_elapsed_s = 0.0f;
-            mission.command = leftover_hold_command(sim);
+            mission.command = leftover_hold_command(copter, sim, mission.takeoff_alt_m);
         }
         break;
     }
 
     case MissionPhase::kHold:
         copter.motors_armed = true;
-        mission.command = leftover_hold_command(sim);
+        mission.command = leftover_hold_command(copter, sim, mission.takeoff_alt_m);
         mission.hold_elapsed_s += dt;
         if (mission.hold_elapsed_s >= mission.hold_s) {
             mission.phase = MissionPhase::kLand;
@@ -154,7 +198,7 @@ inline void leftover_mission_advance(copter::LeftoverCopter& copter, sim::SimMul
 
     case MissionPhase::kLand: {
         copter.motors_armed = true;
-        mission.command = mission.land_command;
+        mission.command = leftover_poscontrol_throttle(copter, sim, 0.25f, 1.5f);
         if (sim.on_ground()) {
             copter::LandDetectorInputs lin;
             lin.motors_armed = true;
@@ -185,7 +229,7 @@ inline void leftover_mission_advance(copter::LeftoverCopter& copter, sim::SimMul
         break;
     }
 
-    leftover_apply_collective(copter, sim, mission.command);
+    leftover_apply_collective(copter, sim, mission.command, copter.loop_dt);
 }
 
 // Mission leftover then CCP-043/045 harness (sensors + Frame/Motor plant).
@@ -213,7 +257,11 @@ inline constexpr PortItem kCompleteness[] = {
      "sitl/copter_main.cpp + CMake copter_sitl_run target"},
     {"leftover_mission_advance", PortStatus::kThisSlice, "arm / takeoff / hold / land leftover state machine"},
     {"leftover_hold_command", PortStatus::kThisSlice,
-     "HOLD leftover rate damper around hoverThrOut; not the plant"},
+     "CCP-064: HOLD via AC_PosControl D cascade (not leftover vz damper)"},
+    {"leftover_poscontrol_throttle", PortStatus::kThisSlice,
+     "CCP-064: pos_desired/vel_desired -> PosControlD::update_controller throttle_out"},
+    {"leftover_copter_loop", PortStatus::kOnMain,
+     "CCP-064: leftover_copter_tick walks Copter scheduler leftover free functions"},
     {"leftover_apply_collective", PortStatus::kThisSlice,
      "leftover collective command → per-motor PWM (equal mix into Frame)"},
     {"leftover_copter_sitl_step", PortStatus::kThisSlice,

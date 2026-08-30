@@ -35,6 +35,7 @@ public:
     // (Frame/Motor mixing + Aircraft dynamics). Matches SitlHarness
     // sensors-then-plant order.
     void step(float dt) {
+        copter_.loop_dt = dt;
         copter_.gyro_buffer = sim_.gyro;
         copter_.accel_buffer = sim_.accel_body;
         copter_.gyro_injected = true;
@@ -108,7 +109,9 @@ inline constexpr PortItem kCompleteness[] = {
     {"SitlCopterHarness scaffold", PortStatus::kThisSlice,
      "refs LeftoverCopter + SimMulticopter; step sensor inject + leftover_copter_tick"},
     {"leftover_copter_tick", PortStatus::kThisSlice,
-     "tick counter + CCP-035 update_flight_mode when Mode* set"},
+     "CCP-064: leftover_copter_loop = Copter::loop leftover scheduler + update_flight_mode"},
+    {"leftover_copter_loop", PortStatus::kThisSlice,
+     "FAST_TASK rate/motors/AHRS/inertia/ekf/mode + SCHED_TASK rc/throttle/nav"},
     {"gyro/accel synthesis", PortStatus::kThisSlice,
      "SimMulticopter::gyro / accel_body → leftover buffers + inject flags"},
     {"baro synthesis", PortStatus::kThisSlice,

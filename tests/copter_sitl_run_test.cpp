@@ -100,16 +100,38 @@ TEST_CASE("leftover copter sitl mission arm takeoff hold land",
     REQUIRE(copter.baro_injected);
 }
 
+
+TEST_CASE("leftover_hold_command uses AC_PosControl altitude not vz damper",
+          "[copter][sitl][ccp-064]") {
+    LeftoverCopter copter{};
+    SimMulticopter sim{};
+    sim.velocity_ef = {};
+    sim.position.z = -9.0f;  // 9 m AGL, target 10 m
+    const float low = fwcpp::hal_sitl::copter_sitl_run::leftover_hold_command(copter, sim, 10.0f);
+    LeftoverCopter copter_high{};
+    SimMulticopter sim_high{};
+    sim_high.velocity_ef = {};
+    sim_high.position.z = -11.0f;  // 11 m AGL
+    const float high = fwcpp::hal_sitl::copter_sitl_run::leftover_hold_command(copter_high, sim_high, 10.0f);
+    // Same vz=0: a vz damper would emit hover both times. PosControl climbs
+    // when below target and reduces throttle when above.
+    REQUIRE(low > high);
+    REQUIRE(low > sim.hover_command());
+    REQUIRE(high < sim_high.hover_command());
+}
+
 TEST_CASE("copter_sitl_run leftover catalog remaining_count",
           "[copter][sitl][ccp-044][leftover]") {
     REQUIRE(remaining_count() == 0);
-    REQUIRE(this_slice_count() == 7);
-    REQUIRE(on_main_count() == 3);
+    REQUIRE(this_slice_count() == 8);
+    REQUIRE(on_main_count() == 4);
     REQUIRE(out_of_scope_count() == 4);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("leftover_mission_advance", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_hold_command", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("leftover_poscontrol_throttle", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("leftover_copter_loop", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover_apply_collective", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_copter_sitl_step", PortStatus::kThisSlice));
     REQUIRE(completeness_has("copter_sitl_run arm/takeoff/hold/land", PortStatus::kThisSlice));

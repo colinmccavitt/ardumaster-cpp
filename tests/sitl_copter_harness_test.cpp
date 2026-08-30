@@ -140,18 +140,23 @@ TEST_CASE("leftover_copter_tick wires update_flight_mode when Mode* set",
     REQUIRE(copter.tick_count == 0);
     leftover_copter_tick(copter);
     REQUIRE(copter.tick_count == 1);
+    REQUIRE(copter.loop_ran_update_flight_mode);
+    REQUIRE(copter.loop_ran_rate_controller);
+    REQUIRE(copter.loop_ran_motors_output);
+    REQUIRE(copter.loop_ran_read_ahrs);
 }
 
 TEST_CASE("SitlCopterHarness leftover catalog remaining_count",
           "[copter][sitl][ccp-043][leftover]") {
     REQUIRE(remaining_count() == 0);
-    REQUIRE(this_slice_count() == 9);
+    REQUIRE(this_slice_count() == 10);
     REQUIRE(on_main_count() == 3);
     REQUIRE(out_of_scope_count() == 2);
     REQUIRE(completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("SitlCopterHarness scaffold", PortStatus::kThisSlice));
     REQUIRE(completeness_has("leftover_copter_tick", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("leftover_copter_loop", PortStatus::kThisSlice));
     REQUIRE(completeness_has("gyro/accel synthesis", PortStatus::kThisSlice));
     REQUIRE(completeness_has("baro synthesis", PortStatus::kThisSlice));
     REQUIRE(completeness_has("GPS synthesis", PortStatus::kThisSlice));

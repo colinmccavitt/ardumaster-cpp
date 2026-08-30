@@ -1,5 +1,7 @@
-// CCP-045: standalone copter_sitl_run — arm, takeoff, hold, land on the
-// real SIM_Multicopter Frame/Motor plant (not leftover body-z / SimPlane).
+// CCP-045/064: standalone copter_sitl_run — arm, takeoff, hold, land on the
+// real SIM_Multicopter Frame/Motor plant. Vehicle tick is leftover_copter_loop
+// (Copter scheduler leftovers + Mode::run). Hold/takeoff/land throttle is
+// AC_PosControl D, not the leftover 1-line vz damper.
 //
 // USAGE: copter_sitl_run [--help] [duration_seconds]
 // Default duration is 20 simulated seconds @ 400Hz. Exits 0 if LANDED after
@@ -22,7 +24,7 @@ namespace {
 
 void print_usage(const char* argv0) {
     std::cout << "usage: " << argv0 << " [--help] [duration_seconds > 0]\n"
-              << "  CCP-045: LeftoverCopter + SimMulticopter Frame/Motor plant\n"
+              << "  CCP-064: LeftoverCopter loop + AC_PosControl D + SimMulticopter plant\n"
               << "  Mission: arm, takeoff to 10m, hold 2s, land.\n"
               << "  Default duration: 20 simulated seconds @ 400Hz.\n";
 }
@@ -53,7 +55,7 @@ int main(int argc, char** argv) {
     fwcpp::hal_sitl::SitlCopterHarness harness(copter, sim);
     fwcpp::hal_sitl::copter_sitl_run::LeftoverMission mission{};
 
-    std::cout << "CCP-045 SITL: LeftoverCopter+SimMulticopter Frame/Motor, "
+    std::cout << "CCP-064 SITL: LeftoverCopter loop+AC_PosControl D+SimMulticopter, "
               << duration_s << " simulated seconds (" << num_ticks << " ticks @ 400Hz)\n";
     std::cout << "mission: arm, takeoff " << mission.takeoff_alt_m << "m, hold " << mission.hold_s
               << "s, land  frame=" << sim.frame().name << " motors=" << static_cast<int>(sim.num_motors()) << "\n";
