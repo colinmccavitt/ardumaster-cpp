@@ -1,9 +1,12 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
 
 #include <fwcpp/copter/mode.hpp>
 #include <fwcpp/copter/mode_leftover.hpp>
 #include <fwcpp/copter/mode_reason.hpp>
+
+using Catch::Approx;
 
 using fwcpp::copter::FlightModeContext;
 using fwcpp::copter::FlightModeTable;
@@ -29,6 +32,15 @@ public:
     void run() override {}
     [[nodiscard]] bool requires_position() const override { return true; }
     [[nodiscard]] bool has_manual_throttle() const override { return false; }
+};
+
+class TestManualMode : public Mode {
+public:
+    [[nodiscard]] Number mode_number() const override { return Number::ACRO; }
+    [[nodiscard]] bool init(bool /*ignore_checks*/) override { return true; }
+    void run() override {}
+    [[nodiscard]] bool requires_position() const override { return false; }
+    [[nodiscard]] bool has_manual_throttle() const override { return true; }
 };
 
 struct Fixture {
@@ -275,11 +287,74 @@ TEST_CASE("rc_failsafe allows AltHold (default allows_entry true)", "[copter][mo
     REQUIRE(f.ctx.current == &f.table.althold);
 }
 
+TEST_CASE("manual-to-auto sets accel throttle I", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.land_complete = false;
+    in.pilot_desired_throttle = 0.70f;
+    in.throttle_hover = 0.50f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.althold);
+    REQUIRE(f.ctx.accel_throttle_I_set);
+    REQUIRE(f.ctx.accel_throttle_I == Approx(-(0.70f - 0.50f)));
+}
+
+TEST_CASE("accel throttle I skipped when disarmed", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = false;
+    in.land_complete = false;
+    in.pilot_desired_throttle = 0.70f;
+    in.throttle_hover = 0.50f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.althold);
+    REQUIRE_FALSE(f.ctx.accel_throttle_I_set);
+}
+
+TEST_CASE("accel throttle I skipped when land_complete", "[copter][mode]") {
+    Fixture f;
+    SetModeInputs in{};
+    in.armed = true;
+    in.land_complete = true;
+    in.pilot_desired_throttle = 0.70f;
+    in.throttle_hover = 0.50f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::ALT_HOLD, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.althold);
+    REQUIRE_FALSE(f.ctx.accel_throttle_I_set);
+}
+
+TEST_CASE("accel throttle I skipped when staying in manual", "[copter][mode]") {
+    Fixture f;
+    TestManualMode acro;
+    SetModeInputs in{};
+    in.armed = true;
+    in.land_complete = false;
+    in.pilot_desired_throttle = 0.70f;
+    in.throttle_hover = 0.50f;
+    REQUIRE(set_mode(f.ctx, acro, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &acro);
+    REQUIRE_FALSE(f.ctx.accel_throttle_I_set);
+}
+
+TEST_CASE("accel throttle I skipped when already auto", "[copter][mode]") {
+    Fixture f;
+    f.ctx.current = &f.table.althold;
+    SetModeInputs in{};
+    in.armed = true;
+    in.land_complete = false;
+    in.pilot_desired_throttle = 0.70f;
+    in.throttle_hover = 0.50f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, in));
+    REQUIRE(f.ctx.current == &f.table.mode_auto);
+    REQUIRE_FALSE(f.ctx.accel_throttle_I_set);
+}
+
 TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]") {
-    REQUIRE(remaining_count() == 7);
+    REQUIRE(remaining_count() == 6);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 8);
+    REQUIRE(mode_on_main_count() == 9);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -290,7 +365,7 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("mode_from_mode_num stabilize+althold", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("set_mode checks", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("stabilize_run", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("AUTO_RTL", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("AUTO_RTL", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("acro_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("althold_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("remaining mode bodies", ModePortStatus::kRemaining));
@@ -299,7 +374,7 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("Write_Mode/notify", ModePortStatus::kRemaining));
     REQUIRE(mode_completeness_has("Drift-as-manual-throttle", ModePortStatus::kRemaining));
-    REQUIRE(mode_completeness_has("set_accel_throttle_I", ModePortStatus::kRemaining));
+    REQUIRE(mode_completeness_has("set_accel_throttle_I", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("HELI runup/flybar", ModePortStatus::kOutOfScope));
     REQUIRE(mode_completeness_has("AP:: singletons", ModePortStatus::kOutOfScope));
     REQUIRE(mode_completeness_has("AP_Notify sounds", ModePortStatus::kOutOfScope));

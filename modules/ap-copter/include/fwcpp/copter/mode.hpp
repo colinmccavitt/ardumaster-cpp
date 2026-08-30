@@ -4,8 +4,8 @@
 // Upstream ArduCopter/mode.h Number ~77-109, Mode virtuals ~119-143,
 // ModeStabilize ~1723, ModeAltHold ~498, ModeAuto ~531-545; mode.cpp
 // mode_from_mode_num ~32, set_mode ~313-430 (AUTO_RTL ~345-350),
-// exit_mode ~511-524 (non-heli takeoff_stop + exit); mode_auto.cpp
-// return_path_or_jump_to_landing_sequence_auto_RTL ~286-301,
+// exit_mode ~511-524 (non-heli: I transfer then takeoff_stop + exit);
+// mode_auto.cpp return_path_or_jump_to_landing_sequence_auto_RTL ~286-301,
 // enter_auto_rtl ~303-329.
 //
 // Mode is not a heap singleton. The caller owns FlightModeTable;
@@ -15,6 +15,7 @@
 // bodies stay later. update_flight_mode is CCP-035 leftover.
 
 #include <fwcpp/copter/mode_reason.hpp>
+#include <fwcpp/copter/pilot_input.hpp>
 
 #include <cstdint>
 
@@ -124,6 +125,9 @@ struct FlightModeContext {
     ModeReason reason{ModeReason::UNKNOWN};
     // Leftover mission.set_force_resume; no AP_Mission this slice.
     bool force_resume{false};
+    // exit_mode ~515-518: recorded when manual-to-auto I transfer runs.
+    bool accel_throttle_I_set{false};
+    float accel_throttle_I{0.0f};
 };
 
 // Injected Copter / motors / EKF / RC / mission-jump state. Upstream
@@ -135,6 +139,7 @@ struct SetModeInputs {
     bool armed{false};
     bool land_complete{true};
     float pilot_desired_throttle{0.0f};
+    float throttle_hover{0.5f};
     float non_takeoff_throttle{0.0f};
     bool position_ok{true};
     bool ekf_alt_ok{true};
@@ -159,7 +164,7 @@ struct SetModeInputs {
 // Post-lookup checks + exit + switch. Upstream set_mode ~359-437
 // (ignore_checks through flightmode = new / control_mode_reason = reason).
 // Skips HELI runup, MODE_DRIFT_ENABLED throttle special, fence recovery,
-// logger.Write_Mode, notify, set_accel_throttle_I.
+// logger.Write_Mode, notify.
 [[nodiscard]] inline bool enter_mode(FlightModeContext& ctx, Mode& next, ModeReason reason,
                                      const SetModeInputs& in) {
     const bool ignore_checks = !in.armed;
@@ -190,6 +195,16 @@ struct SetModeInputs {
     }
 
     if (ctx.current != nullptr) {
+        // Upstream Copter::exit_mode ~511-524: I transfer, then takeoff_stop, then exit.
+        ctx.accel_throttle_I_set = false;
+        ctx.accel_throttle_I = 0.0f;
+        if (ctx.current->has_manual_throttle() && !next.has_manual_throttle() && in.armed &&
+            !in.land_complete) {
+            // leftover injects pilot_desired_throttle (upstream get_throttle_in).
+            ctx.accel_throttle_I = set_accel_throttle_I_from_pilot_throttle(
+                in.pilot_desired_throttle, in.throttle_hover);
+            ctx.accel_throttle_I_set = true;
+        }
         ctx.current->takeoff_stop();
         ctx.current->exit();
     }
