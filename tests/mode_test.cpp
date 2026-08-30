@@ -68,6 +68,25 @@ void require_submode_runs(const ModeAuto& m, bool takeoff, bool wp, bool land, b
     REQUIRE(m.nav_attitude_time_run == nav_att);
 }
 
+void require_wp_run_flying(const ModeAuto& m) {
+    REQUIRE(m.wp_run);
+    REQUIRE(m.desired_spool_unlimited);
+    REQUIRE(m.update_wpnav);
+    REQUIRE(m.terrain_failsafe_status);
+    REQUIRE(m.pos_D_update);
+    REQUIRE(m.input_thrust_vector_heading);
+    REQUIRE_FALSE(m.make_safe_ground_handling);
+}
+
+void require_no_wp_run_leftovers(const ModeAuto& m) {
+    REQUIRE_FALSE(m.make_safe_ground_handling);
+    REQUIRE_FALSE(m.desired_spool_unlimited);
+    REQUIRE_FALSE(m.update_wpnav);
+    REQUIRE_FALSE(m.terrain_failsafe_status);
+    REQUIRE_FALSE(m.pos_D_update);
+    REQUIRE_FALSE(m.input_thrust_vector_heading);
+}
+
 }  // namespace
 
 TEST_CASE("Mode::Number values match mode.h including gaps", "[copter][mode]") {
@@ -862,6 +881,7 @@ TEST_CASE("ModeAuto run SubMode TAKEOFF leftover takeoff_run only", "[copter][mo
     REQUIRE(f.table.mode_auto.takeoff_run);
     REQUIRE(f.table.mode_auto.auto_takeoff_run);
     REQUIRE_FALSE(f.table.mode_auto.set_auto_armed);
+    require_no_wp_run_leftovers(f.table.mode_auto);
 }
 
 TEST_CASE("ModeAuto takeoff_run leftover sets auto_armed when option enabled", "[copter][mode]") {
@@ -874,26 +894,47 @@ TEST_CASE("ModeAuto takeoff_run leftover sets auto_armed when option enabled", "
     REQUIRE(f.table.mode_auto.takeoff_run);
     REQUIRE(f.table.mode_auto.auto_takeoff_run);
     REQUIRE(f.table.mode_auto.set_auto_armed);
+    require_no_wp_run_leftovers(f.table.mode_auto);
 }
 
-TEST_CASE("ModeAuto run SubMode WP leftover wp_run", "[copter][mode]") {
+TEST_CASE("ModeAuto run SubMode WP leftover wp_run flying", "[copter][mode]") {
     Fixture f;
     REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
     f.table.mode_auto.waiting_to_start = false;
     f.table.mode_auto.submode = ModeAuto::SubMode::WP;
+    REQUIRE_FALSE(f.table.mode_auto.disarmed_or_landed);
     f.table.mode_auto.run();
     REQUIRE(f.table.mode_auto.mission_update);
     require_submode_runs(f.table.mode_auto, false, true, false, false, false, false, false, false, false);
+    require_wp_run_flying(f.table.mode_auto);
 }
 
-TEST_CASE("ModeAuto run SubMode CIRCLE_MOVE_TO_EDGE leftover wp_run", "[copter][mode]") {
+TEST_CASE("ModeAuto run SubMode WP leftover wp_run when disarmed_or_landed", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::WP;
+    f.table.mode_auto.disarmed_or_landed = true;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.wp_run);
+    REQUIRE(f.table.mode_auto.make_safe_ground_handling);
+    REQUIRE_FALSE(f.table.mode_auto.desired_spool_unlimited);
+    REQUIRE_FALSE(f.table.mode_auto.update_wpnav);
+    REQUIRE_FALSE(f.table.mode_auto.terrain_failsafe_status);
+    REQUIRE_FALSE(f.table.mode_auto.pos_D_update);
+    REQUIRE_FALSE(f.table.mode_auto.input_thrust_vector_heading);
+}
+
+TEST_CASE("ModeAuto run SubMode CIRCLE_MOVE_TO_EDGE leftover wp_run flying", "[copter][mode]") {
     Fixture f;
     REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
     f.table.mode_auto.waiting_to_start = false;
     f.table.mode_auto.submode = ModeAuto::SubMode::CIRCLE_MOVE_TO_EDGE;
+    REQUIRE_FALSE(f.table.mode_auto.disarmed_or_landed);
     f.table.mode_auto.run();
     REQUIRE(f.table.mode_auto.mission_update);
     require_submode_runs(f.table.mode_auto, false, true, false, false, false, false, false, false, false);
+    require_wp_run_flying(f.table.mode_auto);
 }
 
 TEST_CASE("ModeAuto run SubMode LAND leftover land_run", "[copter][mode]") {
@@ -1005,11 +1046,17 @@ TEST_CASE("ModeAuto run SubMode switch clears previous leftover flags", "[copter
     f.table.mode_auto.run();
     REQUIRE(f.table.mode_auto.takeoff_run);
     REQUIRE(f.table.mode_auto.auto_takeoff_run);
+    require_no_wp_run_leftovers(f.table.mode_auto);
     f.table.mode_auto.submode = ModeAuto::SubMode::WP;
     f.table.mode_auto.run();
     require_submode_runs(f.table.mode_auto, false, true, false, false, false, false, false, false, false);
     REQUIRE_FALSE(f.table.mode_auto.auto_takeoff_run);
     REQUIRE_FALSE(f.table.mode_auto.set_auto_armed);
+    require_wp_run_flying(f.table.mode_auto);
+    f.table.mode_auto.submode = ModeAuto::SubMode::LAND;
+    f.table.mode_auto.run();
+    require_submode_runs(f.table.mode_auto, false, false, true, false, false, false, false, false, false);
+    require_no_wp_run_leftovers(f.table.mode_auto);
 }
 
 TEST_CASE("ModeAuto run auto_RTL with no landing flags clears and writes AUTO_RTL_EXIT", "[copter][mode]") {
@@ -1088,7 +1135,7 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 21);
+    REQUIRE(mode_on_main_count() == 22);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -1109,7 +1156,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeAuto::run else-path", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::run SubMode switch", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::run auto_RTL landing-sequence", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("ModeAuto::takeoff_run", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeAuto::takeoff_run", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeAuto::wp_run", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));

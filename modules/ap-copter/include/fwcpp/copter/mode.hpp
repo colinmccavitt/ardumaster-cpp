@@ -18,9 +18,10 @@
 // waiting_to_start leftover is on main. Else-path leftover (change detector
 // restart + mission.update) is on main. SubMode switch leftover (dispatch
 // flags only) is on main. auto_RTL landing-sequence leftover is on
-// main. ModeAuto::takeoff_run leftover (AllowTakeOffWithoutRaisingThrottle
-// + auto_takeoff.run flag) is this slice. ModeAuto wp/land/rtl/loiter
-// *_run bodies, ModeRTL/ModeLand, and auto_takeoff.run body stay later.
+// main. ModeAuto::takeoff_run leftover is on main. ModeAuto::wp_run leftover
+// (disarmed/landed ground handling + spool + wp_nav/pos/attitude flags)
+// is this slice. ModeAuto land/rtl/loiter *_run bodies, ModeRTL/ModeLand,
+// and auto_takeoff.run body stay later.
 // update_flight_mode is CCP-035.
 
 #include <fwcpp/copter/mode_reason.hpp>
@@ -109,8 +110,9 @@ public:
 // + origin (mode_auto.cpp ~85-98, on main), else-path change detector
 // + mission.update (mode_auto.cpp ~99-113, on main), SubMode switch
 // dispatch flags (mode_auto.cpp ~116-164, on main), auto_RTL
-// landing-sequence leftover (mode_auto.cpp ~166-174, on main), and
-// takeoff_run leftover (mode_auto.cpp ~1075-1083, this slice). Other
+// landing-sequence leftover (mode_auto.cpp ~166-174, on main),
+// takeoff_run leftover (mode_auto.cpp ~1075-1083, on main), and
+// wp_run leftover (mode_auto.cpp ~1087-1107, this slice). Other
 // *_run bodies and set_submode stay later.
 class ModeAuto : public Mode {
 public:
@@ -196,6 +198,20 @@ public:
     bool set_auto_armed{false};
     // Leftover auto_takeoff.run() call (body stays later).
     bool auto_takeoff_run{false};
+    // Injected is_disarmed_or_landed() (no motors / land-complete object).
+    bool disarmed_or_landed{false};
+    // Leftover make_safe_ground_handling() when disarmed or landed.
+    bool make_safe_ground_handling{false};
+    // Leftover motors->set_desired_spool_state(THROTTLE_UNLIMITED).
+    bool desired_spool_unlimited{false};
+    // Leftover wp_nav->update_wpnav() (no wp_nav object).
+    bool update_wpnav{false};
+    // Leftover copter.failsafe_terrain_set_status (no Copter).
+    bool terrain_failsafe_status{false};
+    // Leftover pos_control->D_update_controller() (no pos_control).
+    bool pos_D_update{false};
+    // Leftover attitude_control->input_thrust_vector_heading (no attitude).
+    bool input_thrust_vector_heading{false};
 
     ModeAuto() = default;
 
@@ -218,12 +234,27 @@ public:
         }
         auto_takeoff_run = true;
     }
+    // Leftover ModeAuto::wp_run (mode_auto.cpp ~1087-1107). No motors /
+    // wp_nav / pos_control / attitude objects. Switch still records
+    // wp_run as the "would call wp_run" leftover, then this helper.
+    void leftover_wp_run() {
+        if (disarmed_or_landed) {
+            make_safe_ground_handling = true;
+            return;
+        }
+        desired_spool_unlimited = true;
+        update_wpnav = true;
+        terrain_failsafe_status = true;
+        pos_D_update = true;
+        input_thrust_vector_heading = true;
+    }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
     // leftover flags (~116-164), auto_RTL landing-sequence leftover
-    // (~166-174), and takeoff_run leftover (~1075-1083). Switch always
-    // runs, including while still waiting_to_start. No AP_Mission /
-    // detector / GCS / logger / *_run bodies. run has no ctx.
+    // (~166-174), takeoff_run leftover (~1075-1083), and wp_run leftover
+    // (~1087-1107). Switch always runs, including while still
+    // waiting_to_start. No AP_Mission / detector / GCS / logger /
+    // *_run bodies. run has no ctx.
     void run() override {
         if (waiting_to_start) {
             if (has_origin) {
@@ -254,6 +285,12 @@ public:
         nav_attitude_time_run = false;
         set_auto_armed = false;
         auto_takeoff_run = false;
+        make_safe_ground_handling = false;
+        desired_spool_unlimited = false;
+        update_wpnav = false;
+        terrain_failsafe_status = false;
+        pos_D_update = false;
+        input_thrust_vector_heading = false;
 
         switch (submode) {
         case SubMode::TAKEOFF:
@@ -263,6 +300,7 @@ public:
         case SubMode::WP:
         case SubMode::CIRCLE_MOVE_TO_EDGE:
             wp_run = true;
+            leftover_wp_run();
             break;
         case SubMode::LAND:
             land_run = true;

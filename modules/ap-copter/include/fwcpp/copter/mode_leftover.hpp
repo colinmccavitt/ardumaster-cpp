@@ -47,7 +47,7 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"althold_run", ModePortStatus::kOnMain,
      "mode_althold.hpp; CCP-039 landed run() on main"},
     {"remaining mode bodies", ModePortStatus::kRemaining,
-     "ModeAuto wp/land/rtl/loiter *_run bodies; RTL/LAND run/init; other modes; "
+     "ModeAuto land/rtl/loiter *_run bodies; RTL/LAND run/init; other modes; "
      "auto_takeoff.run body"},
     {"ModeAuto::init", ModePortStatus::kOnMain,
      "mode_auto.cpp auto_init leftover; mission_present / landed takeoff gate; "
@@ -67,10 +67,14 @@ inline constexpr ModePortItem kModeCompleteness[] = {
     {"ModeAuto::run auto_RTL landing-sequence", ModePortStatus::kOnMain,
      "mode_auto.cpp ~166-174; clear auto_RTL when not landing/return/complete; "
      "leftover Write_Mode AUTO_RTL_EXIT; logged number is AUTO after clear"},
-    {"ModeAuto::takeoff_run", ModePortStatus::kThisSlice,
+    {"ModeAuto::takeoff_run", ModePortStatus::kOnMain,
      "mode_auto.cpp ~1075-1083; leftover set_auto_armed when "
      "allow_takeoff_without_raising_throttle; leftover auto_takeoff_run; "
      "no auto_takeoff.run body / Option enum"},
+    {"ModeAuto::wp_run", ModePortStatus::kThisSlice,
+     "mode_auto.cpp ~1087-1107; leftover make_safe_ground_handling when "
+     "disarmed_or_landed; else leftover spool/wp_nav/pos/attitude flags; "
+     "no motors / wp_nav / pos_control / attitude objects"},
     {"FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain,
      "Copter::gcs_mode_enabled + AP_Vehicle::block_GCS_mode_change; injected "
      "fltmode_gcsblock; LAND/RTL not in list"},
