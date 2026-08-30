@@ -239,10 +239,12 @@ TEST_CASE("leftover_do_pilot_takeoff_ms stops when near complete alt",
 
 TEST_CASE("do_pilot_takeoff_ms catalog moved to this slice",
           "[copter][takeoff][leftover]") {
-    REQUIRE(remaining_count() == 4);
-    REQUIRE(this_slice_count() == 6);
+    REQUIRE(remaining_count() == 0);
+    REQUIRE(this_slice_count() == 7);
     REQUIRE(completeness_has("takeoff helpers", PortStatus::kThisSlice));
     REQUIRE(completeness_has("Mode::_TakeOff::start_m", PortStatus::kThisSlice));
     REQUIRE(completeness_has("do_pilot_takeoff_ms body", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("update_land_detector stationary AND-gate",
+                             PortStatus::kThisSlice));
     REQUIRE_FALSE(completeness_has("do_pilot_takeoff_ms body", PortStatus::kRemaining));
 }
