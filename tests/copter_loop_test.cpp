@@ -53,6 +53,7 @@ using fwcpp::copter::remaining_count;
 using fwcpp::copter::run_rate_controller_main;
 using fwcpp::copter::scheduler_task_count;
 using fwcpp::copter::this_slice_count;
+using fwcpp::copter::three_hz_loop;
 using fwcpp::copter::throttle_loop;
 using fwcpp::copter::kGravityMss;
 using fwcpp::copter::update_flight_mode;
@@ -78,10 +79,10 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 13", "[copter][leftover]") {
-    REQUIRE(remaining_count() == 18);
+TEST_CASE("catalog remaining_count stays open after slice 14", "[copter][leftover]") {
+    REQUIRE(remaining_count() == 17);
     REQUIRE(this_slice_count() == 2);
-    REQUIRE(on_main_count() == 17);
+    REQUIRE(on_main_count() == 18);
     REQUIRE(copter_completeness_size() ==
             on_main_count() + this_slice_count() + remaining_count() + out_of_scope_count());
     REQUIRE(completeness_has("Copter::rc_loop", PortStatus::kOnMain));
@@ -101,10 +102,11 @@ TEST_CASE("catalog remaining_count stays open after slice 13", "[copter][leftove
     REQUIRE(completeness_has("Copter::update_batt_compass", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::update_altitude", PortStatus::kOnMain));
     REQUIRE(completeness_has("Copter::run_nav_updates", PortStatus::kOnMain));
+    REQUIRE(completeness_has("Copter::update_throttle_hover", PortStatus::kOnMain));
     REQUIRE(completeness_has("leftover catalog", PortStatus::kThisSlice));
-    REQUIRE(completeness_has("Copter::update_throttle_hover", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::three_hz_loop", PortStatus::kThisSlice));
+    REQUIRE(completeness_has("Copter::loop_rate_logging", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_super_simple_bearing", PortStatus::kRemaining));
-    REQUIRE(completeness_has("Copter::three_hz_loop", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::update_auto_armed", PortStatus::kRemaining));
     REQUIRE(completeness_has("Copter::init_ardupilot", PortStatus::kRemaining));
     REQUIRE(completeness_has("AP:: singletons", PortStatus::kOutOfScope));
@@ -1115,4 +1117,22 @@ TEST_CASE("update_throttle_hover skips motors update when not level hover",
     const auto pitch_fx = update_throttle_hover(pitched);
     REQUIRE_FALSE(pitch_fx.early_return);
     REQUIRE_FALSE(pitch_fx.motors_update_throttle_hover);
+}
+
+TEST_CASE("three_hz_loop leftover always-on failsafes and low_alt; tuning remaining",
+          "[copter][three_hz_loop]") {
+    const auto leftover = three_hz_loop();
+    REQUIRE(leftover.failsafe_gcs_check);
+    REQUIRE(leftover.failsafe_terrain_check);
+    REQUIRE(leftover.failsafe_deadreckon_check);
+    REQUIRE(leftover.low_alt_avoidance);
+    REQUIRE_FALSE(leftover.transmitter_tuning);
+
+    const auto* row = find_scheduler_task("three_hz_loop");
+    REQUIRE(row != nullptr);
+    REQUIRE(row->kind == TaskKind::kScheduled);
+    REQUIRE(row->rate_hz == 3.0f);
+    REQUIRE(row->max_time_micros == 75);
+    REQUIRE(row->priority == 57);
+    REQUIRE(row->gate == nullptr);
 }
