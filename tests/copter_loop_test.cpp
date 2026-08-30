@@ -94,6 +94,7 @@ using fwcpp::copter::get_wp_distance_m;
 using fwcpp::copter::update_auto_armed;
 using fwcpp::copter::startup_ins_ground;
 using fwcpp::copter::allocate_motors;
+using fwcpp::copter::ESCCalibrationModes;
 using fwcpp::copter::InitArdupilotInputs;
 using fwcpp::copter::init_ardupilot;
 using fwcpp::copter::kRollPitchYawInputMax;
@@ -128,7 +129,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("catalog remaining_count stays open after slice 44", "[copter][leftover]") {
+TEST_CASE("catalog remaining_count stays open after slice 45", "[copter][leftover]") {
     REQUIRE(remaining_count() == 1);
     REQUIRE(this_slice_count() == 2);
     REQUIRE(on_main_count() == 35);
@@ -2690,7 +2691,11 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE(fx.update_aux_servo_function);
     REQUIRE(fx.safety_ignore_mask);
     REQUIRE_FALSE(fx.esc_cal_skipped);
-    REQUIRE_FALSE(fx.esc_cal_body);
+    REQUIRE(fx.esc_cal_body);
+    REQUIRE(fx.esc_cal_switch);
+    REQUIRE_FALSE(fx.esc_cal_radio_wait);
+    REQUIRE_FALSE(fx.esc_cal_notify);
+    REQUIRE_FALSE(fx.esc_cal_passthrough);
     REQUIRE(fx.initialised_params);
     REQUIRE_FALSE(fx.relay_init);
     REQUIRE(fx.register_timer_failsafe);
@@ -2735,7 +2740,11 @@ TEST_CASE("init_ardupilot leftover default notify baro interlock rc_in",
     REQUIRE(fx.pos_variance_filt_set_cutoff);
     REQUIRE(fx.vel_variance_filt_set_cutoff);
     REQUIRE(fx.ap_initialised);
-    REQUIRE_FALSE(fx.esc_cal_body);
+    REQUIRE(fx.esc_cal_body);
+    REQUIRE(fx.esc_cal_switch);
+    REQUIRE_FALSE(fx.esc_cal_radio_wait);
+    REQUIRE_FALSE(fx.esc_cal_notify);
+    REQUIRE_FALSE(fx.esc_cal_passthrough);
 }
 
 TEST_CASE("init_ardupilot leftover throttle_configured injects radio min max",
@@ -2782,6 +2791,34 @@ TEST_CASE("init_ardupilot leftover initial_mode_ok false falls back unavailable"
     REQUIRE(fx.leftover_set_mode_reason == 26);
     REQUIRE(fx.set_mode_stabilize_unavailable);
     REQUIRE(fx.leftover_set_mode_unavailable_reason == 33);
-    REQUIRE_FALSE(fx.esc_cal_body);
+    REQUIRE(fx.esc_cal_body);
     REQUIRE(fx.ap_initialised);
+}
+
+TEST_CASE("init_ardupilot leftover rc_cal fail clears esc calibrate",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.rc_cal_ok = false;
+    in.esc_calibrate = ESCCalibrationModes::ESCCAL_AUTO;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_body);
+    REQUIRE(fx.esc_cal_rc_calibration_checks);
+    REQUIRE(fx.esc_cal_clear_param);
+    REQUIRE_FALSE(fx.esc_cal_switch);
+    REQUIRE_FALSE(fx.esc_cal_would_block);
+}
+
+TEST_CASE("init_ardupilot leftover ESCCAL_NONE high throttle would_block flag",
+          "[copter][init_ardupilot]") {
+    InitArdupilotInputs in{};
+    in.esc_calibrate = ESCCalibrationModes::ESCCAL_NONE;
+    in.throttle_control_in = 950;
+    const auto fx = init_ardupilot(in);
+    REQUIRE(fx.esc_cal_body);
+    REQUIRE(fx.esc_cal_switch);
+    REQUIRE(fx.esc_cal_high_throttle);
+    REQUIRE(fx.esc_cal_would_block);
+    REQUIRE_FALSE(fx.esc_cal_notify);
+    REQUIRE_FALSE(fx.esc_cal_passthrough);
+    REQUIRE_FALSE(fx.esc_cal_radio_wait);
 }

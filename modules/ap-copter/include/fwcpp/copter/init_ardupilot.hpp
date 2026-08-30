@@ -1,8 +1,9 @@
 #pragma once
 
 // Copter::init_ardupilot leftover. Upstream ArduCopter/system.cpp
-// ~16-200 (through ap.initialised = true). ESC cal body remaining
-// (delay/read_radio/arming/while(1)). No notify / battery /
+// ~16-200 (through ap.initialised = true) plus
+// esc_calibration.cpp ~10-72 leftover flags (no while(1) / HAL
+// delay / notify / passthrough bodies). No notify / battery /
 // barometer / winch /
 // rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
 // SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
@@ -37,9 +38,13 @@
 //     set_update_rate, convert_pwm_min_max, update_throttle_range,
 //     update_aux_servo_function, safety_ignore_mask. Skip heli
 //     set_esc_scaling. Do not invent motors / SRV / BoardConfig.
-//   esc_calibration_startup_check() — brushed skip only
-//     (motors->is_brushed_pwm_type() early return). Non-brushed ESC
-//     cal body stays remaining (delay/read_radio/arming/while(1)).
+//   esc_calibration_startup_check() leftover flags — brushed skip
+//     (motors->is_brushed_pwm_type() early return). Non-brushed:
+//     radio_wait / notify / passthrough stay remaining-false. RC
+//     cal inject rc_cal_ok (default true); !rc_cal_ok may clear
+//     esc_calibrate then skip switch. Switch leftover +
+//     would_block flag only (NO while(1)) when ESCCAL_NONE and
+//     throttle_control_in >= 950.
 //   ap.initialised_params = true
 //   register_timer_failsafe(failsafe_check_static, 1000) — flag only
 //   gps.set_log_gps_bit(MASK_LOG_GPS) + gps.init() leftover flags
@@ -80,8 +85,8 @@
 // init_rangefinder stays false (AP_RANGEFINDER remaining).
 // g2.proximity.init stays false (HAL_PROXIMITY remaining).
 // g2.beacon.init stays false (AP_BEACON remaining).
-// The rest of init_ardupilot is ESC cal body only
-// (delay/read_radio/arming/while(1)) — catalog row
+// The rest of init_ardupilot is ESC cal HAL delay,
+// passthrough/auto bodies, and notify — catalog row
 // "Copter::init_ardupilot rest".
 
 #include <cstdint>
@@ -116,6 +121,17 @@ inline constexpr std::uint32_t kMaskLogImuRaw = 1u << 19;
 inline constexpr std::uint8_t kModeReasonInitialised = 26;
 inline constexpr std::uint8_t kModeReasonUnavailable = 33;
 
+// Copter.h ESCCalibrationModes + esc_calibration.cpp HIGH_THROTTLE.
+enum class ESCCalibrationModes : std::uint8_t {
+    ESCCAL_NONE = 0,
+    ESCCAL_PASSTHROUGH_IF_THROTTLE_HIGH = 1,
+    ESCCAL_PASSTHROUGH_ALWAYS = 2,
+    ESCCAL_AUTO = 3,
+    ESCCAL_DISABLED = 9,
+};
+
+inline constexpr std::int16_t kEscCalibrationHighThrottle = 950;
+
 struct InitArdupilotInputs {
     bool motor_interlock_aux{false};
     bool throttle_configured{false};
@@ -125,6 +141,9 @@ struct InitArdupilotInputs {
     bool is_brushed_pwm{false};  // motors->is_brushed_pwm_type()
     std::uint8_t initial_mode{0};  // g.initial_mode; Mode::Number::STABILIZE=0
     bool initial_mode_ok{true};    // set_mode(initial_mode, INITIALISED) result
+    bool rc_cal_ok{true};          // arming.rc_calibration_checks(true)
+    ESCCalibrationModes esc_calibrate{ESCCalibrationModes::ESCCAL_NONE};
+    std::int16_t throttle_control_in{0};  // channel_throttle->get_control_in()
 };
 
 struct InitArdupilotEffects {
@@ -164,7 +183,15 @@ struct InitArdupilotEffects {
     bool update_aux_servo_function{false};
     bool safety_ignore_mask{false};     // flag only — no BoardConfig / motor_mask
     bool esc_cal_skipped{false};        // brushed early return
-    bool esc_cal_body{false};           // remaining — delay/read_radio/arming/while(1)
+    bool esc_cal_body{false};           // entered non-brushed ESC cal check
+    bool esc_cal_radio_wait{false};     // remaining HAL delay / read_radio
+    bool esc_cal_rc_calibration_checks{false};
+    bool esc_cal_clear_param{false};
+    bool esc_cal_switch{false};
+    bool esc_cal_high_throttle{false};
+    bool esc_cal_would_block{false};    // flag only — NO while(1)
+    bool esc_cal_notify{false};         // remaining AP_Notify
+    bool esc_cal_passthrough{false};    // remaining passthrough/auto bodies
     bool initialised_params{false};
     bool relay_init{false};             // remaining AP_RELAY
     bool register_timer_failsafe{false};
@@ -253,10 +280,28 @@ struct InitArdupilotEffects {
     fx.update_throttle_range = true;
     fx.update_aux_servo_function = true;
     fx.safety_ignore_mask = true;
-    // esc_calibration_startup_check leftover — brushed skip only.
-    // esc_cal_body stays false (non-brushed body remaining).
+    // esc_calibration_startup_check leftover flags. Brushed skip
+    // stays. Non-brushed: radio_wait / notify / passthrough remain
+    // false (HAL delay, AP_Notify, passthrough/auto bodies).
+    // would_block is a flag only — do not while(1).
     if (in.is_brushed_pwm) {
         fx.esc_cal_skipped = true;
+    } else {
+        fx.esc_cal_body = true;
+        fx.esc_cal_rc_calibration_checks = true;
+        if (!in.rc_cal_ok) {
+            if (in.esc_calibrate != ESCCalibrationModes::ESCCAL_NONE &&
+                in.esc_calibrate != ESCCalibrationModes::ESCCAL_DISABLED) {
+                fx.esc_cal_clear_param = true;
+            }
+        } else {
+            fx.esc_cal_switch = true;
+            if (in.esc_calibrate == ESCCalibrationModes::ESCCAL_NONE &&
+                in.throttle_control_in >= kEscCalibrationHighThrottle) {
+                fx.esc_cal_high_throttle = true;
+                fx.esc_cal_would_block = true;
+            }
+        }
     }
     fx.initialised_params = true;
     // relay_init stays false (AP_RELAY remaining)
@@ -290,7 +335,8 @@ struct InitArdupilotEffects {
     fx.set_land_complete_maybe = true;
     fx.failsafe_enable = true;
     // Tail after failsafe_enable — leftover flags only. No INS /
-    // motors objects, no real set_mode (CCP-036), no ESC cal body.
+    // motors objects, no real set_mode (CCP-036). ESC cal leftover
+    // flags recorded above (no while(1) / HAL delay / notify).
     fx.ins_set_log_raw_bit = true;
     fx.ins_log_raw_bit = kMaskLogImuRaw;
     fx.motors_output_min = true;
