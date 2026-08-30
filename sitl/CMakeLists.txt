@@ -9,3 +9,9 @@
 # precedent tests/CMakeLists.txt's own sitl_harness_test target follows.
 add_executable(sitl_run main.cpp)
 target_link_libraries(sitl_run PRIVATE ap-hal-sitl)
+
+# CCP-044 slice 1: Copter analogue of sitl_run (CPP-085). Same
+# ap-hal-sitl link — SitlCopterHarness + LeftoverCopter come through
+# ap-hal-sitl's public ap-copter dependency (CCP-043).
+add_executable(copter_sitl_run copter_main.cpp)
+target_link_libraries(copter_sitl_run PRIVATE ap-hal-sitl)
