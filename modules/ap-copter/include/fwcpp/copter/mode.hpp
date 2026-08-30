@@ -277,14 +277,22 @@ public:
         leftover_mode_rtl_run = true;
         leftover_mode_rtl_disarm_on_land = false;
     }
+    // Leftover ModeAuto::loiter_run (mode_auto.cpp ~1162-1180). Same flags
+    // as leftover_wp_run (upstream bodies match). No motors / wp_nav /
+    // pos_control / attitude objects. Switch still records loiter_run as
+    // the "would call loiter_run" leftover, then this helper.
+    // LOITER_TO_ALT does not call this.
+    void leftover_loiter_run() {
+        leftover_wp_run();
+    }
     // Leftover ModeAuto::run waiting_to_start + origin (mode_auto.cpp ~85-98),
     // else-path change detector + mission.update (~99-113), SubMode switch
     // leftover flags (~116-164), auto_RTL landing-sequence leftover
     // (~166-174), takeoff_run leftover (~1075-1083), wp_run leftover
-    // (~1087-1107), land_run leftover (~1111-1125), and rtl_run leftover
-    // (~1129-1133). Switch always runs, including while still
-    // waiting_to_start. No AP_Mission / detector / GCS / logger /
-    // ModeRTL / *_run bodies. run has no ctx.
+    // (~1087-1107), land_run leftover (~1111-1125), rtl_run leftover
+    // (~1129-1133), and loiter_run leftover (~1162-1180). Switch always
+    // runs, including while still waiting_to_start. No AP_Mission /
+    // detector / GCS / logger / ModeRTL / *_run bodies. run has no ctx.
     void run() override {
         if (waiting_to_start) {
             if (has_origin) {
@@ -354,6 +362,7 @@ public:
             break;
         case SubMode::LOITER:
             loiter_run = true;
+            leftover_loiter_run();
             break;
         case SubMode::LOITER_TO_ALT:
             loiter_to_alt_run = true;

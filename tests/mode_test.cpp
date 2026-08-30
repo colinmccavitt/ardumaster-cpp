@@ -99,6 +99,19 @@ void require_land_run_flying(const ModeAuto& m) {
     REQUIRE_FALSE(m.leftover_mode_rtl_run);
 }
 
+void require_loiter_run_flying(const ModeAuto& m) {
+    REQUIRE(m.loiter_run);
+    REQUIRE(m.desired_spool_unlimited);
+    REQUIRE(m.update_wpnav);
+    REQUIRE(m.terrain_failsafe_status);
+    REQUIRE(m.pos_D_update);
+    REQUIRE(m.input_thrust_vector_heading);
+    REQUIRE_FALSE(m.make_safe_ground_handling);
+    REQUIRE_FALSE(m.wp_run);
+    REQUIRE_FALSE(m.land_run_normal_or_precland);
+    REQUIRE_FALSE(m.leftover_mode_rtl_run);
+}
+
 }  // namespace
 
 TEST_CASE("Mode::Number values match mode.h including gaps", "[copter][mode]") {
@@ -1001,17 +1014,38 @@ TEST_CASE("ModeAuto run SubMode CIRCLE leftover circle_run", "[copter][mode]") {
     require_submode_runs(f.table.mode_auto, false, false, false, false, true, false, false, false, false);
 }
 
-TEST_CASE("ModeAuto run SubMode LOITER leftover loiter_run", "[copter][mode]") {
+TEST_CASE("ModeAuto run SubMode LOITER leftover loiter_run flying", "[copter][mode]") {
     Fixture f;
     REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
     f.table.mode_auto.waiting_to_start = false;
     f.table.mode_auto.submode = ModeAuto::SubMode::LOITER;
     f.table.mode_auto.allow_takeoff_without_raising_throttle = true;
+    REQUIRE_FALSE(f.table.mode_auto.disarmed_or_landed);
     f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.mission_update);
     require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, true, false, false);
-    REQUIRE(f.table.mode_auto.loiter_run);
+    require_loiter_run_flying(f.table.mode_auto);
     REQUIRE_FALSE(f.table.mode_auto.auto_takeoff_run);
     REQUIRE_FALSE(f.table.mode_auto.set_auto_armed);
+}
+
+TEST_CASE("ModeAuto run SubMode LOITER leftover loiter_run when disarmed_or_landed", "[copter][mode]") {
+    Fixture f;
+    REQUIRE(set_mode(f.ctx, f.table, Mode::Number::AUTO, ModeReason::RC_COMMAND, {}));
+    f.table.mode_auto.waiting_to_start = false;
+    f.table.mode_auto.submode = ModeAuto::SubMode::LOITER;
+    f.table.mode_auto.disarmed_or_landed = true;
+    f.table.mode_auto.run();
+    REQUIRE(f.table.mode_auto.loiter_run);
+    REQUIRE(f.table.mode_auto.make_safe_ground_handling);
+    REQUIRE_FALSE(f.table.mode_auto.desired_spool_unlimited);
+    REQUIRE_FALSE(f.table.mode_auto.update_wpnav);
+    REQUIRE_FALSE(f.table.mode_auto.terrain_failsafe_status);
+    REQUIRE_FALSE(f.table.mode_auto.pos_D_update);
+    REQUIRE_FALSE(f.table.mode_auto.input_thrust_vector_heading);
+    REQUIRE_FALSE(f.table.mode_auto.wp_run);
+    REQUIRE_FALSE(f.table.mode_auto.land_run_normal_or_precland);
+    REQUIRE_FALSE(f.table.mode_auto.leftover_mode_rtl_run);
 }
 
 TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover loiter_to_alt_run", "[copter][mode]") {
@@ -1021,6 +1055,9 @@ TEST_CASE("ModeAuto run SubMode LOITER_TO_ALT leftover loiter_to_alt_run", "[cop
     f.table.mode_auto.submode = ModeAuto::SubMode::LOITER_TO_ALT;
     f.table.mode_auto.run();
     require_submode_runs(f.table.mode_auto, false, false, false, false, false, false, false, true, false);
+    REQUIRE(f.table.mode_auto.loiter_to_alt_run);
+    REQUIRE_FALSE(f.table.mode_auto.loiter_run);
+    require_no_wp_run_leftovers(f.table.mode_auto);
 }
 
 TEST_CASE("ModeAuto run SubMode NAV_ATTITUDE_TIME leftover nav_attitude_time_run", "[copter][mode]") {
@@ -1189,7 +1226,7 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(remaining_count() == 1);
     REQUIRE(remaining_count() > 0);
     REQUIRE(mode_this_slice_count() == 2);
-    REQUIRE(mode_on_main_count() == 24);
+    REQUIRE(mode_on_main_count() == 25);
     REQUIRE(mode_out_of_scope_count() == 3);
     REQUIRE(mode_completeness_size() ==
             mode_on_main_count() + mode_this_slice_count() + remaining_count() + mode_out_of_scope_count());
@@ -1213,7 +1250,8 @@ TEST_CASE("leftover remaining_count matches catalog", "[copter][mode][leftover]"
     REQUIRE(mode_completeness_has("ModeAuto::takeoff_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::wp_run", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("ModeAuto::land_run", ModePortStatus::kOnMain));
-    REQUIRE(mode_completeness_has("ModeAuto::rtl_run", ModePortStatus::kThisSlice));
+    REQUIRE(mode_completeness_has("ModeAuto::rtl_run", ModePortStatus::kOnMain));
+    REQUIRE(mode_completeness_has("ModeAuto::loiter_run", ModePortStatus::kThisSlice));
     REQUIRE(mode_completeness_has("FLTMODE_GCSBLOCK param", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("fence recovery", ModePortStatus::kOnMain));
     REQUIRE(mode_completeness_has("update_flight_mode FAST_TASK", ModePortStatus::kOnMain));
