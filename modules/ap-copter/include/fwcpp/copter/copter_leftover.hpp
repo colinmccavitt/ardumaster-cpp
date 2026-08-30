@@ -1,13 +1,14 @@
 #pragma once
 
 // CCP-035 leftover completeness catalog — ArduCopter vehicle loop
-// (Copter.cpp / Copter.h / system.cpp). Slice 38 lands
+// (Copter.cpp / Copter.h / system.cpp). Slice 39 lands
 // init_ardupilot leftover (notify/battery/baro + interlock +
 // init_rc_in + allocate_motors call + rc convert/init + init_rc_out
 // leftover + esc_cal brushed skip + initialised_params + failsafe
-// register leftover; gcs/osd/surface_tracking/relay remaining false).
-// Rest of init_ardupilot (ESC cal body, GPS/compass,
-// startup_INS_ground call, …) stays remaining.
+// register leftover + GPS/compass leftover flags;
+// gcs/osd/surface_tracking/relay remaining false).
+// Rest of init_ardupilot (ESC cal body, airspeed/OA, attitude sanity,
+// optflow/camera, startup_INS_ground call, …) stays remaining.
 // remaining_count() > 0 is expected after this slice.
 //
 // ADR-0012: no AP:: singletons, no AP_Param var_info, no exceptions.
@@ -46,9 +47,9 @@ inline constexpr CopterPortItem kCopterCompleteness[] = {
     {"Copter::throttle_loop", PortStatus::kOnMain,
      "throttle_loop.hpp; always mix, auto_armed, gnd-effect, ekf-terrain; no heli"},
     {"Copter::init_ardupilot", PortStatus::kThisSlice,
-     "init_ardupilot.hpp; notify/battery/baro + interlock + init_rc_in + allocate_motors call + rc convert/init + init_rc_out + esc_cal brushed skip + initialised_params + failsafe register leftover; gcs/osd/surface_tracking/relay remaining false"},
+     "init_ardupilot.hpp; notify/battery/baro + interlock + init_rc_in + allocate_motors call + rc convert/init + init_rc_out + esc_cal brushed skip + initialised_params + failsafe register leftover + GPS/compass leftover flags; gcs/osd/surface_tracking/relay remaining false"},
     {"Copter::init_ardupilot rest", PortStatus::kRemaining,
-     "ESC cal body, GPS/compass, startup_INS_ground call, etc."},
+     "ESC cal body, airspeed/OA, attitude sanity, optflow/camera, startup_INS_ground call, etc."},
     {"Copter::run_rate_controller_main", PortStatus::kOnMain,
      "run_rate_controller.hpp; set_dt_s + rate_controller_run iff !rate thread"},
     {"Copter::read_inertia", PortStatus::kOnMain,

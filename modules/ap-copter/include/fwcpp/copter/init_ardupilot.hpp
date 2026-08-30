@@ -1,10 +1,11 @@
 #pragma once
 
 // Copter::init_ardupilot leftover. Upstream ArduCopter/system.cpp
-// ~16-87 (after init_rc_out(); stop BEFORE gps.set_log_gps_bit).
-// No notify / battery / barometer / winch / rssi / GCS / OSD /
-// SurfaceTracking / RC_Channel / motors / SRV_Channels / BoardConfig /
-// AP_Relay / HAL objects — record leftover flags only. Do not invoke
+// ~16-94 (after register_timer_failsafe; stop BEFORE
+// AP_AIRSPEED_ENABLED). No notify / battery / barometer / winch /
+// rssi / GCS / OSD / SurfaceTracking / RC_Channel / motors /
+// SRV_Channels / BoardConfig / AP_Relay / HAL / GPS / compass /
+// airspeed / OA objects — record leftover flags only. Do not invoke
 // the allocate_motors() helper body (call-site leftover flag only).
 //
 // Always-on this slice (AP_WINCH_ENABLED / AP_RSSI_ENABLED are not
@@ -35,12 +36,16 @@
 //     cal body stays remaining (delay/read_radio/arming/while(1)).
 //   ap.initialised_params = true
 //   register_timer_failsafe(failsafe_check_static, 1000) — flag only
+//   gps.set_log_gps_bit(MASK_LOG_GPS) + gps.init() leftover flags
+//   AP::compass().set_log_bit(MASK_LOG_COMPASS) + init leftover flags
 //
 // surface_tracking.init stays false (AP_RANGEFINDER remaining).
 // relay.init stays false (AP_RELAY remaining).
-// The rest of init_ardupilot (ESC cal body, GPS/compass,
-// startup_INS_ground call, etc.) is catalog row
-// "Copter::init_ardupilot rest".
+// airspeed.set_log_bit stays false (AP_AIRSPEED remaining).
+// g2.oa.init stays false (AP_OAPATHPLANNER remaining).
+// The rest of init_ardupilot (ESC cal body, airspeed/OA, attitude
+// sanity, optflow/camera, startup_INS_ground call, etc.) is catalog
+// row "Copter::init_ardupilot rest".
 
 #include <cstdint>
 
@@ -59,6 +64,10 @@ inline constexpr std::int16_t kDefaultPwmMax = 2000;
 
 // register_timer_failsafe period — ArduCopter/system.cpp ~87
 inline constexpr std::uint16_t kFailsafeCheckPeriodUs = 1000;
+
+// ArduCopter/defines.h MASK_LOG_GPS = (1<<2); MASK_LOG_COMPASS = (1<<13)
+inline constexpr std::uint32_t kMaskLogGps = 1u << 2;
+inline constexpr std::uint32_t kMaskLogCompass = 1u << 13;
 
 struct InitArdupilotInputs {
     bool motor_interlock_aux{false};
@@ -111,6 +120,14 @@ struct InitArdupilotEffects {
     bool relay_init{false};             // remaining AP_RELAY
     bool register_timer_failsafe{false};
     std::uint16_t register_timer_failsafe_period{0};
+    bool gps_set_log_bit{false};
+    std::uint32_t gps_log_bit{0};       // MASK_LOG_GPS
+    bool gps_init{false};
+    bool compass_set_log_bit{false};
+    std::uint32_t compass_log_bit{0};   // MASK_LOG_COMPASS
+    bool compass_init{false};
+    bool airspeed_set_log_bit{false};   // remaining AP_AIRSPEED
+    bool oa_init{false};                // remaining AP_OAPATHPLANNER
 };
 
 [[nodiscard]] inline InitArdupilotEffects init_ardupilot(
@@ -163,6 +180,14 @@ struct InitArdupilotEffects {
     // relay_init stays false (AP_RELAY remaining)
     fx.register_timer_failsafe = true;
     fx.register_timer_failsafe_period = kFailsafeCheckPeriodUs;
+    // GPS / compass leftover flags only — no objects.
+    fx.gps_set_log_bit = true;
+    fx.gps_log_bit = kMaskLogGps;
+    fx.gps_init = true;
+    fx.compass_set_log_bit = true;
+    fx.compass_log_bit = kMaskLogCompass;
+    fx.compass_init = true;
+    // airspeed_set_log_bit / oa_init stay false (remaining)
     return fx;
 }
 
