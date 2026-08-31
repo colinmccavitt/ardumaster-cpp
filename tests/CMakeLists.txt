@@ -208,6 +208,14 @@ catch_discover_tests(ahrs_leftover_test)
 
 add_executable(sim_plane_test sim_plane_test.cpp)
 target_link_libraries(sim_plane_test PRIVATE ap-sim Catch2::Catch2WithMain)
+# CPP-094: absolute path to this test's real, byte-for-byte upstream fixture
+# (tests/fixtures/skywalker_2013.json) - no established fixture-path
+# convention existed anywhere else in this tree to reuse, so this
+# CMAKE_CURRENT_SOURCE_DIR-derived compile definition is the new one;
+# an absolute path avoids any dependence on ctest's/the test binary's
+# working directory.
+target_compile_definitions(sim_plane_test PRIVATE
+    FWCPP_SIM_PLANE_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 catch_discover_tests(sim_plane_test)
 
 add_executable(sim_multicopter_test sim_multicopter_test.cpp)

@@ -48,16 +48,43 @@
 //   - All airframe config variants and their "-suffix" frame-string
 //     parsing: elevons, vtail, dspoilers, redundant, reverse_thrust,
 //     reverse_elevator_rudder, tailsitter, aerobatic, copter_tailsitter,
-//     have_launcher, have_steering, ice_engine (and ICEngine itself),
-//     "-heavy"/"-jet" mass overrides. calculate_forces' surface-mixing
-//     if/else-if chain (elevons/vtail/dspoilers/redundant) and its
-//     reverse_elevator_rudder negation are skipped entirely - aileron/
-//     elevator/rudder/throttle are used exactly as given. getTorque's
-//     `if (tailsitter || aerobatic)` effective-airspeed/alpha adjustment
-//     (SIM_Plane.cpp lines ~281-289) is excluded too - alpha and airspeed
-//     are used as passed in, unmodified.
-//   - load_coeffs() / AP_JSON model-file loading - Coefficients is a plain
-//     aggregate a caller can hand-edit instead (see step 1 of the ticket).
+//     have_launcher, have_steering, ice_engine (and ICEngine itself).
+//     calculate_forces' surface-mixing if/else-if chain (elevons/vtail/
+//     dspoilers/redundant) and its reverse_elevator_rudder negation are
+//     skipped entirely - aileron/elevator/rudder/throttle are used exactly
+//     as given. getTorque's `if (tailsitter || aerobatic)` effective-
+//     airspeed/alpha adjustment (SIM_Plane.cpp lines ~281-289) is excluded
+//     too - alpha and airspeed are used as passed in, unmodified.
+//     ("-heavy"/"-jet" mass/thrust_scale overrides used to be listed here
+//     too - CPP-094 ported them, see MassVariant below.)
+//   - load_coeffs() (AP_JSON model-file loading) IS PORTED (real line ~398
+//     below) - this bullet used to claim otherwise; corrected by CPP-094,
+//     which also gave it its first real test: a byte-for-byte copy of
+//     upstream's own `Tools/autotest/models/skywalker_2013.json`
+//     (tests/fixtures/skywalker_2013.json) loaded via load_coeffs() and
+//     checked to reproduce Coefficients{}'s hardcoded defaults exactly -
+//     the genuine round-trip proof the previous synthetic-fixture-only
+//     parser test never gave. skywalker_2013.json is the ONLY real
+//     native-format Plane coefficient file anywhere in the pinned upstream
+//     tree (verified directly: `grep -rl c_lift_a` across the whole pinned
+//     tree matches nothing else) - `Callisto.json`/`freestyle.json` (also
+//     under Tools/autotest/models/) are MULTICOPTER frame-config formats
+//     (mass/battery/motor-count fields, not aerodynamic coefficients), and
+//     `xplane_plane.json`/`xplane_heli.json` are DREF mapping configs for
+//     the unrelated X-Plane external-FDM backend - none of the three are
+//     valid load_coeffs() inputs; a caller wanting a real, different
+//     upstream-format plane has exactly the one file. Getting that one
+//     real file to actually round-trip surfaced two genuine, previously-
+//     silent bugs in this port, both fixed by CPP-094: (1) load_coeffs()
+//     itself read the CG-offset key as "cg" - upstream's real key
+//     (SIM_Plane.cpp:191) is "CGOffset" - so the field silently never
+//     loaded from any real file (masked before now because the
+//     constructor's own default cg_offset already equals
+//     skywalker_2013.json's value); (2) sim_json.hpp's parser only
+//     recognized "//" comments - skywalker_2013.json uses "#" (upstream's
+//     own real AP_JSON.cpp strips "#" to end-of-line, see sim_json.hpp's
+//     banner) - so a byte-for-byte copy of the real file failed to parse
+//     at all until "#"-comment support was added.
 //   - Atmosphere/air density model (AP_Baro::get_air_density_for_alt_amsl,
 //     eas2tas from altitude). air_density defaults to SSL_AIR_DENSITY
 //     (1.225f kg/m^3, AP_Math/definitions.h) and is held constant - a
@@ -336,6 +363,27 @@ enum class AirframeMix : std::uint8_t {
     kRedundant = 4,
 };
 
+// CPP-094: real upstream `-heavy`/`-jet` frame-string mass/thrust_scale
+// overrides (SIM_Plane.cpp:53-59), reproduced as an explicit constructor
+// enum - same ADR-0012 shape as AirframeMix above - rather than raw
+// frame_str string parsing, which this class has no other trace of.
+// Verified asymmetry (re-checked directly against the real source, not
+// assumed symmetric): `-heavy` is `mass = 8;` ALONE; `-jet` is `mass = 22;
+// thrust_scale = (mass * GRAVITY_MSS) / hover_throttle;` - jet recomputes
+// thrust_scale from its own new mass, heavy does not. See the SimPlane
+// constructor's own doc comment for how that asymmetry is expressed here
+// (SimPlane::heavy_frozen_mass_kg_) and for why kHeavy+kJet don't need a
+// combinable bitmask: upstream applies both real `if`s unconditionally in
+// sequence, so a frame_str carrying both suffixes ends up behaviorally
+// IDENTICAL to kJet alone (jet's unconditional mass/thrust_scale
+// overwrite leaves nothing of heavy's effect observable) - a mutually
+// exclusive 3-value enum loses no real distinguishable upstream behavior.
+enum class MassVariant : std::uint8_t {
+    kStandard = 0,
+    kHeavy = 1,
+    kJet = 2,
+};
+
 struct FrameConfig {
     AirframeMix mix = AirframeMix::kStandard;
     bool reverse_elevator_rudder = false;
@@ -387,10 +435,43 @@ public:
     // (the overwhelming majority of existing sim_plane_test.cpp cases) -
     // a caller exercising turbulence and wanting a specific sequence
     // passes their own seed explicitly.
+    //
+    // mass_variant (CPP-094, default kStandard - identical behavior to
+    // before this ticket) applies the real upstream `-heavy`/`-jet`
+    // frame-string overrides - see MassVariant's own doc comment above for
+    // the full derivation and real line citations. Applied AFTER mass_kg
+    // so mass_kg still names the pre-override baseline mass (matching
+    // upstream's own real "mass = 2.0f, THEN maybe overwritten" order,
+    // SIM_Plane.cpp:41 vs 53-59).
     explicit SimPlane(const Coefficients& coeffs = Coefficients{}, float mass_kg = 2.0f, float hover_throttle = 0.7f,
-                       std::uint32_t wind_rng_seed = 20260827U)
+                       std::uint32_t wind_rng_seed = 20260827U, MassVariant mass_variant = MassVariant::kStandard)
         : Aircraft(wind_rng_seed), coefficient(coeffs), hover_throttle(hover_throttle) {
         mass = mass_kg;
+        switch (mass_variant) {
+        case MassVariant::kStandard:
+            break;
+        case MassVariant::kHeavy:
+            // Upstream SIM_Plane.cpp:53-54: `if (strstr(frame_str,
+            // "-heavy")) { mass = 8; }` - mass alone changes. thrust_scale
+            // must NOT follow: freeze update()'s thrust-scale calculation
+            // at the PRE-heavy mass_kg (2.0f by default here, matching
+            // upstream's real mass=2.0f baseline at the point this branch
+            // runs) via heavy_frozen_mass_kg_ - see that field's own doc
+            // comment and update()'s own thrust_scale line.
+            heavy_frozen_mass_kg_ = mass_kg;
+            mass = 8.0f;
+            break;
+        case MassVariant::kJet:
+            // Upstream SIM_Plane.cpp:56-58 ("a 22kg jet, level top speed is
+            // 102m/s", comment transcribed verbatim): mass=22, AND
+            // thrust_scale recomputed from that new mass. No freeze
+            // needed: this port's update() already recomputes thrust_scale
+            // from the live `mass` field every call by default (see
+            // update()'s own comment on why) - kJet's real "recompute from
+            // the new mass" behavior falls out for free.
+            mass = 22.0f;
+            break;
+        }
         dcm.identity();
         ground_behavior = GroundBehavior::kNone;
     }
@@ -439,7 +520,16 @@ public:
         json_get_float(obj, "deltaa_max", coefficient.deltaa_max);
         json_get_float(obj, "deltae_max", coefficient.deltae_max);
         json_get_float(obj, "deltar_max", coefficient.deltar_max);
-        json_get_vector3(obj, "cg", coefficient.cg_offset);
+        // CPP-094: this key was "cg" until this ticket - upstream's real
+        // key (SIM_Plane.cpp:191, `{ "CGOffset", &coefficient.CGOffset,
+        // VarType::VECTOR3F }`) is "CGOffset". A real, silent inherited bug:
+        // every real-world model file (including skywalker_2013.json
+        // itself) uses "CGOffset", so the old key never matched anything
+        // and coefficient.cg_offset silently stayed at whatever the
+        // constructor default already was - undetected because that
+        // default happens to equal skywalker_2013.json's own CGOffset
+        // value, so no prior (synthetic-fixture) test could have caught it.
+        json_get_vector3(obj, "CGOffset", coefficient.cg_offset);
         return true;
     }
 
@@ -798,6 +888,26 @@ public:
         }
     }
 
+    // Upstream: thrust_scale = (mass * GRAVITY_MSS) / hover_throttle
+    // (SIM_Plane.cpp:47), computed once in Plane::Plane(); computed
+    // per-call here instead since mass/hover_throttle are plain public
+    // fields a caller may change between calls (a port-specific
+    // convenience upstream's own single-shot constructor computation
+    // doesn't offer). CPP-094: exposed as its own accessor (rather than
+    // an update()-local variable) so heavy_frozen_mass_kg_'s real
+    // MassVariant::kHeavy asymmetry - mass changes, thrust_scale does NOT
+    // follow - is directly testable without stepping full update()/
+    // update_dynamics() physics. Reads heavy_frozen_mass_kg_ instead of
+    // `mass` directly whenever it's set (>= 0.0f, only ever true for
+    // kHeavy); for every kStandard/kJet caller (including every
+    // pre-CPP-094 caller, since heavy_frozen_mass_kg_ defaults to the
+    // sentinel) this reduces to `(mass * kGravityMss) / hover_throttle`,
+    // byte-for-byte unchanged from before CPP-094.
+    [[nodiscard]] float thrust_scale() const {
+        const float mass_for_thrust = (heavy_frozen_mass_kg_ >= 0.0f) ? heavy_frozen_mass_kg_ : mass;
+        return (mass_for_thrust * kGravityMss) / hover_throttle;
+    }
+
     // Upstream: Plane::calculate_forces (SIM_Plane.cpp:398) + the thrust-
     // scaling/ground-friction tail of it, folded together with
     // Aircraft::update_dynamics (SIM_Aircraft.cpp:709) into one per-tick
@@ -832,12 +942,10 @@ public:
         const math::Vector3f force = getForce(mixed.aileron, mixed.elevator, mixed.rudder, angle_of_attack, beta, airspeed, gyro, air_density);
         math::Vector3f rot_accel = getTorque(mixed.aileron, mixed.elevator, mixed.rudder, mixed.throttle, force, angle_of_attack, airspeed, beta, gyro, air_density);
 
-        // scale thrust to newtons - upstream: thrust_scale = (mass *
-        // GRAVITY_MSS) / hover_throttle, computed once in Plane::Plane();
-        // computed per-call here since mass/hover_throttle are plain public
-        // fields a caller may change between calls.
-        const float thrust_scale = (mass * kGravityMss) / hover_throttle;
-        const float thrust_newtons = mixed.throttle * thrust_scale;
+        // scale thrust to newtons - see thrust_scale()'s own doc comment
+        // above for the upstream citation and the CPP-094
+        // heavy_frozen_mass_kg_ handling.
+        const float thrust_newtons = mixed.throttle * thrust_scale();
 
         accel_body = math::Vector3f(thrust_newtons, 0.0f, 0.0f) + force;
         accel_body = accel_body / mass;
@@ -956,6 +1064,16 @@ public:
     FrameConfig frame_config;
     float angle_of_attack = 0.0f;
     float beta = 0.0f;
+
+    // CPP-094: sentinel < 0.0f means "not frozen" - update()'s thrust_scale
+    // calculation follows the live `mass` field every call, exactly as it
+    // did before this ticket (MassVariant::kStandard/kJet). Only
+    // MassVariant::kHeavy's constructor branch ever sets this, to the
+    // PRE-heavy mass_kg, reproducing the real upstream asymmetry where
+    // `-heavy` changes mass alone and thrust_scale does not follow - see
+    // the constructor's own doc comment and MassVariant's doc comment
+    // above the enum for the full derivation.
+    float heavy_frozen_mass_kg_ = -1.0f;
 };
 
 } // namespace fwcpp::sim
