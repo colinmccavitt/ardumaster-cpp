@@ -1121,4 +1121,10 @@ catch_discover_tests(sim_longtail_test)
 # VCP-011: SitlQuadPlaneHarness + quadplane_sitl_run hover/transition catalog.
 add_executable(sitl_quadplane_harness_test sitl_quadplane_harness_test.cpp)
 target_link_libraries(sitl_quadplane_harness_test PRIVATE ap-hal-sitl ap-vehicle ap-sim ap-quadplane Catch2::Catch2WithMain)
+# VCP-013: reuses the exact fixture-path convention CPP-094/CCP-067 already
+# established (an absolute, CMAKE_CURRENT_SOURCE_DIR-derived compile
+# definition) so this target can load the same real tests/fixtures/
+# Callisto.json fixture CCP-067 added, instead of duplicating it.
+target_compile_definitions(sitl_quadplane_harness_test PRIVATE
+    FWCPP_SIM_FRAME_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 catch_discover_tests(sitl_quadplane_harness_test)

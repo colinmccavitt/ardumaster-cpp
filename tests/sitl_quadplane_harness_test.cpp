@@ -1,5 +1,7 @@
 // VCP-011: SitlQuadPlaneHarness sensors + Plane/QuadPlane tick + SIM_QuadPlane.
 #include <cmath>
+#include <string>
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -21,6 +23,17 @@ using fwcpp::quadplane::QuadPlane;
 using fwcpp::sim::SimQuadPlane;
 using fwcpp::vehicle::ModeFBWA;
 using fwcpp::vehicle::Plane;
+
+namespace {
+// VCP-013: same fixture-path convention CPP-094/CCP-067 established
+// (FWCPP_SIM_FRAME_FIXTURES_DIR, an absolute, CMAKE_CURRENT_SOURCE_DIR-
+// derived compile definition - see tests/CMakeLists.txt) reused here rather
+// than duplicated, per the ticket's explicit "reuse the existing fixture"
+// instruction.
+std::string callisto_fixture_path() {
+    return std::string(FWCPP_SIM_FRAME_FIXTURES_DIR) + "/Callisto.json";
+}
+}  // namespace
 
 TEST_CASE("SitlQuadPlaneHarness step ticks Plane and QuadPlane into SimQuadPlane",
           "[quadplane][sitl][vcp-011]") {
@@ -192,4 +205,72 @@ TEST_CASE("SitlQuadPlaneHarness scripted flight through -tilttrivec frame stays 
         REQUIRE(std::isfinite(yaw));
     }
     REQUIRE(harness.tick_count() == 500);
+}
+
+TEST_CASE("SimQuadPlane composes Frame::init's real JSON-suffix mechanism end to end with the real Callisto.json fixture",
+          "[quadplane][sitl][vcp-013]") {
+    // VCP-013: proves the composition VCP-011/CCP-067 never tested together
+    // - SimQuadPlane's own frame-type detection (sim_quadplane.hpp lines
+    // 21-62, strstr() suffix matching against the whole frame_str) does not
+    // corrupt a ":<path>.json" suffix before it reaches
+    // frame_.init(frame_str) (sim_quadplane.hpp line 78), which is the same
+    // already-tested (CCP-067) Frame::init()/load_frame_params()
+    // ":file.json" mechanism (real upstream SIM_Frame.cpp lines 458,
+    // 580-588).
+    //
+    // frame_str = "quadplane-octa-quad:<abs path>/Callisto.json": real
+    // upstream's own naming convention for this exact vehicle
+    // (Tools/autotest/arducopter.py real line 9422:
+    // model="octa-quad:@ROMFS/models/Callisto.json"), with the "quadplane"
+    // prefix QuadPlane::QuadPlane()'s own frame_type parser expects added
+    // in front. Checked by hand against every strstr() suffix branch in
+    // sim_quadplane.hpp (octa-quad-cor, octa-quad-cw-cor, octa/octaquad,
+    // hexax, hexa, plus, y6, tri, tilttrivec, tilthvec, tilttri, firefly,
+    // tilt, cl84, copter_tailsitter): none of those substrings appear
+    // anywhere in this frame_str or in the fixture's own absolute path
+    // (".../tests/fixtures/Callisto.json"), so "-octa-quad" is the first
+    // and only branch that fires.
+    //
+    // Finding: this composition ALREADY worked correctly, no fix was
+    // needed. frame_.init() (sim_frame.hpp line 522) is unmodified,
+    // already-correct, already-tested (CCP-067) code; SimQuadPlane's
+    // constructor only ever reads frame_str through read-only strstr()
+    // substring checks before passing the same, untouched pointer straight
+    // through to frame_.init(frame_str) at line 78 - no truncation, no
+    // copy, no reformatting of the ":file.json" suffix anywhere along the
+    // way.
+    const std::string frame_str = std::string("quadplane-octa-quad:") + callisto_fixture_path();
+    SimQuadPlane sim{frame_str.c_str()};
+
+    // Structural motor count: real upstream flies Callisto as an
+    // "octa-quad" (8 motor) frame (arducopter.py line 9422 above). This
+    // comes from the "-octa-quad" frame_str suffix selecting the
+    // "octa-quad" FrameTemplate (sim_frame.hpp line 416, 8 motors), not
+    // from the JSON file itself.
+    REQUIRE(sim.frame().num_motors == 8);
+
+    // The real Callisto.json fixture's own field values, loaded through
+    // this composed constructor path instead of load_frame_params() called
+    // directly - same 4 headline fields CCP-067's own round-trip test
+    // checks (sim_frame_test.cpp lines 56-59).
+    const auto& model = sim.frame().get_model();
+    REQUIRE(model.mass == Catch::Approx(32.5f));
+    REQUIRE(model.num_motors == Catch::Approx(8.0f));
+    REQUIRE(model.disc_area == Catch::Approx(1.82f));
+    REQUIRE(model.hoverThrOut == Catch::Approx(0.36f));
+
+    // Real upstream's "increase mass for plane components" step
+    // (SIM_QuadPlane.cpp real line 107: mass = frame->get_mass() * 1.5,
+    // unconditional, applied AFTER frame->init() so any -heavy/-jet effect
+    // on frame mass is discarded regardless - see this commit's own message
+    // for why that forwarding is deliberately not added here) is
+    // implemented in this port via Frame::set_mass_scale(1.5f)
+    // (sim_quadplane.hpp line 75, called BEFORE frame_.init()) baked into
+    // Frame::init()'s own mass_ calculation (sim_frame.hpp line 531:
+    // mass_ = model.mass * mass_scale) rather than as a separate
+    // multiply-after-init step. A structural difference in WHEN the scale
+    // is applied, but it produces the identical final value - proven here
+    // end to end for the first time.
+    REQUIRE(sim.frame().get_mass() == Catch::Approx(32.5f * 1.5f));
+    REQUIRE(sim.mass == Catch::Approx(32.5f * 1.5f));
 }
