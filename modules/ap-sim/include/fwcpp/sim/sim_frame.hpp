@@ -5,9 +5,12 @@
 // Frame::init / calculate_forces transcribed from original source.
 //
 // Disclosed leftovers vs original:
-//   - JSON model load_frame_params (optional custom vehicle JSON) is not
-//     ported; default_model values are used (same as original with no
-//     ":file.json" suffix).
+//   - CCP-067: the "JSON model load_frame_params is not ported" claim that
+//     used to be here was stale - Frame::load_frame_params() (below) is a
+//     real, working port of SIM_Frame.cpp's own load_frame_params()/
+//     Frame::init() ":file.json" suffix mechanism (real lines 458/580-588),
+//     round-trip tested against real upstream Callisto.json/freestyle.json
+//     fixtures (see tests/sim_frame_test.cpp). Corrected in passing.
 //   - Battery is a constant maxVoltage (no SIM_Battery drain / AP_Param
 //     SIM_BATT_*). Short SITL missions are insensitive; current is still
 //     summed from motors.

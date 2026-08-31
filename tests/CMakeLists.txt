@@ -222,6 +222,17 @@ add_executable(sim_multicopter_test sim_multicopter_test.cpp)
 target_link_libraries(sim_multicopter_test PRIVATE ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sim_multicopter_test)
 
+# CCP-067: Frame::load_frame_params() round-trip tests against real upstream
+# Callisto.json/freestyle.json fixtures - same fixture-path convention
+# CPP-094 established for sim_plane_test above (an absolute,
+# CMAKE_CURRENT_SOURCE_DIR-derived compile definition, so the test binary
+# does not depend on ctest's/the binary's own working directory).
+add_executable(sim_frame_test sim_frame_test.cpp)
+target_link_libraries(sim_frame_test PRIVATE ap-sim Catch2::Catch2WithMain)
+target_compile_definitions(sim_frame_test PRIVATE
+    FWCPP_SIM_FRAME_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+catch_discover_tests(sim_frame_test)
+
 add_executable(sim_leftover_test sim_leftover_test.cpp)
 target_link_libraries(sim_leftover_test PRIVATE ap-sim Catch2::Catch2WithMain)
 catch_discover_tests(sim_leftover_test)
