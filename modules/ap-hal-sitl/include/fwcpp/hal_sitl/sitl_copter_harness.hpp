@@ -30,8 +30,18 @@ namespace fwcpp::hal_sitl {
 
 class SitlCopterHarness {
 public:
+    // CCP-066: mixer_ used to be a function-local `static` in
+    // apply_motor_pwm, shared by every SitlCopterHarness instance in the
+    // process (a real multi-vehicle/multi-test state-sharing bug, and
+    // -fno-threadsafe-statics meant even its one-time init wasn't
+    // guarded). It is now a genuine per-instance member, initialized once
+    // per instance right here in the constructor.
     SitlCopterHarness(copter::LeftoverCopter& copter, sim::SimMulticopter& sim)
-        : copter_(copter), sim_(sim) {}
+        : copter_(copter), sim_(sim) {
+        mixer_.setup_motors(motors::MotorsMatrix::FrameClass::Quad, motors::MotorsMatrix::FrameType::X);
+        mixer_.normalise_rpy_factors();
+        mixer_.set_throttle_thrust_max(1.0f);
+    }
 
     // Synthesize gyro/accel/baro/GPS/compass from sim_ into leftover
     // sensor buffers, inject arm/spool/attitude-hold smoke flags, tick
@@ -85,16 +95,14 @@ public:
     [[nodiscard]] const compass::Compass& compass() const { return compass_; }
     [[nodiscard]] std::uint32_t tick_count() const { return copter_.tick_count; }
 
+    // CCP-066: test-only accessor proving mixer_ is a genuine per-instance
+    // member (distinct address per SitlCopterHarness) rather than the
+    // function-local `static` it used to be (one shared address for every
+    // instance in the process, regardless of `this`).
+    [[nodiscard]] const motors::MotorsMatrix& mixer_for_test() const { return mixer_; }
+
 private:
     void apply_motor_pwm(float dt) {
-        static motors::MotorsMatrix mixer;
-        static bool inited = false;
-        if (!inited) {
-            mixer.setup_motors(motors::MotorsMatrix::FrameClass::Quad, motors::MotorsMatrix::FrameType::X);
-            mixer.normalise_rpy_factors();
-            mixer.set_throttle_thrust_max(1.0f);
-            inited = true;
-        }
         if (!copter_.motors_armed) {
             for (std::uint8_t i = 0; i < sim::kSitlServoChannels; ++i) {
                 copter_.motor_pwm[i] = 0;
@@ -118,24 +126,25 @@ private:
         const float yaw_in = math::constrain_value(-0.2f * sim_.gyro.z, -1.0f, 1.0f);
         const float command = math::constrain_value(copter_.throttle_out, 0.0f, 1.0f);
         bool lr = false, lp = false, ly = false, ll = false, lu = false;
-        mixer.output_armed_stabilizing(roll_in, 0.0f, pitch_in, 0.0f, yaw_in, 0.0f, command, command, 0.0f, 1.0f, dt,
-                                       lr, lp, ly, ll, lu);
-        mixer.set_spool_state(motors::MotorsMatrix::SpoolState::ThrottleUnlimited);
+        mixer_.output_armed_stabilizing(roll_in, 0.0f, pitch_in, 0.0f, yaw_in, 0.0f, command, command, 0.0f, 1.0f, dt,
+                                        lr, lp, ly, ll, lu);
+        mixer_.set_spool_state(motors::MotorsMatrix::SpoolState::ThrottleUnlimited);
         motors::ThrustLinParams params;
         params.curve_expo = 0.0f;
         params.spin_min = 0.0f;
         params.spin_max = 1.0f;
-        mixer.output_to_motors(true, false, 0.0f, 0.0f, 0.0f, params, dt, 1000, 2000);
+        mixer_.output_to_motors(true, false, 0.0f, 0.0f, 0.0f, params, dt, 1000, 2000);
         const auto& frame = sim_.frame();
         for (std::uint8_t i = 0; i < frame.num_motors; ++i) {
             copter_.motor_pwm[frame.motor_offset + frame.motors[i].servo] =
-                static_cast<std::uint16_t>(mixer.pwm_out(i));
+                static_cast<std::uint16_t>(mixer_.pwm_out(i));
         }
     }
 
     copter::LeftoverCopter& copter_;
     sim::SimMulticopter& sim_;
     compass::Compass compass_{};
+    motors::MotorsMatrix mixer_{};
 };
 
 namespace sitl_copter {
