@@ -851,90 +851,25 @@ public:
         update_dynamics(rot_accel, dt);
     }
 
+    // CPP-093: this override now fully delegates to the base class.
     // Upstream: Aircraft::update_dynamics (SIM_Aircraft.cpp:709) - the
-    // rigid-body integrator. Ported in full for the STANDARD config: gyro
-    // integration + +-2000 deg/s clamp, body-accel +-64G clamp, DCM
-    // rotate+normalize, body->earth accel rotation plus gravity, the
-    // on-ground accel_earth.z clamp, accelerometer-equivalent accel_body
-    // re-derivation, velocity/position integration, and the real
-    // velocity_air_ef/velocity_air_bf recomputation against wind_ef
-    // (CPP-051 - see file banner's "WIND MODELING" note). The
-    // eas2tas/air_density-from-altitude recompute, the entire
-    // `switch (ground_behavior)` block, slung-payload/tether hooks, and
-    // adjust_frame_time are excluded - see file banner.
+    // rigid-body integrator (gyro integration + clamp, accel clamp, DCM
+    // rotate+normalize, body->earth accel rotation plus gravity, ground
+    // accel/velocity clamps, velocity/position integration, wind-relative
+    // velocity, and update_eas_airspeed()) plus the real, altitude-dependent
+    // eas2tas/air_density recompute and the on-ground apply_ground_behavior()
+    // call - all already correctly implemented in Aircraft::update_dynamics
+    // (this file's base class, see sim_aircraft.hpp). A prior hand-rolled
+    // copy of this same integration lived here as dead code below an
+    // unconditional early `return` (a real eas2tas=1.0 simplification of
+    // the base class's own real altitude-dependent value) - it was verified
+    // during CPP-093 to be fully superseded (the base class computes a real
+    // eas2tas rather than assuming 1.0, and SimPlane::apply_ground_behavior
+    // already no-ops when off the ground, so the base class's on-ground-only
+    // call site is behaviorally identical to the dead code's unconditional
+    // one) and was removed rather than left unreachable.
     void update_dynamics(const math::Vector3f& rot_accel, float dt) {
         Aircraft::update_dynamics(rot_accel, dt);
-        return;
-        gyro += rot_accel * dt;
-
-        gyro.x = math::constrain_value(gyro.x, -math::radians(2000.0f), math::radians(2000.0f));
-        gyro.y = math::constrain_value(gyro.y, -math::radians(2000.0f), math::radians(2000.0f));
-        gyro.z = math::constrain_value(gyro.z, -math::radians(2000.0f), math::radians(2000.0f));
-
-        // limit body accel to 64G
-        const float accel_limit = 64.0f * kGravityMss;
-        accel_body.x = math::constrain_value(accel_body.x, -accel_limit, accel_limit);
-        accel_body.y = math::constrain_value(accel_body.y, -accel_limit, accel_limit);
-        accel_body.z = math::constrain_value(accel_body.z, -accel_limit, accel_limit);
-
-        // update attitude
-        dcm.rotate(gyro * dt);
-        dcm.normalize();
-
-        math::Vector3f accel_earth = dcm * accel_body;
-        accel_earth += math::Vector3f(0.0f, 0.0f, kGravityMss);
-
-        // if we're on the ground, then our vertical acceleration is limited
-        // to zero. This effectively adds the force of the ground on the aircraft
-        if (on_ground() && accel_earth.z > 0.0f) {
-            accel_earth.z = 0.0f;
-        }
-
-        // work out acceleration as seen by the accelerometers. It sees the kinematic
-        // acceleration (ie. real movement), plus gravity
-        accel_body = dcm.transposed() * (accel_earth + math::Vector3f(0.0f, 0.0f, -kGravityMss));
-
-        // new velocity vector
-        velocity_ef += accel_earth * dt;
-
-        // new position vector
-        position += velocity_ef * dt;
-
-        // velocity relative to airmass, earth then body frame - upstream:
-        // SIM_Aircraft.cpp:762-766, `velocity_air_ef = velocity_ef -
-        // wind_ef; velocity_air_bf = dcm.transposed() * velocity_air_ef;`
-        // - wind_ef is real as of CPP-051 (see file banner), populated by
-        // update_wind() (called from update(), once per tick, before this
-        // method runs); a caller driving update_dynamics() directly
-        // without ever calling update_wind() sees wind_ef at its
-        // zero-initialized default, so velocity_air_ef == velocity_ef
-        // exactly - identical to this slice's pre-CPP-051 behavior.
-        velocity_air_ef = velocity_ef - wind_ef;
-        velocity_air_bf = dcm.transposed() * velocity_air_ef;
-
-        // Upstream: Aircraft::update_eas_airspeed() (SIM_Aircraft.cpp:1377),
-        // airspeed = velocity_air_ef.length() / eas2tas with eas2tas held at
-        // 1.0 this slice (see file banner's atmosphere-model exclusion).
-        // BUGFIX during review: this assignment was missing from the initial
-        // port - without it, airspeed stayed at its zero-initialized default
-        // forever, so getForce/getTorque's is_zero(airspeed) guard was always
-        // true and the aircraft never generated any aerodynamic force at all
-        // (free-fall under gravity+thrust only). The 1-second sanity test's
-        // -490m bound was too loose to catch this (free fall alone only
-        // drops ~4.9m in 1s, well inside the old 10m margin).
-        airspeed = velocity_air_bf.length();
-
-        // constrain height to the ground - simplified flat-earth clamp
-        // (upstream's real position.z snap-to-terrain and ground_behavior
-        // switch are excluded, see file banner): don't let velocity carry
-        // the aircraft further down once it's reached the ground plane.
-        if (on_ground() && velocity_ef.z > 0.0f) {
-            velocity_ef.z = 0.0f;
-        }
-
-        // CPP-030 leftover closer: taxi/takeoff-roll variants. kNone is a
-        // no-op here (the clamp above is the already-landed floor model).
-        apply_ground_behavior(dt);
     }
 
     // CPP-082 - upstream: HALSITL::SITL_State::_update_airspeed(true_
